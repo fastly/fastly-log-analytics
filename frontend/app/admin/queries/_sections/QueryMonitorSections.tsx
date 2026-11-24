@@ -211,7 +211,7 @@ export function ActiveQueriesCard({
             <div data-testid="admin-queries-active-skeleton">
               <Skeleton className="h-10 w-full rounded-none" />
               <div className="h-[520px] flex items-center justify-center text-xs text-muted-foreground">
-                Inspecting DuckDB connection pool...
+                Inspecting ClickHouse and Postgres queries...
               </div>
             </div>
           ) : (

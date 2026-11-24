@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import contextvars
-from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Any
+import logging
+import threading
+import time
+from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import wait as _wait_futures
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from backend.high_scale.ingest_controller import HighScaleService
 
 from backend.core.clickhouse import ClickHouseError
+from backend.core.request_telemetry import HighScaleSections
 from backend.high_scale._common import (
     build_clickhouse_filters,
     visible_fact_clauses,
@@ -26,6 +34,7 @@ from backend.repositories.insights.shaping import (
     COMPRESSIBLE_REGEX,
     PROBE_REGEX,
     build_error_insight_card,
+    build_insight_card,
     build_insufficient_baseline_card,
     compute_available_history_hours,
     evaluate_insight_severity,
@@ -62,14 +71,54 @@ from backend.repositories.utils.response_shaping import (
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 
+from .batches import DetectionBatch, plan_execution
+from .rollup import ROLLUP_DETECTIONS, baseline_hours_span, coverage_sql, covered_span, hour_totals, rollup_base_sql
 from .sql_queries import Detection, _base_sql, _detection_for
 
-_MAX_WORKERS = 12
+logger = logging.getLogger(__name__)
+
+_MAX_WORKERS = 8
 _FIELD_SAMPLE_ROWS = 1000
 _BASE_FIELDS = frozenset({"timestamp", "url", "country", "ip"})
 _ASN_INSIGHT_MARKERS = ("asn", "metro")
 _INSIGHTS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=200, ttl_seconds=300)
+_INSIGHTS_TELEMETRY_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=200, ttl_seconds=300)
+# Results with error cards are kept briefly so retries and prewarms reuse the cards that did succeed.
+_INSIGHTS_PARTIAL_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=200, ttl_seconds=60)
 _CacheRegistry.register("high_scale.insights._INSIGHTS_CACHE", _INSIGHTS_CACHE)
+_CacheRegistry.register("high_scale.insights._INSIGHTS_TELEMETRY_CACHE", _INSIGHTS_TELEMETRY_CACHE)
+_CacheRegistry.register("high_scale.insights._INSIGHTS_PARTIAL_CACHE", _INSIGHTS_PARTIAL_CACHE)
+# One evaluation scans the whole baseline once per detection (minutes on a busy service), so page requests
+# never run it themselves: they get the last result at once while a single background evaluation per
+# request shape refreshes it, and a cold shape answers with pending cards after a short wait.
+_STALE_MAX_SECONDS = 24 * 3600
+_COLD_WAIT_SECONDS = 5.0
+_META_WAIT_SECONDS = 15.0
+# A failed scan is raised to the next page request only while it is this recent; after that, retry.
+_FAILURE_REPLAY_SECONDS = 60.0
+_INSIGHTS_LAST_RESULT: BoundedTTLCache = BoundedTTLCache(maxsize=200, ttl_seconds=_STALE_MAX_SECONDS)
+_INSIGHTS_REFRESH_FAILURES: BoundedTTLCache = BoundedTTLCache(maxsize=200, ttl_seconds=_STALE_MAX_SECONDS)
+_CacheRegistry.register("high_scale.insights._INSIGHTS_LAST_RESULT", _INSIGHTS_LAST_RESULT)
+_CacheRegistry.register("high_scale.insights._INSIGHTS_REFRESH_FAILURES", _INSIGHTS_REFRESH_FAILURES)
+# Shapes with no result yet (a page is waiting) get their own pool, so prewarms and stale refreshes
+# queued in _REFRESH_POOL never hold them back.
+_COLD_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-insights-cold")
+_REFRESH_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-insights-refresh")
+_JOBS_LOCK = threading.Lock()
+
+
+@dataclass
+class _Job:
+    context: contextvars.Context
+    run: Callable[[], None] = lambda: None
+    started: float | None = None
+    promoted: bool = False
+    future: Future = field(default_factory=Future)
+    meta_ready: threading.Event = field(default_factory=threading.Event)
+    preview: dict[str, Any] | None = None
+
+
+_INSIGHTS_JOBS: dict[tuple[Any, ...], _Job] = {}
 
 
 def _severity(items: list[dict[str, Any]]) -> str:
@@ -86,37 +135,42 @@ def _asn_context(service_id: str, rows: list[tuple[Any, ...]], insight_id: str) 
     return build_insight_asn_context(service_id, rows, insight_id, include_dma="metro" in insight_id)
 
 
-def insights_endpoint(
+def _rollup_spans(
+    history: dict[str, Any], coverage: list[dict[str, Any]], baseline_start: datetime, window_start: datetime
+) -> dict[str, tuple[datetime, datetime]]:
+    """Per rollup shape, the baseline hours its rows can replace (absent when none match the raw facts)."""
+    hours = history.get("hours")
+    if not hours or not coverage:
+        return {}
+    raw = hour_totals(zip(hours, history.get("hour_rows") or [], history.get("hour_checksums") or [], strict=True))
+    by_shape: dict[str, list[tuple[object, object, object]]] = {}
+    for row in coverage:
+        by_shape.setdefault(str(row["shape"]), []).append((row["hour"], row["row_count"], row["batch_checksum"]))
+    spans: dict[str, tuple[datetime, datetime]] = {}
+    for shape, rows in by_shape.items():
+        if span := covered_span(baseline_start, window_start, raw, hour_totals(rows)):
+            spans[shape] = span
+    return spans
+
+
+def _evaluate(
     service: HighScaleService,
-    req: Any,
+    window_hours: float,
+    baseline_hours: float,
     clamp_start: str | None,
     clamp_end: str | None,
-    mask_ips: bool = False,
-    clamp_cache_key: str | None = None,
-    force_refresh: bool = False,
-) -> InsightsResponse:
-    window_hours = float(req.window_size_hrs)
-    baseline_hours = float(req.baseline_hours)
-    req_filters = getattr(req, "filters", None)
-    filter_clause, filter_params = build_clickhouse_filters(req_filters) if req_filters else ("", {})
-    key_clamp = resolve_clamp_cache_key(clamp_start, clamp_end, clamp_cache_key)
-    cache_key = (
-        service.service_id,
-        id(service.client),
-        window_hours,
-        baseline_hours,
-        key_clamp,
-        int(mask_ips),
-        filter_clause,
-        tuple(sorted((k, str(v)) for k, v in filter_params.items())),
-    )
-    from backend.high_scale.ingest_controller import HighScaleService
+    mask_ips: bool,
+    filter_clause: str,
+    filter_params: dict[str, Any],
+    enabled_fields: frozenset[str],
+    on_meta: Callable[[dict[str, Any]], None] | None = None,
+) -> tuple[dict[str, Any], bool]:
+    """Run every detection once; returns the envelope and whether any card is an error card.
 
-    use_cache = isinstance(service, HighScaleService)
-    if use_cache and not force_refresh:
-        cached = _INSIGHTS_CACHE.get(cache_key)
-        if cached is not None:
-            return InsightsResponse.with_telemetry(**cached, is_cached=True, cache_age_seconds=0)
+    The log field settings (``enabled_fields``) decide which insights run; the sampled ``present``
+    columns only shape each detection's SQL, so rows logged before a field was enabled can't break it.
+    """
+    trace = HighScaleSections(service.service_id, "insights")
     baseline_start, window_start, now = _window(window_hours, baseline_hours, clamp_start, clamp_end)
     scope = " AND ".join(visible_fact_clauses("request"))
     if filter_clause:
@@ -135,36 +189,172 @@ def insights_endpoint(
         **filter_params,
     }
     in_range = "event_timestamp >= {baseline_start:DateTime64(3)} AND event_timestamp <= {window_end:DateTime64(3)}"
-    history_sql = (
-        "/* insight:history */ SELECT min(event_timestamp) AS earliest, "
-        "countIf(event_timestamp >= {window_start:DateTime64(3)}) AS window_total "
-        f"FROM request_facts WHERE {scope} AND {in_range}"
-    )
+    # The rollup has no per-request columns, so a filtered evaluation always reads raw facts.
+    use_rollup = not filter_clause
+    if use_rollup:
+        # Per-hour row counts and batch checksums let the rollup replace exactly the hours it matches.
+        history_sql = (
+            "/* insight:history */ SELECT min(earliest) AS earliest, sum(window_total) AS window_total, "
+            "groupArray(hour) AS hours, groupArray(row_count) AS hour_rows, "
+            "groupArray(batch_checksum) AS hour_checksums FROM ("
+            "SELECT toUInt32(toUnixTimestamp(toStartOfHour(event_timestamp))) AS hour, "
+            "min(event_timestamp) AS earliest, "
+            "countIf(event_timestamp >= {window_start:DateTime64(3)}) AS window_total, "
+            "count() AS row_count, sum(cityHash64(batch_id)) AS batch_checksum "
+            f"FROM request_facts WHERE {scope} AND {in_range} GROUP BY hour)"
+        )
+    else:
+        history_sql = (
+            "/* insight:history */ SELECT min(event_timestamp) AS earliest, "
+            "countIf(event_timestamp >= {window_start:DateTime64(3)}) AS window_total "
+            f"FROM request_facts WHERE {scope} AND {in_range}"
+        )
+    coverage_start, coverage_end = baseline_hours_span(baseline_start, window_start)
+    coverage_params = {**params, "coverage_start": coverage_start, "coverage_end": coverage_end}
+
+    def read_coverage() -> list[dict[str, Any]]:
+        try:
+            return service.client.execute(coverage_sql(), coverage_params)
+        except Exception as exc:
+            logger.warning("insights rollup coverage unavailable for %s: %s", service.service_id, exc)
+            return []
+
     sample_sql = (
         "/* insight:fields */ SELECT groupUniqArrayArray(mapKeys(custom_fields)) AS fields FROM ("
         f"SELECT custom_fields FROM request_facts WHERE {scope} AND {in_range} "
         f"ORDER BY event_timestamp DESC LIMIT {_FIELD_SAMPLE_ROWS})"
     )
-    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-insights-meta") as meta_pool:
-        fut_history = meta_pool.submit(
-            contextvars.copy_context().run, lambda: service.client.execute(history_sql, params)
+    # Pending cards need only history and fields; the coverage read finishes behind them.
+    meta_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-insights-meta")
+    fut_coverage = None
+    try:
+        fut_history = trace.submit(
+            meta_pool, "history", lambda: service.client.execute(history_sql, params), source="fact"
         )
-        fut_sample = meta_pool.submit(
-            contextvars.copy_context().run, lambda: service.client.execute(sample_sql, params)
+        fut_sample = trace.submit(
+            meta_pool, "fields", lambda: service.client.execute(sample_sql, params), source="fact"
         )
         history = fut_history.result()
         sample = fut_sample.result()
-    earliest = history[0].get("earliest") if history else None
-    window_total = int(history[0].get("window_total") or 0) if history else 0
-    history_hours = compute_available_history_hours(now, earliest)
+        earliest = history[0].get("earliest") if history else None
+        window_total = int(history[0].get("window_total") or 0) if history else 0
+        history_hours = compute_available_history_hours(now, earliest)
+        if use_rollup and coverage_start < coverage_end and history_hours >= baseline_hours and history[0].get("hours"):
+            fut_coverage = trace.submit(meta_pool, "rollup_coverage", read_coverage, source="projection")
+    finally:
+        meta_pool.shutdown(wait=False)
     present = set(_BASE_FIELDS)
     present.update(sample[0].get("fields") or [] if sample else [])
     fingerprint = _fingerprint_column(present) or "ja3"
     make_investigate_url = _make_investigate_url(service.service_id, window_start, now)
 
-    def run(definition: InsightDefinition, detection: Detection) -> dict[str, Any]:
-        if detection.needs_baseline and history_hours < baseline_hours:
-            return build_insufficient_baseline_card(
+    def _shape(definition: InsightDefinition, rows: list[tuple[Any, ...]]) -> dict[str, Any]:
+        return shape_insight_card_from_rows(
+            definition,
+            rows,
+            service_id=service.service_id,
+            window_hours=window_hours,
+            baseline_hours=baseline_hours,
+            fp_col=fingerprint,
+            actual_cols=sorted(present),
+            mask_ips=mask_ips,
+            investigate_url_builder=make_investigate_url,
+        )
+
+    def run_standalone(definition: InsightDefinition, detection: Detection) -> list[tuple[str, dict[str, Any]]]:
+        try:
+            shape = ROLLUP_DETECTIONS.get(definition.id)
+            span = rollup_spans.get(shape) if shape else None
+            query_params = params
+            source: Literal["fact", "mixed"] = "fact"
+            if shape and span:
+                sql = rollup_base_sql(detection, definition.id, shape)
+                query_params = {**params, "rollup_start": span[0], "rollup_end": span[1]}
+                source = "mixed"
+            else:
+                sql = _base_sql(detection, definition.id)
+            if filter_clause:
+                sql = sql.replace(
+                    "AND event_timestamp <= {window_end:DateTime64(3)}",
+                    f"AND event_timestamp <= {{window_end:DateTime64(3)}} AND ({filter_clause})",
+                )
+            rows = [
+                tuple(row.values())
+                for row in trace.run(definition.id, lambda: service.client.execute(sql, query_params), source=source)
+            ]
+            return [(definition.id, _shape(definition, rows))]
+        except Exception as exc:
+            return [
+                (
+                    definition.id,
+                    build_error_insight_card(
+                        definition.id,
+                        definition.title,
+                        str(definition.category),
+                        _failure_message(exc),
+                        description=definition.description,
+                    ),
+                )
+            ]
+
+    def run_batch(
+        batch: DetectionBatch, members: list[tuple[InsightDefinition, Detection]]
+    ) -> list[tuple[str, dict[str, Any]]]:
+        active_ids = {definition.id for definition, _ in members}
+        try:
+            span = rollup_spans.get(batch.rollup_shape) if batch.rollup_shape else None
+            sql, source = batch.build_sql(active_ids, present=present, rollup_span=span, filter_clause=filter_clause)
+            query_params = (
+                {**params, "rollup_start": span[0], "rollup_end": span[1]} if (batch.rollup_shape and span) else params
+            )
+            raw_rows = trace.run(
+                f"batch_{batch.name}", lambda: service.client.execute(sql, query_params), source=source
+            )
+            per_detector = batch.extract_rows(
+                raw_rows, active_ids, window_hours=window_hours, baseline_hours=baseline_hours
+            )
+        except Exception as exc:
+            msg = _failure_message(exc)
+            return [
+                (
+                    definition.id,
+                    build_error_insight_card(
+                        definition.id,
+                        definition.title,
+                        str(definition.category),
+                        msg,
+                        description=definition.description,
+                    ),
+                )
+                for definition, _ in members
+            ]
+        out: list[tuple[str, dict[str, Any]]] = []
+        for definition, _ in members:
+            try:
+                out.append((definition.id, _shape(definition, per_detector.get(definition.id, []))))
+            except Exception as exc:
+                out.append(
+                    (
+                        definition.id,
+                        build_error_insight_card(
+                            definition.id,
+                            definition.title,
+                            str(definition.category),
+                            _failure_message(exc),
+                            description=definition.description,
+                        ),
+                    )
+                )
+        return out
+
+    candidates: list[tuple[InsightDefinition, Detection]] = []
+    for definition in registry.get_all():
+        detection = _detection_for(definition.id, present)
+        if detection is not None and all(column in enabled_fields for column in definition.required_fields):
+            candidates.append((definition, detection))
+    if on_meta is not None:
+        pending_cards = [
+            build_insufficient_baseline_card(
                 definition.id,
                 definition.title,
                 definition.description,
@@ -172,42 +362,60 @@ def insights_endpoint(
                 baseline_hours,
                 history_hours,
             )
-        try:
-            sql = _base_sql(detection, definition.id)
-            if filter_clause:
-                sql = sql.replace(
-                    "AND event_timestamp <= {window_end:DateTime64(3)}",
-                    f"AND event_timestamp <= {{window_end:DateTime64(3)}} AND ({filter_clause})",
-                )
-            rows = [tuple(row.values()) for row in service.client.execute(sql, params)]
-            return shape_insight_card_from_rows(
-                definition,
-                rows,
-                service_id=service.service_id,
+            if detection.needs_baseline and history_hours < baseline_hours
+            else build_insight_card(
+                insight_id=definition.id,
+                title=definition.title,
+                description=definition.description,
+                category=str(definition.category),
+                severity="info",
+                summary="Evaluating in the background; results appear when the scan finishes.",
+                items=[],
+            )
+            | {"placeholder": True}
+            for definition, detection in candidates
+        ]
+        on_meta(
+            build_insights_envelope(
+                pending_cards,
+                window_start=window_start.isoformat(),
+                window_end=now.isoformat(),
+                baseline_start=baseline_start.isoformat(),
+                baseline_end=window_start.isoformat(),
+                computed_at="",
                 window_hours=window_hours,
                 baseline_hours=baseline_hours,
-                fp_col=fingerprint,
-                actual_cols=sorted(present),
-                mask_ips=mask_ips,
-                investigate_url_builder=make_investigate_url,
+                window_total_requests=window_total,
+                pending=True,
             )
-        except Exception as exc:
-            return build_error_insight_card(
+        )
+    coverage = fut_coverage.result() if fut_coverage is not None else []
+    rollup_spans = _rollup_spans(history[0] if history else {}, coverage, baseline_start, window_start)
+    cards_by_id: dict[str, dict[str, Any]] = {}
+    eligible: list[tuple[InsightDefinition, Detection]] = []
+    for definition, detection in candidates:
+        if detection.needs_baseline and history_hours < baseline_hours:
+            cards_by_id[definition.id] = build_insufficient_baseline_card(
                 definition.id,
                 definition.title,
+                definition.description,
                 str(definition.category),
-                _failure_message(exc),
-                description=definition.description,
+                baseline_hours,
+                history_hours,
             )
-
-    candidates: list[tuple[InsightDefinition, Detection]] = []
-    for definition in registry.get_all():
-        detection = _detection_for(definition.id, present)
-        if detection is not None and all(column in present for column in definition.required_fields):
-            candidates.append((definition, detection))
+        else:
+            eligible.append((definition, detection))
+    batches, standalone = plan_execution(eligible, present)
+    tasks: list[Callable[[], list[tuple[str, dict[str, Any]]]]] = [
+        *(lambda b=b, m=m: run_batch(b, m) for b, m in batches),
+        *(lambda d=d, det=det: run_standalone(d, det) for d, det in standalone),
+    ]
     with ThreadPoolExecutor(max_workers=_MAX_WORKERS, thread_name_prefix="hs-insights") as pool:
-        futures = [pool.submit(contextvars.copy_context().run, lambda pair=pair: run(*pair)) for pair in candidates]
-        cards = [future.result() for future in futures]
+        futures = [pool.submit(contextvars.copy_context().run, task) for task in tasks]
+        for future in futures:
+            for insight_id, card in future.result():
+                cards_by_id[insight_id] = card
+    cards = [cards_by_id[definition.id] for definition, _ in candidates]
     computed_at = now.isoformat()
     payload = build_insights_envelope(
         cards,
@@ -220,9 +428,194 @@ def insights_endpoint(
         baseline_hours=baseline_hours,
         window_total_requests=window_total,
     )
-    if use_cache and not any(c.get("severity") == "error" for c in cards):
+    return payload, any(c.get("severity") == "error" for c in cards)
+
+
+def _store(cache_key: tuple[Any, ...], payload: dict[str, Any], partial: bool, queries: list[Any]) -> None:
+    cached_queries = [{**q, "is_cached": True} if isinstance(q, dict) else q for q in queries]
+    if partial:
+        _INSIGHTS_PARTIAL_CACHE[cache_key] = (payload, cached_queries)
+    else:
         _INSIGHTS_CACHE[cache_key] = payload
-    return InsightsResponse.with_telemetry(**payload)
+        _INSIGHTS_TELEMETRY_CACHE[cache_key] = cached_queries
+        _INSIGHTS_PARTIAL_CACHE.pop(cache_key, None)
+    _INSIGHTS_LAST_RESULT[cache_key] = (payload, cached_queries, time.monotonic())
+    _INSIGHTS_REFRESH_FAILURES.pop(cache_key, None)
+
+
+def _start_or_join(
+    cache_key: tuple[Any, ...], evaluate: Callable[..., tuple[dict[str, Any], bool]], *, interactive: bool
+) -> _Job:
+    """Return the evaluation for ``cache_key``, starting one in the background if none runs.
+
+    ``interactive`` (a page waiting on a shape with no result) queues it on the cold pool; a job still
+    queued on the refresh pool is also queued there, and whichever thread picks it up first runs it.
+    """
+    from backend.utils.telemetry import clear_queries, get_queries
+
+    job = _Job(context=contextvars.copy_context())
+
+    def publish(preview: dict[str, Any]) -> None:
+        job.preview = preview
+        job.meta_ready.set()
+
+    def refresh() -> None:
+        with _JOBS_LOCK:
+            if job.started is not None:
+                return
+            job.started = time.monotonic()
+        clear_queries()
+        try:
+            payload, partial = evaluate(on_meta=publish)
+            queries = list(get_queries())
+            _store(cache_key, payload, partial, queries)
+            job.future.set_result((payload, queries))
+        except BaseException as exc:
+            _INSIGHTS_REFRESH_FAILURES[cache_key] = (exc, time.monotonic())
+            job.future.set_exception(exc)
+        finally:
+            job.meta_ready.set()
+            with _JOBS_LOCK:
+                if _INSIGHTS_JOBS.get(cache_key) is job:
+                    del _INSIGHTS_JOBS[cache_key]
+
+    job.run = refresh
+    with _JOBS_LOCK:
+        existing = _INSIGHTS_JOBS.get(cache_key)
+        if existing is None:
+            _INSIGHTS_JOBS[cache_key] = job
+            created = True
+        elif interactive and existing.started is None and not existing.promoted:
+            existing.promoted = True
+            job, created = existing, False
+        else:
+            return existing
+    try:
+        (_COLD_POOL if interactive else _REFRESH_POOL).submit(job.context.copy().run, job.run)
+    except BaseException:
+        if created:
+            with _JOBS_LOCK:
+                _INSIGHTS_JOBS.pop(cache_key, None)
+        raise
+    return job
+
+
+def _job_result(cache_key: tuple[Any, ...], job: _Job) -> InsightsResponse:
+    try:
+        payload, queries = job.future.result()
+    except BaseException:
+        _INSIGHTS_REFRESH_FAILURES.pop(cache_key, None)
+        raise
+    return InsightsResponse.with_telemetry(
+        **payload, debug_queries=[q.copy() if isinstance(q, dict) else q for q in queries]
+    )
+
+
+def insights_endpoint(
+    service: HighScaleService,
+    req: Any,
+    clamp_start: str | None,
+    clamp_end: str | None,
+    mask_ips: bool = False,
+    clamp_cache_key: str | None = None,
+    force_refresh: bool = False,
+) -> InsightsResponse:
+    from backend.utils.telemetry import get_queries
+
+    window_hours = float(req.window_size_hrs)
+    baseline_hours = float(req.baseline_hours)
+    req_filters = getattr(req, "filters", None)
+    filter_clause, filter_params = build_clickhouse_filters(req_filters) if req_filters else ("", {})
+    key_clamp = resolve_clamp_cache_key(clamp_start, clamp_end, clamp_cache_key)
+    from backend import config as svcconfig
+
+    enabled_fields = frozenset(svcconfig.active_log_field_ids(svcconfig.load_config(service.service_id) or {}))
+    cache_key = (
+        service.service_id,
+        id(service.client),
+        window_hours,
+        baseline_hours,
+        key_clamp,
+        int(mask_ips),
+        filter_clause,
+        tuple(sorted((k, str(v)) for k, v in filter_params.items())),
+        tuple(sorted(enabled_fields)),
+    )
+    from backend.high_scale.ingest_controller import HighScaleService
+
+    def evaluate(on_meta: Callable[[dict[str, Any]], None] | None = None) -> tuple[dict[str, Any], bool]:
+        return _evaluate(
+            service,
+            window_hours,
+            baseline_hours,
+            clamp_start,
+            clamp_end,
+            mask_ips,
+            filter_clause,
+            filter_params,
+            enabled_fields,
+            on_meta,
+        )
+
+    if not isinstance(service, HighScaleService):
+        get_queries()
+        payload, _ = evaluate()
+        return InsightsResponse.with_telemetry(**payload)
+    if force_refresh:
+        return _job_result(cache_key, _start_or_join(cache_key, evaluate, interactive=False))
+
+    cached = _INSIGHTS_CACHE.get(cache_key)
+    cached_telemetry = _INSIGHTS_TELEMETRY_CACHE.get(cache_key)
+    if cached is None and (partial := _INSIGHTS_PARTIAL_CACHE.get(cache_key)) is not None:
+        cached, cached_telemetry = partial
+    if cached is not None:
+        cached_queries = [q.copy() if isinstance(q, dict) else q for q in (cached_telemetry or [])]
+        return InsightsResponse.with_telemetry(
+            **cached, is_cached=True, cache_age_seconds=0, debug_queries=cached_queries
+        )
+    if (last := _INSIGHTS_LAST_RESULT.get(cache_key)) is not None:
+        payload, last_queries, stored_at = last
+        failure, _ = _INSIGHTS_REFRESH_FAILURES.get(cache_key) or (None, 0.0)
+        _start_or_join(cache_key, evaluate, interactive=False)
+        return InsightsResponse.with_telemetry(
+            **payload,
+            is_cached=True,
+            cache_age_seconds=int(time.monotonic() - stored_at),
+            refreshing=True,
+            refresh_error=_failure_message(failure) if isinstance(failure, Exception) else None,
+            debug_queries=[q.copy() if isinstance(q, dict) else q for q in last_queries],
+        )
+    if (failed := _INSIGHTS_REFRESH_FAILURES.pop(cache_key, None)) is not None:
+        failure, failed_at = failed
+        if time.monotonic() - failed_at < _FAILURE_REPLAY_SECONDS:
+            raise failure
+    job = _start_or_join(cache_key, evaluate, interactive=True)
+    # The wait counts from when the scan starts, not from when it was queued.
+    began = job.started if job.started is not None else time.monotonic()
+    _wait_futures([job.future], timeout=max(0.0, began + _COLD_WAIT_SECONDS - time.monotonic()))
+    if job.future.done():
+        return _job_result(cache_key, job)
+    if job.started is not None:
+        job.meta_ready.wait(max(0.0, job.started + _COLD_WAIT_SECONDS + _META_WAIT_SECONDS - time.monotonic()))
+        if job.future.done():
+            return _job_result(cache_key, job)
+    if job.preview is not None:
+        return InsightsResponse.with_telemetry(**job.preview)
+    # Queued, or still reading history and fields: no detections are known yet.
+    baseline_start, window_start, now = _window(window_hours, baseline_hours, clamp_start, clamp_end)
+    return InsightsResponse.with_telemetry(
+        **build_insights_envelope(
+            [],
+            window_start=window_start.isoformat(),
+            window_end=now.isoformat(),
+            baseline_start=baseline_start.isoformat(),
+            baseline_end=window_start.isoformat(),
+            computed_at="",
+            window_hours=window_hours,
+            baseline_hours=baseline_hours,
+            pending=True,
+        )
+    )
 
 
 compute_clickhouse_insights = insights_endpoint

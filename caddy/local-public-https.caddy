@@ -12,20 +12,44 @@ https://:443 {
 
 	@public_host host {$LOCAL_PUBLIC_HOST}
 	handle @public_host {
+		request_body {
+			max_size 25MB
+		}
+		header {
+			-Server
+			Strict-Transport-Security "max-age=31536000; includeSubDomains"
+			X-Frame-Options "DENY"
+			X-Content-Type-Options "nosniff"
+			Referrer-Policy "strict-origin-when-cross-origin"
+			Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+			Cross-Origin-Opener-Policy "same-origin"
+			?Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+		}
 		route {
 			request_header -X-Admin-Gateway-Token
+			request_header -X-FLA-Admin-Gateway
+			request_header -X-FLA-Frontend-Proxy
+			request_header X-FLA-Public-Gateway "1"
 			request_header X-Proxied-By-Caddy "true"
 			request_header X-Forwarded-For {http.request.remote.host}
 
 			@api path /api/* /js/* /rum-beacon
 			reverse_proxy @api 127.0.0.1:8000 {
+				header_up X-Forwarded-For {http.request.header.X-Forwarded-For}
 				flush_interval -1
 				transport http {
+					# Below the app's 5 s keep-alive, so Caddy never reuses a socket it closed.
+					keepalive 4s
 					response_header_timeout 180s
 					read_timeout 180s
 				}
 			}
-			reverse_proxy 127.0.0.1:3000
+			reverse_proxy 127.0.0.1:3000 {
+				header_up X-Forwarded-For {http.request.header.X-Forwarded-For}
+				transport http {
+					keepalive 4s
+				}
+			}
 		}
 	}
 	handle {

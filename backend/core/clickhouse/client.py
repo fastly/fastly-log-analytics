@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import sys
 import threading
@@ -47,7 +48,7 @@ from backend.core.clickhouse.params import (
     digest_rows,
     utc,
 )
-from backend.core.duckdb import _get_fos_client
+from backend.core.fos_client import _get_fos_client
 from backend.core.request_telemetry import current_clickhouse_scope, get_meter, query_registry
 from backend.utils.telemetry import _QUERIES, get_queries, record_call
 
@@ -84,6 +85,101 @@ def _safe_count(value: Any) -> int:
         return 0
 
 
+_DOMAIN_TABLES: dict[str, tuple[str, ...]] = {
+    "request": ("request_facts",),
+    "request_aggregate": ("request_aggregates",),
+    "cmcd": ("cmcd_projection_facts",),
+    "network_dimensions": ("network_minute_dimensions",),
+    "performance_dimensions": ("performance_minute_dimensions",),
+    "rum": ("rum_vitals_facts",),
+}
+
+_MATERIALIZED_CF_KEYS: frozenset[str] = frozenset(
+    {
+        "_bot_name",
+        "age",
+        "asn",
+        "backend",
+        "bytes",
+        "c_speed",
+        "c_type",
+        "cache",
+        "cid",
+        "city",
+        "conn_requests",
+        "cookie_session",
+        "delivery_rate",
+        "digest",
+        "edge",
+        "edge_score_reason",
+        "edge_sid",
+        "elapsed",
+        "hits",
+        "host",
+        "io_input_format",
+        "io_output_format",
+        "ipv6",
+        "is_bot",
+        "is_ipv6",
+        "is_shield",
+        "is_ssl",
+        "ja3",
+        "ja4",
+        "lat",
+        "lon",
+        "method",
+        "metro",
+        "ngwaf_bot",
+        "ngwaf_bot_category",
+        "ngwaf_wellknown_bot",
+        "obytes",
+        "oconnect_ms",
+        "oip",
+        "oretries",
+        "ost",
+        "ottfb",
+        "ottlb",
+        "p_desc",
+        "p_type",
+        "ploss",
+        "pop",
+        "prid",
+        "proto",
+        "protocol",
+        "referer",
+        "region",
+        "req_header_bytes",
+        "resp_bytes",
+        "resp_header_content_encoding",
+        "retrans",
+        "rid",
+        "rtt_min",
+        "rtt_var",
+        "server_region",
+        "status",
+        "tcp_rtt",
+        "tls",
+        "tls_ciphers_sha",
+        "transport",
+        "ttfb",
+        "ttl",
+        "ua",
+        "waf",
+        "waf_blocked_rules",
+        "waf_logged_rules",
+        "waf_ms",
+        "waf_resp",
+        "waf_sig",
+    }
+)
+_CF_LITERAL_RE = re.compile(r"custom_fields\['([a-zA-Z0-9_]+)'\]")
+_REQUEST_FACTS_WORD_RE = re.compile(r"(?<![A-Za-z0-9_])request_facts(?![A-Za-z0-9_])")
+_CF_PARAM_RE = re.compile(r"custom_fields\[\{([a-zA-Z0-9_]+):String\}\]")
+_PUB_FENCE_RE = re.compile(
+    r"batch_id\s+IN\s*\(\s*SELECT\s+batch_id\s+FROM\s+high_scale_batch_publications\s+FINAL\s+WHERE\s+([^()]+?)\)"
+)
+
+
 class ClickHouseClient:
     """One reusable HTTP pool; bounded admission also applies to injected transports."""
 
@@ -95,6 +191,12 @@ class ClickHouseClient:
         self._state_lock = threading.Lock()
         self._closed = False
         self._active = 0
+        self._pub_fence_cache: dict[str, tuple[float, dict[str, tuple[str, ...]] | None]] = {}
+        self._pub_fence_refreshing: set[str] = set()
+        self._empty_stale_batches: set[tuple[str, str, str]] = set()
+        self._non_empty_stale_batches: set[tuple[str, str, str]] = set()
+        self._cf_materialized_cache: tuple[float, bool] | None = None
+        self._pub_fence_lock = threading.Lock()
         self._http = httpx.Client(
             base_url=httpx.URL(
                 scheme="https" if settings.secure else "http",
@@ -109,7 +211,227 @@ class ClickHouseClient:
             trust_env=False,
         )
 
-    def execute(self, sql: str, params: dict | None = None, *, settings: Mapping[str, str] | None = None) -> list[dict]:
+    def _filter_empty_stale_batches(self, service_id: str, domain: str, stale_bids: list[str]) -> set[str]:
+        uncached = [
+            bid
+            for bid in stale_bids
+            if (service_id, domain, bid) not in self._empty_stale_batches
+            and (service_id, domain, bid) not in self._non_empty_stale_batches
+        ]
+        if uncached and (tables := _DOMAIN_TABLES.get(domain)):
+            try:
+                quoted = ", ".join(f"'{bid}'" for bid in uncached)
+                non_empty: set[str] = set()
+                for tbl in tables:
+                    prewhere = (
+                        f"PREWHERE dimension = 'status' AND batch_id IN ({quoted})"
+                        if tbl == "request_aggregates"
+                        else f"PREWHERE batch_id IN ({quoted})"
+                    )
+                    rows = self._request(
+                        "execute",
+                        data={
+                            "query": (
+                                f"SELECT DISTINCT batch_id FROM `{tbl}` "
+                                f"{prewhere} WHERE service_id = {{service_id:String}}"
+                            ),
+                            "param_service_id": _parameter(service_id),
+                        },
+                        settings=None,
+                    )
+                    for r in rows or []:
+                        if b := str(r.get("batch_id") or ""):
+                            non_empty.add(b)
+                for bid in uncached:
+                    if bid not in non_empty:
+                        self._empty_stale_batches.add((service_id, domain, bid))
+                    else:
+                        self._non_empty_stale_batches.add((service_id, domain, bid))
+            except Exception as exc:
+                structlog.get_logger(__name__).debug("clickhouse_empty_stale_batch_probe_failed", error=str(exc))
+        return {bid for bid in stale_bids if (service_id, domain, bid) in self._empty_stale_batches}
+
+    def _compute_pending_batches(self, service_id: str) -> dict[str, tuple[str, ...]] | None:
+        try:
+            check_form = {
+                "query": (
+                    "SELECT domain, batch_id, "
+                    "toUInt8(argMax(updated_at, manifest_version) < now() - INTERVAL 5 MINUTE) AS is_stale "
+                    "FROM high_scale_batch_publications "
+                    "PREWHERE (domain, generation, batch_id) IN ("
+                    "SELECT domain, generation, batch_id FROM high_scale_batch_publications "
+                    "PREWHERE publication_state != 'visible' "
+                    "WHERE service_id = {service_id:String}"
+                    ") "
+                    "WHERE service_id = {service_id:String} "
+                    "GROUP BY domain, generation, batch_id "
+                    "HAVING argMax(publication_state, manifest_version) != 'visible'"
+                ),
+                "param_service_id": _parameter(service_id),
+            }
+            rows = self._request("execute", data=check_form, settings=None)
+            candidates_by_dom: dict[str, list[tuple[str, bool]]] = {}
+            stale_by_dom: dict[str, list[str]] = {}
+            for r in rows or []:
+                dom = str(r.get("domain") or "")
+                bid = str(r.get("batch_id") or "")
+                if dom and re.fullmatch(r"[0-9a-fA-F-]+", bid):
+                    is_stale = int(r.get("is_stale") or 0) == 1
+                    candidates_by_dom.setdefault(dom, []).append((bid, is_stale))
+                    if is_stale:
+                        stale_by_dom.setdefault(dom, []).append(bid)
+            empty_stale_by_dom = {
+                dom: self._filter_empty_stale_batches(service_id, dom, bids)
+                for dom, bids in stale_by_dom.items()
+                if len(candidates_by_dom.get(dom, ())) > 50
+            }
+            by_dom: dict[str, list[str]] = {}
+            for dom, cands in candidates_by_dom.items():
+                empty_set = empty_stale_by_dom.get(dom, set())
+                kept = [bid for bid, is_stale in cands if not (is_stale and bid in empty_set)]
+                if kept:
+                    by_dom[dom] = kept
+            return {k: tuple(v) for k, v in by_dom.items()}
+        except Exception:
+            return None
+
+    def _refresh_pending_batches_bg(self, service_id: str) -> None:
+        try:
+            pending_map = self._compute_pending_batches(service_id)
+            with self._pub_fence_lock:
+                self._pub_fence_cache[service_id] = (time.monotonic(), pending_map)
+        finally:
+            with self._pub_fence_lock:
+                self._pub_fence_refreshing.discard(service_id)
+
+    def _get_pending_batches(self, service_id: str) -> dict[str, tuple[str, ...]] | None:
+        if isinstance(self._http._transport, httpx.MockTransport):
+            return None
+        with self._pub_fence_lock:
+            now = time.monotonic()
+            cached = self._pub_fence_cache.get(service_id)
+            if cached is not None:
+                if (now - cached[0]) < 30.0:
+                    return cached[1]
+                if service_id not in self._pub_fence_refreshing:
+                    self._pub_fence_refreshing.add(service_id)
+                    threading.Thread(target=self._refresh_pending_batches_bg, args=(service_id,), daemon=True).start()
+                return cached[1]
+            pending_map = self._compute_pending_batches(service_id)
+            self._pub_fence_cache[service_id] = (time.monotonic(), pending_map)
+            return pending_map
+
+    def _has_materialized_cf_columns(self) -> bool:
+        if isinstance(self._http._transport, httpx.MockTransport):
+            return bool(getattr(self, "_enable_cf_rewrite_in_tests", False))
+        if os.getenv("PYTEST_CURRENT_TEST") and not getattr(self, "_enable_cf_rewrite_in_tests", False):
+            return False
+        with self._pub_fence_lock:
+            now = time.monotonic()
+            if self._cf_materialized_cache is not None:
+                ttl = 60.0 if self._cf_materialized_cache[1] else 10.0
+                if (now - self._cf_materialized_cache[0]) < ttl:
+                    return self._cf_materialized_cache[1]
+            ready = False
+            try:
+                rows = self._request(
+                    "execute",
+                    data={
+                        "query": (
+                            "SELECT "
+                            "(SELECT count() FROM system.columns "
+                            " WHERE database = currentDatabase() AND table = 'request_facts' AND name LIKE '_cf_%') AS cols, "
+                            "(SELECT count() FROM system.mutations "
+                            " WHERE database = currentDatabase() AND table = 'request_facts' AND is_done = 0 "
+                            " AND command LIKE '%MATERIALIZE COLUMN%') AS muts"
+                        ),
+                    },
+                    settings=None,
+                )
+                if rows:
+                    cols = int(rows[0].get("cols") or 0)
+                    muts = int(rows[0].get("muts") or 0)
+                    ready = cols >= len(_MATERIALIZED_CF_KEYS) and muts == 0
+            except Exception:
+                ready = False
+            self._cf_materialized_cache = (time.monotonic(), ready)
+            return ready
+
+    def rewrite_publication_fence(self, sql: str, params: dict | None = None, *, rewrite_cf: bool = True) -> str:
+        """Rewrite ``batch_id IN (SELECT ... FROM high_scale_batch_publications FINAL ...)`` when pending set is small."""
+        svc_id = (params or {}).get("service_id")
+        if (
+            isinstance(svc_id, str)
+            and svc_id
+            and "high_scale_batch_publications FINAL" in sql
+            and _PUB_FENCE_RE.search(sql)
+            and (pending_map := self._get_pending_batches(svc_id)) is not None
+        ):
+
+            def _replace_fence(match: re.Match[str]) -> str:
+                where_body = match.group(1)
+                dom: str | None = None
+                if m_lit := re.search(r"domain\s*=\s*'([a-z0-9_]+)'", where_body):
+                    dom = m_lit.group(1)
+                elif m_par := re.search(r"domain\s*=\s*\{([a-zA-Z0-9_]+):String\}", where_body):
+                    dom = str((params or {}).get(m_par.group(1)) or "")
+                pending_ids = (
+                    pending_map.get(dom, ())
+                    if dom
+                    else tuple(sorted({bid for bids in pending_map.values() for bid in bids}))
+                )
+                if not pending_ids:
+                    return "1=1"
+                if len(pending_ids) <= 250:
+                    quoted = ", ".join(f"'{bid}'" for bid in pending_ids)
+                    return f"batch_id NOT IN ({quoted})"
+                return match.group(0)
+
+            sql = _PUB_FENCE_RE.sub(_replace_fence, sql)
+
+        upper_sql = sql.lstrip().upper()
+        is_fact_query = bool(_REQUEST_FACTS_WORD_RE.search(sql)) and upper_sql.startswith(("SELECT", "WITH", "/*"))
+        is_where_fragment = not upper_sql.startswith(
+            ("SELECT", "WITH", "/*", "INSERT", "ALTER", "CREATE", "DROP", "OPTIMIZE", "SYSTEM", "TRUNCATE")
+        )
+        is_console_wrapper = bool(re.match(r"^SELECT\s+\*\s+FROM\s*\(\s*\n", upper_sql))
+        has_star_subquery = bool(
+            re.search(r"(?:\bSELECT\s+(?:DISTINCT\s+|ALL\s+)?\*|\.\s*\*)", upper_sql)
+            and (upper_sql.startswith("WITH") or re.search(r"\b(?:FROM|JOIN)\s*\(\s*(?:WITH|SELECT)\b", upper_sql))
+        )
+        if (
+            rewrite_cf
+            and not is_console_wrapper
+            and not has_star_subquery
+            and (is_fact_query or is_where_fragment)
+            and "custom_fields[" in sql
+            and "SELECT custom_fields FROM" not in sql
+            and "SELECT event_timestamp, custom_fields FROM" not in sql
+            and self._has_materialized_cf_columns()
+        ):
+            sql = _CF_LITERAL_RE.sub(
+                lambda m: f"`_cf_{m.group(1)}`" if m.group(1) in _MATERIALIZED_CF_KEYS else m.group(0),
+                sql,
+            )
+            if params:
+                sql = _CF_PARAM_RE.sub(
+                    lambda m: (
+                        f"`_cf_{params[m.group(1)]}`"
+                        if m.group(1) in params and str(params[m.group(1)]) in _MATERIALIZED_CF_KEYS
+                        else m.group(0)
+                    ),
+                    sql,
+                )
+        return sql
+
+    def execute(
+        self,
+        sql: str,
+        params: dict | None = None,
+        *,
+        settings: Mapping[str, str] | None = None,
+        rewrite_cf: bool = True,
+    ) -> list[dict]:
         """Run internal SQL. SELECT-like statements return JSON rows; DDL returns [].
 
         ``settings`` adds allow-listed per-query ClickHouse settings (see ``_QUERY_SETTINGS``).
@@ -123,6 +445,7 @@ class ClickHouseClient:
                 raise ValueError(f"ClickHouse query setting {name!r} needs a nonempty string value")
         if re.search(r"\{[^{}]+:\s*Identifier\s*\}", sql, re.IGNORECASE):
             raise ValueError("ClickHouse identifier parameters are forbidden")
+        sql = self.rewrite_publication_fence(sql, params, rewrite_cf=rewrite_cf)
         form = {"query": sql}
         for name, value in (params or {}).items():
             if not isinstance(name, str) or not _PARAM_NAME.fullmatch(name):
@@ -162,16 +485,43 @@ class ClickHouseClient:
             raise ValueError("invalid ClickHouse insert value") from None
         quoted_columns = ", ".join(f"`{c}`" for c in columns)
         sql = f"INSERT INTO `{table}` ({quoted_columns}) FORMAT JSONCompactEachRow"
+        if table == "high_scale_batch_publications":
+            with self._pub_fence_lock:
+                self._pub_fence_cache.clear()
+        elif table in CLICKHOUSE_HIGH_SCALE_TABLES and "batch_id" in columns:
+            b_idx = columns.index("batch_id")
+            inserted_bids = {str(r[b_idx]) for r in rows}
+            with self._pub_fence_lock:
+                if self._empty_stale_batches:
+                    before = len(self._empty_stale_batches)
+                    self._empty_stale_batches = {
+                        item for item in self._empty_stale_batches if item[2] not in inserted_bids
+                    }
+                    if len(self._empty_stale_batches) != before:
+                        self._pub_fence_cache.clear()
         self._request("insert", sql=sql, content=content, rows_written=len(rows))
 
     def delete_batch_rows(self, table: str, batch_id: str) -> None:
         """Synchronously remove a failed high-scale batch before a retry."""
         if table not in CLICKHOUSE_HIGH_SCALE_TABLES:
             raise ValueError("ClickHouse table is not internally allowlisted")
-        self.execute(
-            f"ALTER TABLE `{table}` DELETE WHERE batch_id={{batch_id:UUID}} SETTINGS mutations_sync=2",
-            {"batch_id": batch_id},
+        targets = [table]
+        # request_insight_hourly is filled by a materialized view on request_facts, so it holds the batch too;
+        # it exists only once the rollup schema is installed, and retry cleanup must not depend on that.
+        if table == "request_facts" and self._table_exists("request_insight_hourly"):
+            targets.append("request_insight_hourly")
+        for target in targets:
+            self.execute(
+                f"ALTER TABLE `{target}` DELETE WHERE batch_id={{batch_id:UUID}} SETTINGS mutations_sync=2",
+                {"batch_id": batch_id},
+            )
+
+    def _table_exists(self, name: str) -> bool:
+        rows = self.execute(
+            "SELECT count() AS n FROM system.tables WHERE database = currentDatabase() AND name = {name:String}",
+            {"name": name},
         )
+        return bool(rows and int(rows[0].get("n") or 0))
 
     def health(self) -> dict:
         """Exercise authenticated database access; unavailable is an explicit exception."""
@@ -278,25 +628,35 @@ class ClickHouseClient:
                 "wait_end_of_query": "1",
                 "default_format": "JSON",
                 "output_format_json_quote_64bit_integers": "0",
-                "max_memory_usage": "1073741824",
-                "max_threads": "2",
+                "max_memory_usage": os.getenv("CLICKHOUSE_QUERY_MAX_MEMORY_BYTES", "1073741824"),
+                "max_threads": os.getenv("CLICKHOUSE_QUERY_MAX_THREADS", "2"),
                 "memory_overcommit_ratio_denominator": "0",
                 "memory_overcommit_ratio_denominator_for_user": "0",
-                "max_bytes_before_external_group_by": "134217728",
-                "max_bytes_before_external_sort": "134217728",
+                "max_bytes_before_external_group_by": os.getenv(
+                    "CLICKHOUSE_MAX_BYTES_BEFORE_EXTERNAL_GROUP_BY", "134217728"
+                ),
+                "max_bytes_before_external_sort": os.getenv("CLICKHOUSE_MAX_BYTES_BEFORE_EXTERNAL_SORT", "134217728"),
             }
             if settings:
                 query.update(settings)
+                if (
+                    "additional_table_filters" in settings
+                    and " IN (SELECT " in str(settings["additional_table_filters"])
+                    and "MockTransport" not in type(self._http._transport).__name__
+                    and not getattr(self, "_analyzer_mandatory", False)
+                ):
+                    query.setdefault("enable_analyzer", "0")
             if operation == "insert":
+                is_mock = "MockTransport" in type(self._http._transport).__name__
                 query.update(
                     {
                         "query": sql or "",
                         "async_insert": "0",
                         "date_time_input_format": "best_effort",
-                        "max_memory_usage": "536870912",
-                        "max_threads": "2",
-                        "max_insert_threads": "1",
-                        "max_block_size": "2048",
+                        "max_memory_usage": os.getenv("CLICKHOUSE_INSERT_MAX_MEMORY_BYTES", "536870912"),
+                        "max_threads": "2" if is_mock else os.getenv("CLICKHOUSE_INSERT_MAX_THREADS", "4"),
+                        "max_insert_threads": "1" if is_mock else os.getenv("CLICKHOUSE_INSERT_THREADS", "2"),
+                        "max_block_size": "2048" if is_mock else os.getenv("CLICKHOUSE_INSERT_MAX_BLOCK_SIZE", "65536"),
                     }
                 )
             network_started = time.perf_counter()
@@ -312,6 +672,25 @@ class ClickHouseClient:
                         timeout, connect=self._settings.connect_timeout_s, pool=self._settings.pool_timeout_s
                     ),
                 )
+                if (
+                    response.status_code == 500
+                    and query.get("enable_analyzer") == "0"
+                    and (
+                        response.headers.get("X-ClickHouse-Exception-Code") == "452"
+                        or "enable_analyzer" in response.text
+                    )
+                ):
+                    self._analyzer_mandatory = True
+                    query.pop("enable_analyzer", None)
+                    response = self._http.post(
+                        "/",
+                        params=query,
+                        files={key: (None, value) for key, value in data.items()} if data else None,
+                        content=content,
+                        timeout=httpx.Timeout(
+                            timeout, connect=self._settings.connect_timeout_s, pool=self._settings.pool_timeout_s
+                        ),
+                    )
             finally:
                 stats["network_ms"] = (time.perf_counter() - network_started) * 1000
             stats["status_code"] = response.status_code

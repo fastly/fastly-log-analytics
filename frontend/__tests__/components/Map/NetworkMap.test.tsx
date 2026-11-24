@@ -189,6 +189,32 @@ describe('NetworkMap empty-state & data rendering', () => {
     expect(screen.queryByText('No map data available')).not.toBeInTheDocument()
   })
 
+  it('populates metro rows and selects last non-empty bucket_idx for Cloud sparse map_buckets without metro_code', () => {
+    const data: NetworkMapData = {
+      buckets: ['2026-01-01T00:00:00Z', '2026-01-01T00:05:00Z', '2026-01-01T00:10:00Z'],
+      cities: [
+        { name: 'Frankfurt', lat: 50.11, lon: 8.68 },
+        { name: 'Ashburn', lat: 39.04, lon: -77.49 },
+      ],
+      map_buckets: [
+        {
+          bucket: '2026-01-01T00:10:00Z',
+          bucket_idx: 2,
+          cities: [
+            { city_idx: 0, country: 'DE', reqs: 120, health_score: 88.5, rtt_med_us: 14000, avg_ploss: 0.001, error_pct: 0 },
+            { city_idx: 1, country: 'US', reqs: 80, health_score: 94.2, rtt_med_us: 9000, avg_ploss: 0, error_pct: 0 },
+          ],
+        },
+      ],
+    }
+    const { container } = render(<NetworkMap {...baseProps({ data })} />)
+    expect(screen.getByTestId('playback-controls').getAttribute('data-bucket-idx')).toBe('2')
+    expect(container.querySelector('table caption')?.textContent).toContain('top 2 metros by health_score')
+    expect(container.querySelectorAll('table tbody tr')).toHaveLength(2)
+    expect(container.querySelector('table tbody')?.textContent).toContain('Ashburn')
+    expect(container.querySelector('table tbody')?.textContent).toContain('Frankfurt')
+  })
+
   it('increments bucketIdx on the playInterval when playing flips to true', () => {
     vi.useFakeTimers()
     render(<NetworkMap {...baseProps({ data: { buckets: ['t0', 't1'] } })} />)

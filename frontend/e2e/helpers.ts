@@ -2,6 +2,7 @@ import AxeBuilder from '@axe-core/playwright'
 import { expect, test, type APIRequestContext, type Locator, type Page } from '@playwright/test'
 import { adminGatewayContextOptions } from '../../scripts/lib/admin_gateway_client.cjs'
 import type { DebugQuery } from '../types/api'
+export { virtualAuthenticator, installPasskeyAuthenticator } from './cloud/authenticator'
 
 declare global {
   interface Window {
@@ -284,7 +285,9 @@ export async function assertAnalyst403(
     })
     inviteId = seeded.inviteId
     for (const url of urlBuilder(serviceId)) {
-      const res = await page.request.get(url, { headers: { 'x-remote-analyst': '1' } })
+      const res = await page.request.get(url, {
+        headers: { 'x-remote-analyst': '1', host: 'share-e2e.example.com' },
+      })
       expect(res.status()).toBe(403)
       const body = await res.json().catch(() => ({}))
       if (body.error) expect(body.error).toBe('admin_only')

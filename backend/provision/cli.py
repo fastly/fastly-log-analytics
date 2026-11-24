@@ -23,6 +23,12 @@ from typing import Any
 import typer
 from rich.console import Console
 
+from backend.core.service_defaults import (
+    DEFAULT_LOG_PERIOD_SECONDS,
+    DEFAULT_SNAPSHOT_INTERVAL_MINUTES,
+    VALID_SNAPSHOT_INTERVAL_MINUTES,
+)
+
 # ── Rich Consoles & ANSI colour helpers (folded from utils.py) ───────────────
 _stdout = Console(highlight=False, markup=False, soft_wrap=True)
 _stderr = Console(stderr=True, highlight=False, markup=False, soft_wrap=True)
@@ -351,9 +357,11 @@ def wizard(args) -> dict:
         "cdn_secret": cdn_secret,
         "delete_after": not getattr(args, "disable_delete_after", False) if delete_after else False,
         "enable_cron_sync": not getattr(args, "disable_cron_sync", False),
-        "commit_interval_mins": getattr(args, "commit_interval_mins", 5) or 5,
-        "enable_cron_compact": not getattr(args, "disable_cron_compact", False),
         "log_retention_days": getattr(args, "log_retention_days", 30) or 30,
+        "snapshot_interval_minutes": _validate_snapshot_interval_minutes(
+            getattr(args, "snapshot_interval_minutes", DEFAULT_SNAPSHOT_INTERVAL_MINUTES)
+        )
+        or DEFAULT_SNAPSHOT_INTERVAL_MINUTES,
         "log_fields": log_fields_cfg,
     }
 
@@ -445,7 +453,7 @@ def handle_teardown(args):
             service_id,
             bucket=state.get("fos_bucket_name"),
             remove_data=args.remove_data
-            or (not args.yes and ask_yes("Remove local database and cache as well?", default=True)),
+            or (not args.yes and ask_yes("Remove local metadata and cache as well?", default=True)),
         )
         ok("Teardown completed.")
     except Exception as exc:
@@ -456,7 +464,6 @@ def handle_teardown(args):
 def handle_reset_logs(args):
     banner("Fastly Log Analysis — Delete Data")
     from backend import config as svcconfig
-    from backend.core.metadata.base import is_ingested_files_dedup_active
     from backend.core.reset import reset_service_logs
     from backend.cron.scheduler import get_scheduler
 
@@ -469,10 +476,9 @@ def handle_reset_logs(args):
     if not args.yes:
         blank()
         print(f"  {_c(YLW + BOLD, 'The following will be permanently deleted:')}")
-        print(f"  {_c(DIM, 'Cloud DuckLake log data (ducklake/ in FOS, High-Scale only)')}")
+        print(f"  {_c(DIM, 'ClickHouse analytical log tables and rollups')}")
         print(f"  {_c(DIM, 'Quarantined-file copies (errors/)')}")
-        print(f"  {_c(DIM, 'Local DuckLake data, DuckDB analytical database + cache')}")
-        print(f"  {_c(DIM, 'Local ingestion dedup indexes')}")
+        print(f"  {_c(DIM, 'Postgres ingest ledger and local ingestion dedup indexes')}")
         if args.delete_raw:
             print(f"  {_c(YLW + BOLD, 'Raw .gz request logs in cloud storage (raw/request/)')}")
         if args.wipe_usage:
@@ -481,13 +487,6 @@ def handle_reset_logs(args):
         print(
             f"  {_c(BLU, 'Preserved:')} saved views, alerts, source registration, audit history, scoring labels/audit."
         )
-        if args.delete_raw and not is_ingested_files_dedup_active(service_id):
-            blank()
-            warn(
-                "This source keeps request logs after ingest (delete_after=False). Deleting raw/request/ now "
-                "means the next full sync has no dedup record left and will re-ingest this "
-                "service's ENTIRE history."
-            )
         blank()
         if not ask_yes(_c(YLW + BOLD, "This cannot be undone. Continue?"), default=False):
             sys.exit(0)
@@ -575,7 +574,9 @@ def handle_update_logs(args):
         "endpoint_name": args.endpoint_name or prov_cfg.get("endpoint_name", "Fastly Object Storage Logs"),
         "sample_rate": args.sample_rate or prov_cfg.get("sample_rate", 100),
         "edge_only": args.edge_only if args.edge_only is not None else prov_cfg.get("edge_only", False),
-        "log_period": parse_period(args.period) if args.period else prov_cfg.get("log_period", 60),
+        "log_period": parse_period(args.period)
+        if args.period
+        else prov_cfg.get("log_period", DEFAULT_LOG_PERIOD_SECONDS),
         "log_fields": new_lf_config,
         "update_format": True,
     }
@@ -692,7 +693,7 @@ def handle_list_fields(args):
     print(f"\n  {'Field':<20} {'Group':<6} {'Type':<12} {'Bytes':>6}    Description")
     for f in lf.LOG_FIELD_CATALOG:
         print(
-            f"  {f['id']:<20} {(f['group'] or '(core)'):<6} {f['duckdb_type']:<12} {f['typical_bytes']:>6}    {f['description'][:60]}"
+            f"  {f['id']:<20} {(f['group'] or '(core)'):<6} {f['sql_type']:<12} {f['typical_bytes']:>6}    {f['description'][:60]}"
         )
 
 
@@ -700,6 +701,63 @@ def handle_list_fields(args):
 # Typer surface — each subcommand collects typed options, packs them
 # into a SimpleNamespace, and delegates to the matching handler.
 # ────────────────────────────────────────────────────────────────────────────
+
+
+def _validate_snapshot_interval_minutes(value: int | None) -> int | None:
+    if value is not None and (
+        isinstance(value, bool) or not isinstance(value, int) or value not in VALID_SNAPSHOT_INTERVAL_MINUTES
+    ):
+        allowed = ", ".join(str(v) for v in VALID_SNAPSHOT_INTERVAL_MINUTES)
+        raise typer.BadParameter(f"snapshot_interval_minutes must be one of: {allowed} (got {value})")
+    return value
+
+
+def handle_set_snapshot_interval(args) -> None:
+    from backend import config as svcconfig
+
+    interval = _validate_snapshot_interval_minutes(args.snapshot_interval_minutes)
+    if interval is None:
+        raise typer.BadParameter("snapshot_interval_minutes is required")
+
+    service_id = getattr(args, "service_id", None)
+    if not service_id:
+        configs = svcconfig.list_configs()
+        if len(configs) == 1:
+            service_id = configs[0].get("service_id", "")
+        elif len(configs) == 0:
+            fail("No configured services found. Pass --service-id.")
+            sys.exit(1)
+        else:
+            ids = ", ".join(str(c.get("service_id", "")) for c in configs)
+            fail(f"Multiple services configured ({ids}). Pass --service-id.")
+            sys.exit(1)
+
+    if not svcconfig.load_config(service_id):
+        fail(f"Service config not found: {service_id}")
+        sys.exit(1)
+
+    def _mutate(cfg: dict[str, Any]) -> None:
+        prov = cfg.get("provisioning")
+        if not isinstance(prov, dict):
+            prov = {}
+            cfg["provisioning"] = prov
+        cron_sync = prov.get("cron_sync")
+        if not isinstance(cron_sync, dict):
+            cron_sync = {}
+            prov["cron_sync"] = cron_sync
+        cron_sync["snapshot_interval_minutes"] = interval
+
+    svcconfig.mutate_config(service_id, _mutate)
+
+    try:
+        from backend.provision.orchestrator import _sync_crontab
+
+        _sync_crontab()
+    except Exception:
+        pass
+
+    ok(f"Updated snapshot_interval_minutes={interval} for service {service_id}")
+
 
 app = typer.Typer(
     add_completion=False,
@@ -725,9 +783,13 @@ def cmd_provision(
     shield: str | None = typer.Option(None, "--shield"),
     disable_delete_after: bool = typer.Option(False, "--disable-delete-after"),
     disable_cron_sync: bool = typer.Option(False, "--disable-cron-sync"),
-    commit_interval_mins: int = typer.Option(5, "--commit-interval-mins"),
-    disable_cron_compact: bool = typer.Option(False, "--disable-cron-compact"),
     log_retention_days: int = typer.Option(30, "--log-retention-days"),
+    snapshot_interval_minutes: int = typer.Option(
+        DEFAULT_SNAPSHOT_INTERVAL_MINUTES,
+        "--snapshot-interval-minutes",
+        callback=_validate_snapshot_interval_minutes,
+        help="Cloud snapshot interval in minutes (5, 15, 30, 60, 360, 1440).",
+    ),
     preset: str | None = typer.Option(None, "--preset"),
     enable_group: list[str] | None = typer.Option(None, "--enable-group"),
     disable_group: list[str] | None = typer.Option(None, "--disable-group"),
@@ -750,9 +812,8 @@ def cmd_provision(
         shield=shield,
         disable_delete_after=disable_delete_after,
         disable_cron_sync=disable_cron_sync,
-        commit_interval_mins=commit_interval_mins,
-        disable_cron_compact=disable_cron_compact,
         log_retention_days=log_retention_days,
+        snapshot_interval_minutes=snapshot_interval_minutes,
         preset=preset,
         enable_group=enable_group,
         disable_group=disable_group,
@@ -816,23 +877,6 @@ def cmd_reset_logs(
 ):
     args = SimpleNamespace(service_id=service_id, delete_raw=delete_raw, wipe_usage=wipe_usage, yes=yes)
     handle_reset_logs(args)
-
-
-@app.command("restore-data", help="Rebuild a service's local DuckLake data from its cloud copy in FOS.")
-def cmd_restore_data(
-    service_id: str = typer.Option(..., "--service-id", help="The Fastly service ID to restore."),
-):
-    from backend.core.duckdb import get_source_for_service
-    from backend.core.storage.backup import restore_from_cloud
-
-    source = get_source_for_service(service_id)
-    if source is None:
-        raise typer.BadParameter(f"No configured service {service_id!r}", param_hint="--service-id")
-    result = restore_from_cloud(source, progress=info)
-    ok(
-        f"Restored {result['remote_files']} cloud file(s): {result['downloaded']} downloaded, "
-        f"{result['registered']} registered, {result['reindexed']} raw object(s) re-indexed."
-    )
 
 
 @app.command("update-logs", help="Push a refreshed log_fields config.")
@@ -908,5 +952,29 @@ def cmd_list_fields():
     handle_list_fields(SimpleNamespace())
 
 
+@app.command("set-snapshot-interval", help="Set cloud snapshot interval (minutes) for a service.")
+def cmd_set_snapshot_interval(
+    snapshot_interval_minutes: int = typer.Option(
+        ...,
+        "--snapshot-interval-minutes",
+        callback=_validate_snapshot_interval_minutes,
+        help="Cloud snapshot interval in minutes (5, 15, 30, 60, 360, 1440).",
+    ),
+    service_id: str | None = typer.Option(None, "--service-id", help="Target Fastly service ID."),
+):
+    args = SimpleNamespace(
+        service_id=service_id,
+        snapshot_interval_minutes=snapshot_interval_minutes,
+    )
+    handle_set_snapshot_interval(args)
+
+
+def main() -> None:
+    from backend.core.metadata.base import closing_pg_pool
+
+    with closing_pg_pool():
+        app()
+
+
 if __name__ == "__main__":
-    app()
+    main()

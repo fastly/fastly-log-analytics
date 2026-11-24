@@ -1,9 +1,12 @@
 "use client"
 
 import React, { useState, useEffect, useEffectEvent, useRef } from 'react'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query'
 import {
+  adminFetch,
   client,
+  getApiBase,
   unwrapClient,
   queryKeys,
   extractApiError,
@@ -52,6 +55,7 @@ import {
   subscribeDraft,
   validateMutationFn,
 } from './wizardActions'
+import { applyAttach, clearAttach, resolveAttachOffer, type AttachOffer } from './attach'
 
 export * from './types'
 export * from './wizardActions'
@@ -118,8 +122,8 @@ export function useWizardEffects(args: WizardEffectsArgs) {
 
   useEffect(() => {
     if (open && !pendingDraft) {
-      setStep("mode")
-      setMode(null)
+      setStep(isCloudMode() ? "token" : "mode")
+      setMode(isCloudMode() ? "provision" : null)
       setSearch("")
       setSelectedService(null)
       setIsDeploying(false)
@@ -131,7 +135,7 @@ export function useWizardEffects(args: WizardEffectsArgs) {
   }, [open, reset, pendingDraft])
 
   useEffect(() => {
-    if (step === "storage" && config.cdn_prefix) {
+    if (step === "storage" && config.cdn_prefix && !isCloudMode()) {
       const timer = setTimeout(() => checkDomain(config.cdn_prefix), 500)
       return () => clearTimeout(timer)
     }
@@ -196,8 +200,8 @@ export function useWizardState(open: boolean, onOpenChange: (open: boolean) => v
   const services = useServiceStore((s) => s.services)
   const { timezone } = useTimezoneStore()
   const queryClient = useQueryClient()
-  const [step, setStep] = useState<Step>("mode")
-  const [mode, setMode] = useState<WizardMode>(null)
+  const [step, setStep] = useState<Step>(() => (isCloudMode() ? "token" : "mode"))
+  const [mode, setMode] = useState<WizardMode>(() => (isCloudMode() ? "provision" : null))
   const [token, setToken] = useState("")
   const [submittedToken, setSubmittedToken] = useState("")
   const [prevOpenForToken, setPrevOpenForToken] = useState(open)
@@ -209,6 +213,8 @@ export function useWizardState(open: boolean, onOpenChange: (open: boolean) => v
   const [tokenInfo, setTokenInfo] = useState<TokenInfo | null>(null)
   const [search, setSearch] = useState("")
   const [selectedService, setSelectedService] = useState<ProvisionService | null>(null)
+  const [attachOffer, setAttachOffer] = useState<AttachOffer | null>(null)
+  const [isCheckingAttach, setIsCheckingAttach] = useState(false)
   const [isDeploying, setIsDeploying] = useState(false)
   const [fosStatus, setFosStatus] = useState<FosStatus>("idle")
   const [fosError, setFosError] = useState("")
@@ -260,11 +266,29 @@ export function useWizardState(open: boolean, onOpenChange: (open: boolean) => v
     error: servicesError,
     isLoading: isLoadingServices,
   } = useQuery({
-    queryKey: ["provision-services", submittedToken],
+    queryKey: ["provision-services", submittedToken, isCloudMode()],
     queryFn: async () => {
       if (!submittedToken) return []
+      if (isCloudMode()) {
+        const response = await adminFetch(`${getApiBase()}/api/provision/services`, {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token: submittedToken }),
+        })
+        if (!response.ok) {
+          const errorBody = await response.json().catch(() => null)
+          const err = new Error(extractApiError(errorBody ?? response.statusText)) as Error & { code?: string }
+          err.code =
+            (errorBody as { detail?: { error?: string }; error?: string } | null)?.detail?.error ??
+            (errorBody as { error?: string } | null)?.error
+          throw err
+        }
+        const payload = (await response.json()) as { services?: ProvisionService[] }
+        return payload.services ?? []
+      }
       const { data, error } = await client.GET("/api/provision/services", {
-        params: { query: { token: submittedToken } },
+        headers: { Authorization: `Bearer ${submittedToken}` },
       })
       if (error) {
         const err = new Error(extractApiError(error)) as Error & { code?: string }
@@ -288,7 +312,7 @@ export function useWizardState(open: boolean, onOpenChange: (open: boolean) => v
   const { data: catalog, isLoading: isLoadingCatalog } = useQuery({
     queryKey: ["services", "catalog"],
     queryFn: async () => unwrapClient(client.GET("/api/log-fields/catalog")),
-    enabled: step === "fields",
+    enabled: open && config.logging_enabled !== false,
   })
 
   const updateLogFields = (fn: (lf: ProvisionConfig["log_fields"]) => ProvisionConfig["log_fields"]) =>
@@ -311,15 +335,36 @@ export function useWizardState(open: boolean, onOpenChange: (open: boolean) => v
     if (token) setSubmittedToken(token)
   }
 
+  const validateOnSuccess = buildValidateOnSuccess({ token, setTokenInfo, setConfig, setStep, mode })
   const validateMutation = useMutation({
     mutationFn: validateMutationFn(token),
-    onSuccess: buildValidateOnSuccess({ token, setTokenInfo, setConfig, setStep, mode }),
+    onSuccess: (data) => {
+      setConfig(clearAttach)
+      validateOnSuccess(data)
+    },
+    onError: async (error, serviceId) => {
+      setIsCheckingAttach(true)
+      try {
+        setAttachOffer(await resolveAttachOffer(error, token, serviceId, config.log_fields))
+      } finally {
+        setIsCheckingAttach(false)
+      }
+    },
   })
 
   const handleServiceSelect = (service: ProvisionService) => {
     if (service.provisioned) return
     setSelectedService(service)
+    setAttachOffer(null)
     validateMutation.mutate(service.id)
+  }
+
+  const acceptAttach = () => {
+    if (!attachOffer?.available || attachOffer.serviceId !== selectedService?.id) return
+    validateOnSuccess(attachOffer.data)
+    setConfig((prev) => applyAttach(prev, attachOffer))
+    setStep("storage")
+    setAttachOffer(null)
   }
 
   const handleCheckConfig = () =>
@@ -531,6 +576,9 @@ export function useWizardState(open: boolean, onOpenChange: (open: boolean) => v
     handleTokenSubmit,
     validateMutation,
     handleServiceSelect,
+    attachOffer,
+    isCheckingAttach,
+    acceptAttach,
     handleCheckFos,
     checkDomain,
     domainStatus,

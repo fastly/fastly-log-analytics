@@ -6,7 +6,7 @@ import type { PlotlyTrace } from '@/types/api'
 
 export function parseExtentMs(value: unknown, edge: 'earliest' | 'latest'): number | null {
   if (typeof value !== 'string' || value.length === 0) return null
-  const t = Date.parse(value.length === 10 ? `${value}${edge === 'earliest' ? 'T00:00:00.000Z' : 'T23:59:59.999Z'}` : value)
+  const t = toUTCDate(value.length === 10 ? `${value}${edge === 'earliest' ? 'T00:00:00.000Z' : 'T23:59:59.999Z'}` : value).getTime()
   return Number.isNaN(t) ? null : t
 }
 
@@ -495,7 +495,7 @@ const STATIC_DEFAULT = { window: '24', baseline: '168' } as const
 
 export function historyHoursFromExtents(earliest: string | null | undefined, now: number = Date.now()): number | null {
   if (!earliest) return null
-  const ms = Date.parse(earliest.length === 10 ? earliest + 'T00:00:00.000Z' : earliest)
+  const ms = toUTCDate(earliest.length === 10 ? earliest + 'T00:00:00.000Z' : earliest).getTime()
   return Number.isFinite(ms) ? Math.max(0, (now - ms) / 3_600_000) : null
 }
 

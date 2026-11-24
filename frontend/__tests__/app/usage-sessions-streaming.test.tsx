@@ -1,5 +1,5 @@
-import { fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
-import { http, HttpResponse } from 'msw'
+import { fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react'
+import { http, HttpResponse } from 'msw/http'
 import { describe, expect, it, test, vi, beforeAll, beforeEach, afterEach } from 'vitest'
 import { UsageLogClient } from '@/app/admin/usage-log/page'
 import Loading from '@/app/admin/usage-log/loading'
@@ -21,6 +21,9 @@ import {
 } from '../helpers/page-smoke'
 import type { PlotlyChart } from '@/components/PlotlyChart'
 import React, { type ComponentProps } from 'react'
+import { setCloudModeRuntime } from '@/lib/cloud-engine/mode'
+import { DEFAULT_INPUTS, DEFAULT_UNITS, LIST_PRICE_RATES } from '@/lib/cloud-engine/usage/estimate'
+import { useServiceQuery } from '@/hooks/useDashboardCards'
 
 beforeAll(() => {
   stubResizeObserver()
@@ -145,7 +148,9 @@ vi.mock('@/hooks/useDashboardCards', async (importOriginal) => {
 
 vi.mock('@/components/CostCalculator/CostCalculator', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/components/CostCalculator/CostCalculator')>()),
-  CostCalculator: () => <div data-testid="cost-calculator" />,
+  CostCalculator: ({ prefillNote, localStorageGbHours }: { prefillNote?: string; localStorageGbHours?: number | null }) => (
+    <div data-testid="cost-calculator" data-local-storage-gb-hours={localStorageGbHours ?? ''}>{prefillNote}</div>
+  ),
 }))
 
 function resetDefaultStores() {
@@ -246,8 +251,8 @@ let errorSpy: ReturnType<typeof spyOnConsoleError>
 
 function makePrefill(overrides: Partial<PrefillResponse>): PrefillResponse {
   return {
-    _is_cached: false, data_days: 7, commit_interval_mins: 5, sample_rate: 100, edge_only: false,
-    compaction_enabled: true, delete_after: false, log_retention_days: 90, rum_retention_days: 90, deployment_mode: 'standard', billing_zone: null, ...overrides,
+    _is_cached: false, data_days: 7, sample_rate: 100, edge_only: false,
+    delete_after: false, snapshot_interval_minutes: 5, log_retention_days: 90, rum_retention_days: 90, billing_zone: null, ...overrides,
   }
 }
 
@@ -299,16 +304,226 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
   })
 
   afterEach(() => {
+    setCloudModeRuntime(false)
     reportLayoutChildArgs = null
     useMockDataTable = false
     mockIsDataReady = null
     errorSpy.mockRestore()
   })
 
+  test('treats a service query waiting for app data as initially loading', () => {
+    mockIsDataReady = false
+    const queryFn = vi.fn(async () => ({ rows: [] }))
+
+    const { result } = renderHook(
+      () => useServiceQuery(['loading-contract', 'test-svc'], queryFn),
+      { wrapper: makeQueryWrapper(queryClient) },
+    )
+
+    expect(result.current.isLoading).toBe(true)
+    expect(queryFn).not.toHaveBeenCalled()
+  })
+
+  test('does not mark an explicitly disabled service query as loading', () => {
+    mockIsDataReady = false
+    const queryFn = vi.fn(async () => ({ rows: [] }))
+
+    const { result } = renderHook(
+      () => useServiceQuery(['loading-contract-disabled', 'test-svc'], queryFn, { enabled: false }),
+      { wrapper: makeQueryWrapper(queryClient) },
+    )
+
+    expect(result.current.isLoading).toBe(false)
+    expect(queryFn).not.toHaveBeenCalled()
+  })
+
+  test('does not mark a callback-disabled service query as loading', () => {
+    mockIsDataReady = false
+    const queryFn = vi.fn(async () => ({ rows: [] }))
+
+    const { result } = renderHook(
+      () => useServiceQuery(['loading-contract-disabled-callback', 'test-svc'], queryFn, { enabled: () => false }),
+      { wrapper: makeQueryWrapper(queryClient) },
+    )
+
+    expect(result.current.isLoading).toBe(false)
+    expect(queryFn).not.toHaveBeenCalled()
+  })
+
   test('usage page mounts and renders title', () => {
     renderWithQuery(<UsagePage />, { queryClient })
     expect(screen.getByText('System Usage')).toBeInTheDocument()
     expect(errorSpy).not.toHaveBeenCalled()
+  })
+
+  test('RUM failure keeps an unavailable section visible when RUM is enabled', async () => {
+    useServiceStore.setState({
+      activeServiceId: 'test-svc',
+      isInitialized: true,
+      services: [{ id: 'test-svc', name: 'Test', rum_enabled: true }],
+    })
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === '/api/usage/rum-breakdown') throw new Error('rum unavailable')
+      return { data: {} }
+    })
+
+    renderWithQuery(<UsagePage />, { queryClient })
+
+    expect(await screen.findByText('Real User Monitoring (RUM) Operations')).toBeInTheDocument()
+    expect(await screen.findByText('Something went wrong')).toBeInTheDocument()
+    expect(screen.getByText('rum unavailable')).toBeInTheDocument()
+  })
+
+  test('Cloud usage renders Compute, KV, secrets and CDN requests from measured prefill', async () => {
+    setCloudModeRuntime(true)
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === '/api/usage/prefill/rates') return { data: LIST_PRICE_RATES }
+      if (path === '/api/usage/prefill') return {
+        data: {
+          inputs: { ...DEFAULT_INPUTS, requestsPerDay: 12345, edgeRequestsPerDay: 10000 },
+          units: { ...DEFAULT_UNITS, secrets: 3 },
+          measuredInputs: { requestsPerDay: true, edgeRequestsPerDay: true },
+          measuredUnits: { secrets: true },
+          rates: { ...LIST_PRICE_RATES, secret_rate_per_month: 7 },
+          window: { days: 7, files: 10, lines: 100 },
+        },
+      }
+      return undefined
+    })
+
+    renderWithQuery(<UsagePage />, { queryClient })
+    expect(await screen.findByText('Compute (app + worker)')).toBeInTheDocument()
+    expect(screen.getByText('KV Store')).toBeInTheDocument()
+    expect(screen.getByText('Secret Store')).toBeInTheDocument()
+    expect(screen.getByText('1 secrets')).toBeInTheDocument()
+    expect(screen.getByText('$0.00')).toBeInTheDocument()
+    expect(screen.getByText(/front reqs/)).toBeInTheDocument()
+    expect(screen.getByRole('spinbutton', { name: 'Total requests per day' })).toHaveValue(12345)
+    expect(screen.queryByTestId('cost-calculator')).not.toBeInTheDocument()
+  })
+
+  test('Cloud cost card and Compute charts use one Platform Metrics read for the range', async () => {
+    setCloudModeRuntime(true)
+    useMockAdminFetch = true
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === '/api/usage/current-storage') return { data: { compute_requests: 7, compute_vcpu_ms: 3, kv_ops: 2 } as never }
+      return undefined
+    })
+    mockAdminFetch.mockImplementation(async () => Response.json({
+      source: 'fastly', requests: 1_500, vcpu_ms: 2_500, billed_ms: 60_000,
+      app_requests: 1_000, worker_requests: 500, app_vcpu_ms: 2_000, worker_vcpu_ms: 500,
+      covered_from: '2026-01-01T00:00:00.000Z', covered_to: '2026-01-01T01:00:00.000Z',
+      data: [{ time: '2026-01-01T00:00:00.000Z', app_requests: 1_000, worker_requests: 500, app_vcpu_ms: 2_000, worker_vcpu_ms: 500, billed_ms: 60_000 }],
+    }))
+
+    renderWithQuery(<UsagePage />, { queryClient })
+
+    expect(await screen.findByText('Fastly stats · KV logged')).toBeInTheDocument()
+    expect(screen.getByText('1.5K reqs')).toBeInTheDocument()
+    expect(screen.queryByText('7 reqs')).not.toBeInTheDocument()
+    expect(screen.getByText('Compute Requests')).toBeInTheDocument()
+    expect(screen.getByText('Compute vCPU')).toBeInTheDocument()
+    expect(mockAdminFetch).toHaveBeenCalledTimes(1)
+    expect(mockAdminFetch.mock.calls[0][0]).toBe(
+      '/api/usage/compute?start_time=2026-01-01T00%3A00%3A00Z&end_time=2026-01-01T01%3A00%3A00Z',
+    )
+    const vcpuTraces = plotlyMock.mock.calls.map(([props]) => props.data as Array<{ name?: string; y?: number[]; hovertemplate?: string }>)
+      .findLast((traces) => traces.some((t) => t.hovertemplate?.includes(' s<extra>')))
+    expect(vcpuTraces?.map((t) => [t.name, t.y])).toEqual([['App service', [2]], ['Worker service', [0.5]]])
+  })
+
+  test('Cloud cost card prices every product the install uses, not only storage, operations and egress', async () => {
+    setCloudModeRuntime(true)
+    useMockAdminFetch = true
+    const line = (id: string, label: string, usd: number | null, detail: string, source = 'fastly') => ({ id, label, usd, detail, source })
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === '/api/usage/current-storage') {
+        return {
+          data: {
+            total_billed_gb_hours: 43.2, storage_billing_complete: true, compute_requests: 7, compute_vcpu_ms: 3, kv_ops: 2,
+            incurred: {
+              total: 10.4212,
+              telemetryUsd: 0,
+              lines: [
+                line('storage', 'Object Storage', 0.0012, '43.20 GB-hrs', 'logged'),
+                line('ops', 'Storage operations', 0.08, 'A 15,000 · B 97,800', 'logged'),
+                { ...line('delivery', 'CDN delivery', 9.2, '0.75 GB · 9,100,000 front reqs'), parts: [{ label: 'Egress', usd: 0.09 }, { label: 'Requests', usd: 9.11 }] },
+                line('compute', 'Compute (app + worker)', 0.31, '141,195 reqs · 5,160,000 vCPU ms'),
+                line('kv', 'KV Store operations', null, 'Admin only (Fastly stats)', 'none'),
+                line('secrets', 'Secret Store', 0.83, '5 secrets × 1.0 days'),
+                line('config', 'Config Store', 0, 'No usage charge'),
+              ],
+            },
+          } as never,
+        }
+      }
+      if (path === '/api/usage/operations') {
+        return { data: { source: 'local', complete: true, provenance: ['fos_usage'], total_class_a: 15_000, total_class_b: 97_800, data: [] } as never }
+      }
+      return undefined
+    })
+    mockAdminFetch.mockImplementation(async () => Response.json({ source: 'unavailable', reason: 'stats_unavailable' }))
+
+    renderWithQuery(<UsagePage />, { queryClient })
+
+    const card = (await screen.findByText('Compute (app + worker):')).closest('[data-testid="stat-card"]') ?? document.body
+    expect(within(card as HTMLElement).getByText('$10.42')).toBeInTheDocument()
+    for (const [label, usd] of [['CDN delivery:', '$9.20'], ['Secret Store:', '$0.83'], ['Compute (app + worker):', '$0.31']]) {
+      const row = within(card as HTMLElement).getByText(label).closest('tr') as HTMLElement
+      expect(within(row).getByText(usd)).toBeInTheDocument()
+    }
+    const deliveryRow = within(card as HTMLElement).getByText('CDN delivery:').closest('tr') as HTMLElement
+    expect(within(deliveryRow).getByText('Egress $0.09')).toBeInTheDocument()
+    expect(within(deliveryRow).getByText('Requests $9.11')).toBeInTheDocument()
+    const kvRow = within(card as HTMLElement).getByText('KV Store operations:').closest('tr') as HTMLElement
+    expect(within(kvRow).getByText('n/a')).toBeInTheDocument()
+    expect(within(card as HTMLElement).getByText(/KV Store operations cost excluded/)).toBeInTheDocument()
+  })
+
+  test('Cloud cost card falls back to logged Compute figures when Platform Metrics is unavailable', async () => {
+    setCloudModeRuntime(true)
+    useMockAdminFetch = true
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === '/api/usage/current-storage') return { data: { compute_requests: 7, compute_vcpu_ms: 3, kv_ops: 2 } as never }
+      return undefined
+    })
+    mockAdminFetch.mockImplementation(async () => Response.json({ source: 'unavailable', reason: 'stats_unavailable' }))
+
+    renderWithQuery(<UsagePage />, { queryClient })
+
+    expect(await screen.findByText('logged')).toBeInTheDocument()
+    expect(screen.getByText('7 reqs')).toBeInTheDocument()
+  })
+
+  test('High-Scale missing traffic is labelled reference rather than measured service traffic', async () => {
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === '/api/usage/prefill/rates' || path === '/api/usage/prefill')
+        return { data: makePrefill({ requests_per_day: null, edge_requests_per_day: null, edge_only: true }) }
+      return undefined
+    })
+    renderWithQuery(<UsagePage />, { queryClient })
+    expect(await screen.findByText(/Traffic measurements are unavailable/)).toBeInTheDocument()
+    expect(screen.queryByText('Compute (app + worker)')).not.toBeInTheDocument()
+    expect(screen.queryByText('Compute Requests')).not.toBeInTheDocument()
+  })
+
+  test('High-Scale does not call traffic unavailable before the below-the-fold estimator loads its measurements', async () => {
+    vi.stubGlobal('IntersectionObserver', class {
+      observe() {}
+      disconnect() {}
+    })
+    try {
+      mockGet.mockImplementation(async (path: string) => {
+        if (path === '/api/usage/prefill/rates') return { data: makePrefill({ requests_per_day: null }) }
+        return undefined
+      })
+      renderWithQuery(<UsagePage />, { queryClient })
+      await screen.findByTestId('cost-calculator')
+      expect(mockGet).not.toHaveBeenCalledWith('/api/usage/prefill', expect.anything())
+      expect(screen.queryByText(/Traffic measurements are unavailable/)).not.toBeInTheDocument()
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   test('UX-6: storage card shows an error (not "0.00 GB-hrs") and the cost is flagged partial on a storage 5xx', async () => {
@@ -319,32 +534,136 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     renderWithQuery(<UsagePage />, { queryClient })
     await waitFor(() => expect(screen.getByText('Failed to load storage usage.')).toBeInTheDocument())
     expect(screen.queryByText(/GB-hrs/)).toBeNull()
-    expect(screen.getByText(/Partial estimate — storage cost excluded\./)).toBeInTheDocument()
+    expect(await screen.findByText(/Partial estimate — storage.*cost excluded\./)).toBeInTheDocument()
   })
 
-  test('storage breakdown itemizes cloud-copy deletions and expired archive inside Deleted (Still Billed)', async () => {
+  test('storage breakdown keeps processed data under Live Storage and raw logs under Deleted (Still Billed)', async () => {
+    const GB = 1024 ** 3
     mockGet.mockImplementation(async (path: string) => {
       if (path === '/api/usage/current-storage') {
         return {
           data: {
-            live_bytes: 0, live_files: 0, quarantine_bytes: 0, total_billed_bytes: 0, total_billed_gb_hours: 0,
+            live_bytes: 10 * GB, live_files: 0, quarantine_bytes: 0, total_billed_bytes: 0, total_billed_gb_hours: 0,
             total_files: 0, total_bytes: 0, start: '', end: '',
-            deleted_bytes: 3 * 1024 ** 3, cloud_copy_deleted_bytes: 2 * 1024 ** 3, archive_expired_bytes: 1024 ** 3,
+            processed_request_bytes: 7 * GB, processed_rum_bytes: 2 * GB, processed_objects: 30,
+            raw_logs_deleted: true, regular_log_bytes: 5 * GB, rum_bytes: 3 * GB,
+            deleted_bytes: 20 * GB, cloud_copy_deleted_bytes: 4 * GB, archive_expired_bytes: 6 * GB,
           },
         } as never
       }
       return undefined
     })
     renderWithQuery(<UsagePage />, { queryClient })
-    expect(await screen.findByText('↳ Cloud copy & compaction:')).toBeInTheDocument()
-    expect(screen.getByText('↳ Expired archive:')).toBeInTheDocument()
-    expect(screen.getByText('2 GB')).toBeInTheDocument()
+    const label = async (text: string) => (await screen.findByText(text)).closest('tr') as HTMLElement
+    const order = ['Live Storage:', '↳ Request data:', '↳ RUM data:', '↳ Other:', 'Deleted (Still Billed):',
+      '↳ Raw request logs:', '↳ Raw RUM logs:', '↳ Compaction:', '↳ Expired by retention:']
+    const rows = await Promise.all(order.map(label))
+    for (let i = 1; i < rows.length; i++) {
+      expect(rows[i - 1].compareDocumentPosition(rows[i]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    }
+    expect(rows[1]).toHaveTextContent('7 GB')
+    expect(rows[1]).toHaveTextContent('30 objects')
+    expect(rows[3]).toHaveTextContent('1 GB')
+    expect(rows[5]).toHaveTextContent('5 GB')
+    expect(screen.queryByText('↳ Cloud copy & compaction:')).toBeNull()
+  })
+
+  test('storage breakdown lists kept raw logs under Live Storage when raw deletion is off', async () => {
+    const GB = 1024 ** 3
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === '/api/usage/current-storage') {
+        return {
+          data: {
+            live_bytes: 9 * GB, live_files: 0, quarantine_bytes: 0, total_billed_bytes: 0, total_billed_gb_hours: 0,
+            total_files: 0, total_bytes: 0, start: '', end: '',
+            processed_request_bytes: 4 * GB, processed_rum_bytes: 0, processed_objects: 3,
+            raw_logs_deleted: false, regular_log_bytes: 5 * GB, rum_bytes: 0, deleted_bytes: 0,
+          },
+        } as never
+      }
+      return undefined
+    })
+    renderWithQuery(<UsagePage />, { queryClient })
+    const kept = (await screen.findByText('↳ Raw request logs (kept):')).closest('tr') as HTMLElement
+    const deleted = screen.getByText('Deleted (Still Billed):').closest('tr') as HTMLElement
+    expect(kept.compareDocumentPosition(deleted) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.queryByText('↳ Other:')).toBeNull()
+  })
+
+  test('UsagePage keeps local selected-period storage authoritative when Platform storage is present and flags incomplete operations', async () => {
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === '/api/usage/current-storage') {
+        return {
+          data: {
+            live_bytes: 1024 ** 3, live_files: 1, quarantine_bytes: 0,
+            total_billed_bytes: 1024 ** 3, total_billed_gb_hours: 720,
+            storage_billing_complete: true, storage_billing_provenance: ['high-scale:source_objects'],
+            total_files: 1, total_bytes: 1024 ** 3, deleted_bytes: 0, deleted_bytes_complete: true,
+            start: '2026-01-01T00:00:00Z', end: '2026-01-01T01:00:00Z',
+          },
+        } as never
+      }
+      if (path === '/api/usage/platform') {
+        return {
+          data: {
+            _is_cached: false,
+            source: 'fastly',
+            storage: { status: 'ok', scope: 'account', bytes: 2 * 1024 ** 3, buckets: 3, gb_hours: 48 },
+            compute: { status: 'not_configured', scope: null, requests: 0, billed_time_ms: 0, backend_errors: 0, cache_operations: 0, sandboxes: 0, resource_errors: 0 },
+            ngwaf: { status: 'not_configured', scope: null, total: 0, allowed: 0, blocked: 0, challenged: 0, logged: 0, timeout: 0, unknown: 0 },
+          },
+        } as never
+      }
+      if (path === '/api/usage/operations') {
+        return {
+          data: {
+            data: [], total_class_a: 0, total_class_b: 0, granularity: 'hour', note: '', fos_fields_found: [],
+            source: 'local', complete: false, provenance: [],
+          },
+        } as never
+      }
+      if (path === '/api/usage/prefill/rates' || path === '/api/usage/prefill') {
+        return { data: makePrefill({}) } as never
+      }
+      return undefined
+    })
+
+    renderWithQuery(<UsagePage />, { queryClient })
+
+    expect(await screen.findByText('720.00 GB-hrs')).toBeInTheDocument()
+    expect(screen.queryByText('48.00 GB-hrs')).not.toBeInTheDocument()
+    expect(screen.queryByText('48.00 GB-hours · 3 buckets')).not.toBeInTheDocument()
+    expect(screen.queryByText('NGWAF Outcomes')).not.toBeInTheDocument()
+    expect(screen.queryByText('Traffic Geography')).not.toBeInTheDocument()
+    expect(screen.getAllByText('Measured · this install').length).toBeGreaterThan(0)
+    expect(screen.queryByText('Measured · Fastly Platform (account-wide)')).not.toBeInTheDocument()
+    expect(screen.getByTestId('cost-calculator')).toHaveAttribute('data-local-storage-gb-hours', '720')
+    expect(screen.getAllByText('Unavailable').length).toBeGreaterThanOrEqual(2)
+    expect(screen.getByText(/Partial estimate.*operations.*excluded/)).toBeInTheDocument()
+    expect(mockGet).not.toHaveBeenCalledWith('/api/usage/platform', expect.anything())
+    expect(mockGet).not.toHaveBeenCalledWith('/api/usage/geography', expect.anything())
+    expect(mockGet).toHaveBeenCalledWith(
+      '/api/usage/current-storage',
+      expect.objectContaining({
+        params: { query: { start: '2026-01-01T00:00:00Z', end: '2026-01-01T01:00:00Z' } },
+      }),
+    )
   })
 
   test('sessions page mounts and renders title', () => {
     renderWithQuery(<SessionsPage />, { queryClient })
     expect(screen.getByText('User Sessions')).toBeInTheDocument()
     expect(errorSpy).not.toHaveBeenCalled()
+  })
+
+  test('shows a contextual loading state while Streaming prerequisites are pending', () => {
+    mockIsDataReady = false
+
+    renderWithQuery(<StreamingClient />, { queryClient })
+
+    expect(screen.getByText('Loading Active Viewers...')).toBeInTheDocument()
+    expect(screen.getByText('Loading Buffer Health...')).toBeInTheDocument()
+    expect(mockPost).not.toHaveBeenCalled()
   })
 
   test('requests /api/cmcd/aggregates with the page window and renders the headline cards', async () => {
@@ -378,6 +697,36 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     expect(screen.getAllByText('—').length).toBeGreaterThan(0)
   })
 
+  test('formats Top Content metrics cleanly without raw floats, shows em-dash for null rebuffer_rate, and clamps Starvation Rate y-axis non-negative', async () => {
+    useMockDataTable = false
+    const { BUFFER_LAYOUT } = await import('@/app/streaming/_sections/StreamingConstants')
+    expect(BUFFER_LAYOUT.yaxis2?.rangemode).toBe('nonnegative')
+
+    mockPost.mockResolvedValue({
+      data: {
+        ...CMCD_FIXTURE,
+        top_content: [
+          {
+            content_id: 'live-stream-1',
+            session_count: 12,
+            rebuffer_rate: null,
+            avg_bitrate: 2395.9837186584173,
+            avg_buffer_length: 3958.4825789645065,
+          },
+        ],
+      },
+    } as never)
+    renderWithQuery(<StreamingClient />, { queryClient })
+    expect(await screen.findByText('live-stream-1')).toBeInTheDocument()
+    const row = screen.getByText('live-stream-1').closest('tr')
+    expect(row).not.toBeNull()
+    expect(within(row!).getByText('2,396')).toBeInTheDocument()
+    expect(within(row!).getByText('3,958')).toBeInTheDocument()
+    expect(within(row!).getByText('—')).toBeInTheDocument()
+    expect(screen.queryByText(/2395\.9837/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/3958\.4825/)).not.toBeInTheDocument()
+  })
+
   describe('CostCalculator calc logic with RUM', () => {
     test('returns correct calculations for DEFAULTS', () => {
       const results = calculate(DEFAULTS)
@@ -388,96 +737,128 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     })
 
     test('correctly calculates RUM beacon costs and storage when rumBeaconsDay is set', () => {
-      const results = calculate({ ...DEFAULTS, rumBeaconsDay: 10000 })
+      const results = calculate({ ...DEFAULTS, rumBeaconsDay: 10000, rumRetentionDays: 90 })
       expect(results.rumBeaconsMonth).toBe(300000)
-      const expected30dRumGbMonths = (10000 * 30 * RUM_COMPRESSED_BYTES_PER_BEACON) / (1024 * 1024 * 1024)
+      const expected30dRumGbMonths = (10000 * 30 * RUM_COMPRESSED_BYTES_PER_BEACON) / 1e9
       // RUM storage follows the RUM retention: 90 days is three times the 30-day monthly volume.
       expect(results.rumParquetGBMonths).toBeCloseTo(expected30dRumGbMonths * 3, 5)
-      expect(results.costRum).toBeCloseTo(1.5 + expected30dRumGbMonths * 3 * 0.02, 5)
       const rumTier = results.storageTiers.find(t => t.label === 'RUM data')
+      const rumArchiveTier = results.storageTiers.find(t => t.label === 'RUM archive')
       expect(rumTier).toBeDefined()
+      expect(rumArchiveTier).toBeDefined()
       expect(rumTier?.gbMonths).toBeCloseTo(expected30dRumGbMonths * 3, 5)
-      // A shorter RUM retention shrinks RUM storage but not the request data.
+      expect(results.costRum).toBeCloseTo(0.75 + (expected30dRumGbMonths * 3 + (rumArchiveTier?.gbMonths ?? 0)) * 0.02, 5)
+      // A shorter RUM retention shrinks RUM storage but not the request archive.
       const short = calculate({ ...DEFAULTS, rumBeaconsDay: 10000, rumRetentionDays: 30 })
       expect(short.rumParquetGBMonths).toBeCloseTo(expected30dRumGbMonths, 5)
-      expect(short.storageTiers.find(t => t.label === 'DuckLake data')?.gbMonths)
-        .toBeCloseTo(results.storageTiers.find(t => t.label === 'DuckLake data')?.gbMonths ?? 0, 6)
+      expect(short.storageTiers.find(t => t.label === 'Archive Parquet')?.gbMonths)
+        .toBeCloseTo(results.storageTiers.find(t => t.label === 'Archive Parquet')?.gbMonths ?? 0, 6)
     })
 
-    test('models ZSTD raw log compression (15x) for smaller compressed volume, raw storage, and CDN egress', () => {
-      expect(RAW_LOG_COMPRESSION_RATIO).toBe(15)
+    test('models ZSTD raw log compression (5x) for smaller compressed volume, raw storage, and CDN egress', () => {
+      expect(RAW_LOG_COMPRESSION_RATIO).toBe(5)
       const results = calculate(DEFAULTS)
       expect(results.totalGzBytesPerMonth).toBeCloseTo(results.totalBytesPerMonth / RAW_LOG_COMPRESSION_RATIO, 2)
-      expect(results.cdnEgressGB).toBeCloseTo(results.totalGzBytesPerMonth / (1024 * 1024 * 1024), 6)
-      // PREFILL reverse-estimates uncompressed bytes/line from compressed file size using RAW_LOG_COMPRESSION_RATIO
-      const prefilled = reducer(DEFAULTS, {
+      expect(results.cdnEgressGB).toBeCloseTo(results.totalGzBytesPerMonth / 1e9, 6)
+      // PREFILL keeps canonical DEFAULTS.bytesPerLine (1320) unless estimated_bytes_per_line is provided
+      const prefilledDefault = reducer(DEFAULTS, {
         type: 'PREFILL',
         prefill: makePrefill({ avg_log_file_size_kb: 50, requests_per_day: 1_000_000, log_period_seconds: 60 }),
       })
-      const expectedFilesPerDay = (86400 / 60) * 120
-      const expectedBpl = Math.round((50 * 1024 * RAW_LOG_COMPRESSION_RATIO * expectedFilesPerDay) / 1_000_000)
-      expect(prefilled.bytesPerLine).toBe(expectedBpl)
+      expect(prefilledDefault.bytesPerLine).toBe(1320)
+      const prefilledMeasured = reducer(DEFAULTS, {
+        type: 'PREFILL',
+        prefill: makePrefill({ estimated_bytes_per_line: 2450, avg_log_file_size_kb: 50 }),
+      })
+      expect(prefilledMeasured.bytesPerLine).toBe(2450)
     })
 
-    test('High-Scale adds the archive Parquet tier sized from the measured per-artifact and per-row bytes', () => {
-      const standard = calculate(DEFAULTS)
-      const highScale = calculate({ ...DEFAULTS, deploymentMode: 'high_scale' })
-      expect(standard.storageTiers.find(t => t.label === 'High-Scale archive')).toBeUndefined()
-      const archive = highScale.storageTiers.find(t => t.label === 'High-Scale archive')
+    test('sizes the Archive Parquet tier from snapshot_interval_minutes and batches busy services', () => {
+      const defaults = calculate(DEFAULTS)
+      const archive = defaults.storageTiers.find(t => t.label === 'Archive Parquet')
       expect(archive?.gbMonths).toBeGreaterThan(0)
-      expect(highScale.totalGBStored).toBeCloseTo(standard.totalGBStored + (archive?.gbMonths ?? 0), 6)
-      // Defaults: 1440 log files/day at ~0.33 objects per tick means one object per page, so 3 writes and 3 reads per file.
-      const filesPerMonth = (86400 / DEFAULTS.logPeriod) * DEFAULTS.logNodes * 30
-      expect(highScale.classAPerMonth - standard.classAPerMonth).toBeCloseTo(filesPerMonth * 3, 6)
-      expect(highScale.classBPerMonth - standard.classBPerMonth).toBeCloseTo(filesPerMonth * 3, 6)
-      const busy = calculate({ ...DEFAULTS, deploymentMode: 'high_scale', logNodes: 60 })
-      const busyFiles = (86400 / DEFAULTS.logPeriod) * 60
-      const busyPages = Math.ceil(busyFiles / Math.min(DEFAULTS.archiveBatchObjects, (busyFiles * 20) / 86400))
-      expect(busy.classAPerMonth - calculate({ ...DEFAULTS, logNodes: 60 }).classAPerMonth).toBeCloseTo(busyPages * 30 * 3, 6)
+      // Defaults: a 10 s period gives 8640 log files/day; 5m (300 s) snapshot window batches 30 objects/page
+      // (288 pages/day), each costing 3 reads on top of one read per raw file.
+      const snapshotSeconds = DEFAULTS.snapshotIntervalMinutes * 60
+      const filesPerDay = (86400 / DEFAULTS.logPeriod) * DEFAULTS.logNodes
+      const pagesPerDay = Math.ceil(filesPerDay / Math.min(DEFAULTS.archiveBatchObjects, (filesPerDay * snapshotSeconds) / 86400))
+      expect(pagesPerDay).toBe(288)
+      expect(defaults.classBPerMonth).toBeCloseTo((filesPerDay + pagesPerDay * 5) * 30, 6)
+      const busy = calculate({ ...DEFAULTS, logNodes: 60 })
+      const busyPeriods = 86400 / DEFAULTS.logPeriod
+      const busyReqEffective = (DEFAULTS.edgeOnly ? DEFAULTS.edgeReqDay : DEFAULTS.reqDay) * (DEFAULTS.sampleRate / 100)
+      const busyFiles = busyPeriods * 60 * -Math.expm1(-busyReqEffective / busyPeriods / 60)
+      const busyPages = Math.ceil(busyFiles / Math.min(DEFAULTS.archiveBatchObjects, (busyFiles * snapshotSeconds) / 86400))
+      expect(busy.parquetFilesPerMonth).toBeCloseTo(busyPages * 30, 6)
       expect(busyPages).toBeLessThan(busyFiles)
     })
 
-    test('PREFILL takes the service retention settings and deployment mode; 0 means keep forever', () => {
+    test('PREFILL applies snapshot_interval_minutes and longer intervals reduce archive/DR ops while lengthening raw-log steady-state window', () => {
       const prefilled = reducer(DEFAULTS, {
         type: 'PREFILL',
-        prefill: makePrefill({ log_retention_days: 14, rum_retention_days: 7, deployment_mode: 'high_scale' }),
+        prefill: makePrefill({ snapshot_interval_minutes: 60 }),
       })
-      expect([prefilled.retentionDays, prefilled.rumRetentionDays, prefilled.deploymentMode]).toEqual([14, 7, 'high_scale'])
-      const forever = reducer(DEFAULTS, {
-        type: 'PREFILL',
-        prefill: makePrefill({ log_retention_days: 0, rum_retention_days: 0, deployment_mode: 'standard' }),
-      })
-      expect([forever.retentionDays, forever.rumRetentionDays, forever.deploymentMode]).toEqual([365, 365, 'standard'])
+      expect(prefilled.snapshotIntervalMinutes).toBe(60)
+
+      const at5m = calculate({ ...DEFAULTS, snapshotIntervalMinutes: 5, deleteLogs: true })
+      const at60m = calculate({ ...DEFAULTS, snapshotIntervalMinutes: 60, deleteLogs: true })
+      const at24h = calculate({ ...DEFAULTS, snapshotIntervalMinutes: 1440, deleteLogs: true })
+
+      expect(at5m.drStateSnapshotsPerMonth).toBe(8640)
+      expect(at60m.drStateSnapshotsPerMonth).toBe(720)
+      expect(at24h.drStateSnapshotsPerMonth).toBe(30)
+
+      expect(at60m.parquetFilesPerMonth).toBeLessThan(at5m.parquetFilesPerMonth)
+      expect(at60m.classAPerMonth).toBeLessThan(at5m.classAPerMonth)
+      expect(at60m.classBPerMonth).toBeLessThan(at5m.classBPerMonth)
+
+      // Raw logs stay in FOS for snapshotIntervalMinutes + 15m grace when deleteLogs is true
+      // At 24h (1440m + 15m = 24.25h) with minDays=0, raw-log steady-state GB-months is > at 5m (20m = 1/3h)
+      const noMin5m = calculate({ ...DEFAULTS, snapshotIntervalMinutes: 5, deleteLogs: true, minDays: 0 })
+      const noMin24h = calculate({ ...DEFAULTS, snapshotIntervalMinutes: 1440, deleteLogs: true, minDays: 0 })
+      const raw5m = noMin5m.storageTiers.find((t) => t.label === 'Raw logs')!.gbMonths
+      const raw24h = noMin24h.storageTiers.find((t) => t.label === 'Raw logs')!.gbMonths
+      expect(raw24h / raw5m).toBeCloseTo((1440 + 15) / (5 + 15), 5)
     })
 
-    test('the High-Scale archive is billed for the retention window plus the one-day margin, per domain', () => {
-      const base = { ...DEFAULTS, deploymentMode: 'high_scale' as const, rumBeaconsDay: 10000, minDays: 1 }
+    test('PREFILL takes the service retention settings; 0 means keep forever', () => {
+      const prefilled = reducer(DEFAULTS, {
+        type: 'PREFILL',
+        prefill: makePrefill({ log_retention_days: 14, rum_retention_days: 7 }),
+      })
+      expect([prefilled.retentionDays, prefilled.rumRetentionDays]).toEqual([14, 7])
+      const forever = reducer(DEFAULTS, {
+        type: 'PREFILL',
+        prefill: makePrefill({ log_retention_days: 0, rum_retention_days: 0 }),
+      })
+      expect([forever.retentionDays, forever.rumRetentionDays]).toEqual([365, 365])
+    })
+
+    test('the FOS archive is billed for the retention window plus the one-day margin, per domain', () => {
+      const base = { ...DEFAULTS, rumBeaconsDay: 10000, minDays: 1 }
       const archiveGB = (state: typeof base, label: string) =>
         calculate(state).storageTiers.find(t => t.label === label)?.gbMonths ?? 0
       // Request archive scales with the request retention (+1 day) and ignores RUM retention.
-      const req30 = archiveGB({ ...base, retentionDays: 30 }, 'High-Scale archive')
-      const req7 = archiveGB({ ...base, retentionDays: 7 }, 'High-Scale archive')
+      const req30 = archiveGB({ ...base, retentionDays: 30 }, 'Archive Parquet')
+      const req7 = archiveGB({ ...base, retentionDays: 7 }, 'Archive Parquet')
       expect(req30 / req7).toBeCloseTo(31 / 8, 6)
-      expect(archiveGB({ ...base, retentionDays: 30, rumRetentionDays: 3 }, 'High-Scale archive')).toBeCloseTo(req30, 9)
+      expect(archiveGB({ ...base, retentionDays: 30, rumRetentionDays: 3 }, 'Archive Parquet')).toBeCloseTo(req30, 9)
       // RUM archive scales with the RUM retention (+1 day) and ignores the request retention.
-      const rum30 = archiveGB({ ...base, rumRetentionDays: 30 }, 'High-Scale RUM archive')
-      const rum7 = archiveGB({ ...base, rumRetentionDays: 7 }, 'High-Scale RUM archive')
+      const rum30 = archiveGB({ ...base, rumRetentionDays: 30 }, 'RUM archive')
+      const rum7 = archiveGB({ ...base, rumRetentionDays: 7 }, 'RUM archive')
       expect(rum30).toBeGreaterThan(0)
       expect(rum30 / rum7).toBeCloseTo(31 / 8, 6)
-      expect(archiveGB({ ...base, retentionDays: 5, rumRetentionDays: 30 }, 'High-Scale RUM archive')).toBeCloseTo(rum30, 9)
+      expect(archiveGB({ ...base, retentionDays: 5, rumRetentionDays: 30 }, 'RUM archive')).toBeCloseTo(rum30, 9)
       // The FOS 30-day minimum floors a short window.
       const floored = calculate({ ...base, minDays: 30, retentionDays: 3 })
-      expect(floored.storageTiers.find(t => t.label === 'High-Scale archive')?.flagged).toBe(true)
-      // Standard keeps no archive and no RUM archive.
-      const standard = calculate({ ...DEFAULTS, rumBeaconsDay: 10000 })
-      expect(standard.storageTiers.some(t => t.label.includes('archive'))).toBe(false)
+      expect(floored.storageTiers.find(t => t.label === 'Archive Parquet')?.flagged).toBe(true)
     })
 
     test('reducer PREFILL handles rum_beacons_per_day correctly', () => {
       const prefill = makePrefill({
         rum_beacons_per_day: 5000, requests_per_day: 1000000, edge_requests_per_day: 800000,
-        log_period_seconds: 60, commit_interval_mins: 5, sample_rate: 100, edge_only: true,
-        compaction_enabled: true, delete_after: true, log_retention_days: 90,
+        log_period_seconds: 60, sample_rate: 100, edge_only: true,
+        delete_after: true, log_retention_days: 90,
         class_a_rate_per_1k: 0.005, class_b_rate_per_10k: 0.01, cdn_egress_rate_per_gb: 0.12,
         storage_rate_per_gb_month: 0.02, min_billed_days: 30, avg_nodes_per_flush: 1,
       })
@@ -485,21 +866,23 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     })
 
     test('Billing Zones (MBZ100, MBZ200, Global) configure correct rates and calculate egress costs', () => {
-      expect(DEFAULTS.billingZone).toBe('MBZ200')
-      expect(DEFAULTS.rateEgress).toBe(0.12)
-      const mbz100State = reducer(DEFAULTS, { type: 'SET_ZONE', zone: 'MBZ100' })
+      const highTraffic = { ...DEFAULTS, reqDay: 20_000_000, edgeReqDay: 20_000_000 }
+      expect(highTraffic.billingZone).toBe('MBZ200')
+      expect(highTraffic.rateEgress).toBe(0.12)
+      const mbz100State = reducer(highTraffic, { type: 'SET_ZONE', zone: 'MBZ100' })
       expect(mbz100State.billingZone).toBe('MBZ100')
       expect(mbz100State.rateEgress).toBe(0.08)
-      const globalState = reducer(DEFAULTS, { type: 'SET_ZONE', zone: 'Global' })
+      const globalState = reducer(highTraffic, { type: 'SET_ZONE', zone: 'Global' })
       expect(globalState.billingZone).toBe('Global')
       expect(globalState.rateEgress).toBe(0.18)
 
-      const [resMBZ100, resMBZ200, resGlobal] = [calculate(mbz100State), calculate(DEFAULTS), calculate(globalState)]
+      const [resMBZ100, resMBZ200, resGlobal] = [calculate(mbz100State), calculate(highTraffic), calculate(globalState)]
+      expect(resMBZ200.cdnEgressGB).toBeGreaterThan(100)
       expect(resMBZ100.cdnEgressGB).toBe(resMBZ200.cdnEgressGB)
       expect(resGlobal.cdnEgressGB).toBe(resMBZ200.cdnEgressGB)
-      expect(resMBZ100.costEgress).toBeCloseTo(resMBZ100.cdnEgressGB * 0.08, 4)
-      expect(resMBZ200.costEgress).toBeCloseTo(resMBZ200.cdnEgressGB * 0.12, 4)
-      expect(resGlobal.costEgress).toBeCloseTo(resGlobal.cdnEgressGB * 0.18, 4)
+      expect(resMBZ100.costEgress).toBeCloseTo((resMBZ100.cdnEgressGB - 100) * 0.08, 4)
+      expect(resMBZ200.costEgress).toBeCloseTo((resMBZ200.cdnEgressGB - 100) * 0.12, 4)
+      expect(resGlobal.costEgress).toBeCloseTo((resGlobal.cdnEgressGB - 100) * 0.18, 4)
       expect(resMBZ100.costEgress).toBeLessThan(resMBZ200.costEgress)
       expect(resMBZ200.costEgress).toBeLessThan(resGlobal.costEgress)
     })
@@ -558,6 +941,38 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
       expect(screen.getByText('s3://fos-bucket/lake/part-001.parquet')).toBeInTheDocument()
       expect(screen.getByText('cron:commit:svc-alpha')).toBeInTheDocument()
       expect(screen.getByText('Caught up')).toBeInTheDocument()
+    })
+
+    it('issues one usage-log read in Cloud mode so readiness never sees a dependent follow-up query', async () => {
+      setCloudModeRuntime(true)
+      try {
+        mockGet.mockImplementation((url: string) =>
+          Promise.resolve({
+            data: url === '/api/admin/usage-log' ? SAMPLE_USAGE_LOG : SAMPLE_ACCOUNTING,
+            response: new Response(null, { status: 200 }),
+          }),
+        )
+        renderWithQuery(<UsageLogClient initialServiceId="svc-alpha" initialNowMs={1780315200000} />)
+        await waitFor(() => expect(screen.getByText('s3://fos-bucket/lake/part-001.parquet')).toBeInTheDocument())
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        const usageCalls = mockGet.mock.calls.filter(([url]) => url === '/api/admin/usage-log')
+        expect(usageCalls).toHaveLength(1)
+        expect(usageCalls[0][1]).toEqual(expect.objectContaining({ params: { query: expect.objectContaining({ page_size: 500 }) } }))
+      } finally {
+        setCloudModeRuntime(false)
+      }
+    })
+
+    it('shows a failed usage-log read as an error instead of an empty ledger', async () => {
+      mockGet.mockImplementation((url: string) =>
+        url === '/api/admin/usage-log'
+          ? Promise.reject(new Error('Cloud usage history is incomplete'))
+          : Promise.resolve({ data: SAMPLE_ACCOUNTING, response: new Response(null, { status: 200 }) }),
+      )
+      renderWithQuery(<UsageLogClient initialServiceId="svc-alpha" initialNowMs={1780315200000} />)
+      const alert = await screen.findByTestId('admin-usage-log-error')
+      expect(alert).toHaveAttribute('role', 'alert')
+      expect(alert).toHaveTextContent('Cloud usage history is incomplete')
     })
 
     it('switches time-window presets, filters by process/operation, refreshes, and purges logs', async () => {
@@ -657,7 +1072,7 @@ describe('HighScaleRequestFactsPage (/high-scale/request-facts)', () => {
     expect(screen.getByTestId('high-scale-loading-card').className).toContain('contain-intrinsic-size')
   })
 
-  it('renders DuckDB Standard Mode Emulation badge and supports filter controls', () => {
+  it('renders ClickHouse Distributed Cluster badge and supports filter controls', () => {
     useFactsMock.mockReturnValue(
       mockFactsState({
         data: {
@@ -665,13 +1080,13 @@ describe('HighScaleRequestFactsPage (/high-scale/request-facts)', () => {
             event_id: 'event-emul-1', timestamp: '2026-09-11T00:00:01Z', service_id: 'service-1',
             status: 200, host: 'www.example.com', pop: 'IAD', country: 'US', client_ip: '203.0.113.xxx', url: '/healthz',
           }],
-          metadata: { ...baseMetadata, mode: 'duckdb_emulation' },
+          metadata: baseMetadata,
           next_cursor: null, _is_cached: false,
         },
       }),
     )
     render(<HighScaleRequestFactsPage />)
-    expect(screen.getByTestId('high-scale-mode-badge')).toHaveTextContent('DuckDB Standard Mode Emulation')
+    expect(screen.getByTestId('high-scale-mode-badge')).toHaveTextContent('ClickHouse Distributed Cluster')
     expect(screen.getByText('/healthz')).toBeInTheDocument()
     expect(screen.getByText('IAD')).toBeInTheDocument()
     expect(screen.getByText('203.0.113.xxx')).toBeInTheDocument()
@@ -685,7 +1100,7 @@ describe('HighScaleRequestFactsPage (/high-scale/request-facts)', () => {
     expect(useFactsMock).toHaveBeenLastCalledWith(
       expect.objectContaining({
         serviceId: 'service-1', status: 503, domain: 'api.example.com',
-        pop: 'LHR', country: 'GB', batchId: 'batch-9', emulateStandard: true,
+        pop: 'LHR', country: 'GB', batchId: 'batch-9',
       }),
     )
 

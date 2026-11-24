@@ -3,7 +3,7 @@
 import React from 'react'
 import type { Dispatch, SetStateAction } from 'react'
 import { QueryClientContext } from '@tanstack/react-query'
-import type { VisibilityState } from '@tanstack/react-table'
+import type { ColumnVisibilityState } from '@tanstack/react-table'
 import { useActiveLogFields } from '@/hooks/useBootstrap'
 import { queryKeys } from '@/lib/api'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
@@ -11,6 +11,7 @@ import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { Bot, Fingerprint, Scale } from 'lucide-react'
 import type { PlotlyLayout } from '@/types/api'
+import { approxMark, boundMark, type NetworkRollupMeta } from '@/components/network/rollupLabels'
 import {
   BOT_COLUMN_IDS,
   BOT_EFFICIENCY_COLUMN_IDS,
@@ -29,6 +30,14 @@ import {
 
 export { SECURITY_INFO, type SecurityData }
 
+/** Cloud's summary read for the cards it can answer; absent when the page makes one raw read. */
+export type SummaryQueryState = {
+  isLoading: boolean
+  isFetching: boolean
+  error: Error | null
+  rollup: NetworkRollupMeta | undefined
+}
+
 export type BotsSectionProps = {
   data: SecurityData | undefined
   isLoading: boolean
@@ -39,18 +48,19 @@ export type BotsSectionProps = {
   timezone: string
   commonTimeLayout: PlotlyLayout
   getFieldLabel: (id: string) => string
-  ngwafBotVisibility: VisibilityState
-  setNgwafBotVisibility: Dispatch<SetStateAction<VisibilityState>>
+  ngwafBotVisibility: ColumnVisibilityState
+  setNgwafBotVisibility: Dispatch<SetStateAction<ColumnVisibilityState>>
   onNgwafBotVisChange: (id: string, vis: boolean) => void
-  botVisibility: VisibilityState
-  setBotVisibility: Dispatch<SetStateAction<VisibilityState>>
+  botVisibility: ColumnVisibilityState
+  setBotVisibility: Dispatch<SetStateAction<ColumnVisibilityState>>
   onBotVisChange: (id: string, vis: boolean) => void
-  botEfficiencyVisibility?: VisibilityState
-  setBotEfficiencyVisibility?: Dispatch<SetStateAction<VisibilityState>>
+  botEfficiencyVisibility?: ColumnVisibilityState
+  setBotEfficiencyVisibility?: Dispatch<SetStateAction<ColumnVisibilityState>>
   onBotEfficiencyVisChange?: (id: string, vis: boolean) => void
-  fingerprintVisibility: VisibilityState
-  setFingerprintVisibility: Dispatch<SetStateAction<VisibilityState>>
+  fingerprintVisibility: ColumnVisibilityState
+  setFingerprintVisibility: Dispatch<SetStateAction<ColumnVisibilityState>>
   onFingerprintVisChange: (id: string, vis: boolean) => void
+  summary?: SummaryQueryState
 }
 
 export function BotsSection({
@@ -75,6 +85,7 @@ export function BotsSection({
   fingerprintVisibility,
   setFingerprintVisibility,
   onFingerprintVisChange,
+  summary,
 }: BotsSectionProps) {
   const { isFieldActive } = useActiveLogFields()
   const queryClient = React.useContext(QueryClientContext)
@@ -93,6 +104,14 @@ export function BotsSection({
   const botEfficiencyChartData = useBotEfficiencyChartData(data)
 
   const cardErr = error as AnalyticsCardError | null
+  const sum = summary ?? { isLoading, isFetching, error, rollup: undefined }
+  const sumErr = sum.error as AnalyticsCardError | null
+  const fpColumns = React.useMemo(() => fingerprintColumns(sum.rollup), [sum.rollup])
+  const efficiencyMarks = [
+    boundMark(sum.rollup, 'bot_efficiency') && '≥ counts',
+    approxMark(sum.rollup, 'bot_efficiency.referrals') && '≈ referrals',
+  ].filter(Boolean).join(', ')
+  const efficiencySuffix = efficiencyMarks ? ` (${efficiencyMarks})` : ''
   const uaEmptyMsg = isFieldActive('ua')
     ? 'No bot or crawler traffic detected in this time window.'
     : 'Requires User-Agent (ua) field to be enabled in Fastly logging.'
@@ -105,16 +124,16 @@ export function BotsSection({
             title="Verified Bots (NGWAF)"
             icon={<Bot className="h-4 w-4" />}
             headerAction={intervalButtons}
-            isLoading={isLoading}
-            isFetching={isFetching}
+            isLoading={sum.isLoading}
+            isFetching={sum.isFetching}
             loadingMessage="Loading NGWAF verified bots..."
-            error={cardErr}
+            error={sumErr}
             className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
             contentClassName="p-2"
             helpTitle={SECURITY_INFO.ngwaf_bots.title}
             helpContent={SECURITY_INFO.ngwaf_bots.body}
           >
-            {ngwafBotsData.length === 0 && !isLoading ? (
+            {ngwafBotsData.length === 0 && !sum.isLoading ? (
               <div className="flex items-center justify-center h-full text-muted-foreground text-sm text-center px-4">
                 {ngwafConfigured ? (
                   'No NGWAF bot detections in this time window.'
@@ -149,10 +168,10 @@ export function BotsSection({
                 onChange={onNgwafBotVisChange}
               />
             }
-            isLoading={isLoading}
-            isFetching={isFetching}
+            isLoading={sum.isLoading}
+            isFetching={sum.isFetching}
             loadingMessage="Loading NGWAF bot names..."
-            error={cardErr}
+            error={sumErr}
             className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
             contentClassName="p-0"
             helpTitle={SECURITY_INFO.ngwaf_bots.title}
@@ -162,7 +181,7 @@ export function BotsSection({
               columns={ngwafBotColumns}
               data={data?.ngwaf_verified_bots || []}
               emptyMessage={
-                isLoading
+                sum.isLoading
                   ? ''
                   : ngwafConfigured
                     ? 'No NGWAF bot detections in this time window.'
@@ -179,7 +198,7 @@ export function BotsSection({
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
         <AnalyticsCard
-          title="Well-Known Bots"
+          title={`Well-Known Bots${boundMark(sum.rollup, 'wellknown_bots') ? ' (≥ counts)' : ''}`}
           icon={<Bot className="h-4 w-4" />}
           headerAction={
             <ColumnVisibilityDropdown
@@ -218,21 +237,32 @@ export function BotsSection({
               onChange={onFingerprintVisChange}
             />
           }
-          isLoading={isLoading}
-          isFetching={isFetching}
+          isLoading={sum.isLoading}
+          isFetching={sum.isFetching}
           loadingMessage="Loading TLS fingerprints..."
-          error={cardErr}
+          error={sumErr}
           className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
           contentClassName="p-0"
           helpTitle={SECURITY_INFO.fingerprints.title}
           helpContent={SECURITY_INFO.fingerprints.body}
         >
-          <FingerprintCoverageHint coverage={data?.fingerprint_coverage?.tls_ciphers_sha} field="tls_ciphers_sha" />
+          <FingerprintCoverageHint
+            coverage={data?.fingerprint_coverage?.tls_ciphers_sha}
+            field="tls_ciphers_sha"
+            hasTraffic={Boolean(
+              data && (
+                (data.tls_fingerprints?.length ?? 0) > 0 ||
+                (data.traffic_quality?.length ?? 0) > 0 ||
+                (data.active_clients?.length ?? 0) > 0 ||
+                (data.req_size_dist?.length ?? 0) > 0
+              ),
+            )}
+          />
           <DataTable
-            columns={fingerprintColumns}
+            columns={fpColumns}
             data={data?.tls_fingerprints || []}
             emptyMessage={
-              isLoading
+              sum.isLoading
                 ? ''
                 : isFieldActive('ja3') || isFieldActive('ja4')
                   ? 'No TLS fingerprints in this time range.'
@@ -248,7 +278,7 @@ export function BotsSection({
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
         <AnalyticsCard
-          title="Bot & Crawler Cost vs. Referrals"
+          title={`Bot & Crawler Cost vs. Referrals${efficiencySuffix}`}
           icon={<Scale className="h-4 w-4" />}
           isLoading={isLoading}
           isFetching={isFetching}
@@ -277,7 +307,7 @@ export function BotsSection({
         </AnalyticsCard>
 
         <AnalyticsCard
-          title="Bot & Crawler Value vs. Cost (Bandwidth, Requests & Referrals)"
+          title={`Bot & Crawler Value vs. Cost (Bandwidth, Requests & Referrals)${efficiencySuffix}`}
           icon={<Scale className="h-4 w-4" />}
           headerAction={
             onBotEfficiencyVisChange ? (

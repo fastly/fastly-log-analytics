@@ -173,14 +173,27 @@ export function ChartEmptyState({ requires }: { requires?: string }) {
 
 const subscribeNever = () => () => {}
 
+function findScrollContainer(node: Element): Element | null {
+  let el: Element | null = node.parentElement
+  while (el && el !== document.body && el !== document.documentElement) {
+    const style = getComputedStyle(el)
+    if (/(auto|scroll|overlay)/.test(style.overflow + style.overflowX + style.overflowY)) {
+      return el
+    }
+    el = el.parentElement
+  }
+  return null
+}
+
 interface UseInViewOnceOptions<T extends Element> {
   rootMargin?: string
   findRoot?: (node: T) => Element | null
+  enabled?: boolean
 }
 
 export function useInViewOnce<T extends Element>(
   ref: RefObject<T | null>,
-  { rootMargin = '0px', findRoot }: UseInViewOnceOptions<T> = {},
+  { rootMargin = '0px', findRoot, enabled = true }: UseInViewOnceOptions<T> = {},
 ): boolean {
   const [seen, setSeen] = useState(false)
   const supported = useSyncExternalStore(
@@ -191,7 +204,7 @@ export function useInViewOnce<T extends Element>(
 
   useEffect(() => {
     const node = ref.current
-    if (seen || !supported || !node) return
+    if (!enabled || seen || !supported || !node) return
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {
@@ -199,13 +212,13 @@ export function useInViewOnce<T extends Element>(
           observer.disconnect()
         }
       },
-      { root: findRoot ? findRoot(node) : null, rootMargin },
+      { root: findRoot ? findRoot(node) : findScrollContainer(node), rootMargin },
     )
     observer.observe(node)
     return () => observer.disconnect()
-  }, [ref, seen, supported, rootMargin, findRoot])
+  }, [ref, enabled, seen, supported, rootMargin, findRoot])
 
-  return seen || !supported
+  return enabled && (seen || !supported)
 }
 
 interface LazyMountProps {
@@ -225,7 +238,7 @@ export function LazyMount({
   const visible = useInViewOnce(ref, { rootMargin })
 
   return (
-    <div ref={ref} className={className} style={visible ? undefined : { minHeight }}>
+    <div ref={ref} data-lazy-panel={visible ? 'ready' : 'pending'} className={className} style={visible ? undefined : { minHeight }}>
       {visible ? children : null}
     </div>
   )
@@ -248,6 +261,15 @@ export function UpdatingBadge() {
       Updating
     </div>
   )
+}
+
+function loadingTitleText(node: React.ReactNode): string {
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map(loadingTitleText).join('')
+  if (React.isValidElement<{ children?: React.ReactNode }>(node)) {
+    return loadingTitleText(node.props.children)
+  }
+  return ''
 }
 
 // U-9: surface distinct UX for loading vs empty vs 403. Callers were collapsing
@@ -279,7 +301,7 @@ interface AnalyticsCardProps {
   footer?: React.ReactNode
   helpContent?: React.ReactNode
   helpTitle?: string
-  /** Contextual copy shown during initial loading (defaults to "Loading data..."). */
+  /** Contextual copy shown during initial loading (defaults to the card title). */
   loadingMessage?: string
 }
 
@@ -319,6 +341,8 @@ export function AnalyticsCard({
   const showError = !showLoading && error != null
   const showEmpty = !showLoading && !showError && isEmpty === true
   const is403 = showError && error?.status === 403
+  const titleText = loadingTitleText(title).trim()
+  const effectiveLoadingMessage = loadingMessage ?? (titleText ? `Loading ${titleText}...` : 'Loading data...')
 
   return (
     <>
@@ -362,7 +386,7 @@ export function AnalyticsCard({
           // The refetch-with-old-data UX is preserved by the separate
           // `isFetching && !isLoading` opacity-40 branch on the children below.
           // A-10 (WCAG 4.1.3 Status Messages): role=status + aria-live=polite so
-          // screen readers announce "Loading data..." when the overlay appears
+          // screen readers announce the loading message when the overlay appears
           // and an implicit "data loaded" when it's removed. The spinner stays
           // aria-hidden — the text node carries the announcement.
           <div
@@ -372,7 +396,9 @@ export function AnalyticsCard({
           >
             <div className="flex flex-col items-center gap-2">
               <Loader2 className="h-6 w-6 animate-spin text-primary" aria-hidden="true" />
-              <span className="text-xs text-foreground animate-pulse font-medium">{loadingMessage ?? "Loading data..."}</span>
+              <span className="text-xs text-foreground animate-pulse font-medium">
+                {effectiveLoadingMessage}
+              </span>
             </div>
           </div>
         ) : null}
@@ -429,7 +455,10 @@ export function AnalyticsCard({
             </div>
           </div>
         ) : null}
-        <div className={cn("h-full", isFetching && !showLoading && "opacity-40 pointer-events-none transition-opacity")}>
+        <div
+          aria-hidden={showEmpty || undefined}
+          className={cn("h-full", isFetching && !showLoading && "opacity-40 pointer-events-none transition-opacity")}
+        >
           {children}
         </div>
       </CardContent>

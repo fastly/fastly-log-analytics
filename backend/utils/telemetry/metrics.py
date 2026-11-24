@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import itertools
-import json
 import logging
 import os
 import sys
@@ -20,7 +19,6 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
-from backend.utils.bounded_cache import _MISSING
 from backend.utils.date_utils import iso_z
 from backend.utils.module_shim import install_shim_module
 from backend.utils.telemetry import log_flusher as _log_flusher
@@ -471,7 +469,7 @@ def record_call(
                 if not code:
                     break
                 fn = code.co_filename
-                if "telemetry.py" in fn or "/telemetry/" in fn or "contextlib.py" in fn or "duckdb.py" in fn:
+                if "telemetry.py" in fn or "/telemetry/" in fn or "contextlib.py" in fn:
                     frame = frame.f_back
                     continue
                 caller = code.co_name
@@ -523,8 +521,8 @@ class track_query:
     def __exit__(self, exc_type, exc_val, exc_tb):
         elapsed = round((time.time() - self.t0) * 1000, 2)
         sql_stripped = self.query.strip()
-        get_queries().append({"sql": sql_stripped, "time_ms": elapsed, "engine": "DuckDB"})
-        record_telemetry_query(engine="duckdb", sql=sql_stripped, duration_ms=elapsed)
+        get_queries().append({"sql": sql_stripped, "time_ms": elapsed, "engine": "ClickHouse"})
+        record_telemetry_query(engine="clickhouse", sql=sql_stripped, duration_ms=elapsed)
         _add_span_event(
             "db.query",
             {
@@ -633,7 +631,7 @@ def flush_usage_log(service_id: str) -> None:
         source = _load_service_source(service_id)
         if not source:
             return
-        from backend.core.duckdb import log_usage_calls
+        from backend.core.fos_client import log_usage_calls
 
         log_usage_calls(source, calls, process_context=get_process_context())
     except Exception as e:
@@ -645,7 +643,7 @@ def run_usage_log_cleanup(service_id: str) -> None:
         source = _load_service_source(service_id)
         if not source:
             return
-        from backend.core.duckdb import purge_usage_log
+        from backend.core.fos_client import purge_usage_log
 
         purge_usage_log(source)
     except Exception as e:
@@ -793,67 +791,9 @@ def _is_streaming_content_type(response: Response) -> bool:
 
 class TelemetryResponseBodyMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        response = await call_next(request)
-        try:
-            from backend.models.common import _DEBUG_ENVELOPE_KEYS, _debug_responses_enabled
-        except Exception:
-            return response
-        master_enabled = _debug_responses_enabled()
-        is_remote = getattr(request.state, "is_remote", False)
-        analyst_query_enabled = analyst_api_enabled = False
-        if is_remote and master_enabled:
-            from backend.utils.remote_access import analyst_debug_visibility
+        from backend.core.request_telemetry.middleware import _dispatch_telemetry_response
 
-            analyst_query_enabled, analyst_api_enabled = analyst_debug_visibility(request)
-        if _is_streaming_content_type(response) or not _is_json_response(response):
-            return response
-        opt_in = master_enabled and (
-            request.headers.get("x-debug-responses") == "1" or _os.getenv("DEBUG_RESPONSES_FORCE_INCLUDE") == "1"
-        )
-        if is_remote and opt_in and getattr(request.state, "_analyst_envelope_complete", False):
-            return response
-        try:
-            body = b"".join([chunk async for chunk in response.body_iterator])
-        except Exception as e:
-            logger.warning("[telemetry-middleware] failed to read response body: %s", e)
-            return response
-        if not body:
-            return _reconstruct(response, body)
-        try:
-            parsed: Any = json.loads(body)
-        except (ValueError, json.JSONDecodeError) as e:
-            logger.debug("[telemetry-middleware] body not JSON-parseable: %s", e)
-            return _reconstruct(response, body)
-        if not isinstance(parsed, dict):
-            return _reconstruct(response, body)
-        if not opt_in:
-            keys_to_strip = (*_DEBUG_ENVELOPE_KEYS, "_is_cached") if master_enabled else _DEBUG_ENVELOPE_KEYS
-            stripped = [parsed.pop(k, _MISSING) for k in keys_to_strip]
-            if all(v is _MISSING for v in stripped):
-                return _reconstruct(response, body)
-            try:
-                return _reconstruct(response, json.dumps(parsed, default=str).encode("utf-8"))
-            except Exception as e:
-                logger.warning("[telemetry-middleware] failed to strip telemetry: %s", e)
-                return _reconstruct(response, body)
-        if "_debug_queries" in parsed:
-            return _reconstruct(response, body)
-        try:
-            inject_queries = analyst_query_enabled if is_remote else True
-            inject_api_calls = analyst_api_enabled if is_remote else True
-            if inject_queries:
-                parsed["_debug_queries"] = get_queries()
-                pg_queries = list(get_sqlite_queries())
-                parsed["_debug_postgres"] = pg_queries
-                parsed["_debug_sqlite"] = pg_queries
-            if inject_api_calls:
-                parsed["_debug_calls"] = get_tracked_calls()
-            if not is_remote or inject_queries or inject_api_calls:
-                parsed.setdefault("_is_cached", False)
-            return _reconstruct(response, json.dumps(parsed, default=str).encode("utf-8"))
-        except Exception as e:
-            logger.warning("[telemetry-middleware] failed to inject telemetry: %s", e)
-            return _reconstruct(response, body)
+        return await _dispatch_telemetry_response(self, request, call_next)
 
 
 def _reconstruct(original: Response, body: bytes) -> Response:

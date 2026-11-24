@@ -1,6 +1,7 @@
 "use client"
 
 import React from 'react'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { useForm, type PathValue } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import type { WizardState } from '../types'
@@ -25,25 +26,38 @@ export function StorageStep({ s }: { s: WizardState }) {
     setValue(key, val as PathValue<StorageStepFormValues, K>, { shouldDirty: true, shouldValidate: true })
     setConfig({ ...config, [key]: val })
   }
+  const updateMany = (patch: Partial<StorageStepFormValues>) => {
+    for (const [k, v] of Object.entries(patch) as [
+      keyof StorageStepFormValues,
+      StorageStepFormValues[keyof StorageStepFormValues],
+    ][]) {
+      setValue(k, v as PathValue<StorageStepFormValues, typeof k>, { shouldDirty: true, shouldValidate: true })
+    }
+    setConfig({ ...config, ...patch })
+  }
 
   return (
     <div className="flex-1 overflow-y-auto min-h-0">
       <div className="p-8 space-y-10 pb-12 max-w-3xl mx-auto">
-        <LoggingSetupSection config={config} update={update} />
-        <CdnFrontSection
-          cdnPrefix={config.cdn_prefix}
-          cdnShield={config.cdn_shield}
-          domainStatus={domainStatus}
-          domainMessage={domainMessage}
-          onChangePrefix={(val) => update("cdn_prefix", val)}
-          onChangeShield={(val) => update("cdn_shield", val)}
-          onCheckDomain={checkDomain}
-        />
-        <AutomationSection
-          config={config}
-          selectedServiceId={s.selectedService?.id}
-          update={update}
-        />
+        <LoggingSetupSection config={config} update={update} updateMany={updateMany} />
+        {!isCloudMode() && (
+          <>
+            <CdnFrontSection
+              cdnPrefix={config.cdn_prefix}
+              cdnShield={config.cdn_shield}
+              domainStatus={domainStatus}
+              domainMessage={domainMessage}
+              onChangePrefix={(val) => update("cdn_prefix", val)}
+              onChangeShield={(val) => update("cdn_shield", val)}
+              onCheckDomain={checkDomain}
+            />
+            <AutomationSection
+              config={config}
+              selectedServiceId={s.selectedService?.id}
+              update={update}
+            />
+          </>
+        )}
       </div>
     </div>
   )

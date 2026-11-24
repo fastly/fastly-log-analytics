@@ -6,7 +6,7 @@ import logging
 import sys
 import threading
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict
 
@@ -20,7 +20,7 @@ from backend.core.metadata.pg_pool import (
 from backend.core.metadata.pg_pool import (
     get_con_readonly as open_readonly,
 )
-from backend.utils.date_utils import iso_z, iso_z_now, parse_iso_utc
+from backend.utils.date_utils import ensure_utc, iso_z, iso_z_now, parse_hour_key, parse_iso_utc
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +81,7 @@ _SCHEMA = [
     )""",
     "CREATE INDEX IF NOT EXISTS idx_telemetry_sections_page ON telemetry_sections (page_load_id)",
     "CREATE INDEX IF NOT EXISTS idx_telemetry_sections_ts ON telemetry_sections (timestamp)",
-    # Bytes the Standard-mode cloud copy deleted from FOS (compaction, retention). FOS bills a deleted object for 30
+    # Bytes the cloud copy deleted from FOS (compaction, retention). FOS bills a deleted object for 30
     # days, so the Usage page needs them; rows older than the billing window are pruned on insert.
     """CREATE TABLE IF NOT EXISTS cloud_copy_deletions (
         service_id TEXT NOT NULL,
@@ -121,8 +121,9 @@ def _upsert_hourly_summary(
 ) -> None:
     if not summary_map:
         return
+    # Every writer locks the shared rows in key order, so concurrent flushes queue instead of deadlocking.
     summary_rows = [
-        (sid, hr, oc, ot, counts[0], counts[1], now_iso) for (sid, hr, oc, ot), counts in summary_map.items()
+        (sid, hr, oc, ot, counts[0], counts[1], now_iso) for (sid, hr, oc, ot), counts in sorted(summary_map.items())
     ]
     con.executemany(
         "INSERT INTO usage_log_hourly_summary "
@@ -148,38 +149,27 @@ def log_usage_calls(service_id: str, calls: list[dict], process_context: str | N
         details = c.get("details") or ""
         svc = c.get("service", "FOS")
 
-        # FOS classification:
-        #   Class A: PUT/POST/COPY/LIST family (mutating writes, multi-object delete via POST ?delete).
-        #     Canonical S3 op names land here; so do raw HTTP verbs PUT/POST/COPY,
-        #     which is what the telemetry proxy emits via request.method.
-        #   Class B: GET/HEAD/single-object DELETE (the default).
-        # Note: single-object DELETE (`DELETE /key`) is Class B in Fastly billing;
-        # the DeleteObjects batch endpoint arrives as POST and is therefore A.
-        op_class = "B"
+        # Fastly Object Storage S3 API billing classification:
+        # https://www.fastly.com/documentation/guides/platform/object-storage/working-with-object-storage/#using-the-s3-compatible-api
+        #   Class B: GetObject and HeadObject ONLY (raw HTTP GET/HEAD).
+        #   Class A: all other FOS operations, including PutObject, CopyObject,
+        #     DeleteObject, DeleteObjects, ListObjectsV1/V2, multipart, and bucket ops.
         normalized_op = op_type.replace("_", "")
-        if svc == "FOS" and (
-            normalized_op
-            in (
-                "PUTOBJECT",
-                "POSTOBJECT",
-                "COPYOBJECT",
-                "LISTOBJECTSV2",
-                "DELETEOBJECTS",
-                "PUT",
-                "POST",
-                "COPY",
-            )
-        ):
-            op_class = "A"
-        elif svc == "CDN":
+        if svc == "CDN":
             op_class = "CDN"
+        elif svc == "FOS":
+            op_class = (
+                "B" if normalized_op in ("GET", "HEAD", "GETOBJECT", "HEADOBJECT") and "Class A" not in details else "A"
+            )
         elif "Class A" in details:
             op_class = "A"
+        else:
+            op_class = "B"
 
         # Apply shield egress multiplier for CDN operations
         op_bytes = c.get("bytes")
         if op_class == "CDN" and op_bytes is not None:
-            # X-Cache values are stored at the beginning of details: "HIT, MISS · duckdb httpfs"
+            # X-Cache values are stored at the beginning of details: "HIT, MISS · boto3"
             # Fastly X-Cache order is: Shield POP first, Edge POP second.
             # If there's a comma (multiple POPs) AND the Edge POP (the last value)
             # is MISS or PASS, the Edge fetched the payload from the Shield.
@@ -317,7 +307,7 @@ def reconcile_fastly_stats(
     hourly_records: list[dict],
 ) -> int:
     """Upsert per-hour reconciliation rows to align local usage_log with Fastly's
-    authoritative /stats/aggregate counts.
+    authoritative account-level Platform Metrics counts.
 
     Each record in ``hourly_records`` is a dict with::
 
@@ -459,7 +449,7 @@ def reconcile_fastly_stats(
                             service_id,
                             op_class,
                             f"RECONCILE_{op_class}",
-                            f"fastly://stats/aggregate/{hour_start}",
+                            f"fastly://metrics/v2/platform/aggregate/hourly/{hour_start}",
                             "OK",
                             0.0,
                             "fastly.reconciliation",
@@ -538,6 +528,52 @@ def cloud_copy_deleted_bytes_in_billing_window(service_id: str) -> int:
         (service_id, cutoff),
     ).fetchone()
     return int(row[0]) if row and row[0] is not None else 0
+
+
+def cloud_copy_deletion_records_in_window(
+    service_id: str,
+    start: datetime,
+    end: datetime,
+    minimum_days: int = _FOS_MIN_BILLING_DAYS,
+) -> list[dict[str, Any]]:
+    """Return conservative minimum-billing intervals for local cloud-copy deletions overlapping [start, end)."""
+    start_utc = ensure_utc(start)
+    end_utc = ensure_utc(end)
+    min_days = max(0, int(minimum_days))
+    min_window_ms = min_days * 86_400_000
+    cutoff = iso_z(start_utc - timedelta(days=min_days))
+    upper = iso_z(end_utc)
+    con = _ul(service_id)
+    rows = con.execute(
+        "SELECT deleted_at, bytes, objects FROM cloud_copy_deletions "
+        "WHERE service_id = ? AND deleted_at >= ? AND deleted_at < ? ORDER BY deleted_at",
+        (service_id, cutoff, upper),
+    ).fetchall()
+    intervals: list[dict[str, Any]] = []
+    for idx, row in enumerate(rows):
+        deleted_at_str = row[0]
+        deleted_bytes = int(row[1] or 0)
+        if deleted_bytes <= 0:
+            continue
+        dt = parse_iso_utc(str(deleted_at_str))
+        if dt is None:
+            continue
+        deleted_ms = int(dt.timestamp() * 1000)
+        intervals.append(
+            {
+                "id": f"high-scale:cloud-copy:{deleted_at_str}:{idx}",
+                "dataset": "cloud_copy",
+                "kind": "minimum_billed",
+                "bytes": deleted_bytes,
+                "created_at": None,
+                "deleted_at": deleted_ms,
+                "billed_from": deleted_ms,
+                "billed_until": deleted_ms + min_window_ms,
+                "complete": False,
+                "provenance": "high-scale:cloud_copy_deletions",
+            }
+        )
+    return intervals
 
 
 def clear_usage_log(service_id: str) -> None:
@@ -619,9 +655,12 @@ def _query_usage_log_aggregate_rollup(
     # match what writers store.
     def _next_hour_start(hour_prefix: str) -> str:
         # "2026-06-04T23" → "2026-06-05T00:00:00.000Z"
-        try:
-            dt = datetime.strptime(hour_prefix, "%Y-%m-%dT%H").replace(tzinfo=UTC)
-        except ValueError:
+        dt = (
+            parse_hour_key(f"{hour_prefix[:10]}-{hour_prefix[11:]}")
+            if len(hour_prefix) == 13 and hour_prefix[10] == "T"
+            else None
+        )
+        if dt is None:
             return hour_prefix + ":59:59.999Z"
         nxt = dt + timedelta(hours=1)
         return nxt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -666,6 +705,122 @@ def _query_usage_log_aggregate_rollup(
         + class_params,
     ).fetchall()
     return rows
+
+
+def get_usage_operation_buckets(
+    service_id: str,
+    start: str,
+    end: str,
+    by: Literal["hour", "day"],
+) -> dict[str, Any]:
+    """Aggregate Class A/B FOS operation counts into UTC hour or day buckets from the local usage ledger.
+
+    Uses ``usage_log_hourly_summary`` for fully contained interior hours and raw ``usage_log``
+    for the start and end boundary hours.
+    """
+    if by not in ("hour", "day"):
+        raise ValueError(f"unsupported bucket granularity: {by}")
+
+    start_bound = start[:-1] + ".000Z" if start.endswith("Z") and "." not in start else start
+    start_hour = (start_bound or "")[:13]
+    end_hour = (end or "")[:13]
+    bucket_len = 13 if by == "hour" else 10
+
+    def _next_hour_start(hour_prefix: str) -> str:
+        dt = (
+            parse_hour_key(f"{hour_prefix[:10]}-{hour_prefix[11:]}")
+            if len(hour_prefix) == 13 and hour_prefix[10] == "T"
+            else None
+        )
+        if dt is None:
+            return hour_prefix + ":59:59.999Z"
+        return (dt + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    def _hour_start(hour_prefix: str) -> str:
+        return hour_prefix + ":00:00.000Z"
+
+    con = open_readonly(service_id)
+    try:
+        if start_hour == end_hour:
+            rows = con.execute(
+                f"""
+                SELECT substr(timestamp, 1, {bucket_len}) AS bucket,
+                       operation_class,
+                       SUM(count) AS c
+                FROM usage_log
+                WHERE service_id = ? AND timestamp >= ? AND timestamp <= ?
+                  AND operation_class IN ('A', 'B')
+                GROUP BY bucket, operation_class
+                ORDER BY bucket
+                """,
+                [service_id, start_bound, end],
+            ).fetchall()
+        else:
+            start_hour_end = _next_hour_start(start_hour)
+            end_hour_start = _hour_start(end_hour)
+            rows = con.execute(
+                f"""
+                SELECT bucket, operation_class, SUM(c) AS c
+                FROM (
+                    SELECT substr(hour, 1, {bucket_len}) AS bucket,
+                           operation_class,
+                           count AS c
+                    FROM usage_log_hourly_summary
+                    WHERE service_id = ? AND hour > ? AND hour < ?
+                      AND operation_class IN ('A', 'B')
+                    UNION ALL
+                    SELECT substr(timestamp, 1, {bucket_len}) AS bucket,
+                           operation_class,
+                           count AS c
+                    FROM usage_log
+                    WHERE service_id = ? AND timestamp >= ? AND timestamp < ?
+                      AND operation_class IN ('A', 'B')
+                    UNION ALL
+                    SELECT substr(timestamp, 1, {bucket_len}) AS bucket,
+                           operation_class,
+                           count AS c
+                    FROM usage_log
+                    WHERE service_id = ? AND timestamp >= ? AND timestamp <= ?
+                      AND operation_class IN ('A', 'B')
+                ) AS combined
+                GROUP BY bucket, operation_class
+                ORDER BY bucket
+                """,
+                [
+                    service_id,
+                    start_hour,
+                    end_hour,
+                    service_id,
+                    start_bound,
+                    start_hour_end,
+                    service_id,
+                    end_hour_start,
+                    end,
+                ],
+            ).fetchall()
+    finally:
+        try:
+            con.close()
+        except Exception:
+            logger.debug("usage_log: failed to close readonly connection", exc_info=True)
+
+    agg: dict[str, dict[str, int]] = {}
+    for bucket_raw, op_class, count_val in rows:
+        bucket_str = str(bucket_raw)
+        label = f"{bucket_str}:00" if by == "hour" else bucket_str
+        entry = agg.setdefault(label, {"class_a": 0, "class_b": 0})
+        cnt = int(count_val or 0)
+        if op_class == "A":
+            entry["class_a"] += cnt
+        elif op_class == "B":
+            entry["class_b"] += cnt
+
+    points = [{"date": d, **v} for d, v in sorted(agg.items())]
+    return {
+        "data": points,
+        "total_class_a": sum(v["class_a"] for v in agg.values()),
+        "total_class_b": sum(v["class_b"] for v in agg.values()),
+    }
 
 
 def _build_usage_log_where(

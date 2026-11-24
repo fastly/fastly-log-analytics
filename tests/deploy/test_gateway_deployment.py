@@ -276,118 +276,6 @@ def test_prod_compose_passes_operator_otel_settings_without_defaults() -> None:
     assert backend_env["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] == traces
 
 
-def _render_standard_observability_compose(
-    prod: bool, otel_values: dict[str, str] | None = None, *, admin: bool = False
-) -> dict:
-    env = os.environ.copy()
-    for name in (*OTEL_ENV, "COMPOSE_FILE", "COMPOSE_PROFILES"):
-        env.pop(name, None)
-    env.update(otel_values or {})
-    files = ["docker-compose.yml"]
-    if prod:
-        files.append("docker-compose.prod.yml")
-    if admin:
-        env.update(
-            ADMIN_GATEWAY_HOST="admin.example.test",
-            ADMIN_GATEWAY_CERT_DIR="/operator/certificates",
-            ADMIN_GATEWAY_REQUIRED="1",
-            ADMIN_GATEWAY_SECRET="test-fixture-not-a-credential",
-            LOCAL_HOSTS="admin.example.test",
-        )
-        files.append("docker-compose.admin-mtls.yml")
-        if prod:
-            files.append("docker-compose.admin-mtls.prod.yml")
-    files.append("docker-compose.observability.standard.yml")
-    if prod:
-        files.append("docker-compose.observability.standard.prod.yml")
-    command = ["docker", "compose", "--env-file", "/dev/null"]
-    for filename in files:
-        command.extend(["-f", filename])
-    result = subprocess.run(
-        [*command, "config", "--format", "json"], cwd=ROOT, env=env, check=True, capture_output=True, text=True
-    )
-    return json.loads(result.stdout)
-
-
-@pytest.mark.parametrize("prod", [False, True])
-def test_standard_observability_is_private_bounded_and_has_no_grafana(prod: bool) -> None:
-    config = _render_standard_observability_compose(prod)
-    services = config["services"]
-    assert set(services) == {"backend", "frontend", "caddy", "postgres", "prometheus", "tempo"}
-    multipod = yaml.safe_load((ROOT / "docker-compose.observability.yml").read_text())
-    for name, target in (("prometheus", "/prometheus"), ("tempo", "/var/tempo")):
-        service = services[name]
-        assert service["image"] == multipod["services"][name]["image"]
-        assert service["network_mode"] == ("host" if prod else "service:backend")
-        assert not service.get("ports") and not service.get("networks")
-        assert int(service["mem_limit"]) == 512 * 1024**2
-        assert service["memswap_limit"] == service["mem_limit"]
-        assert float(service["cpus"]) == 0.5
-        assert service["read_only"] and service["cap_drop"] == ["ALL"]
-        assert service["logging"]["options"] == {"max-size": "10m", "max-file": "3"}
-        volume = next(volume for volume in service["volumes"] if volume["target"] == target)
-        assert volume["type"] == "volume"
-        assert volume["source"] in config["volumes"]
-    backend = services["backend"]
-    # Local has only its existing Caddy listener; prod retains no published ports.
-    assert {port["target"] for port in backend.get("ports", [])} == (set() if prod else {80})
-    assert backend["environment"]["TRUSTED_PROXY_IPS"] == "127.0.0.1"
-    if prod:
-        assert backend["environment"]["REQUIRE_PROXY_HEADERS"] == "1"
-        assert "--forwarded-allow-ips=127.0.0.1" in backend["command"]
-        assert services["caddy"]["image"] == "caddy-ratelimit:2-alpine"
-
-
-@pytest.mark.parametrize("prod", [False, True])
-def test_standard_observability_requires_explicit_exporter_settings(prod: bool) -> None:
-    env = _render_standard_observability_compose(prod)["services"]["backend"]["environment"]
-    assert env["OTEL_EXPORTER"] == "none"
-    assert all(env[name] == "" for name in OTEL_ENV[1:])
-    requested = {
-        "OTEL_EXPORTER": "otlp",
-        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "http://127.0.0.1:9090/api/v1/otlp/v1/metrics",
-        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://127.0.0.1:4318/v1/traces",
-    }
-    env = _render_standard_observability_compose(prod, requested)["services"]["backend"]["environment"]
-    assert {name: env[name] for name in OTEL_ENV} == requested
-
-
-@pytest.mark.parametrize("prod", [False, True])
-def test_standard_observability_preserves_required_admin_gateway(prod: bool) -> None:
-    config = _render_standard_observability_compose(prod, admin=True)
-    services = config["services"]
-    for name in ("backend", "frontend"):
-        assert services[name]["environment"]["ADMIN_GATEWAY_REQUIRED"] == "1"
-        assert services[name]["environment"]["ADMIN_GATEWAY_SECRET"] == "test-fixture-not-a-credential"
-    assert services["admin-gateway"]["network_mode"] == ("host" if prod else "service:backend")
-    assert services["admin-gateway"]["read_only"] is True
-    assert not ({9090, 3200, 4318} & {port["target"] for port in services["backend"].get("ports", [])})
-
-
-def test_standard_observability_receivers_bind_only_loopback_with_retention() -> None:
-    prometheus = yaml.safe_load((ROOT / "observability/standard/prometheus.yml").read_text())
-    assert prometheus["scrape_configs"] == []
-    assert "remote_write" not in prometheus
-    overlay = yaml.safe_load((ROOT / "docker-compose.observability.standard.yml").read_text())
-    command = overlay["services"]["prometheus"]["command"]
-    assert "--web.listen-address=127.0.0.1:9090" in command
-    assert "--web.enable-otlp-receiver" in command
-    assert "--storage.tsdb.retention.time=24h" in command
-    assert "--storage.tsdb.retention.size=512MB" in command
-    assert "--web.enable-admin-api" not in command
-    assert "--web.enable-remote-write-receiver" not in command
-    tempo = yaml.safe_load((ROOT / "observability/standard/tempo.yml").read_text())
-    assert tempo["server"]["http_listen_address"] == "127.0.0.1"
-    assert tempo["server"]["grpc_listen_address"] == "127.0.0.1"
-    assert tempo["memberlist"]["bind_addr"] == ["127.0.0.1"]
-    assert tempo["distributor"]["receivers"]["otlp"]["protocols"] == {"http": {"endpoint": "127.0.0.1:4318"}}
-    assert tempo["compactor"]["compaction"]["block_retention"] == "24h"
-    assert tempo["storage"]["trace"]["local"]["path"] == "/var/tempo/blocks"
-    assert tempo["storage"]["trace"]["wal"]["path"] == "/var/tempo/wal"
-    assert tempo["usage_report"]["reporting_enabled"] is False
-    assert "metrics_generator" not in tempo
-
-
 def test_standard_observability_verifier_is_copied_into_runtime_image() -> None:
     dockerfile = (ROOT / "backend/Dockerfile").read_text().split(" AS runner", 1)[1]
     assert "COPY --chown=app:app scripts/dev/verify_observability.py scripts/dev/" in dockerfile
@@ -404,13 +292,10 @@ def test_standard_observability_static_gate_is_mirrored_in_make_and_ci() -> None
         if step.get("name") == "Deploy config validation (compose + helm chart)"
     )
     for files in (
-        ["docker-compose.yml", "docker-compose.observability.standard.yml"],
-        [
-            "docker-compose.yml",
-            "docker-compose.prod.yml",
-            "docker-compose.observability.standard.yml",
-            "docker-compose.observability.standard.prod.yml",
-        ],
+        ["docker-compose.yml"],
+        ["docker-compose.yml", "docker-compose.prod.yml"],
+        ["docker-compose.multipod.yml"],
+        ["docker-compose.multipod.yml", "docker-compose.observability.yml"],
     ):
         command = "docker compose " + " ".join("-f " + name for name in files) + " config -q"
         assert command in make
@@ -623,8 +508,6 @@ def _minimal_observability_chart(*extra: str) -> list[dict]:
             "--set",
             "global.privateObservability.enabled=true",
             "--set",
-            "config.ducklakeCatalog=postgresql://fixture/catalog",
-            "--set",
             "secrets.existingSecret=fixture-secret",
             *extra,
         ],
@@ -672,22 +555,14 @@ def test_private_helm_receivers_are_bounded_persistent_and_have_no_grafana() -> 
     assert all(doc["spec"].get("egress") == [] for doc in policies)
 
 
-def test_private_helm_wires_backend_celery_and_real_high_scale_worker_without_duplicate_env() -> None:
+def test_private_helm_wires_backend_and_real_high_scale_worker_without_duplicate_env() -> None:
     docs = _minimal_observability_chart(
-        "--set",
-        "highScale.enabled=true",
-        "--set",
-        "highScale.sharedState.existingClaim=test-app-state",
-        "--set",
-        "config.deploymentMode=high_scale",
-        "--set",
-        "config.ducklakeCatalog=postgresql://fixture/catalog",
         "--set",
         "secrets.existingSecret=fixture-secret",
     )
     deployments = [doc for doc in docs if doc["kind"] == "Deployment"]
-    selected = [doc for doc in deployments if doc["metadata"]["name"].endswith(("-backend", "-worker", "-ingest"))]
-    assert len(selected) == 3
+    selected = [doc for doc in deployments if doc["metadata"]["name"].endswith(("-backend", "-worker"))]
+    assert len(selected) == 2
     for doc in selected:
         entries = doc["spec"]["template"]["spec"]["containers"][0]["env"]
         env = {entry["name"]: entry.get("value") for entry in entries}
@@ -695,8 +570,6 @@ def test_private_helm_wires_backend_celery_and_real_high_scale_worker_without_du
         assert env["OTEL_EXPORTER"] == "otlp"
         assert env["OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"] == "http://prometheus:9090/api/v1/otlp/v1/metrics"
         assert env["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] == "http://tempo:4318/v1/traces"
-    policy = next(doc for doc in docs if doc["kind"] == "NetworkPolicy" and doc["metadata"]["name"].endswith("-ingest"))
-    assert {9090, 4318} <= {port["port"] for rule in policy["spec"]["egress"] for port in rule.get("ports", [])}
 
 
 @pytest.mark.parametrize(
@@ -704,16 +577,7 @@ def test_private_helm_wires_backend_celery_and_real_high_scale_worker_without_du
     [
         ["--set", "observability.enabled=true"],
         ["--set", "otel.exporter=none"],
-        [
-            "--set",
-            "highScale.enabled=true",
-            "--set",
-            "highScale.sharedState.existingClaim=fixture",
-            "--set",
-            "highScale.env[0].name=OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
-            "--set",
-            "highScale.env[0].value=https://external.example.test/v1/metrics",
-        ],
+        ["--set", "otel.exporter=otlp"],
     ],
 )
 def test_private_helm_rejects_mixed_profiles_and_conflicting_sdk_configuration(extra) -> None:
@@ -1090,8 +954,6 @@ def test_public_gateway_strips_both_admin_credentials_and_keeps_analyst_marker(t
             "template",
             "public-test",
             str(ROOT / "deploy/chart/fastly-log-analytics"),
-            "--set",
-            "config.ducklakeCatalog=postgresql://fixture/catalog",
             "--set",
             "secrets.existingSecret=fixture-secret",
             "--set",
@@ -2389,3 +2251,47 @@ def test_registry_native_platform_failure_leaves_overlay_and_proof_untouched(
         main([str(path), commit, str(overlay), str(output)])
     assert overlay.read_text() == original
     assert not output.exists()
+
+
+APP_PROXY_CONFIGS = (
+    "Caddyfile",
+    "caddy/Caddyfile.local",
+    "caddy/Caddyfile.multipod",
+    "caddy/local-public-https.caddy",
+    "deploy/chart/admin-gateway/files/Caddyfile",
+    "deploy/chart/fastly-log-analytics/templates/public-gateway.yaml",
+)
+
+
+def _app_reverse_proxies(text: str) -> list[tuple[str, str]]:
+    """Each reverse_proxy to the app's backend (:8000) or frontend (:3000), with its block."""
+    lines = text.splitlines()
+    found = []
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith("reverse_proxy") or not re.search(r":(8000|3000)\b", stripped):
+            continue
+        block = []
+        if stripped.endswith("{"):
+            depth = 1
+            for body in lines[i + 1 :]:
+                depth += body.count("{") - body.count("}")
+                if depth <= 0:
+                    break
+                block.append(body.strip())
+        found.append((stripped, "\n".join(block)))
+    return found
+
+
+@pytest.mark.parametrize("relative", APP_PROXY_CONFIGS)
+def test_app_upstream_idle_connections_close_before_the_app_closes_them(relative):
+    # uvicorn and `next start` close idle keep-alive connections after 5 s while Caddy
+    # keeps them for 2 min by default. Caddy then reuses a socket the app already closed
+    # ("use of closed network connection") and, not retrying a POST, answers 502.
+    text = (Path(__file__).resolve().parents[2] / relative).read_text()
+    proxies = _app_reverse_proxies(text)
+    assert proxies, f"{relative}: no app reverse_proxy found"
+    for directive, block in proxies:
+        match = re.search(r"^keepalive\s+(\d+)s$", block, re.MULTILINE)
+        assert match, f"{relative}: {directive!r} has no upstream keepalive below the app's 5 s idle timeout"
+        assert int(match.group(1)) < 5, f"{relative}: {directive!r} keepalive {match.group(1)}s is not below 5 s"

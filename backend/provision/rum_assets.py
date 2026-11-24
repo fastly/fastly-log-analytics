@@ -1,6 +1,7 @@
 """RUM assets & Faro SDK management."""
 
 import hashlib
+import json
 import logging
 import xml.etree.ElementTree as ET
 from typing import Any
@@ -162,6 +163,22 @@ def faro_tracker_ready(cfg: dict) -> tuple[bool, str]:
     return True, ""
 
 
+def _js_json_literal(value: str) -> str:
+    """Serialize *value* as an HTML-safe JS string literal."""
+    return json.dumps(str(value)).replace("</", "<\\/")
+
+
+def _js_bool_literal(value: object, *, default: bool = True) -> str:
+    """Coerce *value* strictly to the JS boolean literal ``'true'`` or ``'false'``."""
+    if value is None:
+        return "true" if default else "false"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return "false" if value.strip().lower() in {"false", "0", "no", "off", ""} else "true"
+    return "true" if bool(value) else "false"
+
+
 def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon") -> str:
     """Generate the Faro Web SDK wrapper JS.
 
@@ -183,24 +200,36 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
     enabled for a service, which ``upload_rum_tracker_js``'s MD5-vs-ETag
     check already handles idempotently.
     """
-    beacon_url = beacon_endpoint.format(service_id=service_id)
+    beacon_url = str(beacon_endpoint).replace("{service_id}", str(service_id))
 
     cfg = svcconfig.load_config(service_id) or {}
     rum_cfg = cfg.get("rum") or {}
 
-    capture_vitals = rum_cfg.get("capture_vitals", True)
-    capture_performance = rum_cfg.get("capture_performance", True)
-    capture_errors = rum_cfg.get("capture_errors", True)
-    capture_events = rum_cfg.get("capture_events", True)
+    capture_vitals_js = _js_bool_literal(rum_cfg.get("capture_vitals", True), default=True)
+    capture_performance_js = _js_bool_literal(rum_cfg.get("capture_performance", True), default=True)
+    capture_errors_js = _js_bool_literal(rum_cfg.get("capture_errors", True), default=True)
+    capture_events_js = _js_bool_literal(rum_cfg.get("capture_events", True), default=True)
 
-    return f"""/* Faro Web SDK wrapper for service {service_id} */
+    safe_comment_id = (
+        str(service_id)
+        .replace("*/", "* /")
+        .replace("</", "<\\/")
+        .replace("\r", " ")
+        .replace("\n", " ")
+        .replace("\u2028", " ")
+        .replace("\u2029", " ")
+    )
+    service_id_js = _js_json_literal(service_id)
+    beacon_url_js = _js_json_literal(beacon_url)
+
+    return f"""/* Faro Web SDK wrapper for service {safe_comment_id} */
 (function() {{
-  var SERVICE_ID = '{service_id}';
-  var BEACON_ENDPOINT = '{beacon_url}';
-  var CAPTURE_VITALS = {str(capture_vitals).lower()};
-  var CAPTURE_PERFORMANCE = {str(capture_performance).lower()};
-  var CAPTURE_ERRORS = {str(capture_errors).lower()};
-  var CAPTURE_EVENTS = {str(capture_events).lower()};
+  var SERVICE_ID = {service_id_js};
+  var BEACON_ENDPOINT = {beacon_url_js};
+  var CAPTURE_VITALS = {capture_vitals_js};
+  var CAPTURE_PERFORMANCE = {capture_performance_js};
+  var CAPTURE_ERRORS = {capture_errors_js};
+  var CAPTURE_EVENTS = {capture_events_js};
   var pendingBeacons = [];
 
   // Helper to synchronously unroll individual Faro transport items and queue them
@@ -305,7 +334,7 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
 
     groupKeys.forEach(function(gKey) {{
       var g = groups[gKey];
-      var extra = '?service_id=' + SERVICE_ID;
+      var extra = '?service_id=' + encodeURIComponent(SERVICE_ID);
       var hasAnyRating = g.metrics.some(function(m) {{ return Boolean(m.rating); }});
       g.metrics.forEach(function(m) {{
         extra += '&rum_metric_name=' + encodeURIComponent(m.name) + '&rum_metric_value=' + encodeURIComponent(m.value);
@@ -463,7 +492,7 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
         name: 'rum-app',
         version: '1.0.0'
       }},
-      url: BEACON_ENDPOINT + '?service_id=' + SERVICE_ID,
+      url: BEACON_ENDPOINT + '?service_id=' + encodeURIComponent(SERVICE_ID),
       instrumentations: instrumentations,
       // Sampling: default to 100% (track all sessions)
       // Can be configured per-service via rum_sampling_rate in config

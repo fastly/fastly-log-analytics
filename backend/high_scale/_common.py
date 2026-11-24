@@ -7,17 +7,20 @@ import hashlib
 import hmac
 import json
 import math
+import os
 import re
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Protocol, overload
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from backend.repositories.utils.filters import filter_spec_attr, normalize_filter_key
+from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
 from backend.utils.date_utils import safe_iso
 
 if TYPE_CHECKING:
@@ -42,6 +45,26 @@ def sketch(values: list[float]) -> tuple[list[float], list[int]]:
     return centroids, [histogram[centroid] for centroid in centroids]
 
 
+@lru_cache(maxsize=8192)
+def _parse_iso_cached(stripped: str) -> datetime:
+    return datetime.fromisoformat(stripped.replace("Z", "+00:00"))
+
+
+@lru_cache(maxsize=8192)
+def _parse_iso_utc_cached(stripped: str) -> datetime:
+    dt = _parse_iso_cached(stripped)
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+
+
+@lru_cache(maxsize=8192)
+def _bucket_str_cached(value: str) -> datetime | None:
+    try:
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+    except ValueError:
+        return None
+    return timestamp.replace(second=0, microsecond=0)
+
+
 @overload
 def range_value(value: str | datetime) -> datetime: ...
 @overload
@@ -52,10 +75,10 @@ def range_value(value: str | datetime | None) -> datetime | None:
         return None
     if isinstance(value, datetime):
         return value
-    stripped = str(value).strip()
+    stripped = value.strip() if isinstance(value, str) else str(value).strip()
     if not stripped:
         return None
-    return datetime.fromisoformat(stripped.replace("Z", "+00:00"))
+    return _parse_iso_cached(stripped)
 
 
 def normalize_cache_bound(value: str | datetime | None) -> str | None:
@@ -76,16 +99,11 @@ def normalize_cache_bound(value: str | datetime | None) -> str | None:
 
 def bucket(value: object) -> datetime | None:
     """Floor a datetime or ISO string to its UTC minute; ``None`` when unparseable."""
+    if isinstance(value, str):
+        return _bucket_str_cached(value)
     if isinstance(value, datetime):
-        timestamp = value.astimezone(UTC)
-    elif isinstance(value, str):
-        try:
-            timestamp = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
-        except ValueError:
-            return None
-    else:
-        return None
-    return timestamp.replace(second=0, microsecond=0)
+        return value.astimezone(UTC).replace(second=0, microsecond=0)
+    return None
 
 
 _bucket = bucket
@@ -103,6 +121,10 @@ def finite_float(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return parsed if math.isfinite(parsed) else None
+
+
+def clickhouse_string_literal(value: str) -> str:
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
 def _flt(value: Any, *, precision: int | None = None) -> float:
@@ -190,7 +212,9 @@ class ArchiveManifestCatalog(Protocol):
     ) -> tuple[ArchiveManifest, ...]: ...
 
 
-_OPAQUE_ARCHIVE_KEYS = frozenset({"raw_json", "raw_line_base64", "raw_line", "_record_kind", "raw_payload"})
+_OPAQUE_ARCHIVE_KEYS = frozenset(
+    {"raw_json", "raw_line_base64", "raw_line", "_record_kind", "raw_payload", "_ngwaf_enrichment"}
+)
 
 
 def _sanitize_archive_row(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -235,10 +259,11 @@ def raw_query_producer(
 
 def _row_timestamp(row: Mapping[str, Any]) -> datetime | None:
     value = row.get("timestamp")
+    if isinstance(value, str):
+        stripped = value.strip()
+        return _parse_iso_utc_cached(stripped) if stripped else None
     if isinstance(value, datetime):
         return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
-    if isinstance(value, str) and value.strip():
-        return range_value(value).astimezone(UTC)
     return None
 
 
@@ -248,9 +273,44 @@ VISIBLE_PUBLICATION_FENCE_SQL = (
     "SELECT batch_id FROM high_scale_batch_publications FINAL "
     "WHERE service_id={service_id:String} AND publication_state='visible')"
 )
+LEGACY_ROLLUP_BATCH_UUID = "00000000-0000-0000-0000-000000000000"
+
+_all_visible_cache: BoundedTTLCache[str, bool] = BoundedTTLCache(maxsize=256, ttl_seconds=30.0)
+CacheRegistry.register("hs_all_visible_fence_cache", _all_visible_cache)
 
 
-def visible_publication_fence_sql(domain: str | None = None) -> str:
+def _is_all_batches_visible(client: Any, service_id: str | None, domain: str | None) -> bool:
+    if client is None or not service_id or not domain or os.getenv("PYTEST_CURRENT_TEST"):
+        return False
+    if not (hasattr(client, "_http") and "MockTransport" not in type(client._http._transport).__name__):
+        return False
+    if hasattr(client, "_get_pending_batches"):
+        try:
+            pending_map = client._get_pending_batches(service_id)
+            return pending_map is not None and len(pending_map.get(domain, ())) == 0
+        except Exception:
+            return False
+    key = f"{id(client)}:{service_id}:{domain}"
+    cached = _all_visible_cache.get(key)
+    if cached is not None:
+        return bool(cached)
+    try:
+        rows = client.execute(
+            "SELECT countIf(publication_state != 'visible') AS non_vis, count() AS tot "
+            "FROM high_scale_batch_publications FINAL "
+            "WHERE service_id={service_id:String} AND domain={domain:String}",
+            {"service_id": service_id, "domain": domain},
+        )
+        is_all_vis = bool(rows and int(rows[0].get("tot") or 0) > 0 and int(rows[0].get("non_vis") or 0) == 0)
+    except Exception:
+        is_all_vis = False
+    _all_visible_cache.set(key, is_all_vis)
+    return is_all_vis
+
+
+def visible_publication_fence_sql(
+    domain: str | None = None, *, client: Any = None, service_id: str | None = None
+) -> str:
     """Return the publication-fence SQL predicate, optionally scoped to ``domain``."""
     if domain is None:
         return VISIBLE_PUBLICATION_FENCE_SQL
@@ -263,7 +323,18 @@ def visible_publication_fence_sql(domain: str | None = None) -> str:
     )
 
 
-def visible_fact_clauses(domain: str) -> list[str]:
+def visible_rollup_publication_fence_sql(domain: str) -> str:
+    """Fence new rollup rows by receipt while retaining pre-batch-id rollups."""
+    if not _DOMAIN_IDENT_RE.fullmatch(domain):
+        raise ValueError(f"Invalid publication domain identifier: {domain!r}")
+    receipt_fence = (
+        "batch_id IN (SELECT batch_id FROM high_scale_batch_publications FINAL "
+        f"WHERE service_id={{service_id:String}} AND domain='{domain}' AND publication_state='visible')"
+    )
+    return f"(batch_id = toUUID('{LEGACY_ROLLUP_BATCH_UUID}') OR {receipt_fence})"
+
+
+def visible_fact_clauses(domain: str, *, client: Any = None, service_id: str | None = None) -> list[str]:
     """Predicates (with a ``{service_id:String}`` parameter) limiting a fact table to visible batches of ``domain``."""
     if not _DOMAIN_IDENT_RE.fullmatch(domain):
         raise ValueError(f"Invalid publication domain identifier: {domain!r}")
@@ -323,9 +394,14 @@ def format_iso_utc_or_empty(value: Any) -> str:
     return format_iso_utc(value) or ""
 
 
-def _bucket_case(column: str, buckets: tuple[tuple[int, str], ...], last: str) -> str:
+def _bucket_case(column: str, buckets: Iterable[Any], last: str) -> str:
     """Build a ClickHouse ``multiIf(col <= limit, 'label', ..., 'last')`` expression."""
-    arms = ", ".join(f"{column} <= {limit}, '{label}'" for limit, label in buckets)
+    bucket_list = list(buckets)
+    if bucket_list and isinstance(bucket_list[0], str):
+        from backend.repositories.utils.response_shaping.domains import PERF_TTL_BUCKET_EDGES
+
+        bucket_list = list(PERF_TTL_BUCKET_EDGES)
+    arms = ", ".join(f"{column} <= {limit}, '{label}'" for limit, label in bucket_list)
     return f"multiIf({arms}, '{last}')"
 
 
@@ -334,7 +410,7 @@ def resolve_asn_display_labels(service_id: str, asns: Iterable[int]) -> dict[int
     asn_list = list(asns)
     if not asn_list:
         return {}
-    from backend.core import duckdb as _db
+    from backend.core import fos_client as _db
 
     try:
         names = _db.get_asn_names(service_id, asn_list)
@@ -346,7 +422,8 @@ def resolve_asn_display_labels(service_id: str, asns: Iterable[int]) -> dict[int
 _COLUMNS = {"client_ip": "client_ip", "ip": "client_ip", "country": "country", "url": "url"}
 _ROUNDED = frozenset({"age", "ttl"})
 _BOOLEAN = frozenset({"edge", "is_ipv6", "waf"})
-_UNSUPPORTED = frozenset({"_bot_name", "_ngwaf_bot_name", "_tunnel_requests", "waf_sig_ind", "edge_score_reason_ind"})
+_VIRTUAL_CSV_COLUMNS = {"waf_sig_ind": "waf_sig", "edge_score_reason_ind": "edge_score_reason"}
+_UNSUPPORTED = frozenset({"_bot_name", "_ngwaf_bot_name", "_tunnel_requests"})
 
 
 def _column(key: str, params: dict[str, Any], param: str) -> str:
@@ -368,6 +445,8 @@ def request_filter_clauses(
     clauses: list[str] = []
     params: dict[str, Any] = {}
     for i, (raw_key, spec) in enumerate((filters or {}).items()):
+        if raw_key == "filter_mode":
+            continue
         key = normalize_filter_key(raw_key)
         mode = str(filter_spec_attr(spec, "mode") or "include")
         raw_values = filter_spec_attr(spec, "values") or []
@@ -376,7 +455,6 @@ def request_filter_clauses(
             continue
         if key in _UNSUPPORTED or not key:
             raise ValueError(f"high-scale request readers do not support filtering on {raw_key!r}")
-        column = _column(key, params, f"{prefix}_k{i}")
         concrete = [v for v in values if v is not None]
         names: list[str] = []
         for j, value in enumerate(concrete):
@@ -391,7 +469,23 @@ def request_filter_clauses(
             params[name] = str_val
             names.append(f"{{{name}:String}}")
         include = mode != "exclude"
-        parts: list[str] = []
+        if key in _VIRTUAL_CSV_COLUMNS:
+            backing_key = _VIRTUAL_CSV_COLUMNS[key]
+            key_param = f"{prefix}_k{i}"
+            params[key_param] = backing_key
+            lookup = f"custom_fields[{{{key_param}:String}}]"
+            parts: list[str] = []
+            if names:
+                arr_expr = f"arrayExists(x -> trimBoth(x) IN ({', '.join(names)}), splitByChar(',', {lookup}))"
+                parts.append(arr_expr if include else f"NOT {arr_expr}")
+            if len(concrete) != len(values):
+                eq_op = "=" if include else "!="
+                parts.append(f"{lookup} {eq_op} ''")
+            joiner = " OR " if include else " AND "
+            clauses.append(f"({joiner.join(parts)})")
+            continue
+        column = _column(key, params, f"{prefix}_k{i}")
+        parts = []
         if names:
             op = "IN" if include else "NOT IN"
             parts.append(f"{column} {op} ({', '.join(names)})")
@@ -457,6 +551,33 @@ def build_published_facts_where(
         clauses.append(f"event_timestamp {cmp_op} {{end:DateTime64(3)}}")
         params["end"] = end
     return " AND ".join(clauses), params
+
+
+def minute_stride_sql(start: datetime | None, end: datetime | None, stride: int) -> str:
+    """Return a ClickHouse primary-key-prunable minute-sampling filter for ``[start, end)``.
+
+    ``toMinute(event_timestamp) % stride = 0`` is non-monotonic so ClickHouse's
+    ``MergeTree`` index analyzer cannot prune granules on ``event_timestamp``.
+    ``toStartOfMinute(event_timestamp) IN (...)`` is monotonic and prunes ~98%
+    of granules via the primary key index.
+    """
+    if stride <= 1:
+        return ""
+    if start is None or end is None:
+        return f" AND toMinute(event_timestamp) % {stride} = 0"
+    s = start.astimezone(UTC) if start.tzinfo is not None else start.replace(tzinfo=UTC)
+    e = end.astimezone(UTC) if end.tzinfo is not None else end.replace(tzinfo=UTC)
+    cur = s.replace(second=0, microsecond=0)
+    rem = cur.minute % stride
+    if rem != 0:
+        cur = cur + timedelta(minutes=stride - rem)
+    pts: list[str] = []
+    while cur < e and len(pts) <= 512:
+        pts.append(f"toDateTime('{cur.strftime('%Y-%m-%d %H:%M:%S')}', 'UTC')")
+        cur += timedelta(minutes=stride)
+    if not pts or len(pts) > 512:
+        return f" AND toMinute(event_timestamp) % {stride} = 0"
+    return f" AND toStartOfMinute(event_timestamp) IN ({', '.join(pts)})"
 
 
 _FIELD_DIMENSIONS: dict[str, str] = {

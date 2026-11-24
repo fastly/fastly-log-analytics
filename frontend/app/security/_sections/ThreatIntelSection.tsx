@@ -2,7 +2,8 @@
 
 import React from 'react'
 import type { Dispatch, SetStateAction } from 'react'
-import type { ColumnDef, VisibilityState } from '@tanstack/react-table'
+import type { ColumnVisibilityState } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import { useActiveLogFields } from '@/hooks/useBootstrap'
 import { CHART_COLORS, useTimeseriesToTraces, formatCount, formatCountMaybe } from '@/lib/utils'
 import { useServiceQuery } from '@/hooks/useDashboardCards'
@@ -17,7 +18,9 @@ import { Button } from '@/components/ui/button'
 import { HelpDialog } from '@/components/ui/confirm-dialog'
 import type { PlotlyLayout, PlotlyTrace } from '@/types/api'
 import type { components } from '@/types/api.generated'
-import { SECURITY_INFO, type SecurityData } from './BotsSection'
+import { SECURITY_INFO, type SecurityData, type SummaryQueryState } from './BotsSection'
+import { approxMark, boundMark, RawWindowNote, readRawWindow, readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 
 type TopIpHeader = components['schemas']['TopIpHeaderRow']
 type ThreatIntelItem = components['schemas']['ThreatIntelItem']
@@ -35,19 +38,23 @@ export function ThreatIntelPanel({
 }) {
   const [isHelpOpen, setIsHelpOpen] = React.useState(false)
 
-  const { data, isLoading, error } = useServiceQuery<ThreatIntelItem[]>(
+  const { data: response, isLoading, error } = useServiceQuery<{ data?: ThreatIntelItem[] } | undefined>(
     ['security', 'threat-intel', serviceId, startTime, endTime],
     async ({ signal }) => {
-      if (!serviceId) return []
+      if (!serviceId) return undefined
       const { data: res, error: reqErr } = await client.GET('/api/security/threat-intel', {
         signal,
         params: { query: { start_time: startTime ?? undefined, end_time: endTime ?? undefined } },
       })
       if (reqErr) throw new Error(extractApiError(reqErr))
-      return res?.data || []
+      return res
     },
     { enabled: !!serviceId },
   )
+  const data = response?.data
+  const rollup = readRollupMeta(response)
+  const requestsMark = boundMark(rollup, 'threat_intel.requests')
+  const countryMark = approxMark(rollup, 'threat_intel.top_country')
 
   const columns = React.useMemo<ColumnDef<ThreatIntelItem>[]>(
     () => [
@@ -68,7 +75,7 @@ export function ThreatIntelPanel({
         header: 'Requests',
         cell: ({ row }) => (
           <span className="font-semibold font-mono text-xs text-foreground/80 tabular-nums">
-            {formatCount(row.original.requests)}
+            {requestsMark}{formatCount(row.original.requests)}
           </span>
         ),
       },
@@ -80,6 +87,7 @@ export function ThreatIntelPanel({
           return (
             <div className="flex items-center gap-1.5 text-xs font-medium text-foreground/80">
               <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+              {countryMark}
               <FilterValueCell filters={[{ column: 'country', value: country }]} display={country} />
             </div>
           )
@@ -136,7 +144,7 @@ export function ThreatIntelPanel({
           ),
       },
     ],
-    [],
+    [requestsMark, countryMark],
   )
 
   if (isLoading) {
@@ -179,6 +187,8 @@ export function ThreatIntelPanel({
 
   return (
     <>
+      <RollupDataThroughSlot reserve={isCloudMode()} meta={rollup} className="mb-6" />
+      <RawWindowNote window={readRawWindow(response)} className="mb-6" />
       <Card className="col-span-12 border-muted/40 shadow-sm bg-card p-0">
         <DataTable
           columns={columns}
@@ -277,9 +287,10 @@ export type HeaderAnomaliesProps = {
   isFetching: boolean
   error: Error | null
   getFieldLabel: (id: string) => string
-  topIpVisibility: VisibilityState
-  setTopIpVisibility: Dispatch<SetStateAction<VisibilityState>>
+  topIpVisibility: ColumnVisibilityState
+  setTopIpVisibility: Dispatch<SetStateAction<ColumnVisibilityState>>
   onTopIpVisChange: (id: string, vis: boolean) => void
+  summary?: SummaryQueryState
 }
 
 export function HeaderAnomaliesSection({
@@ -291,6 +302,7 @@ export function HeaderAnomaliesSection({
   topIpVisibility,
   setTopIpVisibility,
   onTopIpVisChange,
+  summary,
 }: HeaderAnomaliesProps) {
   const { isFieldActive } = useActiveLogFields()
   const headerSizeData = React.useMemo((): PlotlyTrace[] => {
@@ -322,22 +334,24 @@ export function HeaderAnomaliesSection({
   ]
 
   const cardErr = error as AnalyticsCardError | null
+  const sum = summary ?? { isLoading, isFetching, error, rollup: undefined }
+  const sumErr = sum.error as AnalyticsCardError | null
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
       <AnalyticsCard
-        title="Request Header Size Distribution"
+        title={`Request Header Size Distribution${boundMark(sum.rollup, 'req_size_dist') ? ' (≥ counts)' : ''}`}
         icon={<Scale className="h-4 w-4" />}
-        isLoading={isLoading}
-        isFetching={isFetching}
+        isLoading={sum.isLoading}
+        isFetching={sum.isFetching}
         loadingMessage="Loading request header size distribution..."
-        error={cardErr}
+        error={sumErr}
         className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
         contentClassName="p-2"
         helpTitle={SECURITY_INFO.req_size.title}
         helpContent={SECURITY_INFO.req_size.body}
       >
-        {headerSizeData.length === 0 && !isLoading ? (
+        {headerSizeData.length === 0 && !sum.isLoading ? (
           <ChartEmptyState
             requires={
               isFieldActive('req_header_bytes')
@@ -395,6 +409,7 @@ export type NetworkSectionProps = {
   error: Error | null
   timezone: string
   commonTimeLayout: PlotlyLayout
+  summary?: SummaryQueryState
 }
 
 export function NetworkSection({
@@ -404,6 +419,7 @@ export function NetworkSection({
   error,
   timezone,
   commonTimeLayout,
+  summary,
 }: NetworkSectionProps) {
   const { isFieldActive } = useActiveLogFields()
   const ipv6Data = useTimeseriesToTraces(
@@ -441,7 +457,8 @@ export function NetworkSection({
     ]
   }, [data])
 
-  const cardErr = error as AnalyticsCardError | null
+  const sum = summary ?? { isLoading, isFetching, error, rollup: undefined }
+  const sumErr = sum.error as AnalyticsCardError | null
 
   return (
     <>
@@ -449,16 +466,16 @@ export function NetworkSection({
         <AnalyticsCard
           title="IPv6 Adoption over Time"
           icon={<Globe className="h-4 w-4" />}
-          isLoading={isLoading}
-          isFetching={isFetching}
+          isLoading={sum.isLoading}
+          isFetching={sum.isFetching}
           loadingMessage="Loading IPv6 adoption data..."
-          error={cardErr}
+          error={sumErr}
           className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
           contentClassName="p-2"
           helpTitle={SECURITY_INFO.ipv6.title}
           helpContent={SECURITY_INFO.ipv6.body}
         >
-          {ipv6Data.length === 0 && !isLoading ? (
+          {ipv6Data.length === 0 && !sum.isLoading ? (
             <ChartEmptyState
               requires={isFieldActive('is_ipv6') ? undefined : 'Infrastructure (Group C) fields to be enabled in Fastly logging.'}
             />
@@ -472,18 +489,18 @@ export function NetworkSection({
         </AnalyticsCard>
 
         <AnalyticsCard
-          title="Proxy/Anonymizer Breakdown"
+          title={`Proxy/Anonymizer Breakdown${boundMark(sum.rollup, 'proxy_dist') ? ' (≥ counts)' : ''}`}
           icon={<Network className="h-4 w-4" />}
-          isLoading={isLoading}
-          isFetching={isFetching}
+          isLoading={sum.isLoading}
+          isFetching={sum.isFetching}
           loadingMessage="Loading proxy/anonymizer breakdown..."
-          error={cardErr}
+          error={sumErr}
           className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
           contentClassName="p-2"
           helpTitle={SECURITY_INFO.proxy.title}
           helpContent={SECURITY_INFO.proxy.body}
         >
-          {proxyData.length === 0 && !isLoading ? (
+          {proxyData.length === 0 && !sum.isLoading ? (
             <ChartEmptyState
               requires={
                 isFieldActive('p_type')
@@ -499,18 +516,18 @@ export function NetworkSection({
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <AnalyticsCard
-          title="Connection Reuse (Requests per Connection)"
+          title={`Connection Reuse (Requests per Connection)${boundMark(sum.rollup, 'conn_reuse_dist') ? ' (≥ counts)' : ''}`}
           icon={<Repeat className="h-4 w-4" />}
-          isLoading={isLoading}
-          isFetching={isFetching}
+          isLoading={sum.isLoading}
+          isFetching={sum.isFetching}
           loadingMessage="Loading connection reuse distribution..."
-          error={cardErr}
+          error={sumErr}
           className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
           contentClassName="p-2"
           helpTitle={SECURITY_INFO.conn_reuse.title}
           helpContent={SECURITY_INFO.conn_reuse.body}
         >
-          {connReuseData.length === 0 && !isLoading ? (
+          {connReuseData.length === 0 && !sum.isLoading ? (
             <ChartEmptyState
               requires={
                 isFieldActive('conn_requests')

@@ -3,20 +3,23 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import logging
 import math
+import os
 import re
 import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from functools import cached_property
 from pathlib import Path
 from typing import Any, Protocol
 from uuid import UUID, uuid5
 
+import orjson
 import structlog
 from cachetools import LRUCache
 
@@ -25,7 +28,8 @@ from backend.core.clickhouse import ClickHouseClient as HttpClickHouseClient
 
 logger = structlog.get_logger("backend.high_scale.archive")
 
-from backend.high_scale._common import range_value
+from backend.high_scale._common import _parse_iso_utc_cached
+from backend.high_scale._common import finite_float as _finite
 from backend.high_scale.archive.manifests import PublicationResult, build_cmcd_projection_key
 
 _SCHEMA_FILES = [
@@ -59,6 +63,7 @@ def install_clickhouse_schema() -> None:
             content,
         )
         content = re.sub(r"ReplicatedMergeTree\('/clickhouse/[^']+',\s*'[^']+'\)", "MergeTree()", content)
+        content = re.sub(r"ReplicatedSummingMergeTree\('/clickhouse/[^']+',\s*'[^']+'\)", "SummingMergeTree()", content)
         content = re.sub(
             r"ReplicatedReplacingMergeTree\(([^)]+)\)\n\s*\('[^']+',\s*'[^']+'\)", r"ReplacingMergeTree(\1)", content
         )
@@ -67,6 +72,17 @@ def install_clickhouse_schema() -> None:
                 try:
                     client.execute(stmt)
                 except Exception as e:
+                    fallback_stmt = re.sub(
+                        r",\s*(?:map_serialization_version|map_serialization_version_for_zero_level_parts|map_buckets_strategy|max_buckets_in_map|map_buckets_min_avg_size)\s*=\s*[^,;\n]+",
+                        "",
+                        stmt,
+                    )
+                    if fallback_stmt != stmt:
+                        try:
+                            client.execute(fallback_stmt)
+                            continue
+                        except Exception:
+                            pass
                     logging.getLogger(__name__).warning("Failed to install schema %s: %s", filename, e)
 
 
@@ -85,6 +101,40 @@ _PUBLICATION_COLUMNS = (
     "manifest_version",
     "updated_at",
 )
+
+
+_DEFAULT_TABLE_TTL_DAYS = 30
+_TABLE_TTL_DAYS: dict[str, int] = {"request_aggregates_1h": 90}
+_TTL_BOUNDARY_GRACE = timedelta(minutes=10)
+
+
+def _count_ttl_expired_rows(
+    table: str,
+    columns: Sequence[str],
+    mapped_rows: Sequence[tuple[Any, ...]],
+    *,
+    now: datetime | None = None,
+) -> int:
+    """Count rows whose ClickHouse TTL column is at or past the table's retention horizon."""
+    if not mapped_rows:
+        return 0
+    ts_idx: int | None = None
+    for ts_col in ("event_timestamp", "bucket_start"):
+        if ts_col in columns:
+            ts_idx = columns.index(ts_col)
+            break
+    if ts_idx is None:
+        return 0
+    ttl_days = _TABLE_TTL_DAYS.get(table, _DEFAULT_TABLE_TTL_DAYS)
+    cutoff = (now or datetime.now(UTC)) - timedelta(days=ttl_days) + _TTL_BOUNDARY_GRACE
+    expired = 0
+    for row in mapped_rows:
+        ts = row[ts_idx]
+        if isinstance(ts, datetime):
+            ts_utc = ts.replace(tzinfo=UTC) if ts.tzinfo is None else ts.astimezone(UTC)
+            if ts_utc <= cutoff:
+                expired += 1
+    return expired
 
 
 class BaseClickHouseBatchAdapter:
@@ -119,21 +169,65 @@ class BaseClickHouseBatchAdapter:
         if existing is not None:
             self._validate_publication(existing, batch)
             if existing["publication_state"] == "visible":
-                return InsertReceipt(batch.batch_id, len(batch.rows), batch.digest)
+                vis = int(existing.get("visible_rows", len(batch.rows)))
+                return InsertReceipt(batch.batch_id, vis, batch.digest, ttl_expired_rows=max(0, len(batch.rows) - vis))
             version = int(existing["manifest_version"])
         else:
             self._insert_publication(batch, batch_uuid, version=1, state="pending", visible_rows=0)
             version = 1
 
         expected = len(batch.rows)
-        existing_rows = self._count_rows(table, batch, batch_uuid)
+        existing_rows = self._count_rows(table, batch, batch_uuid, columns=columns, mapped_rows=mapped_rows)
         if existing_rows not in (0, expected):
+            if existing is not None:
+                expired_candidates = _count_ttl_expired_rows(table, columns, mapped_rows)
+                if expired_candidates > 0 and (expected - expired_candidates) <= existing_rows < expected:
+                    ttl_expired = expected - existing_rows
+                    logger.warning(
+                        "clickhouse.ttl_evicted_rows",
+                        table=table,
+                        batch_id=batch.batch_id,
+                        expected_rows=expected,
+                        visible_rows=existing_rows,
+                        ttl_expired_rows=ttl_expired,
+                    )
+                    self._insert_publication(
+                        batch, batch_uuid, version=version + 1, state="visible", visible_rows=existing_rows
+                    )
+                    return InsertReceipt(batch.batch_id, existing_rows, batch.digest, ttl_expired_rows=ttl_expired)
             self._client.delete_batch_rows(table, batch_uuid)
             raise PartialInsert(existing_rows)
         if existing_rows == 0:
-            self._client.insert_rows(table, columns, list(mapped_rows))
-            existing_rows = self._count_rows(table, batch, batch_uuid)
+            chunk_size = max(1, int(os.getenv("HIGH_SCALE_INSERT_CHUNK_ROWS", "50000")))
+            inserted_any = False
+            try:
+                for chunk in itertools.batched(mapped_rows, chunk_size) if mapped_rows else ((),):
+                    self._client.insert_rows(table, columns, list(chunk))
+                    inserted_any = True
+            except Exception:
+                if inserted_any:
+                    try:
+                        self._client.delete_batch_rows(table, batch_uuid)
+                    except Exception:
+                        logger.debug("cleanup after chunked insert failure failed", exc_info=True)
+                raise
+            existing_rows = self._count_rows(table, batch, batch_uuid, columns=columns, mapped_rows=mapped_rows)
         if existing_rows != expected:
+            expired_candidates = _count_ttl_expired_rows(table, columns, mapped_rows)
+            if expired_candidates > 0 and (expected - expired_candidates) <= existing_rows < expected:
+                ttl_expired = expected - existing_rows
+                logger.warning(
+                    "clickhouse.ttl_evicted_rows",
+                    table=table,
+                    batch_id=batch.batch_id,
+                    expected_rows=expected,
+                    visible_rows=existing_rows,
+                    ttl_expired_rows=ttl_expired,
+                )
+                self._insert_publication(
+                    batch, batch_uuid, version=version + 1, state="visible", visible_rows=existing_rows
+                )
+                return InsertReceipt(batch.batch_id, existing_rows, batch.digest, ttl_expired_rows=ttl_expired)
             self._client.delete_batch_rows(table, batch_uuid)
             raise PartialInsert(existing_rows)
 
@@ -159,11 +253,39 @@ class BaseClickHouseBatchAdapter:
             raise ValueError("ClickHouse publication receipt is ambiguous")
         return rows[0]
 
-    def _count_rows(self, table: str, batch: HighScaleBatch, batch_uuid: str) -> int:
+    def _count_rows(
+        self,
+        table: str,
+        batch: HighScaleBatch,
+        batch_uuid: str,
+        *,
+        columns: Sequence[str] = (),
+        mapped_rows: Sequence[tuple[Any, ...]] = (),
+    ) -> int:
+        where_sql = "WHERE service_id={service_id:String} AND batch_id={batch_id:UUID}"
+        params: dict[str, Any] = {"service_id": batch.service_id, "batch_id": batch_uuid}
+        if mapped_rows:
+            for ts_col in ("event_timestamp", "bucket_start"):
+                if ts_col in columns:
+                    idx = columns.index(ts_col)
+                    ts_vals = [r[idx] for r in mapped_rows if isinstance(r[idx], datetime)]
+                    if ts_vals:
+                        if ts_col == "bucket_start":
+                            where_sql += (
+                                " AND bucket_start >= toDateTime({min_ts:DateTime64(3, 'UTC')})"
+                                " AND bucket_start <= toDateTime({max_ts:DateTime64(3, 'UTC')})"
+                            )
+                        else:
+                            where_sql += (
+                                f" AND {ts_col} >= {{min_ts:DateTime64(3, 'UTC')}}"
+                                f" AND {ts_col} <= {{max_ts:DateTime64(3, 'UTC')}}"
+                            )
+                        params["min_ts"] = min(ts_vals)
+                        params["max_ts"] = max(ts_vals)
+                    break
         rows = self._client.execute(
-            f"SELECT count() AS row_count FROM `{table}` "
-            "WHERE service_id={service_id:String} AND batch_id={batch_id:UUID}",
-            {"service_id": batch.service_id, "batch_id": batch_uuid},
+            f"SELECT count() AS row_count FROM `{table}` {where_sql}",
+            params,
         )
         if len(rows) != 1 or not isinstance(rows[0].get("row_count"), int):
             raise ValueError("ClickHouse insert receipt is invalid")
@@ -225,16 +347,6 @@ def _first_text(row: Mapping[str, Any], keys: tuple[str, ...]) -> str:
     return ""
 
 
-def _finite(value: Any) -> float | None:
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        number = float(str(value).strip())
-    except ValueError:
-        return None
-    return number if math.isfinite(number) else None
-
-
 def rum_environment(row: Mapping[str, Any]) -> dict[str, Any]:
     """Text environment fields plus ``ttfb`` (None when absent or not finite)."""
     env: dict[str, Any] = {name: _first_text(row, keys) for name, keys in _TEXT_ALIASES.items()}
@@ -282,6 +394,7 @@ _DOMAIN_COLUMNS = {
         *_COMMON_FACT_COLUMNS,
         "client_id",
         "request_event_id",
+        "req_id",
         "metric_name",
         "metric_value",
         "metric_rating",
@@ -293,6 +406,7 @@ _DOMAIN_COLUMNS = {
         *_COMMON_FACT_COLUMNS,
         "client_id",
         "request_event_id",
+        "req_id",
         "error_message",
         "error_file",
         "pathname",
@@ -318,6 +432,15 @@ _DOMAIN_COLUMNS = {
 class PublicationStatus(StrEnum):
     PENDING = "pending"
     VISIBLE = "visible"
+    # Postgres bookkeeping only: a failed attempt whose sources were later published under another batch.
+    SUPERSEDED = "superseded"
+    # Postgres bookkeeping only: an operator retired a pending publication whose data can no longer be published.
+    ABANDONED = "abandoned"
+
+
+class SupersededPublication(RuntimeError):
+    def __init__(self, batch_id: str) -> None:
+        super().__init__(f"publication {batch_id} was superseded by a replacement batch; refusing to publish it")
 
 
 class PartialInsert(RuntimeError):
@@ -340,7 +463,10 @@ class HighScaleBatch:
         for i, row in enumerate(self.rows):
             if i > 0:
                 h.update(b"\n")
-            h.update(json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+            try:
+                h.update(orjson.dumps(row, option=orjson.OPT_SORT_KEYS))
+            except (TypeError, ValueError):
+                h.update(json.dumps(row, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
         return f"sha256:{h.hexdigest()}"
 
 
@@ -361,6 +487,7 @@ class InsertReceipt:
     batch_id: str
     rows_inserted: int
     digest: str
+    ttl_expired_rows: int = 0
 
 
 class BatchManifestStore(Protocol):
@@ -399,7 +526,12 @@ class ClickHouseBatchAdapter(BaseClickHouseBatchAdapter):
 
 
 def _batch_uuid(batch: HighScaleBatch) -> str:
-    return str(uuid5(_BATCH_NAMESPACE, "\0".join((batch.service_id, batch.domain, batch.generation, batch.batch_id))))
+    return publication_batch_uuid(batch.service_id, batch.domain, batch.generation, batch.batch_id)
+
+
+def publication_batch_uuid(service_id: str, domain: str, generation: str, batch_id: str) -> str:
+    """The ``batch_id`` a publication's ClickHouse rows and receipt carry."""
+    return str(uuid5(_BATCH_NAMESPACE, "\0".join((service_id, domain, generation, batch_id))))
 
 
 def _event_uuid(value: Any, *, field: str) -> str:
@@ -424,15 +556,18 @@ def _required_nonnegative_int(row: Mapping[str, Any], field: str) -> int:
 
 def _timestamp(row: Mapping[str, Any], field: str) -> datetime:
     value = row.get(field)
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            raise ValueError(f"{field} must be an ISO timestamp")
+        try:
+            return _parse_iso_utc_cached(s)
+        except ValueError:
+            raise ValueError(f"{field} must be an ISO timestamp") from None
     if isinstance(value, datetime):
         parsed = value
     elif isinstance(value, date):
         parsed = datetime.combine(value, datetime.min.time())
-    elif isinstance(value, str):
-        try:
-            parsed = range_value(value)
-        except ValueError:
-            raise ValueError(f"{field} must be an ISO timestamp") from None
     else:
         raise ValueError(f"{field} must be an ISO timestamp")
     return (parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed).astimezone(UTC)
@@ -519,7 +654,19 @@ _CORE_FACT_KEYS = frozenset(
 
 
 def _extract_custom_fields(row: Mapping[str, Any]) -> dict[str, str]:
-    base = _string_map(row, "custom_fields")
+    nested = row.get("custom_fields") or {}
+    if not isinstance(nested, Mapping):
+        raise ValueError("custom_fields must be a mapping")
+    base: dict[str, str] = {}
+    for key, value in nested.items():
+        if not isinstance(key, str):
+            raise ValueError("custom_fields keys and values must be scalar strings or numbers")
+        if value is None:
+            base[key] = ""
+        elif isinstance(value, (str, int, float, bool)):
+            base[key] = str(value)
+        else:
+            raise ValueError("custom_fields keys and values must be scalar strings or numbers")
     for k, v in row.items():
         if k not in _CORE_FACT_KEYS and not k.startswith("_"):
             if isinstance(v, (str, int, float, bool)) and v not in (None, ""):
@@ -547,6 +694,7 @@ def _rows_for_domain(batch: HighScaleBatch, batch_uuid: str) -> list[tuple[Any, 
             common = _common_values(batch, row, batch_uuid)
             req_id = row.get("request_event_id")
             req_uuid = None if req_id is None else _event_uuid(req_id, field="request_event_id")
+            receipt_id = "" if row.get("req_id") is None else _required_string(row, "req_id")
             client_id = _required_string(row, "client_id", default="")
             if batch.domain == "rum_vitals":
                 val = row.get("metric_value")
@@ -566,7 +714,7 @@ def _rows_for_domain(batch: HighScaleBatch, batch_uuid: str) -> list[tuple[Any, 
                     _required_string(row, "pathname", default=""),
                     *_rum_environment_values(row, with_error_position=True),
                 )
-            rows.append((*common, client_id, req_uuid, *tail))
+            rows.append((*common, client_id, req_uuid, receipt_id, *tail))
         elif batch.domain == "cmcd":
             request_event_id = row.get("request_event_id")
             if not isinstance(request_event_id, str) or not request_event_id:
@@ -633,6 +781,8 @@ class ClickHousePublication:
             self._manifests.put(manifest)
         else:
             self._validate_existing(manifest, batch)
+            if manifest.status in (PublicationStatus.SUPERSEDED, PublicationStatus.ABANDONED):
+                raise SupersededPublication(batch.batch_id)
             if manifest.status is PublicationStatus.VISIBLE:
                 return PublicationResult(batch.batch_id, manifest.status, manifest.visible_rows, True)
 
@@ -641,7 +791,7 @@ class ClickHousePublication:
             raise ValueError("ClickHouse receipt batch id mismatch")
         if receipt.digest != batch.digest:
             raise ValueError("ClickHouse receipt digest mismatch")
-        if receipt.rows_inserted != len(batch.rows):
+        if receipt.ttl_expired_rows < 0 or (receipt.rows_inserted + receipt.ttl_expired_rows) != len(batch.rows):
             raise PartialInsert(receipt.rows_inserted)
 
         self._manifests.put(

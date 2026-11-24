@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation'
 import { parseAsString, useQueryState } from 'nuqs'
 import { useQuery } from '@tanstack/react-query'
 import { client, extractApiError, unwrapClient, STALE_VIEW_RETRY_OPTIONS, throwIfStaleAggregates, isStaleDashboardViewError } from '@/lib/api'
-import type { ChartMetric, FiltersPayload, PlotlyLayout, PlotlyRelayoutEvent, PlotlyTrace } from '@/types/api'
+import { isChartMetric, type ChartMetric, type FiltersPayload, type PlotlyLayout, type PlotlyRelayoutEvent, type PlotlyTrace } from '@/types/api'
 import type { components } from '@/types/api.generated'
 import { useFilterStore, useServiceStore } from '@/stores/filterStore'
 import {
@@ -130,7 +130,7 @@ export function TrafficChart({
   })()
 
   const emptyMessage =
-    metric === 'ttfb_client' && !isFieldActive('ttfb')
+    (metric === 'ttfb' || metric === 'ttfb_client') && !isFieldActive('ttfb')
       ? 'Requires Infrastructure (Group C) fields to be enabled in Fastly logging.'
       : metric === 'req_size' && !isFieldActive('req_bytes')
         ? 'Requires Request Identity (Group A) fields to be enabled in Fastly logging.'
@@ -278,7 +278,9 @@ function DashboardBody({
       'metric', parseAsString.withDefault('requests').withOptions({ clearOnDefault: true, history: 'replace', shallow: true }),
     )
   } catch { /* Fallback when NuqsAdapter is not mounted in unit tests */ }
-  const metric = metricProp ?? nuqsMetric ?? localMetric
+  const requestedMetric = metricProp ?? nuqsMetric ?? localMetric
+  // A shared or stale ?metric= link can name a metric this chart does not have; the API rejects it.
+  const metric = isChartMetric(requestedMetric) ? requestedMetric : 'requests'
   const setMetric = React.useCallback((nextMetric: string) => {
     if (setMetricProp) { setMetricProp(nextMetric); return }
     setLocalMetric(nextMetric)

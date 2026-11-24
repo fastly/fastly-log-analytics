@@ -25,6 +25,7 @@ import {
   scoringAnalyticsCompositeKey,
   scoringConfigCompositeKey,
   useScoringQuery,
+  useScoringStatus,
 } from '@/components/SessionScoring/ScoringAdminPanels'
 
 type CurvePoint = NonNullable<components['schemas']['ScoringCurvePoint']>
@@ -41,8 +42,8 @@ const fmtDaysFixed = (n: number | null | undefined) => (n == null ? '—' : n.to
 export function L2EnforcementCard({ serviceId, sinceHours = 24 }: L2EnforcementCardProps) {
   const queryClient = useQueryClient()
   const [pendingEnable, setPendingEnable] = React.useState<boolean | null>(null)
-  const cachedStatus = queryClient.getQueryData<{ enabled?: boolean }>(['scoring-status', serviceId])
-  const scoringExplicitlyDisabled = cachedStatus?.enabled === false
+  const { data: scoringStatus } = useScoringStatus(serviceId)
+  const scoringExplicitlyDisabled = scoringStatus?.enabled === false
 
   const { data, isLoading, isError, error, refetch } = useScoringQuery(
     ['scoring-l2-enforce', serviceId],
@@ -50,7 +51,7 @@ export function L2EnforcementCard({ serviceId, sinceHours = 24 }: L2EnforcementC
       client.GET('/api/services/{service_id}/scoring/l2-enforce', {
         params: { path: { service_id: serviceId } },
       }),
-    { staleTime: 30_000, enabled: !scoringExplicitlyDisabled },
+    { staleTime: 30_000, enabled: scoringStatus?.enabled === true },
   )
 
   const { data: health } = useScoringQuery(
@@ -91,7 +92,7 @@ export function L2EnforcementCard({ serviceId, sinceHours = 24 }: L2EnforcementC
           icon={<ShieldAlert className="h-4 w-4" />}
           title="L2 enforcement unavailable"
           message={friendly}
-          onRetry={() => refetch()}
+          onRetry={scoringExplicitlyDisabled ? undefined : () => refetch()}
         />
       </AnalyticsCard>
     )

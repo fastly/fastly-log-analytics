@@ -27,7 +27,7 @@
       "gridPos": {
         "x": 0,
         "y": 0,
-        "w": 4,
+        "w": 6,
         "h": 4
       },
       "fieldConfig": {
@@ -79,9 +79,9 @@
         "uid": "prometheus"
       },
       "gridPos": {
-        "x": 4,
+        "x": 6,
         "y": 0,
-        "w": 4,
+        "w": 6,
         "h": 4
       },
       "fieldConfig": {
@@ -125,122 +125,6 @@
       "description": "The number of analytical queries currently being processed by the backend. Spikes indicate high user concurrency or slow-running queries."
     },
     {
-      "id": 3,
-      "type": "stat",
-      "title": "Ingest queue depth",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "x": 8,
-        "y": 0,
-        "w": 4,
-        "h": 4
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 1000
-              },
-              {
-                "color": "red",
-                "value": 10000
-              }
-            ]
-          },
-          "noValue": "0"
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "colorMode": "value",
-        "graphMode": "area",
-        "textMode": "auto"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "celery_queue_length{queue_name=\"q.ingest\"}",
-          "legendFormat": "",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "description": "The number of log ingestion tasks waiting in the Celery queue. A growing queue indicates ingestion is falling behind, potentially delaying data visibility."
-    },
-    {
-      "id": 4,
-      "type": "stat",
-      "title": "Worker processes",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 0,
-        "w": 4,
-        "h": 4
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "noValue": "0"
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "colorMode": "value",
-        "graphMode": "area",
-        "textMode": "auto"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "max(celery_active_process_count)",
-          "legendFormat": "",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "description": "The maximum number of active Celery worker processes across all worker pods. Useful for verifying auto-scaling behavior."
-    },
-    {
       "id": 5,
       "type": "stat",
       "title": "Backend memory",
@@ -249,9 +133,9 @@
         "uid": "prometheus"
       },
       "gridPos": {
-        "x": 16,
+        "x": 12,
         "y": 0,
-        "w": 4,
+        "w": 6,
         "h": 4
       },
       "fieldConfig": {
@@ -296,15 +180,15 @@
     {
       "id": 6,
       "type": "stat",
-      "title": "DuckLake PG size",
+      "title": "Metadata PG size",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
       "gridPos": {
-        "x": 20,
+        "x": 18,
         "y": 0,
-        "w": 4,
+        "w": 6,
         "h": 4
       },
       "fieldConfig": {
@@ -338,13 +222,13 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "pg_database_size_bytes{datname=\"ducklake\"}",
+          "expr": "pg_database_size_bytes{datname=\"fla\"}",
           "legendFormat": "",
           "range": true,
           "refId": "A"
         }
       ],
-      "description": "The total disk space used by the Postgres database backing DuckLake metadata. Expect gradual growth; sudden spikes suggest uncontrolled metadata generation."
+      "description": "The total disk space used by the Postgres database backing operational metadata. Expect gradual growth; sudden spikes suggest uncontrolled metadata generation."
     },
     {
       "id": 100,
@@ -418,7 +302,7 @@
       "gridPos": {
         "x": 0,
         "y": 14,
-        "w": 8,
+        "w": 12,
         "h": 7
       },
       "description": "The current 5 slowest endpoints by 95th percentile latency."
@@ -449,46 +333,12 @@
         }
       },
       "gridPos": {
-        "x": 8,
+        "x": 12,
         "y": 14,
-        "w": 8,
+        "w": 12,
         "h": 7
       },
       "description": "The top 5 containers consuming the most RAM right now."
-    },
-    {
-      "id": 104,
-      "type": "bargauge",
-      "title": "Top 5 Failing Background Tasks",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "targets": [
-        {
-          "expr": "topk(5, sum by (name) (rate(celery_task_failed_total[5m]))) > 0",
-          "legendFormat": "{{name}}",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "orientation": "horizontal",
-        "displayMode": "gradient",
-        "showUnfilled": true
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ops",
-          "decimals": 2
-        }
-      },
-      "gridPos": {
-        "x": 16,
-        "y": 14,
-        "w": 8,
-        "h": 7
-      },
-      "description": "Tasks failing most frequently. Empty if no failures."
     },
     {
       "type": "row",
@@ -682,7 +532,7 @@
     },
     {
       "type": "row",
-      "title": "Analytical Engine (DuckDB)",
+      "title": "Analytical Engine (ClickHouse)",
       "collapsed": false,
       "gridPos": {
         "x": 0,
@@ -742,7 +592,7 @@
           "refId": "A"
         }
       ],
-      "description": "The number of DuckDB queries currently executing across the system. Correlates with user activity and complex dashboard loads."
+      "description": "The number of analytical queries currently executing across the system. Correlates with user activity and complex dashboard loads."
     },
     {
       "id": 13,
@@ -794,7 +644,7 @@
           "refId": "A"
         }
       ],
-      "description": "The 95th percentile execution time for analytical DuckDB queries. Increases here will directly impact user dashboard load times."
+      "description": "The 95th percentile execution time for analytical queries. Increases here will directly impact user dashboard load times."
     },
     {
       "id": 14,
@@ -846,238 +696,7 @@
           "refId": "A"
         }
       ],
-      "description": "The 95th percentile wait time for a thread to acquire a DuckDB connection from the pool. High wait times mean queries are queued waiting for connections, suggesting the connection pool might be exhausted or queries are too slow."
-    },
-    {
-      "type": "row",
-      "title": "Background Processing (Celery)",
-      "collapsed": false,
-      "gridPos": {
-        "x": 0,
-        "y": 41,
-        "w": 24,
-        "h": 1
-      },
-      "id": 15
-    },
-    {
-      "id": 16,
-      "type": "timeseries",
-      "title": "Queue depth",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 42,
-        "w": 6,
-        "h": 9
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "celery_queue_length",
-          "legendFormat": "{{queue_name}}",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "description": "The number of tasks pending in each Celery queue. Helps identify bottlenecks in specific background processes."
-    },
-    {
-      "id": 17,
-      "type": "timeseries",
-      "title": "Task completions by task",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "x": 6,
-        "y": 42,
-        "w": 6,
-        "h": 9
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ops",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum by (name) (rate(celery_task_succeeded_total[5m])) > 0",
-          "legendFormat": "{{name}}",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "description": "The rate at which different background tasks are successfully completing. Validates that asynchronous work is progressing."
-    },
-    {
-      "id": 18,
-      "type": "timeseries",
-      "title": "Task flow: received vs failed",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 42,
-        "w": 6,
-        "h": 9
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "ops",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true
-          },
-          "noValue": "0"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum(rate(celery_task_received_total[5m]))",
-          "legendFormat": "received",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum(rate(celery_task_failed_total[5m]))",
-          "legendFormat": "failed",
-          "range": true,
-          "refId": "B"
-        }
-      ],
-      "description": "A comparison of tasks entering the system versus tasks failing. A rising failure rate indicates systemic issues with background processing."
-    },
-    {
-      "id": 19,
-      "type": "timeseries",
-      "title": "Task Runtime (p95)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "x": 18,
-        "y": 42,
-        "w": 6,
-        "h": 9
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": true
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "histogram_quantile(0.95, sum by (le, name) (rate(celery_task_runtime_bucket[5m])))",
-          "legendFormat": "{{name}}",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "description": "The 95th percentile execution time for background tasks. Identifying slow tasks can help optimize asynchronous workloads."
+      "description": "The 95th percentile wait time for a thread to acquire a connection from the pool."
     },
     {
       "type": "row",
@@ -1085,7 +704,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 51,
+        "y": 41,
         "w": 24,
         "h": 1
       },
@@ -1101,7 +720,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 52,
+        "y": 42,
         "w": 6,
         "h": 9
       },
@@ -1153,7 +772,7 @@
       },
       "gridPos": {
         "x": 6,
-        "y": 52,
+        "y": 42,
         "w": 6,
         "h": 9
       },
@@ -1187,7 +806,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rate(pg_stat_database_xact_commit{datname=\"ducklake\"}[2m])",
+          "expr": "rate(pg_stat_database_xact_commit{datname=\"fla\"}[2m])",
           "legendFormat": "commit",
           "range": true,
           "refId": "A"
@@ -1197,7 +816,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rate(pg_stat_database_xact_rollback{datname=\"ducklake\"}[2m])",
+          "expr": "rate(pg_stat_database_xact_rollback{datname=\"fla\"}[2m])",
           "legendFormat": "rollback",
           "range": true,
           "refId": "B"
@@ -1215,7 +834,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 52,
+        "y": 42,
         "w": 6,
         "h": 9
       },
@@ -1267,7 +886,7 @@
       },
       "gridPos": {
         "x": 18,
-        "y": 52,
+        "y": 42,
         "w": 6,
         "h": 9
       },
@@ -1303,7 +922,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(pg_stat_database_blks_hit{datname=\"ducklake\"}[5m])) / (sum(rate(pg_stat_database_blks_hit{datname=\"ducklake\"}[5m])) + sum(rate(pg_stat_database_blks_read{datname=\"ducklake\"}[5m])))",
+          "expr": "sum(rate(pg_stat_database_blks_hit{datname=\"fla\"}[5m])) / (sum(rate(pg_stat_database_blks_hit{datname=\"fla\"}[5m])) + sum(rate(pg_stat_database_blks_read{datname=\"fla\"}[5m])))",
           "legendFormat": "Hit Ratio",
           "range": true,
           "refId": "A"
@@ -1317,7 +936,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 61,
+        "y": 51,
         "w": 24,
         "h": 1
       },
@@ -1333,7 +952,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 62,
+        "y": 52,
         "w": 6,
         "h": 9
       },
@@ -1385,7 +1004,7 @@
       },
       "gridPos": {
         "x": 6,
-        "y": 62,
+        "y": 52,
         "w": 6,
         "h": 9
       },
@@ -1437,7 +1056,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 62,
+        "y": 52,
         "w": 6,
         "h": 9
       },
@@ -1499,7 +1118,7 @@
       },
       "gridPos": {
         "x": 18,
-        "y": 62,
+        "y": 52,
         "w": 6,
         "h": 9
       },
@@ -1555,7 +1174,7 @@
       "id": 200,
       "type": "row",
       "title": "ClickHouse prototype (rebuildable serving index)",
-      "gridPos": {"x": 0, "y": 71, "w": 24, "h": 1}
+      "gridPos": {"x": 0, "y": 61, "w": 24, "h": 1}
     },
     {
       "id": 201,
@@ -1563,7 +1182,7 @@
       "title": "ClickHouse query latency",
       "description": "HTTP queries including admission wait and full verification reads; not just dashboard aggregates.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"x": 0, "y": 72, "w": 12, "h": 8},
+      "gridPos": {"x": 0, "y": 62, "w": 12, "h": 8},
       "fieldConfig": {"defaults": {"unit": "ms"}, "overrides": []},
       "targets": [
         {"expr": "histogram_quantile(0.95, sum by (le) (rate(app_clickhouse_query_duration_ms_milliseconds_bucket[5m])))", "legendFormat": "p95", "refId": "A"},
@@ -1576,7 +1195,7 @@
       "title": "ClickHouse insert latency",
       "description": "Synchronous insert duration including admission wait, failures and timeouts.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"x": 12, "y": 72, "w": 12, "h": 8},
+      "gridPos": {"x": 12, "y": 62, "w": 12, "h": 8},
       "fieldConfig": {"defaults": {"unit": "ms"}, "overrides": []},
       "targets": [
         {"expr": "histogram_quantile(0.95, sum by (le) (rate(app_clickhouse_insert_duration_ms_milliseconds_bucket[5m])))", "legendFormat": "p95", "refId": "A"},
@@ -1588,7 +1207,7 @@
       "type": "timeseries",
       "title": "ClickHouse query outcomes",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"x": 0, "y": 80, "w": 12, "h": 8},
+      "gridPos": {"x": 0, "y": 70, "w": 12, "h": 8},
       "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
       "targets": [
         {"expr": "sum by (outcome) (rate(app_clickhouse_queries_total[5m]))", "legendFormat": "{{outcome}}", "refId": "A"}
@@ -1600,7 +1219,7 @@
       "title": "ClickHouse publication outcomes",
       "description": "Published, failed (including pre-claim), stale fence and not-claimed attempts. Counters are attempts, not unique batches.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"x": 12, "y": 80, "w": 12, "h": 8},
+      "gridPos": {"x": 12, "y": 70, "w": 12, "h": 8},
       "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
       "targets": [
         {"expr": "sum by (outcome) (rate(app_clickhouse_publications_total[5m]))", "legendFormat": "{{outcome}}", "refId": "A"}
@@ -1612,7 +1231,7 @@
       "title": "ClickHouse publication lag",
       "description": "Oldest actionable pending/claimed/failed publication in an unexpired building generation with the current selection revision. Unknown on Postgres errors; zero only after a successful empty-backlog query.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"x": 0, "y": 88, "w": 8, "h": 8},
+      "gridPos": {"x": 0, "y": 78, "w": 8, "h": 8},
       "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
       "targets": [
         {"expr": "max(app_clickhouse_publication_lag_seconds and (time() - timestamp(app_clickhouse_publication_lag_seconds) < 30))", "legendFormat": "Oldest actionable age", "refId": "A"}
@@ -1624,7 +1243,7 @@
       "title": "ClickHouse authenticated health",
       "description": "Backend's bounded authenticated system.disks probe: 1 healthy, 0 error. Disabled/no exporter is no data, not healthy.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"x": 8, "y": 88, "w": 8, "h": 8},
+      "gridPos": {"x": 8, "y": 78, "w": 8, "h": 8},
       "fieldConfig": {"defaults": {"unit": "short", "min": 0, "max": 1}, "overrides": []},
       "targets": [
         {"expr": "min(app_clickhouse_up and (time() - timestamp(app_clickhouse_up) < 30))", "legendFormat": "Authenticated up", "refId": "A"}
@@ -1636,7 +1255,7 @@
       "title": "ClickHouse disk capacity",
       "description": "Default ClickHouse disk free and total bytes. Shared filesystem capacity, not the size of ClickHouse facts. Unknown on probe failure.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"x": 16, "y": 88, "w": 8, "h": 8},
+      "gridPos": {"x": 16, "y": 78, "w": 8, "h": 8},
       "fieldConfig": {"defaults": {"unit": "bytes", "min": 0}, "overrides": []},
       "targets": [
         {"expr": "min(app_clickhouse_disk_free_bytes and (time() - timestamp(app_clickhouse_disk_free_bytes) < 30))", "legendFormat": "Free", "refId": "A"},
@@ -1648,7 +1267,7 @@
       "type": "timeseries",
       "title": "ClickHouse Docker memory",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"x": 0, "y": 96, "w": 8, "h": 8},
+      "gridPos": {"x": 0, "y": 86, "w": 8, "h": 8},
       "fieldConfig": {"defaults": {"unit": "bytes", "min": 0}, "overrides": []},
       "targets": [
         {"expr": "docker_container_memory_usage_bytes{name=~\".*-clickhouse-[0-9]+$\"}", "legendFormat": "{{name}}", "refId": "A"}
@@ -1660,7 +1279,7 @@
       "title": "ClickHouse acknowledged physical insert rows",
       "description": "Physical acknowledged rows, including retry copies. Not unique rows, visible rows, or a durable FOS publication watermark.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"x": 8, "y": 96, "w": 8, "h": 8},
+      "gridPos": {"x": 8, "y": 86, "w": 8, "h": 8},
       "fieldConfig": {"defaults": {"unit": "ops", "min": 0}, "overrides": []},
       "targets": [
         {"expr": "sum(rate(app_clickhouse_rows_inserted_total[5m]))", "legendFormat": "Acknowledged rows/s", "refId": "A"}
@@ -1672,7 +1291,7 @@
       "title": "ClickHouse bytes read",
       "description": "ClickHouse-reported scan bytes from operation statistics; not HTTP response payload bytes.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"x": 16, "y": 96, "w": 8, "h": 8},
+      "gridPos": {"x": 16, "y": 86, "w": 8, "h": 8},
       "fieldConfig": {"defaults": {"unit": "Bps", "min": 0}, "overrides": []},
       "targets": [
         {"expr": "sum(rate(app_clickhouse_bytes_read_bytes_total[5m]))", "legendFormat": "Scan bytes/s", "refId": "A"}

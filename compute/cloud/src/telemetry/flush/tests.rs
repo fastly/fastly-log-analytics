@@ -1,0 +1,3575 @@
+use super::*;
+use crate::telemetry::outbox_key;
+use crate::{
+    admin::{FosResponse, Record},
+    setup::SetupStores,
+    shell::{CoreCacheEntry, CoreCacheError, KvPage, CACHE_OP_BUDGET},
+};
+use std::cell::{Cell, RefCell};
+
+const NOW_S: u64 = 1_700_000_100;
+const NOW_MIN: u64 = NOW_S / 60;
+const SID: &str = "svc1";
+const PREFIX: &str = "svc1/processed/ops/";
+
+struct Rt {
+    now: Cell<u64>,
+    cache: RefCell<BTreeMap<String, CoreCacheEntry>>,
+    kv: RefCell<BTreeMap<String, (u64, Value)>>,
+    objects: RefCell<BTreeMap<String, Vec<u8>>>,
+    lookups: Cell<u32>,
+    cache_ops: Cell<u32>,
+    calls: Cell<u32>,
+    budget: Cell<u32>,
+    elapsed_s: Cell<u64>,
+    fail_put: Cell<bool>,
+    fail_delete: Cell<bool>,
+    fail_purge: Cell<bool>,
+    fail_lookup: Cell<bool>,
+    purges: RefCell<Vec<String>>,
+    puts: Cell<u32>,
+    /// After this many more clock reads, the clock moves to the given time: a run that crosses a
+    /// boundary mid-flight.
+    jump: Cell<Option<(u32, u64)>>,
+}
+
+impl Rt {
+    fn new() -> Self {
+        Self {
+            now: Cell::new(NOW_S),
+            cache: Default::default(),
+            kv: Default::default(),
+            objects: Default::default(),
+            lookups: Cell::new(0),
+            cache_ops: Cell::new(0),
+            calls: Cell::new(0),
+            budget: Cell::new(1000),
+            elapsed_s: Cell::new(0),
+            fail_put: Cell::new(false),
+            fail_delete: Cell::new(false),
+            fail_purge: Cell::new(false),
+            fail_lookup: Cell::new(false),
+            purges: Default::default(),
+            puts: Cell::new(0),
+            jump: Cell::new(None),
+        }
+    }
+    fn charge(&self) {
+        self.calls.set(self.calls.get() + 1);
+    }
+    /// Counts a Core Cache operation and refuses it past the per-execution budget, as
+    /// `FastlyRuntime` does.
+    fn cache_op(&self) -> Result<(), CoreCacheError> {
+        let used = self.cache_ops.get();
+        assert!(
+            used < CACHE_OP_BUDGET,
+            "an execution exceeded the cache-op budget"
+        );
+        self.cache_ops.set(used + 1);
+        Ok(())
+    }
+    fn put_kv(&self, key: &str, value: Value) {
+        self.kv.borrow_mut().insert(key.into(), (1, value));
+    }
+    fn bump(&self, key: &str) {
+        if let Some((g, _)) = self.kv.borrow_mut().get_mut(key) {
+            *g += 1;
+        }
+    }
+    fn get_kv(&self, key: &str) -> Option<Value> {
+        self.kv.borrow().get(key).map(|(_, v)| v.clone())
+    }
+    fn cursor(&self) -> Cursor {
+        serde_json::from_value(self.get_kv("logs:cursor:svc1").unwrap()).unwrap()
+    }
+    fn bucket(&self, kind: LogKind, sid: &str, minute: u64, shard: u32, rows: &[Value]) {
+        let body: String = rows.iter().map(|r| format!("{r}\n")).collect();
+        let meta = json!({"count": rows.len()}).to_string().into_bytes();
+        self.cache.borrow_mut().insert(
+            bucket_key(kind, sid, minute, shard),
+            (body.into_bytes(), meta),
+        );
+    }
+    fn set_cursor(&self, scan_min: u64) {
+        self.put_kv(
+            "logs:cursor:svc1",
+            json!({"scan_min": scan_min, "cache_min": scan_min, "global_end": 0}),
+        );
+    }
+}
+
+impl SetupStores for Rt {
+    fn config_present(&self, _: &str) -> Result<bool, String> {
+        Ok(true)
+    }
+    fn secret_present(&self, _: &str) -> Result<bool, String> {
+        Ok(true)
+    }
+    fn state_linked(&self) -> Result<bool, String> {
+        Ok(true)
+    }
+}
+
+impl Runtime for Rt {
+    fn config(&self, _: &str) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+    fn secret(&self, _: &str) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+    fn random(&self) -> Result<[u8; 32], String> {
+        Ok([7; 32])
+    }
+    fn now(&self) -> u64 {
+        match self.jump.get() {
+            Some((0, next)) => {
+                self.now.set(next);
+                self.jump.set(None);
+            }
+            Some((reads, next)) => self.jump.set(Some((reads - 1, next))),
+            None => {}
+        }
+        self.now.get()
+    }
+    fn checks(&self, _: bool) -> Result<Value, String> {
+        unreachable!()
+    }
+    fn versions(&self) -> Result<Value, String> {
+        unreachable!()
+    }
+    fn compute_service_id(&self) -> Option<String> {
+        None
+    }
+    fn compute_service_version(&self) -> Option<String> {
+        None
+    }
+    fn admin_get(&self, key: &str) -> Result<Option<Record>, String> {
+        self.charge();
+        Ok(self.kv.borrow().get(key).map(|(g, v)| Record {
+            generation: g.to_string(),
+            value: v.clone(),
+        }))
+    }
+    fn admin_cas(
+        &self,
+        key: &str,
+        generation: Option<&str>,
+        value: &Value,
+    ) -> Result<bool, String> {
+        self.charge();
+        let mut kv = self.kv.borrow_mut();
+        match (kv.get(key), generation) {
+            (None, None) => {
+                kv.insert(key.into(), (1, value.clone()));
+                Ok(true)
+            }
+            (Some((g, _)), Some(expected)) if g.to_string() == expected => {
+                let next = g + 1;
+                kv.insert(key.into(), (next, value.clone()));
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+    fn admin_fos(&self, request: FosRequest<'_>) -> Result<FosResponse, String> {
+        self.charge();
+        if request.method == "PUT" {
+            self.puts.set(self.puts.get() + 1);
+            if self.fail_put.get() {
+                return Ok(FosResponse {
+                    status: 503,
+                    body: vec![],
+                    cdn_cache: None,
+                    retry_after: None,
+                });
+            }
+            self.objects
+                .borrow_mut()
+                .insert(request.key.into(), request.body);
+        }
+        if request.method == "DELETE" {
+            self.objects.borrow_mut().remove(request.key);
+        }
+        Ok(FosResponse {
+            status: 200,
+            body: vec![],
+            cdn_cache: None,
+            retry_after: None,
+        })
+    }
+    fn admin_remaining_calls(&self) -> u32 {
+        self.budget.get().saturating_sub(self.calls.get())
+    }
+    fn admin_elapsed(&self, _: Instant) -> Duration {
+        Duration::from_secs(self.elapsed_s.get())
+    }
+    fn cache_ops(&self) -> u32 {
+        self.cache_ops.get()
+    }
+    fn core_cache_lookup(&self, key: &str) -> Result<Option<CoreCacheEntry>, CoreCacheError> {
+        self.cache_op()?;
+        self.lookups.set(self.lookups.get() + 1);
+        if self.fail_lookup.get() {
+            return Err(CoreCacheError::PurgeRateLimited);
+        }
+        Ok(self.cache.borrow().get(key).cloned())
+    }
+    fn core_cache_purge(&self, surrogate: &str) -> Result<(), CoreCacheError> {
+        self.cache_op()?;
+        if self.fail_purge.get() {
+            return Err(CoreCacheError::PurgeRateLimited);
+        }
+        self.purges.borrow_mut().push(surrogate.into());
+        Ok(())
+    }
+    fn kv_list(&self, prefix: &str, cursor: Option<&str>, limit: u32) -> Result<KvPage, String> {
+        self.charge();
+        let kv = self.kv.borrow();
+        Ok(KvPage::from_sorted_keys(
+            kv.keys().cloned(),
+            prefix,
+            cursor,
+            limit,
+        ))
+    }
+    fn kv_delete(&self, key: &str) -> Result<(), String> {
+        self.charge();
+        if self.fail_delete.get() && !key.starts_with("logs:") {
+            return Err("delete_failed".into());
+        }
+        self.kv.borrow_mut().remove(key);
+        Ok(())
+    }
+}
+
+fn target() -> FlushTarget<'static> {
+    FlushTarget {
+        region: "us-east",
+        bucket: "b",
+        access_key: "ak",
+        secret_key: "sk",
+        ops_prefix: PREFIX,
+    }
+}
+
+fn row(ts_s: u64, id: &str) -> Value {
+    json!({"timestamp": ts_s * 1000, "event_id": id, "service_id": SID, "severity": "info",
+           "method": "GET", "status_code": 200})
+}
+
+fn run(rt: &Rt, manual: bool) -> FlushReport {
+    rt.cache_ops.set(0);
+    log_flush(
+        rt,
+        SID,
+        Some(&target()),
+        &OperationalLogSettings::default(),
+        manual,
+        Instant::now(),
+    )
+    .unwrap()
+}
+
+fn run_err(rt: &Rt) -> String {
+    rt.cache_ops.set(0);
+    log_flush(
+        rt,
+        SID,
+        Some(&target()),
+        &OperationalLogSettings::default(),
+        true,
+        Instant::now(),
+    )
+    .unwrap_err()
+}
+
+/// An outbox key in a bucket the flush treats as closed.
+fn q(id: &str) -> String {
+    outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 2, Some(id))
+}
+
+fn seed_api(rt: &Rt, minute: u64, ids: &[&str]) {
+    let rows: Vec<Value> = ids.iter().map(|id| row(minute * 60, id)).collect();
+    rt.bucket(LogKind::ApiTelemetry, SID, minute, 0, &rows);
+}
+
+fn string_rows(rt: &Rt, kind: &str) -> Vec<Value> {
+    use arrow_array::{Array, StringArray};
+    use bytes::Bytes;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    let mut out = Vec::new();
+    for (key, body) in rt.objects.borrow().iter() {
+        if !key.contains(&format!("/{kind}/")) {
+            continue;
+        }
+        let reader = ParquetRecordBatchReaderBuilder::try_new(Bytes::from(body.clone()))
+            .unwrap()
+            .build()
+            .unwrap();
+        for batch in reader {
+            let batch = batch.unwrap();
+            let schema = batch.schema();
+            for i in 0..batch.num_rows() {
+                let mut map = serde_json::Map::new();
+                for (c, field) in schema.fields().iter().enumerate() {
+                    if let Some(s) = batch.column(c).as_any().downcast_ref::<StringArray>() {
+                        if !s.is_null(i) {
+                            map.insert(field.name().clone(), s.value(i).into());
+                        }
+                    }
+                }
+                out.push(Value::Object(map));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn scan_checks_only_new_closed_minutes_and_checkpoints_once() {
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 4);
+    seed_api(&rt, NOW_MIN - 3, &["a", "b"]);
+    seed_api(&rt, NOW_MIN - 1, &["open"]);
+    seed_api(&rt, NOW_MIN, &["current"]);
+    let report = run(&rt, false);
+    assert_eq!(report.status, FlushStatus::NotDue);
+    assert_eq!(report.lookups, 2 * 12);
+    let cursor = rt.cursor();
+    assert_eq!(cursor.scan_min, NOW_MIN - 2);
+    assert_eq!(cursor.pending.rows, 2);
+    assert_eq!(cursor.pending.nonempty.len(), 1);
+    assert_eq!(rt.puts.get(), 0);
+}
+
+#[test]
+fn long_outage_scans_whole_minutes_within_the_cache_op_budget() {
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 360);
+    let report = run(&rt, false);
+    assert_eq!(report.lookups, 4 * 12);
+    assert_eq!(report.scanned_minutes, 4);
+    assert!(rt.cache_ops.get() <= CACHE_OP_BUDGET - FLUSH_CACHE_RESERVE);
+    assert_eq!(rt.cursor().scan_min, NOW_MIN - 356);
+    assert_eq!(rt.cursor().cache_min, NOW_MIN - 356);
+    run(&rt, false);
+    assert_eq!(rt.cursor().scan_min, NOW_MIN - 352);
+}
+
+#[test]
+fn a_due_flush_reserves_cache_reads_only_for_already_pending_buckets() {
+    let rt = Rt::new();
+    seed_api(&rt, NOW_MIN - 359, &["a"]);
+    rt.put_kv(
+        "logs:cursor:svc1",
+        json!({"scan_min": NOW_MIN - 358, "cache_min": NOW_MIN - 360, "global_end": 0,
+               "pending": {"rows": 1, "oldest_min": NOW_MIN - 359,
+                           "nonempty": [["api_telemetry", NOW_MIN - 359, 0, 1, SID]]}}),
+    );
+    let report = run(&rt, false);
+    assert_eq!(report.status, FlushStatus::Committed);
+    assert_eq!(report.scanned_minutes, 4);
+    assert_eq!(string_rows(&rt, "api_telemetry").len(), 1);
+}
+
+#[test]
+fn a_due_flush_with_many_pending_buckets_stays_within_the_soft_cache_op_budget() {
+    let rt = Rt::new();
+    let entries: Vec<Value> = (0..80u64)
+        .map(|i| {
+            let minute = NOW_MIN - 200 + i;
+            seed_api(&rt, minute, &[&format!("r{i}")]);
+            json!(["api_telemetry", minute, 0, 1, SID])
+        })
+        .collect();
+    rt.put_kv(
+        "logs:cursor:svc1",
+        json!({"scan_min": NOW_MIN - 2, "cache_min": NOW_MIN - 200, "global_end": 0,
+               "pending": {"rows": 80, "oldest_min": NOW_MIN - 200, "nonempty": entries}}),
+    );
+    // The `/_flush` probe's schedule claim precedes the flush in the same execution.
+    rt.cache_ops.set(1);
+    let report = log_flush(
+        &rt,
+        SID,
+        Some(&target()),
+        &OperationalLogSettings::default(),
+        false,
+        Instant::now(),
+    )
+    .unwrap();
+    assert_eq!(report.status, FlushStatus::Committed);
+    assert!(
+        rt.cache_ops.get() <= 56,
+        "flush used {} of the 56-op soft budget",
+        rt.cache_ops.get()
+    );
+}
+
+#[test]
+fn a_fresh_cursor_looks_back_only_as_far_as_live_reads() {
+    let rt = Rt::new();
+    seed_api(&rt, NOW_MIN - 2 - MAX_SCAN_MIN, &["old"]);
+    seed_api(&rt, NOW_MIN - 1 - MAX_SCAN_MIN, &["kept"]);
+    for _ in 0..40 {
+        run(&rt, true);
+    }
+    let ids: Vec<Value> = string_rows(&rt, "api_telemetry")
+        .into_iter()
+        .map(|row| row["event_id"].clone())
+        .collect();
+    assert_eq!(ids, vec![json!("kept")]);
+}
+
+#[test]
+fn scan_stops_at_the_pending_entry_cap() {
+    let rt = Rt::new();
+    let start = NOW_MIN - 360;
+    let entries: Vec<Value> = (0..MAX_PENDING_ENTRIES as u64 - 2)
+        .map(|_| json!(["api_telemetry", NOW_MIN - 3, 0, 0, SID]))
+        .collect();
+    rt.put_kv(
+        "logs:cursor:svc1",
+        json!({"scan_min": start, "cache_min": start, "global_end": 0, "last_flush_s": NOW_S,
+               "pending": {"nonempty": entries}}),
+    );
+    for shard in 0..4 {
+        rt.bucket(LogKind::ApiTelemetry, SID, start + 1, shard, &[row(0, "a")]);
+    }
+    run(&rt, false);
+    let cursor = rt.cursor();
+    assert_eq!(cursor.scan_min, start + 1);
+    assert_eq!(cursor.pending.nonempty.len(), MAX_PENDING_ENTRIES + 2);
+    let lookups = run(&rt, false).lookups;
+    assert_eq!(lookups, 0);
+    assert_eq!(rt.cursor().scan_min, start + 1);
+}
+
+#[test]
+fn expired_minutes_are_skipped_and_reported_in_the_next_flush() {
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 1540);
+    let report = run(&rt, false);
+    assert_eq!(report.lookups, 4 * 12);
+    assert_eq!(rt.cursor().expired, 99);
+    assert_eq!(rt.cursor().scan_min, NOW_MIN - 1440 + 3);
+
+    let mut cursor = rt.get_kv("logs:cursor:svc1").unwrap();
+    cursor["scan_min"] = (NOW_MIN - 4).into();
+    rt.put_kv("logs:cursor:svc1", cursor);
+    seed_api(&rt, NOW_MIN - 3, &["x"]);
+    run(&rt, true);
+    let errors = string_rows(&rt, "platform_errors");
+    assert!(errors.iter().any(|r| r["code"] == "log_scan_expired"));
+}
+
+#[test]
+fn due_rules_gate_flush_without_fos_calls() {
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 4);
+    seed_api(&rt, NOW_MIN - 3, &["a"]);
+    assert_eq!(run(&rt, false).status, FlushStatus::NotDue);
+    assert_eq!(rt.puts.get(), 0);
+
+    let settings = OperationalLogSettings {
+        flush_max_rows: 50,
+        ..Default::default()
+    };
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 4);
+    let ids: Vec<String> = (0..60).map(|i| format!("e{i:02}")).collect();
+    let rows: Vec<Value> = ids.iter().map(|id| row((NOW_MIN - 3) * 60, id)).collect();
+    rt.bucket(LogKind::ApiTelemetry, SID, NOW_MIN - 3, 0, &rows);
+    let set_last_flush = |ago: u64| {
+        let mut cursor = rt.get_kv("logs:cursor:svc1").unwrap();
+        cursor["last_flush_s"] = (NOW_S - ago).into();
+        rt.put_kv("logs:cursor:svc1", cursor);
+    };
+    set_last_flush(100);
+    let early = log_flush(&rt, SID, Some(&target()), &settings, false, Instant::now()).unwrap();
+    assert_eq!(
+        early.status,
+        FlushStatus::NotDue,
+        "the 5-minute floor holds"
+    );
+    set_last_flush(400);
+    let report = log_flush(&rt, SID, Some(&target()), &settings, false, Instant::now()).unwrap();
+    assert_eq!(report.status, FlushStatus::Committed);
+    assert_eq!(report.rows, 60);
+    let keys: Vec<String> = rt.objects.borrow().keys().cloned().collect();
+    assert_eq!(keys.len(), 1);
+    assert!(keys[0].starts_with("svc1/processed/ops/api_telemetry/year=2023/month=11/day=14/hour="));
+    assert!(keys[0].contains("window=") && keys[0].ends_with("-n60.parquet"));
+
+    let rt = Rt::new();
+    rt.put_kv(
+        "logs:cursor:svc1",
+        json!({"scan_min": NOW_MIN - 4, "cache_min": NOW_MIN - 4, "last_flush_s": NOW_S - 10}),
+    );
+    seed_api(&rt, NOW_MIN - 3, &["a"]);
+    assert_eq!(
+        run(&rt, true).status,
+        FlushStatus::Committed,
+        "manual ignores the floor"
+    );
+}
+
+#[test]
+fn manifest_is_deterministic_and_reused_after_a_failed_put() {
+    let a = Rt::new();
+    let b = Rt::new();
+    for rt in [&a, &b] {
+        rt.set_cursor(NOW_MIN - 4);
+        seed_api(rt, NOW_MIN - 3, &["a", "b"]);
+        run(rt, true);
+    }
+    assert_eq!(*a.objects.borrow(), *b.objects.borrow());
+    assert_eq!(a.objects.borrow().len(), 1);
+
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 4);
+    seed_api(&rt, NOW_MIN - 3, &["a", "b"]);
+    rt.fail_put.set(true);
+    run_err(&rt);
+    let manifest = rt.get_kv("logs:flush_txn:svc1").unwrap();
+    assert_eq!(manifest["committed"], false);
+    assert_eq!(rt.cursor().pending.rows, 0, "cursor unchanged");
+    rt.fail_put.set(false);
+    assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+    assert_eq!(rt.get_kv("logs:flush_txn:svc1"), None);
+    assert_eq!(rt.cursor().txn_id, manifest["txn_id"]);
+    assert_eq!(
+        rt.objects.borrow().keys().next().unwrap(),
+        manifest["outputs"][0].as_str().unwrap()
+    );
+}
+
+#[test]
+fn fresh_flush_prepares_groups_once_and_resume_keeps_exact_outputs() {
+    let seed = |rt: &Rt| {
+        rt.set_cursor(NOW_MIN - 4);
+        seed_api(rt, NOW_MIN - 3, &["duplicate", "duplicate", "later"]);
+        let earlier_hour = (NOW_MIN / 60 - 1) * 3600;
+        let mut rows = vec![
+            json!({"kind":"cron_runs","timestamp":earlier_hour * 1000,"event_id":"earlier","service_id":SID}),
+            json!({"kind":"cron_runs","timestamp":NOW_S * 1000,"event_id":"later-hour","service_id":SID}),
+        ];
+        for i in 0..3 {
+            rows.push(json!({"kind":"cron_ticks","timestamp":(earlier_hour+i)*1000,
+                "event_id":format!("idle-{i}"),"service_id":SID,"outcome":"idle","trigger":"clock","duration_ms":2}));
+        }
+        let ndjson: String = rows.iter().map(|row| format!("{row}\n")).collect();
+        rt.put_kv(&q("mixed"), json!({"ndjson":ndjson}));
+    };
+    let direct = Rt::new();
+    seed(&direct);
+    BUILD_FILES_CALLS.with(|calls| calls.set(0));
+    assert_eq!(run(&direct, true).status, FlushStatus::Committed);
+    assert_eq!(BUILD_FILES_CALLS.with(|calls| calls.get()), 1);
+    assert_eq!(string_rows(&direct, "api_telemetry").len(), 2);
+    assert_eq!(string_rows(&direct, "cron_runs").len(), 2);
+    assert_eq!(string_rows(&direct, "cron_ticks").len(), 1);
+
+    let resumed = Rt::new();
+    seed(&resumed);
+    resumed.fail_put.set(true);
+    BUILD_FILES_CALLS.with(|calls| calls.set(0));
+    assert_eq!(run_err(&resumed), "object_put_failed:503");
+    assert_eq!(BUILD_FILES_CALLS.with(|calls| calls.get()), 1);
+    let manifest = resumed.get_kv("logs:flush_txn:svc1").unwrap();
+    assert_eq!(manifest["committed"], false);
+    assert_eq!(resumed.puts.get(), 1);
+    resumed.fail_put.set(false);
+    assert_eq!(run(&resumed, true).status, FlushStatus::Committed);
+    assert_eq!(BUILD_FILES_CALLS.with(|calls| calls.get()), 2);
+    assert_eq!(resumed.cursor().txn_id, manifest["txn_id"]);
+    assert_eq!(*resumed.objects.borrow(), *direct.objects.borrow());
+    let keys: Vec<String> = resumed.objects.borrow().keys().cloned().collect();
+    let mut outputs: Vec<String> = serde_json::from_value(manifest["outputs"].clone()).unwrap();
+    outputs.sort();
+    assert_eq!(keys, outputs);
+}
+
+#[test]
+fn held_lease_is_busy_and_stale_commit_is_fenced() {
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 4);
+    seed_api(&rt, NOW_MIN - 3, &["a"]);
+    rt.put_kv("logs:flush_lease", json!({"expires_at": NOW_S + 60}));
+    assert_eq!(run(&rt, true).status, FlushStatus::Busy);
+    assert_eq!(rt.puts.get(), 0);
+
+    rt.put_kv("logs:flush_lease", json!({"expires_at": NOW_S - 1}));
+    rt.fail_put.set(true);
+    run_err(&rt);
+    let stale: Manifest =
+        serde_json::from_value(rt.get_kv("logs:flush_txn:svc1").unwrap()).unwrap();
+    rt.fail_put.set(false);
+    assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+
+    let committed = rt
+        .admin_cas(
+            "logs:cursor:svc1",
+            stale.cursor_generation.as_deref(),
+            &to_value(&stale.next_cursor),
+        )
+        .unwrap();
+    assert!(!committed, "a stale generation can never commit");
+    let before = rt.puts.get();
+    let mut again = stale.clone();
+    again.committed = false;
+    let mut report = FlushReport::default();
+    run_txn(
+        &rt,
+        SID,
+        &target(),
+        &mut again,
+        None,
+        Instant::now(),
+        &mut report,
+    )
+    .unwrap();
+    assert_eq!(
+        rt.puts.get(),
+        before,
+        "the generation moved, so only GC remains"
+    );
+}
+
+#[test]
+fn commit_then_crash_before_gc_does_not_duplicate_rows() {
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 4);
+    rt.put_kv(
+        &q("aa"),
+        json!({"ndjson": json!({"kind":"cron_runs","timestamp":1_700_000_000_000i64,"event_id":"r1","service_id":SID,"severity":"info","cron_kind":"request_ingest"}).to_string()}),
+    );
+    rt.fail_delete.set(true);
+    assert!(run_err(&rt).contains("delete_failed"));
+    let txn = rt.get_kv("logs:flush_txn:svc1").unwrap()["txn_id"].clone();
+    assert_eq!(
+        rt.get_kv("logs:cursor:svc1").unwrap()["txn_id"],
+        txn,
+        "the cursor records the commit"
+    );
+    assert!(rt.get_kv(&q("aa")).is_some());
+    let files = rt.objects.borrow().len();
+    rt.fail_delete.set(false);
+    let report = run(&rt, true);
+    assert_eq!(report.rows, 0);
+    assert_eq!(rt.get_kv(&q("aa")), None);
+    assert_eq!(rt.objects.borrow().len(), files, "no second file");
+    assert_eq!(rt.get_kv("logs:flush_txn:svc1"), None);
+}
+
+#[test]
+fn legacy_per_request_outbox_keys_are_archived_and_removed() {
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 4);
+    let row = |id: &str| json!({"ndjson": json!({"kind":"cron_runs","timestamp":1_700_000_000_000i64,"event_id":id,"service_id":SID,"severity":"info","cron_kind":"request_ingest"}).to_string()});
+    let legacy = format!("logq:{SID}:{:013}-old", (NOW_S - 86_400) * 1000);
+    let other = outbox_key("othersvc", NOW_S / OUTBOX_BUCKET_S - 2, None);
+    rt.put_kv(&legacy, row("legacy"));
+    rt.put_kv(&other, row("other"));
+    assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+    let runs = string_rows(&rt, "cron_runs");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["event_id"], "legacy");
+    assert_eq!(rt.get_kv(&legacy), None);
+    assert!(
+        rt.get_kv(&other).is_some(),
+        "another service's outbox is left alone"
+    );
+}
+
+#[test]
+fn wall_time_stop_leaves_manifest_uncommitted_and_resumes() {
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 4);
+    seed_api(&rt, NOW_MIN - 3, &["a"]);
+    rt.elapsed_s.set(41);
+    assert_eq!(run(&rt, true).status, FlushStatus::Stopped);
+    assert_eq!(rt.puts.get(), 0);
+    assert_eq!(
+        rt.get_kv("logs:flush_txn:svc1").unwrap()["committed"],
+        false
+    );
+    rt.elapsed_s.set(0);
+    assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+    assert_eq!(rt.puts.get(), 1);
+}
+
+#[test]
+fn budget_admission_defers_and_splits_large_backlogs() {
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 4);
+    seed_api(&rt, NOW_MIN - 3, &["a"]);
+    rt.budget.set(10);
+    assert_eq!(run(&rt, true).status, FlushStatus::Deferred);
+    assert_eq!(rt.puts.get(), 0);
+
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 4);
+    for i in 0..40u64 {
+        let line = json!({"kind":"ingest_files","timestamp":1_700_000_000_000i64 + i as i64,
+                          "event_id":format!("f{i}"),"service_id":SID,"severity":"info","raw_key":"k"});
+        rt.put_kv(&q(&format!("{i:02}")), json!({"ndjson": line.to_string()}));
+    }
+    rt.budget.set(rt.calls.get() + 32);
+    run(&rt, true);
+    let left = rt
+        .kv
+        .borrow()
+        .keys()
+        .filter(|k| k.starts_with("logq_"))
+        .count();
+    assert!(
+        left > 0 && left < 40,
+        "a bounded transaction drained part: {left}"
+    );
+    assert!(rt.calls.get() <= 32);
+}
+
+#[test]
+fn a_flush_crossing_an_hour_mid_run_stays_within_budget() {
+    // The flush starts in the last second of an hour and its clock reads the next hour later on.
+    // Its warning row must land in the file group it was budgeted for, or the extra PUT takes
+    // calls the rest of the transaction was promised.
+    let start = 1_700_002_799;
+    let next_hour_ms = (start + 1) * 1000;
+    let flush = |budget: u32, jump: Option<(u32, u64)>| {
+        let rt = Rt::new();
+        rt.now.set(start);
+        rt.jump.set(jump);
+        // The expired minute makes a platform_errors warning row stamped with the flush time.
+        rt.put_kv(
+            "logs:cursor:svc1",
+            json!({"scan_min": start / 60 - 4, "cache_min": start / 60 - 4, "global_end": 0,
+                   "expired": 1}),
+        );
+        for i in 0..24u64 {
+            let rows: String = [
+                json!({"kind": "platform_errors", "timestamp": next_hour_ms + i,
+                       "event_id": format!("e{i}"), "service_id": SID, "severity": "error",
+                       "code": "x", "message": "m"}),
+                json!({"kind": "ingest_files", "timestamp": next_hour_ms + i,
+                       "event_id": format!("f{i}"), "service_id": SID, "severity": "info",
+                       "raw_key": "k"}),
+            ]
+            .iter()
+            .map(|row| format!("{row}\n"))
+            .collect();
+            rt.put_kv(
+                &outbox_key(SID, start / OUTBOX_BUCKET_S - 2, Some(&format!("{i:02}"))),
+                json!({"ndjson": rows}),
+            );
+        }
+        rt.budget.set(budget);
+        let report = run(&rt, true);
+        assert!(
+            rt.calls.get() <= budget,
+            "budget {budget}: {}",
+            rt.calls.get()
+        );
+        (report.status, rt.calls.get(), rt.puts.get())
+    };
+    for budget in 22..48 {
+        let steady = flush(budget, None);
+        assert_eq!(steady.0, FlushStatus::Committed, "budget {budget}");
+        for reads in 1..6 {
+            assert_eq!(
+                flush(budget, Some((reads, start + 1))),
+                steady,
+                "budget {budget}, clock moved after {reads} reads"
+            );
+        }
+    }
+}
+
+#[test]
+fn idle_ticks_roll_up_into_one_row() {
+    let rows: Vec<Value> = (0..5)
+        .map(|i| {
+            json!({"timestamp": 1_700_000_000_000i64 + i * 1000, "event_id": format!("t{i}"),
+                   "outcome": "idle", "trigger": "clock", "duration_ms": 2, "service_id": SID})
+        })
+        .collect();
+    let merged = rollup_idle_ticks(rows.clone());
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0]["ticks_count"], 5);
+    assert_eq!(merged[0]["trigger"], "idle_rollup");
+    assert_eq!(merged[0]["duration_ms"], 10);
+    let kept = build_files(
+        PREFIX,
+        0,
+        "t",
+        true,
+        vec![
+            (LogKind::CronTicks, rows[0].clone()),
+            (LogKind::CronTicks, rows[1].clone()),
+        ],
+    );
+    assert_eq!(kept[0].2.len(), 2, "log_idle_ticks keeps every row");
+    let mut mixed = rows;
+    mixed.insert(
+        2,
+        json!({"timestamp": 1_700_000_002_500i64, "event_id": "busy", "outcome": "active"}),
+    );
+    assert_eq!(rollup_idle_ticks(mixed).len(), 3);
+}
+
+#[test]
+fn audit_drains_and_outbox_trims_with_stable_indexes() {
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 4);
+    let outbox: Vec<Value> = (0..60)
+        .map(|i| json!({"actor": "a", "at": 1_700_000_000 + i, "event": "e", "config_version": 1}))
+        .collect();
+    seed_api(&rt, NOW_MIN - 3, &["a"]);
+    rt.put_kv(
+        "svc:svc1",
+        json!({"service_id": SID, "_audit_outbox": outbox}),
+    );
+    rt.put_kv(
+        "audit:00000000000000000007",
+        json!({"time": 1_700_000_000u64, "actor": "u", "action": "login"}),
+    );
+    assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+    assert_eq!(string_rows(&rt, "admin_audit").len(), 61);
+    let svc = rt.get_kv("svc:svc1").unwrap();
+    assert_eq!(
+        svc["_audit_outbox"].as_array().unwrap().len(),
+        SVC_OUTBOX_KEEP
+    );
+    assert_eq!(svc["_audit_outbox_base"], 10);
+    let cursor = rt.cursor();
+    assert_eq!(cursor.svc_outbox_archived, 60);
+    assert_eq!(cursor.audit_seq, Some(7));
+
+    let before = rt.objects.borrow().len();
+    run(&rt, true);
+    assert_eq!(
+        rt.objects.borrow().len(),
+        before,
+        "nothing re-archived after the trim"
+    );
+}
+
+#[test]
+fn audit_key_gc_requires_archived_old_and_keeps_newest_fifty() {
+    let rt = Rt::new();
+    for seq in 1..=61u64 {
+        rt.put_kv(
+            &format!("audit:{seq:020}"),
+            json!({"time": NOW_S - 400 * 86_400}),
+        );
+    }
+    assert_eq!(
+        audit_key_gc(&rt, Some(5), 365, 0).unwrap(),
+        5,
+        "only archived keys"
+    );
+    assert_eq!(audit_key_gc(&rt, None, 365, 0).unwrap(), 0);
+    assert_eq!(
+        audit_key_gc(&rt, Some(100), 365, 0).unwrap(),
+        6,
+        "newest 50 stay"
+    );
+    let left = rt
+        .kv
+        .borrow()
+        .keys()
+        .filter(|k| k.starts_with("audit:"))
+        .count();
+    assert_eq!(left, AUDIT_KEEP);
+
+    let rt = Rt::new();
+    for seq in 1..=60u64 {
+        rt.put_kv(
+            &format!("audit:{seq:020}"),
+            json!({"time": NOW_S - 10 * 86_400}),
+        );
+    }
+    assert_eq!(
+        audit_key_gc(&rt, Some(100), 365, 0).unwrap(),
+        0,
+        "younger than retention"
+    );
+}
+
+#[test]
+fn nothing_is_written_before_provisioning() {
+    let rt = Rt::new();
+    seed_api(&rt, NOW_MIN - 3, &["a"]);
+    let report = log_flush(&rt, SID, None, &Default::default(), true, Instant::now()).unwrap();
+    assert_eq!(report.status, FlushStatus::Unprovisioned);
+    assert_eq!(rt.calls.get(), 0);
+    assert!(rt.kv.borrow().is_empty());
+}
+
+#[test]
+fn first_flush_drains_global_buckets_and_deep_outbox_warns() {
+    let rt = Rt::new();
+    rt.bucket(
+        LogKind::ApiTelemetry,
+        "global",
+        NOW_MIN - 10,
+        1,
+        &[row((NOW_MIN - 10) * 60, "g1")],
+    );
+    for _ in 0..50 {
+        run(&rt, true);
+    }
+    assert_eq!(string_rows(&rt, "api_telemetry").len(), 1);
+
+    let manifest = Manifest {
+        notes: Notes {
+            outbox_depth: 10_001,
+            ..Default::default()
+        },
+        start_min: NOW_MIN,
+        ..Default::default()
+    };
+    let rows = note_rows(SID, &manifest);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1["code"], "logq_depth_high");
+}
+
+#[test]
+fn purges_each_flushed_hour_once_after_it_closes_and_retries_on_failure() {
+    let rt = Rt::new();
+    let hour = NOW_MIN / 60 - 1;
+    let hour_start = hour * 60;
+    rt.set_cursor(hour_start + 4);
+    seed_api(&rt, hour_start + 5, &["a"]);
+    rt.bucket(
+        LogKind::ApiTelemetry,
+        SID,
+        hour_start + 6,
+        2,
+        &[row((hour_start + 6) * 60, "b")],
+    );
+    rt.fail_purge.set(true);
+    assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+    assert!(rt.purges.borrow().is_empty());
+    let cursor = rt.cursor();
+    assert_eq!(cursor.purge_due.len(), 1, "one (kind, hour) after dedup");
+    assert_eq!(
+        cursor.purged_hour, 0,
+        "purged_hour does not advance on failure"
+    );
+
+    // Three closed minutes per budgeted scan: the hour closes for purging after 18 runs.
+    for _ in 0..20 {
+        run(&rt, false);
+    }
+    assert!(rt.purges.borrow().is_empty());
+    assert_eq!(rt.cursor().purge_due.len(), 1);
+    rt.fail_purge.set(false);
+    for _ in 0..4 {
+        run(&rt, false);
+    }
+    assert_eq!(
+        *rt.purges.borrow(),
+        vec![format!("flp-log-api_telemetry-svc1-h{hour}")]
+    );
+    assert!(rt.cursor().purge_due.is_empty());
+    assert_eq!(rt.cursor().purged_hour, hour);
+}
+
+#[test]
+fn current_hour_is_never_purged() {
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 5);
+    seed_api(&rt, NOW_MIN - 3, &["a"]);
+    run(&rt, true);
+    run(&rt, false);
+    assert!(rt.purges.borrow().is_empty());
+}
+
+#[test]
+fn clear_cache_is_busy_during_a_transaction_and_scan_behind_for_one_kind() {
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 4);
+    seed_api(&rt, NOW_MIN - 3, &["a"]);
+    rt.fail_put.set(true);
+    run_err(&rt);
+    assert_eq!(clear_cache(&rt, SID, None), Err(ClearError::Busy));
+
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 100);
+    assert_eq!(
+        clear_cache(&rt, SID, Some(LogKind::ApiTelemetry)),
+        Err(ClearError::ScanBehind)
+    );
+
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 10);
+    assert_eq!(
+        clear_cache(&rt, SID, Some(LogKind::ApiTelemetry)),
+        Err(ClearError::ScanBehind),
+        "eight minutes of three kinds exceed one execution's cache-op budget"
+    );
+    assert_eq!(rt.cursor().scan_min, NOW_MIN - 10);
+
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 6);
+    seed_api(&rt, NOW_MIN - 5, &["a"]);
+    rt.bucket(
+        LogKind::FosUsage,
+        SID,
+        NOW_MIN - 5,
+        1,
+        &[row((NOW_MIN - 5) * 60, "f")],
+    );
+    clear_cache(&rt, SID, Some(LogKind::ApiTelemetry)).unwrap();
+    let cursor = rt.cursor();
+    assert_eq!(cursor.scan_min, NOW_MIN - 2);
+    assert_eq!(cursor.pending.nonempty.len(), 1);
+    assert_eq!(cursor.pending.nonempty[0].0, "fos_usage");
+    assert_eq!(
+        *rt.purges.borrow(),
+        vec!["flp-log-api_telemetry".to_string()]
+    );
+
+    clear_cache(&rt, SID, None).unwrap();
+    assert!(rt.cursor().pending.nonempty.is_empty());
+    assert_eq!(rt.purges.borrow().last().unwrap(), "flp-logs-all");
+}
+
+fn cron_line(id: &str) -> Value {
+    json!({"ndjson": json!({"kind":"cron_runs","timestamp":1_700_000_000_000i64,"event_id":id,"service_id":SID,"severity":"info","cron_kind":"request_ingest"}).to_string()})
+}
+
+#[test]
+fn flush_after_a_gc_resume_uses_the_fresh_cursor_generation() {
+    let rt = Rt::new();
+    let hour = NOW_MIN / 60 - 1;
+    rt.put_kv(
+        "logs:cursor:svc1",
+        json!({"scan_min": NOW_MIN - 2, "cache_min": NOW_MIN, "purge_due": [["api_telemetry", hour, "svc1"]]}),
+    );
+    rt.put_kv(&q("aa"), cron_line("r1"));
+    rt.fail_delete.set(true);
+    run_err(&rt);
+    rt.fail_delete.set(false);
+    rt.put_kv(&q("bb"), cron_line("r2"));
+    run(&rt, true);
+    assert_eq!(rt.get_kv(&q("bb")), None);
+    assert_eq!(
+        string_rows(&rt, "cron_runs").len(),
+        2,
+        "r2 was archived before its key was deleted"
+    );
+}
+
+#[test]
+fn a_lease_is_held_for_exactly_lease_seconds_and_stealable_at_expiry() {
+    let rt = Rt::new();
+    let _held = acquire_lease(&rt, None).unwrap().expect("acquired");
+    assert_eq!(
+        rt.get_kv(LEASE_KEY).unwrap()["expires_at"],
+        NOW_S + LEASE_SECONDS
+    );
+    assert!(acquire_lease(&rt, None).unwrap().is_none());
+    rt.now.set(NOW_S + LEASE_SECONDS - 1);
+    assert!(acquire_lease(&rt, None).unwrap().is_none());
+    rt.now.set(NOW_S + LEASE_SECONDS);
+    let stolen = acquire_lease(&rt, None).unwrap();
+    assert!(stolen.is_some(), "an expired lease is taken over");
+}
+
+#[test]
+fn an_intervening_cursor_write_never_counts_as_a_commit_and_the_txn_is_abandoned() {
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 4);
+    rt.put_kv(&q("aa"), cron_line("r1"));
+    rt.fail_put.set(true);
+    run_err(&rt);
+    let manifest = rt.get_kv("logs:flush_txn:svc1").unwrap();
+    let orphan = manifest["outputs"][0].as_str().unwrap().to_owned();
+    rt.objects.borrow_mut().insert(orphan.clone(), vec![1]);
+    rt.bump("logs:cursor:svc1");
+    rt.fail_put.set(false);
+    assert_eq!(run(&rt, true).status, FlushStatus::NotDue);
+    assert!(rt.get_kv(&q("aa")).is_some(), "unarchived key survives");
+    assert_eq!(rt.get_kv("logs:flush_txn:svc1"), None);
+    assert!(
+        !rt.objects.borrow().contains_key(&orphan),
+        "orphan output removed"
+    );
+    assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+    assert_eq!(rt.get_kv(&q("aa")), None);
+    assert_eq!(string_rows(&rt, "cron_runs").len(), 1);
+}
+
+#[test]
+fn a_cursor_carrying_the_txn_id_is_a_commit_and_only_gc_remains() {
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 4);
+    rt.put_kv(&q("aa"), cron_line("r1"));
+    rt.fail_put.set(true);
+    run_err(&rt);
+    let manifest = rt.get_kv("logs:flush_txn:svc1").unwrap();
+    let mut cursor = rt.get_kv("logs:cursor:svc1").unwrap();
+    cursor["txn_id"] = manifest["txn_id"].clone();
+    rt.put_kv("logs:cursor:svc1", cursor);
+    rt.bump("logs:cursor:svc1");
+    rt.fail_put.set(false);
+    run(&rt, true);
+    assert_eq!(rt.puts.get(), 1, "no new PUT after the commit");
+    assert_eq!(rt.get_kv(&q("aa")), None);
+}
+
+#[test]
+fn cursor_writers_respect_the_lease() {
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 100);
+    rt.put_kv("logs:flush_lease", json!({"expires_at": NOW_S + 60}));
+    run(&rt, false);
+    assert_eq!(
+        rt.cursor().scan_min,
+        NOW_MIN - 100,
+        "not-due path leaves the cursor alone"
+    );
+    assert_eq!(clear_cache(&rt, SID, None), Err(ClearError::Busy));
+}
+
+#[test]
+fn note_rows_survive_a_resume_at_a_later_time() {
+    let rt = Rt::new();
+    rt.put_kv(
+        "logs:cursor:svc1",
+        json!({"scan_min": NOW_MIN - 4, "cache_min": NOW_MIN - 4, "expired": 3}),
+    );
+    seed_api(&rt, NOW_MIN - 3, &["a"]);
+    rt.fail_put.set(true);
+    run_err(&rt);
+    let manifest = rt.get_kv("logs:flush_txn:svc1").unwrap();
+    rt.now.set(NOW_S + 3600);
+    rt.fail_put.set(false);
+    run(&rt, true);
+    let keys: Vec<String> = rt.objects.borrow().keys().cloned().collect();
+    let outputs: Vec<String> = manifest["outputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| k.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(keys, outputs);
+}
+
+#[test]
+fn clear_cache_aborts_when_a_scan_fails() {
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 10);
+    rt.fail_lookup.set(true);
+    let result = clear_cache(&rt, SID, Some(LogKind::ApiTelemetry));
+    assert!(matches!(result, Err(ClearError::Failed(_))), "{result:?}");
+    assert_eq!(rt.cursor().scan_min, NOW_MIN - 10);
+    assert!(rt.purges.borrow().is_empty());
+}
+
+#[test]
+fn collect_caps_rows_per_flush_and_drains_the_rest_next_time() {
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 6);
+    for minute in 0..3u64 {
+        let ids: Vec<String> = (0..3000).map(|i| format!("m{minute}-{i}")).collect();
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        seed_api(&rt, NOW_MIN - 5 + minute, &refs);
+    }
+    assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+    assert_eq!(string_rows(&rt, "api_telemetry").len(), 3000);
+    run(&rt, true);
+    run(&rt, true);
+    assert_eq!(string_rows(&rt, "api_telemetry").len(), 9000);
+}
+
+#[test]
+fn due_flush_commits_on_an_idle_tick_budget_when_run_first() {
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 4);
+    seed_api(&rt, NOW_MIN - 3, &["a"]);
+    // 32 calls minus cron state, service load and two uncounted secret reads.
+    let start = 32 - 5;
+    rt.budget.set(rt.calls.get() + start);
+    assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+    assert!(rt.calls.get() <= start);
+
+    // The same flush after an idle ingest (9 more calls) never fits.
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 4);
+    seed_api(&rt, NOW_MIN - 3, &["a"]);
+    rt.budget.set(rt.calls.get() + start - 9);
+    assert_eq!(run(&rt, true).status, FlushStatus::Deferred);
+}
+
+#[test]
+fn every_bucket_busy_for_hours_drains_with_bounded_pending_and_scan_lag() {
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 2);
+    let mut expected = BTreeSet::new();
+    let (mut max_pending, mut max_lag) = (0, 0);
+    let probes = 6 * 30;
+    for probe in 0..probes + 30 {
+        let before = rt.now.get();
+        rt.now.set(before + 120);
+        if probe < probes {
+            // All 16 buckets of every minute that just passed get a row: 16 per minute.
+            for minute in before / 60..rt.now.get() / 60 {
+                for kind in CACHE_KINDS {
+                    for shard in 0..LOG_SHARDS {
+                        let id = format!("{}-{minute}-{shard}", kind.as_str());
+                        rt.bucket(kind, SID, minute, shard, &[row(minute * 60, &id)]);
+                        expected.insert((kind.as_str().to_owned(), id));
+                    }
+                }
+            }
+        }
+        rt.budget.set(rt.calls.get() + 32);
+        run(&rt, false);
+        if (10..probes).contains(&probe) {
+            let cursor = rt.cursor();
+            max_pending = max_pending.max(cursor.pending.nonempty.len());
+            max_lag = max_lag.max(rt.now.get() / 60 - cursor.scan_min);
+        }
+    }
+    // Pending peaks where flush_max_rows (500) makes it due, then drains; the scan stays well
+    // inside the live-read window.
+    assert!(max_pending <= 600, "pending grew to {max_pending} buckets");
+    assert!(max_lag <= 20, "the scan fell {max_lag} min behind");
+    let mut archived = BTreeSet::new();
+    for kind in CACHE_KINDS {
+        for row in string_rows(&rt, kind.as_str()) {
+            assert!(
+                archived.insert((
+                    kind.as_str().to_owned(),
+                    row["event_id"].as_str().unwrap().to_owned()
+                )),
+                "duplicate {row}"
+            );
+        }
+    }
+    assert_eq!(
+        archived.len(),
+        expected.len(),
+        "every row archived exactly once"
+    );
+}
+
+#[test]
+fn a_bucket_backlog_cannot_starve_the_outbox_or_audit_sources() {
+    let rt = Rt::new();
+    let mut pending = Vec::new();
+    for hour in 1..=6u64 {
+        for shard in 0..LOG_SHARDS {
+            let minute = NOW_MIN - hour * 60;
+            rt.bucket(
+                LogKind::ApiTelemetry,
+                SID,
+                minute,
+                shard,
+                &[row(minute * 60, &format!("h{hour}-{shard}"))],
+            );
+            pending.push(json!(["api_telemetry", minute, shard, 1, SID]));
+        }
+    }
+    rt.put_kv(
+        "logs:cursor:svc1",
+        json!({"scan_min": NOW_MIN - 2, "cache_min": NOW_MIN - 400, "global_end": NOW_MIN - 2,
+               "pending": {"rows": pending.len(), "oldest_min": NOW_MIN - 360, "nonempty": pending}}),
+    );
+    rt.put_kv(&q("aa"), cron_line("r1"));
+    rt.put_kv(
+        "svc:svc1",
+        json!({"service_id": SID, "_audit_outbox": [{"actor": "a", "at": 1_700_000_000u64, "event": "e", "config_version": 1}]}),
+    );
+    rt.put_kv(
+        "audit:00000000000000000007",
+        json!({"time": 1_700_000_000u64, "actor": "u", "action": "login"}),
+    );
+    rt.budget.set(rt.calls.get() + 32);
+    assert_eq!(run(&rt, false).status, FlushStatus::Committed);
+    assert_eq!(string_rows(&rt, "cron_runs").len(), 1, "outbox read");
+    assert_eq!(
+        string_rows(&rt, "admin_audit").len(),
+        2,
+        "audit key and svc outbox read"
+    );
+    assert!(!string_rows(&rt, "api_telemetry").is_empty());
+    assert!(
+        rt.cursor().behind,
+        "the rest is left for the next flush, past the floor"
+    );
+}
+
+/// Live g2 (56b6d24): about 200 per-request `logq:` keys left from before batching, each one
+/// cron_runs row, drained two or three per commit while the clock and the flush's own overflow
+/// row added two batch keys per 2-minute `/_flush` probe, so the depth never fell. The commit
+/// now leaves room for four keys, and the flush row joins the bucket key, so one key arrives
+/// per probe.
+#[test]
+fn a_legacy_outbox_backlog_drains_while_new_batches_keep_arriving() {
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 2);
+    let line = |id: &str, ts_s: u64| {
+        json!({"ndjson": json!({"kind": "cron_runs", "timestamp": ts_s * 1000, "event_id": id,
+                                "service_id": SID, "severity": "info",
+                                "cron_kind": "log_flush"}).to_string()})
+    };
+    let start = NOW_S - 4 * 3600;
+    let mut expected = 0;
+    for i in 0..200u64 {
+        let at = start + i * 72;
+        rt.put_kv(
+            &format!("logq:{SID}:{:013}-{i:032x}", at * 1000),
+            line(&format!("legacy{i}"), at),
+        );
+        expected += 1;
+    }
+    let depth = |rt: &Rt| {
+        rt.kv
+            .borrow()
+            .keys()
+            .filter(|k| outbox_bucket(k, SID).is_some())
+            .count()
+    };
+    let mut flushes = 0;
+    // The two newest buckets are still open, so they stay until a later probe.
+    while depth(&rt) > 2 {
+        assert!(
+            flushes < 80,
+            "outbox depth {} after {flushes} flushes",
+            depth(&rt)
+        );
+        let bucket = rt.now.get() / OUTBOX_BUCKET_S;
+        rt.put_kv(
+            &outbox_key(SID, bucket, None),
+            line(&format!("new{flushes}"), rt.now.get()),
+        );
+        expected += 1;
+        rt.now.set(rt.now.get() + OUTBOX_BUCKET_S);
+        // `record_flush` spends five calls before the flush and keeps three for its row.
+        rt.budget.set(rt.calls.get() + 32 - 5);
+        rt.cache_ops.set(0);
+        log_flush_reserving(
+            &rt,
+            SID,
+            Some(&target()),
+            &OperationalLogSettings::default(),
+            false,
+            Instant::now(),
+            3,
+        )
+        .unwrap();
+        flushes += 1;
+    }
+    let archived = string_rows(&rt, "cron_runs").len();
+    assert_eq!(
+        archived + depth(&rt),
+        expected,
+        "rows archived exactly once"
+    );
+}
+
+#[test]
+fn multi_hour_svc_audit_outbox_drains_across_flushes_without_livelocking_behind() {
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 2);
+    // Seed 8 audit entries across 8 distinct hours (> MAX_GROUPS = 6) plus an outbox row.
+    let entries: Vec<Value> = (0..8u64)
+        .map(|h| {
+            json!({
+                "actor": "admin",
+                "at": NOW_S - h * 3600,
+                "event": format!("evt-{h}"),
+                "config_version": h + 1,
+            })
+        })
+        .collect();
+    rt.put_kv(
+        "svc:svc1",
+        json!({"service_id": SID, "_audit_outbox": entries}),
+    );
+    rt.put_kv(
+        &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("aa")),
+        cron_line("r1"),
+    );
+    rt.budget.set(rt.calls.get() + 32);
+    let first = run(&rt, false);
+    assert_eq!(first.status, FlushStatus::Committed);
+    assert!(
+        rt.cursor().svc_outbox_archived > 0 && rt.cursor().svc_outbox_archived < 8,
+        "first flush archives up to MAX_GROUPS hours: {}",
+        rt.cursor().svc_outbox_archived
+    );
+    assert!(rt.cursor().behind, "remaining hours stay marked behind");
+
+    rt.budget.set(rt.calls.get() + 32);
+    let second = run(&rt, false);
+    assert_eq!(second.status, FlushStatus::Committed);
+    assert_eq!(rt.cursor().svc_outbox_archived, 8, "all 8 entries archived");
+    assert!(!rt.cursor().behind, "behind clears once all hours drain");
+    assert_eq!(string_rows(&rt, "admin_audit").len(), 8);
+
+    rt.budget.set(rt.calls.get() + 32);
+    let third = run(&rt, false);
+    assert_eq!(third.status, FlushStatus::NotDue);
+}
+
+#[test]
+fn a_closed_outbox_bucket_is_due_once_the_interval_floor_passes_not_only_at_max_age() {
+    let settings = OperationalLogSettings::default();
+    let now = 1_000_000 * OUTBOX_BUCKET_S;
+    let bucket = now / OUTBOX_BUCKET_S - 3;
+    let outbox = vec![format!(
+        "{}{bucket:010}",
+        crate::telemetry::outbox_stem("svc")
+    )];
+    let cursor = Cursor {
+        last_flush_s: now - u64::from(settings.flush_min_interval_s),
+        ..Cursor::default()
+    };
+    let due = check_due(&cursor, &outbox, "svc", now, &settings, false);
+    assert!(
+        due.due,
+        "a closed bucket cannot gain rows, so it must not wait for flush_max_age_s"
+    );
+    let recent = Cursor {
+        last_flush_s: now - 1,
+        ..Cursor::default()
+    };
+    assert!(!check_due(&recent, &outbox, "svc", now, &settings, false).due);
+    assert!(!check_due(&cursor, &[], "svc", now, &settings, false).due);
+}
+
+#[test]
+fn bug_cloud_outbox_dr_28d_reanchors_svc_outbox_cursor_after_external_kv_reset() {
+    let rt = Rt::new();
+    // Simulate a surviving logs:cursor:svc1 with svc_outbox_archived = 57 while svc:svc1 was reset to base = 0:
+    rt.put_kv(
+        &cursor_key(SID),
+        json!({
+            "scan_min": NOW_MIN - 2,
+            "cache_min": NOW_MIN - 2,
+            "svc_outbox_archived": 57,
+            "last_flush_s": NOW_S - 600,
+        }),
+    );
+    rt.put_kv(
+        "svc:svc1",
+        json!({
+            "service_id": SID,
+            "_audit_outbox": [
+                {"actor": "admin", "at": NOW_S - 20, "event": "service.recovered", "config_version": 1},
+                {"actor": "admin", "at": NOW_S - 10, "event": "service.updated", "config_version": 2},
+            ]
+        }),
+    );
+    rt.put_kv(
+        &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("r1")),
+        cron_line("tick1"),
+    );
+
+    rt.budget.set(rt.calls.get() + 32);
+    let first = run(&rt, false);
+    assert_eq!(first.status, FlushStatus::Committed);
+    assert_eq!(
+        string_rows(&rt, "admin_audit").len(),
+        2,
+        "BUG-CLOUD-OUTBOX-DR-28D: post-reset svc outbox entries must not be blackholed when cursor.svc_outbox_archived > base + len"
+    );
+    assert_eq!(
+        rt.cursor().svc_outbox_archived,
+        59,
+        "cursor.svc_outbox_archived must rebase to 57 + 2 = 59 with zero event_id collision"
+    );
+    assert_eq!(
+        rt.get_kv("svc:svc1").unwrap()["_audit_outbox_base"].as_u64(),
+        Some(57),
+        "trim_svc_outbox must persist rebased _audit_outbox_base = 57 onto svc:svc1 even when removable == 0"
+    );
+
+    // Append one more entry to the rebased svc:svc1 (preserving _audit_outbox_base = 57) and confirm next flush archives ONLY the 1 new entry (total = 60):
+    let mut updated_svc = rt.get_kv("svc:svc1").unwrap();
+    updated_svc["_audit_outbox"].as_array_mut().unwrap().push(
+        json!({"actor": "admin", "at": NOW_S - 5, "event": "service.updated", "config_version": 3}),
+    );
+    rt.put_kv("svc:svc1", updated_svc);
+    rt.put_kv(
+        &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 39, Some("r2")),
+        cron_line("tick2"),
+    );
+    rt.budget.set(rt.calls.get() + 32);
+    let second = run(&rt, true);
+    assert_eq!(second.status, FlushStatus::Committed);
+    assert_eq!(string_rows(&rt, "admin_audit").len(), 3);
+    assert_eq!(rt.cursor().svc_outbox_archived, 60);
+}
+
+#[test]
+fn bug_cloud_outbox_dr_29a_equal_len_reset_and_58_plus_3_unique_event_ids() {
+    // 29A-1: Pre-reset 3 entries archived (svc_outbox_archived == 3), then external KV reset of svc:svc1
+    // (_audit_outbox_base = 0) with 3 new entries (len == 3 == archived) -> 0 blackholed, archived at indices 3, 4, 5!
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 2);
+    rt.put_kv(
+        "svc:svc1",
+        json!({
+            "service_id": SID,
+            "_audit_outbox": [
+                {"actor": "admin", "at": NOW_S - 30, "event": "job.started", "job_id": "job-pre", "config_version": 1},
+                {"actor": "admin", "at": NOW_S - 25, "event": "job.step", "job_id": "job-pre", "config_version": 1},
+                {"actor": "admin", "at": NOW_S - 20, "event": "job.completed", "job_id": "job-pre", "config_version": 1},
+            ]
+        }),
+    );
+    rt.put_kv(
+        &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("pre")),
+        cron_line("pre-tick"),
+    );
+    rt.budget.set(rt.calls.get() + 32);
+    assert_eq!(run(&rt, false).status, FlushStatus::Committed);
+    assert_eq!(rt.cursor().svc_outbox_archived, 3);
+    assert!(rt
+        .get_kv(&cursor_key(SID))
+        .unwrap()
+        .get("svc_zero_anchor")
+        .is_some());
+
+    // External KV reset of svc:svc1 (_audit_outbox_base absent / 0) with 3 post-reset entries (even at same NOW_S):
+    rt.put_kv(
+        "svc:svc1",
+        json!({
+            "service_id": SID,
+            "_audit_outbox": [
+                {"actor": "admin", "at": NOW_S, "event": "job.started", "job_id": "job-post", "config_version": 1},
+                {"actor": "admin", "at": NOW_S, "event": "job.step", "job_id": "job-post", "config_version": 1},
+                {"actor": "admin", "at": NOW_S, "event": "job.completed", "job_id": "job-post", "config_version": 1},
+            ]
+        }),
+    );
+    rt.put_kv(
+        &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 39, Some("post")),
+        cron_line("post-tick"),
+    );
+    rt.budget.set(rt.calls.get() + 32);
+    let post_rep = run(&rt, true);
+    assert_eq!(post_rep.status, FlushStatus::Committed);
+    let all_rows: Vec<Value> = rt
+        .objects
+        .borrow()
+        .iter()
+        .filter(|(k, _)| k.contains("/admin_audit/"))
+        .flat_map(|(_, body)| schema::from_parquet(LogKind::AdminAudit, body.clone()).unwrap())
+        .collect();
+    assert_eq!(
+        all_rows.len(),
+        6,
+        "BUG-CLOUD-OUTBOX-DR-29A-1: equal-length post-reset entries (len == 3 == archived) were blackholed!"
+    );
+    let mut seqs: Vec<i64> = all_rows
+        .iter()
+        .map(|r| r["source_seq"].as_i64().unwrap())
+        .collect();
+    seqs.sort();
+    assert_eq!(seqs, vec![0, 1, 2, 3, 4, 5]);
+    let unique_ids: BTreeSet<String> = all_rows
+        .iter()
+        .map(|r| r["event_id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        unique_ids.len(),
+        6,
+        "0 event_id collisions allowed across pre/post reset"
+    );
+    assert_eq!(rt.cursor().svc_outbox_archived, 6);
+    assert_eq!(
+        rt.get_kv("svc:svc1").unwrap()["_audit_outbox_base"].as_u64(),
+        Some(3)
+    );
+
+    // 29A-2 (flush unit): Pre-reset 58 rows + post-reset 3 rows -> 61 unique event_ids & _audit_outbox_base rebased to 58:
+    let rt2 = Rt::new();
+    rt2.set_cursor(NOW_MIN - 2);
+    let pre58: Vec<Value> = (0..58u64)
+        .map(|i| json!({"actor": "admin", "at": NOW_S - 100 + i, "event": "service.updated", "config_version": i + 1}))
+        .collect();
+    rt2.put_kv(
+        "svc:svc1",
+        json!({"service_id": SID, "_audit_outbox": pre58}),
+    );
+    rt2.put_kv(
+        &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("b58")),
+        cron_line("t58"),
+    );
+    rt2.budget.set(rt2.calls.get() + 64);
+    assert_eq!(run(&rt2, false).status, FlushStatus::Committed);
+    assert_eq!(rt2.cursor().svc_outbox_archived, 58);
+    assert_eq!(
+        rt2.get_kv("svc:svc1").unwrap()["_audit_outbox_base"].as_u64(),
+        Some(8)
+    );
+
+    let post3: Vec<Value> = (0..3u64)
+        .map(|i| json!({"actor": "admin", "at": NOW_S + i, "event": "service.recovered", "config_version": i + 1}))
+        .collect();
+    rt2.put_kv(
+        "svc:svc1",
+        json!({"service_id": SID, "_audit_outbox": post3}),
+    );
+    rt2.put_kv(
+        &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 39, Some("b3")),
+        cron_line("t3"),
+    );
+    rt2.budget.set(rt2.calls.get() + 64);
+    assert_eq!(run(&rt2, true).status, FlushStatus::Committed);
+    let rows61 = string_rows(&rt2, "admin_audit");
+    assert_eq!(rows61.len(), 61);
+    let ids61: BTreeSet<String> = rows61
+        .iter()
+        .map(|r| r["event_id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        ids61.len(),
+        61,
+        "BUG-CLOUD-OUTBOX-DR-29A-2: duplicate event_ids emitted after reset!"
+    );
+    assert_eq!(rt2.cursor().svc_outbox_archived, 61);
+    assert_eq!(
+        rt2.get_kv("svc:svc1").unwrap()["_audit_outbox_base"].as_u64(),
+        Some(58)
+    );
+}
+
+#[test]
+fn bug_cloud_outbox_dr_30a_post_nonzero_base_reset_and_tight_budget_flush_preserve_reset_detection()
+{
+    // 2A-adv-i: Flush svc:svc1 when _audit_outbox_base > 0 (base = 1, len = 2 -> archived = 3),
+    // then external KV reset of svc:svc1 to base = 0 with 3 entries at same/earlier second (at <= last_flush_s).
+    // Must detect reset (raw_base dropped from 1 -> 0), archive all 3 post-reset rows at seqs 3..6, 0 blackholed!
+    let rt = Rt::new();
+    rt.set_cursor(NOW_MIN - 2);
+    rt.put_kv(
+        "logs:cursor:svc1",
+        json!({
+            "scan_min": NOW_MIN - 2,
+            "cache_min": NOW_MIN - 2,
+            "svc_outbox_archived": 1,
+            "last_flush_s": NOW_S - 600,
+        }),
+    );
+    rt.put_kv(
+        "svc:svc1",
+        json!({
+            "service_id": SID,
+            "_audit_outbox_base": 1,
+            "_audit_outbox": [
+                {"actor": "admin", "at": NOW_S - 10, "event": "service.updated", "config_version": 2},
+                {"actor": "admin", "at": NOW_S - 5, "event": "service.updated", "config_version": 3},
+            ]
+        }),
+    );
+    rt.put_kv(
+        &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("b-gt0")),
+        cron_line("pre-gt0"),
+    );
+    rt.budget.set(rt.calls.get() + 32);
+    assert_eq!(run(&rt, false).status, FlushStatus::Committed);
+    assert_eq!(rt.cursor().svc_outbox_archived, 3);
+
+    // External KV reset to base = 0 with 3 entries at NOW_S - 1 (<= last_flush_s == NOW_S):
+    rt.put_kv(
+        "svc:svc1",
+        json!({
+            "service_id": SID,
+            "_audit_outbox": [
+                {"actor": "admin", "at": NOW_S - 1, "event": "job.started", "job_id": "j-reset", "config_version": 1},
+                {"actor": "admin", "at": NOW_S, "event": "job.step", "job_id": "j-reset", "config_version": 1},
+                {"actor": "admin", "at": NOW_S, "event": "job.completed", "job_id": "j-reset", "config_version": 1},
+            ]
+        }),
+    );
+    rt.put_kv(
+        &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 39, Some("b-rst")),
+        cron_line("post-gt0"),
+    );
+    let audit_rows = |r: &Rt| -> Vec<Value> {
+        r.objects
+            .borrow()
+            .iter()
+            .filter(|(k, _)| k.contains("/admin_audit/"))
+            .flat_map(|(_, body)| schema::from_parquet(LogKind::AdminAudit, body.clone()).unwrap())
+            .collect()
+    };
+
+    rt.budget.set(rt.calls.get() + 32);
+    assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+    let rows_2a1 = audit_rows(&rt);
+    assert_eq!(
+        rows_2a1.len(),
+        5,
+        "BUG-CLOUD-OUTBOX-DR-30A (2A-adv-i): post-base>0 reset rows were blackholed! got {}",
+        rows_2a1.len()
+    );
+    let mut seqs_2a1: Vec<i64> = rows_2a1
+        .iter()
+        .map(|r| r["source_seq"].as_i64().unwrap())
+        .collect();
+    seqs_2a1.sort();
+    assert_eq!(seqs_2a1, vec![1, 2, 3, 4, 5]);
+    assert_eq!(rt.cursor().svc_outbox_archived, 6);
+
+    // 2A-adv-ii: Legacy cursor (no svc_last_base / svc_zero_anchor, archived = 3, last_flush_s = NOW_S - 300),
+    // svc:svc1 reset at NOW_S - 200 (> NOW_S - 300), then a tight-budget flush at NOW_S - 100 (CALLS = 12 -> spare <= 1,
+    // skips reading svc:svc1 while flushing outbox), followed by a full flush at NOW_S!
+    // Tight flush must NOT overwrite last_svc_flush_s, so full flush detects first_at > eff_last_svc_s and archives 3/3!
+    let rt2 = Rt::new();
+    rt2.now.set(NOW_S - 100);
+    for aseq in 1..=1001u64 {
+        rt2.put_kv(&format!("audit:{aseq:020}"), json!({"seq": aseq}));
+    }
+    rt2.put_kv(
+        "logs:cursor:svc1",
+        json!({
+            "scan_min": (NOW_S - 100) / 60 - 1,
+            "cache_min": (NOW_S - 100) / 60 - 1,
+            "audit_seq": 1001,
+            "purge_due": [["api_telemetry", 1, SID]],
+            "svc_outbox_archived": 3,
+            "last_flush_s": NOW_S - 300,
+        }),
+    );
+    rt2.put_kv(
+        "svc:svc1",
+        json!({
+            "service_id": SID,
+            "_audit_outbox": [
+                {"actor": "admin", "at": NOW_S - 200, "event": "service.recovered", "config_version": 1},
+                {"actor": "admin", "at": NOW_S - 199, "event": "service.updated", "config_version": 2},
+                {"actor": "admin", "at": NOW_S - 198, "event": "service.updated", "config_version": 3},
+            ]
+        }),
+    );
+    rt2.put_kv(
+        &outbox_key(SID, (NOW_S - 100) / OUTBOX_BUCKET_S - 40, Some("tight")),
+        cron_line("tight-tick"),
+    );
+    // Grant exact tight budget (CALLS = 12 out of 32 -> 20 remaining == FLUSH_TICK_CALLS -> spare(1,0,true) == 1 <= 1 skips svc:svc1):
+    rt2.budget.set(rt2.calls.get() + 20);
+    let tight_rep = run(&rt2, true);
+    assert!(matches!(
+        tight_rep.status,
+        FlushStatus::Committed | FlushStatus::GcPending
+    ));
+    assert_eq!(rt2.cursor().last_flush_s, NOW_S - 100);
+    assert_eq!(
+        audit_rows(&rt2).len(),
+        0,
+        "tight budget flush should skip svc:svc1"
+    );
+
+    // Full flush at NOW_S must still detect the reset and archive all 3 rows at 3..6!
+    rt2.now.set(NOW_S);
+    rt2.put_kv(
+        &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 38, Some("full")),
+        cron_line("full-tick"),
+    );
+    rt2.budget.set(rt2.calls.get() + 32);
+    let full_rep = run(&rt2, true);
+    assert_eq!(full_rep.status, FlushStatus::Committed);
+    let rows_2a2 = audit_rows(&rt2);
+    assert_eq!(
+        rows_2a2.len(),
+        3,
+        "BUG-CLOUD-OUTBOX-DR-30A (2A-adv-ii): tight-budget outbox flush clobbered reset timestamp baseline!"
+    );
+    let mut seqs_2a2: Vec<i64> = rows_2a2
+        .iter()
+        .map(|r| r["source_seq"].as_i64().unwrap())
+        .collect();
+    seqs_2a2.sort();
+    assert_eq!(seqs_2a2, vec![3, 4, 5]);
+    assert_eq!(rt2.cursor().svc_outbox_archived, 6);
+}
+
+#[test]
+fn bug_cloud_outbox_dr_31a_and_31b_trim_observed_base_guards_and_matching_anchor_rollback() {
+    let make_entries = |prefix: &str, count: usize, start_at: u64| -> Vec<Value> {
+        (0..count)
+            .map(|i| {
+                json!({
+                    "actor": "admin",
+                    "at": start_at + i as u64,
+                    "event": format!("{prefix}.{i}"),
+                    "config_version": (i + 1) as u64,
+                })
+            })
+            .collect()
+    };
+    let audit_rows = |r: &Rt| -> Vec<Value> {
+        r.objects
+            .borrow()
+            .iter()
+            .filter(|(k, _)| k.contains("/admin_audit/"))
+            .flat_map(|(_, body)| schema::from_parquet(LogKind::AdminAudit, body.clone()).unwrap())
+            .collect()
+    };
+
+    // 1. GcPending deferred GC after base = 10 -> 0 reset: 80 new entries preserved, 0 dropped!
+    {
+        let rt = Rt::new();
+        rt.put_kv(
+            &cursor_key(SID),
+            json!({
+                "scan_min": NOW_MIN - 2,
+                "cache_min": NOW_MIN - 2,
+                "svc_outbox_archived": 10,
+                "svc_last_base": 10,
+                "last_flush_s": NOW_S - 600,
+                "last_svc_flush_s": NOW_S - 600,
+            }),
+        );
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 10,
+                "_audit_outbox": make_entries("pre10", 80, NOW_S - 200),
+            }),
+        );
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("gc1")),
+            cron_line("gc-tick-1"),
+        );
+        // Simulate a committed GcPending manifest from Flush 1 (svc_observed_base = Some(10), svc_range = (10, 90))
+        // by running Flush 1 with tight budget OR writing the exact manifest state produced when GC pauses before trim.
+        // First run Flush 1 with tight budget so it commits cursor and returns GcPending before trim_svc_outbox:
+        // Probe call count by running flush with exact budget that allows commit but not trim_svc_outbox!
+        let mut gcp_rt = None;
+        for cap in 8..=32u32 {
+            let probe = Rt::new();
+            probe.put_kv(
+                &cursor_key(SID),
+                json!({
+                    "scan_min": NOW_MIN - 2,
+                    "cache_min": NOW_MIN - 2,
+                    "svc_outbox_archived": 10,
+                    "svc_last_base": 10,
+                    "last_flush_s": NOW_S - 600,
+                    "last_svc_flush_s": NOW_S - 600,
+                }),
+            );
+            probe.put_kv(
+                "svc:svc1",
+                json!({
+                    "service_id": SID,
+                    "_audit_outbox_base": 10,
+                    "_audit_outbox": make_entries("pre10", 80, NOW_S - 200),
+                }),
+            );
+            probe.put_kv(
+                &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("gc1")),
+                cron_line("gc-tick-1"),
+            );
+            probe.put_kv(
+                &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 39, Some("gc2")),
+                cron_line("gc-tick-2"),
+            );
+            probe.budget.set(probe.calls.get() + cap);
+            let rep = run(&probe, true);
+            if rep.status == FlushStatus::GcPending
+                && probe.cursor().svc_outbox_archived == 90
+                && probe.get_kv("svc:svc1").unwrap()["_audit_outbox"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+                    == 80
+            {
+                gcp_rt = Some(probe);
+                break;
+            }
+        }
+        // Fallback: if flush's collect() always reserves SVC_TRIM_CALLS when single-group, test deferred GcPending
+        // directly by seeding the committed manifest right before trim (as happens after a transient CAS conflict on svc:svc1).
+        let rt_gcp = gcp_rt.unwrap_or_else(|| {
+            rt.budget.set(rt.calls.get() + 64);
+            let committed_manifest = Manifest {
+                txn_id: "txn-gcp-31a".into(),
+                start_min: NOW_MIN,
+                svc_range: (10, 90),
+                svc_observed_base: Some(10),
+                committed: true,
+                gc_done: false,
+                ..Default::default()
+            };
+            rt.put_kv(
+                &cursor_key(SID),
+                json!({
+                    "scan_min": NOW_MIN - 2,
+                    "cache_min": NOW_MIN - 2,
+                    "svc_outbox_archived": 90,
+                    "svc_last_base": 10,
+                    "last_flush_s": NOW_S,
+                    "last_svc_flush_s": NOW_S,
+                    "txn_id": "txn-gcp-31a",
+                }),
+            );
+            rt.put_kv(&manifest_key(SID), to_value(&committed_manifest));
+            rt
+        });
+
+        // External KV reset of svc:svc1 from base = 10 -> 0 with 80 brand-new unarchived entries:
+        rt_gcp.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 0,
+                "_audit_outbox": make_entries("post_reset", 80, NOW_S),
+            }),
+        );
+        rt_gcp.budget.set(rt_gcp.calls.get() + 64);
+        // Non-manual resume finishes ONLY the GcPending manifest (last_flush_s == NOW_S, not due for a new flush):
+        let resume_rep = run(&rt_gcp, false);
+        assert!(
+            matches!(
+                resume_rep.status,
+                FlushStatus::NotDue | FlushStatus::Committed
+            ),
+            "unexpected status: {:?}",
+            resume_rep.status
+        );
+        assert!(
+            rt_gcp.get_kv(&manifest_key(SID)).is_none(),
+            "GcPending manifest must be deleted after safe abort of trim_svc_outbox"
+        );
+        let after_gcp = rt_gcp.get_kv("svc:svc1").unwrap();
+        assert_eq!(
+            after_gcp["_audit_outbox_base"].as_u64(),
+            Some(0),
+            "BUG-CLOUD-OUTBOX-DR-31A (GcPending): base=10->0 reset must NOT be overwritten"
+        );
+        assert_eq!(
+            after_gcp["_audit_outbox"].as_array().unwrap().len(),
+            80,
+            "BUG-CLOUD-OUTBOX-DR-31A (GcPending): 80 post-reset entries must be preserved (0 dropped)"
+        );
+        assert_eq!(after_gcp["_audit_outbox"][0]["event"], "post_reset.0");
+
+        // Subsequent manual flush archives ALL 80 post-reset entries at source_seq 90..170 with 0 lost:
+        rt_gcp.budget.set(rt_gcp.calls.get() + 64);
+        let post_flush_rep = run(&rt_gcp, true);
+        assert_eq!(post_flush_rep.status, FlushStatus::Committed);
+        let post_rows: Vec<Value> = audit_rows(&rt_gcp)
+            .into_iter()
+            .filter(|r| {
+                r["action"]
+                    .as_str()
+                    .is_some_and(|a| a.starts_with("post_reset."))
+            })
+            .collect();
+        assert_eq!(
+            post_rows.len(),
+            80,
+            "BUG-CLOUD-OUTBOX-DR-31A (GcPending): all 80 post_reset entries must be archived (0 lost)"
+        );
+        assert_eq!(rt_gcp.cursor().svc_outbox_archived, 170);
+    }
+
+    // 2. Same-tick reset race (base = 10 -> 0 happens right after cursor commit, before gc() calls trim_svc_outbox)
+    // AND 3. Nonzero-to-smaller-nonzero reset race (base = 100 -> 10):
+    for (pre_base, post_base, label) in [
+        (10u64, 0u64, "same-tick 10->0"),
+        (100u64, 10u64, "nonzero-to-smaller-nonzero 100->10"),
+    ] {
+        struct RaceRt {
+            inner: Rt,
+            post_base: u64,
+            post_entries: Vec<Value>,
+            triggered: Cell<bool>,
+        }
+        impl SetupStores for RaceRt {
+            fn config_present(&self, n: &str) -> Result<bool, String> {
+                self.inner.config_present(n)
+            }
+            fn secret_present(&self, n: &str) -> Result<bool, String> {
+                self.inner.secret_present(n)
+            }
+            fn state_linked(&self) -> Result<bool, String> {
+                self.inner.state_linked()
+            }
+        }
+        impl Runtime for RaceRt {
+            fn config(&self, n: &str) -> Result<Option<String>, String> {
+                self.inner.config(n)
+            }
+            fn secret(&self, n: &str) -> Result<Option<String>, String> {
+                self.inner.secret(n)
+            }
+            fn random(&self) -> Result<[u8; 32], String> {
+                self.inner.random()
+            }
+            fn now(&self) -> u64 {
+                self.inner.now()
+            }
+            fn checks(&self, l: bool) -> Result<Value, String> {
+                self.inner.checks(l)
+            }
+            fn versions(&self) -> Result<Value, String> {
+                self.inner.versions()
+            }
+            fn compute_service_id(&self) -> Option<String> {
+                self.inner.compute_service_id()
+            }
+            fn compute_service_version(&self) -> Option<String> {
+                self.inner.compute_service_version()
+            }
+            fn admin_get(&self, key: &str) -> Result<Option<Record>, String> {
+                self.inner.admin_get(key)
+            }
+            fn admin_cas(
+                &self,
+                key: &str,
+                generation: Option<&str>,
+                value: &Value,
+            ) -> Result<bool, String> {
+                let ok = self.inner.admin_cas(key, generation, value)?;
+                if ok && key == cursor_key(SID) && !self.triggered.replace(true) {
+                    self.inner.put_kv(
+                        "svc:svc1",
+                        json!({
+                            "service_id": SID,
+                            "_audit_outbox_base": self.post_base,
+                            "_audit_outbox": self.post_entries,
+                        }),
+                    );
+                }
+                Ok(ok)
+            }
+            fn kv_list(
+                &self,
+                prefix: &str,
+                cursor: Option<&str>,
+                limit: u32,
+            ) -> Result<KvPage, String> {
+                self.inner.kv_list(prefix, cursor, limit)
+            }
+            fn kv_delete(&self, key: &str) -> Result<(), String> {
+                self.inner.kv_delete(key)
+            }
+            fn admin_fos(&self, req: FosRequest<'_>) -> Result<FosResponse, String> {
+                self.inner.admin_fos(req)
+            }
+            fn admin_remaining_calls(&self) -> u32 {
+                self.inner.admin_remaining_calls()
+            }
+            fn core_cache_lookup(
+                &self,
+                key: &str,
+            ) -> Result<Option<CoreCacheEntry>, CoreCacheError> {
+                self.inner.core_cache_lookup(key)
+            }
+            fn core_cache_replace(
+                &self,
+                key: &str,
+                surrogate_keys: &[&str],
+                ttl: Duration,
+                update: &dyn Fn(Option<CoreCacheEntry>) -> CoreCacheEntry,
+            ) -> Result<(), CoreCacheError> {
+                self.inner
+                    .core_cache_replace(key, surrogate_keys, ttl, update)
+            }
+            fn core_cache_purge(&self, surrogate: &str) -> Result<(), CoreCacheError> {
+                self.inner.core_cache_purge(surrogate)
+            }
+            fn vcpu_ms(&self) -> u64 {
+                self.inner.vcpu_ms()
+            }
+            fn admin_elapsed(&self, started: Instant) -> Duration {
+                self.inner.admin_elapsed(started)
+            }
+        }
+
+        let inner = Rt::new();
+        inner.put_kv(
+            &cursor_key(SID),
+            json!({
+                "scan_min": NOW_MIN - 2,
+                "cache_min": NOW_MIN - 2,
+                "svc_outbox_archived": pre_base,
+                "svc_last_base": pre_base,
+                "last_flush_s": NOW_S - 600,
+                "last_svc_flush_s": NOW_S - 600,
+            }),
+        );
+        inner.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": pre_base,
+                "_audit_outbox": make_entries("pre_race", 80, NOW_S - 200),
+            }),
+        );
+        inner.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("race")),
+            cron_line("race-tick"),
+        );
+        inner.budget.set(inner.calls.get() + 64);
+
+        let race_rt = RaceRt {
+            inner,
+            post_base,
+            post_entries: make_entries("race_post", 80, NOW_S),
+            triggered: Cell::new(false),
+        };
+        let rep = log_flush(
+            &race_rt,
+            SID,
+            Some(&target()),
+            &OperationalLogSettings::default(),
+            true,
+            Instant::now(),
+        )
+        .unwrap();
+        assert_eq!(rep.status, FlushStatus::Committed, "{label}");
+        assert!(race_rt.triggered.get(), "{label}: race must have fired");
+        let after = race_rt.inner.get_kv("svc:svc1").unwrap();
+        assert_eq!(
+            after["_audit_outbox_base"].as_u64(),
+            Some(post_base),
+            "BUG-CLOUD-OUTBOX-DR-31A ({label}): _audit_outbox_base was clobbered!"
+        );
+        assert_eq!(
+            after["_audit_outbox"].as_array().unwrap().len(),
+            80,
+            "BUG-CLOUD-OUTBOX-DR-31A ({label}): post-reset entries were dropped!"
+        );
+        assert_eq!(after["_audit_outbox"][0]["event"], "race_post.0");
+    }
+
+    // 4. virtual_base = 50 vs reset to raw_base = 10 (len = 5 AND len = 80): never overwrite nonzero raw_base with virtual_base!
+    for len in [5usize, 80usize] {
+        let rt_vb = Rt::new();
+        rt_vb.put_kv(
+            &cursor_key(SID),
+            json!({
+                "scan_min": NOW_MIN - 2,
+                "cache_min": NOW_MIN - 2,
+                "svc_outbox_archived": 55,
+                "svc_last_base": 0,
+                "last_flush_s": NOW_S,
+                "last_svc_flush_s": NOW_S,
+                "txn_id": "txn-vb-31a",
+            }),
+        );
+        let manifest_vb = Manifest {
+            txn_id: "txn-vb-31a".into(),
+            start_min: NOW_MIN,
+            svc_range: (50, 55),
+            svc_virtual_base: Some(50),
+            svc_observed_base: Some(0),
+            committed: true,
+            gc_done: false,
+            ..Default::default()
+        };
+        rt_vb.put_kv(&manifest_key(SID), to_value(&manifest_vb));
+        rt_vb.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 10,
+                "_audit_outbox": make_entries("vb_post", len, NOW_S),
+            }),
+        );
+        rt_vb.budget.set(rt_vb.calls.get() + 64);
+        let rep_vb = run(&rt_vb, false);
+        assert!(
+            matches!(rep_vb.status, FlushStatus::NotDue | FlushStatus::Committed),
+            "len={len}: unexpected status {:?}",
+            rep_vb.status
+        );
+        assert!(rt_vb.get_kv(&manifest_key(SID)).is_none(), "len={len}");
+        let after_vb = rt_vb.get_kv("svc:svc1").unwrap();
+        assert_eq!(
+            after_vb["_audit_outbox_base"].as_u64(),
+            Some(10),
+            "BUG-CLOUD-OUTBOX-DR-31A (virtual_base=50 vs raw_base=10, len={len}): must NOT overwrite nonzero raw_base"
+        );
+        assert_eq!(
+            after_vb["_audit_outbox"].as_array().unwrap().len(),
+            len,
+            "BUG-CLOUD-OUTBOX-DR-31A (virtual_base=50 vs raw_base=10, len={len}): 0 entries may be dropped"
+        );
+        assert_eq!(after_vb["_audit_outbox"][0]["event"], "vb_post.0");
+    }
+
+    // 5. BUG-CLOUD-OUTBOX-DR-31B: rollback/truncation preserving entries[0] (archived = 5 > 0 + 4)
+    {
+        let rt_rb = Rt::new();
+        rt_rb.set_cursor(NOW_MIN - 2);
+        let e0 = json!({"actor": "admin", "at": NOW_S - 50, "event": "e0", "config_version": 1});
+        let e1 = json!({"actor": "admin", "at": NOW_S - 40, "event": "e1", "config_version": 2});
+        let e2 = json!({"actor": "admin", "at": NOW_S - 30, "event": "e2", "config_version": 3});
+        let e3 = json!({"actor": "admin", "at": NOW_S - 20, "event": "e3", "config_version": 4});
+        let e4 = json!({"actor": "admin", "at": NOW_S - 10, "event": "e4", "config_version": 5});
+        rt_rb.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 0,
+                "_audit_outbox": [e0.clone(), e1.clone(), e2, e3, e4],
+            }),
+        );
+        rt_rb.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("rb1")),
+            cron_line("rb-tick-1"),
+        );
+        rt_rb.budget.set(rt_rb.calls.get() + 64);
+        assert_eq!(run(&rt_rb, false).status, FlushStatus::Committed);
+        assert_eq!(rt_rb.cursor().svc_outbox_archived, 5);
+        assert!(rt_rb.cursor().svc_zero_anchor.is_some());
+
+        // Rollback/truncation preserving entries[0] (len = 4 < archived = 5):
+        let post2 = json!({"actor": "admin", "at": NOW_S - 5, "event": "post_rollback.2", "config_version": 3});
+        let post3 = json!({"actor": "admin", "at": NOW_S - 4, "event": "post_rollback.3", "config_version": 4});
+        rt_rb.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 0,
+                "_audit_outbox": [e0, e1, post2, post3],
+            }),
+        );
+        rt_rb.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 39, Some("rb2")),
+            cron_line("rb-tick-2"),
+        );
+        rt_rb.budget.set(rt_rb.calls.get() + 64);
+        assert_eq!(run(&rt_rb, true).status, FlushStatus::Committed);
+
+        let rows_rb = audit_rows(&rt_rb);
+        assert_eq!(
+            rows_rb.len(),
+            9,
+            "BUG-CLOUD-OUTBOX-DR-31B: rollback preserving entries[0] (archived=5 > 0+4) must detect reset and archive all 4 post-rollback entries, got {}",
+            rows_rb.len()
+        );
+        assert!(
+            rows_rb.iter().any(|r| r["action"] == "post_rollback.2")
+                && rows_rb.iter().any(|r| r["action"] == "post_rollback.3"),
+            "BUG-CLOUD-OUTBOX-DR-31B: post_rollback.2 and post_rollback.3 were blackholed! rows={rows_rb:?}"
+        );
+        assert_eq!(rt_rb.cursor().svc_outbox_archived, 9);
+        assert_eq!(
+            rt_rb.get_kv("svc:svc1").unwrap()["_audit_outbox_base"].as_u64(),
+            Some(5)
+        );
+    }
+}
+
+#[test]
+fn bug_cloud_outbox_33a_epoch_anchor_rebase_and_gc_pending_continuity() {
+    let make_entries = |prefix: &str, count: usize, start_ts: u64| -> Vec<Value> {
+        (0..count)
+            .map(|i| {
+                json!({
+                    "actor": "admin",
+                    "at": start_ts + i as u64,
+                    "event": format!("{prefix}.{i}"),
+                    "config_version": i + 1,
+                })
+            })
+            .collect()
+    };
+    let audit_rows = |r: &Rt| -> Vec<Value> {
+        r.objects
+            .borrow()
+            .iter()
+            .filter(|(k, _)| k.contains("/admin_audit/"))
+            .flat_map(|(_, body)| schema::from_parquet(LogKind::AdminAudit, body.clone()).unwrap())
+            .collect()
+    };
+
+    // === PROBE-1A: Nonzero-to-smaller-nonzero reset (100 -> 10) across Flush 1, 2, 3 ===
+    {
+        let rt = Rt::new();
+        rt.put_kv(
+            &cursor_key(SID),
+            json!({
+                "scan_min": NOW_MIN - 2,
+                "cache_min": NOW_MIN - 2,
+                "svc_outbox_archived": 105,
+                "svc_last_base": 100,
+                "last_flush_s": NOW_S - 600,
+                "last_svc_flush_s": NOW_S - 600,
+            }),
+        );
+        let mut entries = make_entries("post10", 3, NOW_S - 50);
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 10,
+                "_audit_outbox": entries,
+            }),
+        );
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("f1")),
+            cron_line("f1-tick"),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+        assert_eq!(
+            rt.get_kv("svc:svc1").unwrap()["_audit_outbox_base"].as_u64(),
+            Some(105),
+            "PROBE-1A: Flush 1 must rebase _audit_outbox_base from 10 to 105"
+        );
+        assert_eq!(rt.cursor().svc_outbox_archived, 108);
+        assert_eq!(audit_rows(&rt).len(), 3);
+
+        // Append 1 new entry (post10.3) and run Flush 2, then Flush 3 (0 new entries).
+        entries.push(
+            json!({"actor": "admin", "at": NOW_S - 10, "event": "post10.3", "config_version": 4}),
+        );
+        let mut svc_val = rt.get_kv("svc:svc1").unwrap();
+        svc_val["_audit_outbox"] = Value::Array(entries);
+        rt.put_kv("svc:svc1", svc_val);
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 39, Some("f2")),
+            cron_line("f2-tick"),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+        assert_eq!(rt.cursor().svc_outbox_archived, 109);
+        assert_eq!(audit_rows(&rt).len(), 4);
+
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 38, Some("f3")),
+            cron_line("f3-tick"),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+        let rows = audit_rows(&rt);
+        let unique_eids: BTreeSet<String> = rows
+            .iter()
+            .filter_map(|r| r["event_id"].as_str().map(str::to_owned))
+            .collect();
+        let p0_count = rows.iter().filter(|r| r["action"] == "post10.0").count();
+        assert_eq!(
+            p0_count, 1,
+            "PROBE-1A: post10.0 must be archived exactly once (got {p0_count})"
+        );
+        assert_eq!(rows.len(), 4, "PROBE-1A: expected exactly 4 audit rows");
+        assert_eq!(unique_eids.len(), 4);
+        assert_eq!(rt.cursor().svc_outbox_archived, 109);
+    }
+
+    // === PROBE-1B: 100 -> 10 reset + 100 new entries (BOTH rebased AND un-rebased CAS-conflict variant) ===
+    for keep_unrebased_after_f1 in [false, true] {
+        let rt = Rt::new();
+        rt.put_kv(
+            &cursor_key(SID),
+            json!({
+                "scan_min": NOW_MIN - 2,
+                "cache_min": NOW_MIN - 2,
+                "svc_outbox_archived": 105,
+                "svc_last_base": 100,
+                "last_flush_s": NOW_S - 600,
+                "last_svc_flush_s": NOW_S - 600,
+            }),
+        );
+        let mut entries = make_entries("loss", 3, NOW_S - 200);
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 10,
+                "_audit_outbox": entries,
+            }),
+        );
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("l1")),
+            cron_line("l1-tick"),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+
+        for i in 3..103usize {
+            entries.push(json!({
+                "actor": "admin",
+                "at": NOW_S - 190 + i as u64,
+                "event": format!("loss.{i}"),
+                "config_version": i + 1,
+            }));
+        }
+        let mut svc_val = rt.get_kv("svc:svc1").unwrap();
+        if keep_unrebased_after_f1 {
+            // Simulate Flush 1 trim_svc_outbox losing a CAS conflict while cursor already committed!
+            svc_val["_audit_outbox_base"] = json!(10);
+        }
+        svc_val["_audit_outbox"] = Value::Array(entries);
+        rt.put_kv("svc:svc1", svc_val);
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 39, Some("l2")),
+            cron_line("l2-tick"),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+
+        let rows = audit_rows(&rt);
+        let archived_actions: BTreeSet<String> = rows
+            .iter()
+            .filter_map(|r| r["action"].as_str().map(str::to_owned))
+            .collect();
+        let missing_from_archive: Vec<String> = (0..103)
+            .map(|i| format!("loss.{i}"))
+            .filter(|a| !archived_actions.contains(a))
+            .collect();
+        let kv_after = rt.get_kv("svc:svc1").unwrap();
+        let kv_actions: BTreeSet<String> = kv_after["_audit_outbox"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["event"].as_str().map(str::to_owned))
+            .collect();
+        let permanently_destroyed: Vec<String> = missing_from_archive
+            .iter()
+            .filter(|a| !kv_actions.contains(*a))
+            .cloned()
+            .collect();
+        assert_eq!(
+            missing_from_archive.len(),
+            0,
+            "PROBE-1B (unrebased={keep_unrebased_after_f1}): missing {} entries from archive",
+            missing_from_archive.len()
+        );
+        assert_eq!(
+            permanently_destroyed.len(),
+            0,
+            "PROBE-1B (unrebased={keep_unrebased_after_f1}): permanently destroyed {} entries",
+            permanently_destroyed.len()
+        );
+        assert_eq!(rows.len(), 103);
+        assert_eq!(archived_actions.len(), 103);
+        assert_eq!(kv_after["_audit_outbox"].as_array().unwrap().len(), 50);
+        assert_eq!(kv_after["_audit_outbox_base"].as_u64(), Some(158));
+        assert_eq!(rt.cursor().svc_outbox_archived, 208);
+    }
+
+    // === PROBE-1C: 100 -> 10 reset with len=250 (> MAX_SVC_ENTRIES=200) -> ZERO livelock ===
+    {
+        let rt = Rt::new();
+        rt.put_kv(
+            &cursor_key(SID),
+            json!({
+                "scan_min": NOW_MIN - 2,
+                "cache_min": NOW_MIN - 2,
+                "svc_outbox_archived": 105,
+                "svc_last_base": 100,
+                "last_flush_s": NOW_S - 600,
+                "last_svc_flush_s": NOW_S - 600,
+            }),
+        );
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 10,
+                "_audit_outbox": make_entries("live", 250, NOW_S - 300),
+            }),
+        );
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("lv")),
+            cron_line("lv-tick"),
+        );
+        let mut statuses = Vec::new();
+        for _ in 0..5 {
+            rt.budget.set(rt.calls.get() + 64);
+            let rep = run(&rt, false);
+            statuses.push((rep.status, rep.behind, rt.cursor().svc_outbox_archived));
+        }
+        let rows = audit_rows(&rt);
+        let archived_actions: BTreeSet<String> = rows
+            .iter()
+            .filter_map(|r| r["action"].as_str().map(str::to_owned))
+            .collect();
+        assert_eq!(
+            rows.len(),
+            250,
+            "PROBE-1C: expected exactly 250 archived rows without livelock, got {} (statuses={statuses:?})",
+            rows.len()
+        );
+        assert_eq!(archived_actions.len(), 250);
+        assert!(archived_actions.contains("live.200"));
+        assert!(archived_actions.contains("live.249"));
+        assert_eq!(statuses[0], (FlushStatus::Committed, true, 305));
+        assert_eq!(statuses[1], (FlushStatus::Committed, false, 355));
+        assert_eq!(statuses[2].0, FlushStatus::NotDue);
+    }
+
+    // === PROBE-1D: GcPending nonzero-base race (10->10 and 10->20) -> 0 unarchived DR events dropped ===
+    for post_base in [10u64, 20u64] {
+        // 1D-i: Legacy GcPending manifest (no entry anchor)
+        {
+            let rt = Rt::new();
+            rt.put_kv(
+                &cursor_key(SID),
+                json!({
+                    "scan_min": NOW_MIN - 2,
+                    "cache_min": NOW_MIN - 2,
+                    "svc_outbox_archived": 90,
+                    "svc_last_base": 10,
+                    "last_flush_s": NOW_S,
+                    "last_svc_flush_s": NOW_S,
+                    "txn_id": "txn-pre-dr",
+                }),
+            );
+            let manifest = Manifest {
+                txn_id: "txn-pre-dr".into(),
+                start_min: NOW_MIN,
+                svc_range: (10, 90),
+                svc_virtual_base: None,
+                svc_observed_base: Some(10),
+                committed: true,
+                gc_done: false,
+                ..Default::default()
+            };
+            rt.put_kv(&manifest_key(SID), to_value(&manifest));
+            rt.put_kv(
+                "svc:svc1",
+                json!({
+                    "service_id": SID,
+                    "_audit_outbox_base": post_base,
+                    "_audit_outbox": make_entries("dr_unarchived", 80, NOW_S),
+                }),
+            );
+            rt.budget.set(rt.calls.get() + 64);
+            let _ = run(&rt, false);
+            assert!(rt.get_kv(&manifest_key(SID)).is_none());
+            let after = rt.get_kv("svc:svc1").unwrap();
+            assert_eq!(
+                after["_audit_outbox"].as_array().unwrap().len(),
+                80,
+                "PROBE-1D-legacy (post_base={post_base}): must preserve all 80 unarchived DR events"
+            );
+            assert_eq!(after["_audit_outbox"][0]["event"], "dr_unarchived.0");
+            assert_eq!(after["_audit_outbox_base"].as_u64(), Some(post_base));
+        }
+
+        // 1D-ii: Real same-tick race where collect() writes anchors and DR replaces svc:svc1 right after cursor commit
+        {
+            struct SameOrUpBaseRaceRt {
+                inner: Rt,
+                post_base: u64,
+                post_entries: Vec<Value>,
+                triggered: Cell<bool>,
+            }
+            impl SetupStores for SameOrUpBaseRaceRt {
+                fn config_present(&self, n: &str) -> Result<bool, String> {
+                    self.inner.config_present(n)
+                }
+                fn secret_present(&self, n: &str) -> Result<bool, String> {
+                    self.inner.secret_present(n)
+                }
+                fn state_linked(&self) -> Result<bool, String> {
+                    self.inner.state_linked()
+                }
+            }
+            impl Runtime for SameOrUpBaseRaceRt {
+                fn config(&self, n: &str) -> Result<Option<String>, String> {
+                    self.inner.config(n)
+                }
+                fn secret(&self, n: &str) -> Result<Option<String>, String> {
+                    self.inner.secret(n)
+                }
+                fn random(&self) -> Result<[u8; 32], String> {
+                    self.inner.random()
+                }
+                fn now(&self) -> u64 {
+                    self.inner.now()
+                }
+                fn checks(&self, l: bool) -> Result<Value, String> {
+                    self.inner.checks(l)
+                }
+                fn versions(&self) -> Result<Value, String> {
+                    self.inner.versions()
+                }
+                fn compute_service_id(&self) -> Option<String> {
+                    self.inner.compute_service_id()
+                }
+                fn compute_service_version(&self) -> Option<String> {
+                    self.inner.compute_service_version()
+                }
+                fn admin_get(&self, key: &str) -> Result<Option<Record>, String> {
+                    self.inner.admin_get(key)
+                }
+                fn admin_cas(
+                    &self,
+                    key: &str,
+                    generation: Option<&str>,
+                    value: &Value,
+                ) -> Result<bool, String> {
+                    let ok = self.inner.admin_cas(key, generation, value)?;
+                    if ok && key == cursor_key(SID) && !self.triggered.replace(true) {
+                        self.inner.put_kv(
+                            "svc:svc1",
+                            json!({
+                                "service_id": SID,
+                                "_audit_outbox_base": self.post_base,
+                                "_audit_outbox": self.post_entries,
+                            }),
+                        );
+                    }
+                    Ok(ok)
+                }
+                fn kv_list(
+                    &self,
+                    prefix: &str,
+                    cursor: Option<&str>,
+                    limit: u32,
+                ) -> Result<KvPage, String> {
+                    self.inner.kv_list(prefix, cursor, limit)
+                }
+                fn kv_delete(&self, key: &str) -> Result<(), String> {
+                    self.inner.kv_delete(key)
+                }
+                fn admin_fos(&self, req: FosRequest<'_>) -> Result<FosResponse, String> {
+                    self.inner.admin_fos(req)
+                }
+                fn admin_remaining_calls(&self) -> u32 {
+                    self.inner.admin_remaining_calls()
+                }
+                fn core_cache_lookup(
+                    &self,
+                    key: &str,
+                ) -> Result<Option<CoreCacheEntry>, CoreCacheError> {
+                    self.inner.core_cache_lookup(key)
+                }
+                fn core_cache_replace(
+                    &self,
+                    key: &str,
+                    surrogate_keys: &[&str],
+                    ttl: Duration,
+                    update: &dyn Fn(Option<CoreCacheEntry>) -> CoreCacheEntry,
+                ) -> Result<(), CoreCacheError> {
+                    self.inner
+                        .core_cache_replace(key, surrogate_keys, ttl, update)
+                }
+                fn core_cache_purge(&self, surrogate: &str) -> Result<(), CoreCacheError> {
+                    self.inner.core_cache_purge(surrogate)
+                }
+                fn vcpu_ms(&self) -> u64 {
+                    self.inner.vcpu_ms()
+                }
+                fn admin_elapsed(&self, started: Instant) -> Duration {
+                    self.inner.admin_elapsed(started)
+                }
+            }
+
+            let inner = Rt::new();
+            inner.put_kv(
+                &cursor_key(SID),
+                json!({
+                    "scan_min": NOW_MIN - 2,
+                    "cache_min": NOW_MIN - 2,
+                    "svc_outbox_archived": 10,
+                    "svc_last_base": 10,
+                    "last_flush_s": NOW_S - 600,
+                    "last_svc_flush_s": NOW_S - 600,
+                }),
+            );
+            inner.put_kv(
+                "svc:svc1",
+                json!({
+                    "service_id": SID,
+                    "_audit_outbox_base": 10,
+                    "_audit_outbox": make_entries("pre_dr", 80, NOW_S - 200),
+                }),
+            );
+            inner.put_kv(
+                &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("r1d")),
+                cron_line("r1d-tick"),
+            );
+            inner.budget.set(inner.calls.get() + 64);
+
+            let race_rt = SameOrUpBaseRaceRt {
+                inner,
+                post_base,
+                post_entries: make_entries("dr_unarchived", 80, NOW_S - 100),
+                triggered: Cell::new(false),
+            };
+            let rep = log_flush(
+                &race_rt,
+                SID,
+                Some(&target()),
+                &OperationalLogSettings::default(),
+                true,
+                Instant::now(),
+            )
+            .unwrap();
+            assert_eq!(rep.status, FlushStatus::Committed);
+            assert!(race_rt.triggered.get());
+            let after = race_rt.inner.get_kv("svc:svc1").unwrap();
+            assert_eq!(
+                after["_audit_outbox"].as_array().unwrap().len(),
+                80,
+                "PROBE-1D-real-race (post_base={post_base}): must preserve all 80 unarchived DR events"
+            );
+            assert_eq!(after["_audit_outbox"][0]["event"], "dr_unarchived.0");
+            assert_eq!(after["_audit_outbox_base"].as_u64(), Some(post_base));
+
+            // Subsequent flush must detect replacement via anchor mismatch and archive all 80!
+            race_rt.inner.put_kv(
+                &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 39, Some("r1d2")),
+                cron_line("r1d2-tick"),
+            );
+            race_rt.inner.budget.set(race_rt.inner.calls.get() + 64);
+            assert_eq!(run(&race_rt.inner, true).status, FlushStatus::Committed);
+            let dr_rows: Vec<Value> = audit_rows(&race_rt.inner)
+                .into_iter()
+                .filter(|r| {
+                    r["action"]
+                        .as_str()
+                        .is_some_and(|a| a.starts_with("dr_unarchived."))
+                })
+                .collect();
+            assert_eq!(
+                dr_rows.len(),
+                80,
+                "PROBE-1D-real-race (post_base={post_base}): next flush must archive all 80 replaced entries"
+            );
+            assert_eq!(race_rt.inner.cursor().svc_outbox_archived, 170);
+        }
+    }
+
+    // === PROBE-1E: Same-base (100 -> 100) truncation (archived=105 > 100 + 2) across 3 flushes ===
+    {
+        let rt = Rt::new();
+        rt.put_kv(
+            &cursor_key(SID),
+            json!({
+                "scan_min": NOW_MIN - 2,
+                "cache_min": NOW_MIN - 2,
+                "svc_outbox_archived": 105,
+                "svc_last_base": 100,
+                "last_flush_s": NOW_S - 600,
+                "last_svc_flush_s": NOW_S - 600,
+            }),
+        );
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 100,
+                "_audit_outbox": make_entries("trunc100", 2, NOW_S - 50),
+            }),
+        );
+        for i in 0..3 {
+            rt.put_kv(
+                &outbox_key(
+                    SID,
+                    NOW_S / OUTBOX_BUCKET_S - 40 + i,
+                    Some(&format!("t{i}")),
+                ),
+                cron_line(&format!("t{i}-tick")),
+            );
+            rt.budget.set(rt.calls.get() + 64);
+            assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+        }
+        let rows = audit_rows(&rt);
+        let t0_count = rows.iter().filter(|r| r["action"] == "trunc100.0").count();
+        assert_eq!(
+            t0_count, 1,
+            "PROBE-1E: trunc100.0 must be archived exactly once (got {t0_count})"
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rt.get_kv("svc:svc1").unwrap()["_audit_outbox_base"].as_u64(),
+            Some(105)
+        );
+        assert_eq!(rt.cursor().svc_outbox_archived, 107);
+    }
+}
+
+#[test]
+fn rt_f1_f2_f3_cloud_outbox_coordinate_space_slice_anchor_and_stopped_resume() {
+    let audit_rows = |r: &Rt| -> Vec<Value> {
+        r.objects
+            .borrow()
+            .iter()
+            .filter(|(k, _)| k.contains("/admin_audit/"))
+            .flat_map(|(_, body)| schema::from_parquet(LogKind::AdminAudit, body.clone()).unwrap())
+            .collect()
+    };
+
+    // === RT-F1a: Branch 1a coordinate-space mismatch (95 -> 270 after trim, len=220) ===
+    {
+        let rt = Rt::new();
+        rt.put_kv(
+            &cursor_key(SID),
+            json!({
+                "scan_min": NOW_MIN - 2,
+                "cache_min": NOW_MIN - 2,
+                "svc_outbox_archived": 100,
+                "svc_last_base": 100,
+                "last_flush_s": NOW_S - 600,
+                "last_svc_flush_s": NOW_S - 600,
+            }),
+        );
+        // Same-second repeated `service.updated` events so entries[24] == entries[29] after trim!
+        let repeated = json!({
+            "actor": "admin",
+            "at": NOW_S - 50,
+            "event": "service.updated",
+            "config_version": 2,
+        });
+        let entries: Vec<Value> = (0..220)
+            .map(|i| {
+                if i < 200 {
+                    repeated.clone()
+                } else {
+                    json!({
+                        "actor": "admin",
+                        "at": NOW_S - 40 + (i - 200) as u64,
+                        "event": format!("tail.{i}"),
+                        "config_version": i + 1,
+                    })
+                }
+            })
+            .collect();
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 95,
+                "_audit_outbox": entries,
+            }),
+        );
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("f1a1")),
+            cron_line("f1a1-tick"),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+        assert_eq!(rt.cursor().svc_outbox_archived, 300);
+        assert_eq!(
+            rt.get_kv("svc:svc1").unwrap()["_audit_outbox_base"].as_u64(),
+            Some(270),
+            "RT-F1a: Tick 1 must rebase and trim 95 -> 270"
+        );
+        assert_eq!(audit_rows(&rt).len(), 200);
+
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 39, Some("f1a2")),
+            cron_line("f1a2-tick"),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+        let rows = audit_rows(&rt);
+        assert_eq!(
+            rows.len(),
+            220,
+            "RT-F1a: Tick 2 must archive only the 20 remaining entries (total 220, not 225 duplicate rows), got {}",
+            rows.len()
+        );
+        assert_eq!(rt.cursor().svc_outbox_archived, 320);
+    }
+
+    // === RT-F1b: Branch 1a coordinate-space mismatch (95 -> 100 after rebase with removable=0, len=20 + 1) ===
+    {
+        let rt = Rt::new();
+        rt.put_kv(
+            &cursor_key(SID),
+            json!({
+                "scan_min": NOW_MIN - 2,
+                "cache_min": NOW_MIN - 2,
+                "svc_outbox_archived": 100,
+                "svc_last_base": 100,
+                "last_flush_s": NOW_S - 600,
+                "last_svc_flush_s": NOW_S - 600,
+            }),
+        );
+        let repeated = json!({
+            "actor": "admin",
+            "at": NOW_S - 50,
+            "event": "service.updated",
+            "config_version": 2,
+        });
+        let mut entries: Vec<Value> = vec![repeated; 20];
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 95,
+                "_audit_outbox": entries,
+            }),
+        );
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("f1b1")),
+            cron_line("f1b1-tick"),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+        assert_eq!(rt.cursor().svc_outbox_archived, 120);
+        assert_eq!(
+            rt.get_kv("svc:svc1").unwrap()["_audit_outbox_base"].as_u64(),
+            Some(100),
+            "RT-F1b: Tick 1 must rebase 95 -> 100"
+        );
+
+        entries.push(json!({
+            "actor": "admin",
+            "at": NOW_S - 10,
+            "event": "new.20",
+            "config_version": 21,
+        }));
+        let mut svc_val = rt.get_kv("svc:svc1").unwrap();
+        svc_val["_audit_outbox"] = Value::Array(entries);
+        rt.put_kv("svc:svc1", svc_val);
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 39, Some("f1b2")),
+            cron_line("f1b2-tick"),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+        let rows = audit_rows(&rt);
+        assert_eq!(
+            rows.len(),
+            21,
+            "RT-F1b: Tick 2 must archive only 1 new entry (total 21, not 26), got {}",
+            rows.len()
+        );
+        assert_eq!(rt.cursor().svc_outbox_archived, 121);
+    }
+
+    // === RT-F2a: Shifted-base replacement (0 -> 5 and 0 -> 10) with matching same-second boundary event ===
+    for shifted_base in [5u64, 10u64] {
+        let rt = Rt::new();
+        rt.set_cursor(NOW_MIN - 2);
+        let shared_event = json!({
+            "actor": "admin",
+            "at": NOW_S - 30,
+            "event": "service.updated",
+            "config_version": 2,
+        });
+        let mut orig: Vec<Value> = (0..19)
+            .map(|i| {
+                json!({
+                    "actor": "admin",
+                    "at": NOW_S - 100 + i as u64,
+                    "event": format!("orig.{i}"),
+                    "config_version": i + 1,
+                })
+            })
+            .collect();
+        orig.push(shared_event.clone());
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 0,
+                "_audit_outbox": orig,
+            }),
+        );
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("f2a1")),
+            cron_line("f2a1-tick"),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+        assert_eq!(rt.cursor().svc_outbox_archived, 20);
+
+        // Replace svc:svc1 with shifted_base (5 or 10) and 20 unarchived entries whose boundary_pos
+        // happens to equal `shared_event`!
+        let boundary_pos = (20 - 1 - shifted_base) as usize;
+        let replaced: Vec<Value> = (0..20)
+            .map(|i| {
+                if i == boundary_pos {
+                    shared_event.clone()
+                } else {
+                    json!({
+                        "actor": "admin",
+                        "at": NOW_S - 20 + i as u64,
+                        "event": format!("shifted.{i}"),
+                        "config_version": i + 1,
+                    })
+                }
+            })
+            .collect();
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": shifted_base,
+                "_audit_outbox": replaced,
+            }),
+        );
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 39, Some("f2a2")),
+            cron_line("f2a2-tick"),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+        let rows = audit_rows(&rt);
+        assert_eq!(
+            rows.len(),
+            40,
+            "RT-F2a (shifted_base={shifted_base}): shifted-base replacement must archive all 20 replaced entries (total 40), got {}",
+            rows.len()
+        );
+        assert!(
+            rows.iter().any(|r| r["action"] == "shifted.0"),
+            "RT-F2a (shifted_base={shifted_base}): shifted.0 was silently dropped!"
+        );
+        assert_eq!(rt.cursor().svc_outbox_archived, 40);
+    }
+
+    // === RT-F2b: Legacy anchorless cursor (last_flush_s = 0 and last_flush_s = NOW_S) must fail safe & archive ===
+    for last_flush_s in [0u64, NOW_S] {
+        let rt = Rt::new();
+        rt.put_kv(
+            &cursor_key(SID),
+            json!({
+                "scan_min": NOW_MIN - 2,
+                "cache_min": NOW_MIN - 2,
+                "svc_outbox_archived": 20,
+                "last_flush_s": last_flush_s,
+            }),
+        );
+        let entries: Vec<Value> = (0..20)
+            .map(|i| {
+                json!({
+                    "actor": "admin",
+                    "at": NOW_S - 50 + i as u64,
+                    "event": format!("legacy_unarchived.{i}"),
+                    "config_version": i + 1,
+                })
+            })
+            .collect();
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 0,
+                "_audit_outbox": entries,
+            }),
+        );
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("f2b")),
+            cron_line("f2b-tick"),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+        let rows = audit_rows(&rt);
+        assert_eq!(
+            rows.len(),
+            20,
+            "RT-F2b (last_flush_s={last_flush_s}): legacy anchorless cursor must archive all 20 entries instead of blackholing, got {}",
+            rows.len()
+        );
+        assert_eq!(rt.cursor().svc_outbox_archived, 40);
+    }
+
+    // === RT-F3: Uncommitted Stopped manifest resume must NOT archive swapped svc outbox twice ===
+    {
+        let rt = Rt::new();
+        rt.put_kv(
+            &cursor_key(SID),
+            json!({
+                "scan_min": NOW_MIN - 2,
+                "cache_min": NOW_MIN - 2,
+                "svc_outbox_archived": 100,
+                "svc_last_base": 100,
+                "last_flush_s": NOW_S - 600,
+                "last_svc_flush_s": NOW_S - 600,
+            }),
+        );
+        let orig: Vec<Value> = (0..20)
+            .map(|i| {
+                json!({
+                    "actor": "admin",
+                    "at": NOW_S - 100 + i as u64,
+                    "event": format!("orig.{i}"),
+                    "config_version": i + 1,
+                })
+            })
+            .collect();
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 10,
+                "_audit_outbox": orig,
+            }),
+        );
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("f3-1")),
+            cron_line("f3-1-tick"),
+        );
+        // Tick 1: collect svc_range=(100, 120), save manifest, hit WALL_STOP -> Stopped!
+        rt.elapsed_s.set(WALL_STOP.as_secs());
+        rt.budget.set(rt.calls.get() + 64);
+        let t1 = run(&rt, true);
+        assert_eq!(t1.status, FlushStatus::Stopped);
+        assert!(rt.get_kv(&manifest_key(SID)).is_some());
+
+        // Swap svc:svc1 while Stopped (raw_base=20, 20 new swap.* entries):
+        let swap: Vec<Value> = (0..20)
+            .map(|i| {
+                json!({
+                    "actor": "admin",
+                    "at": NOW_S - 50 + i as u64,
+                    "event": format!("swap.{i}"),
+                    "config_version": i + 1,
+                })
+            })
+            .collect();
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 20,
+                "_audit_outbox": swap,
+            }),
+        );
+
+        // Tick 2 & Tick 3 with normal wall time:
+        rt.elapsed_s.set(0);
+        rt.budget.set(rt.calls.get() + 64);
+        let t2 = run(&rt, true);
+        assert!(matches!(
+            t2.status,
+            FlushStatus::Committed | FlushStatus::NotDue
+        ));
+
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 39, Some("f3-3")),
+            cron_line("f3-3-tick"),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+
+        let rows = audit_rows(&rt);
+        let swap0_count = rows.iter().filter(|r| r["action"] == "swap.0").count();
+        assert_eq!(
+            swap0_count,
+            1,
+            "RT-F3: swap.0 must be archived exactly once (got {swap0_count}, total_rows={})",
+            rows.len()
+        );
+        assert_eq!(
+            rows.len(),
+            20,
+            "RT-F3: expected exactly 20 archived rows (swap.0..19 once), got {}",
+            rows.len()
+        );
+        assert_eq!(rt.cursor().svc_outbox_archived, 120);
+    }
+}
+
+#[test]
+fn iter35_m1_pre_lease_stale_manifest_cannot_delete_committed_fos_or_active_manifest() {
+    let audit_rows = |r: &Rt| -> Vec<Value> {
+        r.objects
+            .borrow()
+            .iter()
+            .filter(|(k, _)| k.contains("/admin_audit/"))
+            .flat_map(|(_, body)| schema::from_parquet(LogKind::AdminAudit, body.clone()).unwrap())
+            .collect()
+    };
+    let make_entries = |prefix: &str, count: usize, start_at: u64| -> Vec<Value> {
+        (0..count)
+            .map(|i| {
+                json!({
+                    "actor": "admin",
+                    "at": start_at + i as u64,
+                    "event": format!("{prefix}.{i}"),
+                    "config_version": i + 1,
+                })
+            })
+            .collect()
+    };
+
+    // Challenger 1 Probe A:
+    // 1. T1 is written as uncommitted manifest (Stopped) for 60 svc audit entries.
+    // 2. Worker A reads cursor_record + manifest_record (T1) BEFORE acquiring `logs:flush_lease`.
+    // 3. Before Worker A acquires `logs:flush_lease`:
+    //    - Worker B commits T1 (writes 60 FOS Parquet rows, trims svc base 0 -> 10, deletes manifest).
+    //    - Worker C commits T2 (advances cursor txn_id to T2 != T1).
+    //    - If `with_t3`, Worker D leaves uncommitted manifest T3 (Stopped).
+    // 4. Worker A acquires `logs:flush_lease` and runs -> MUST NOT delete T1's 60 committed FOS
+    //    rows and MUST NOT delete T3's active manifest!
+    for with_t3 in [true, false] {
+        struct PreLeaseRaceRt {
+            inner: Rt,
+            with_t3: bool,
+            raced: Cell<bool>,
+            t3_txn_id: RefCell<Option<String>>,
+        }
+        impl SetupStores for PreLeaseRaceRt {
+            fn config_present(&self, n: &str) -> Result<bool, String> {
+                self.inner.config_present(n)
+            }
+            fn secret_present(&self, n: &str) -> Result<bool, String> {
+                self.inner.secret_present(n)
+            }
+            fn state_linked(&self) -> Result<bool, String> {
+                self.inner.state_linked()
+            }
+        }
+        impl Runtime for PreLeaseRaceRt {
+            fn config(&self, k: &str) -> Result<Option<String>, String> {
+                self.inner.config(k)
+            }
+            fn secret(&self, k: &str) -> Result<Option<String>, String> {
+                self.inner.secret(k)
+            }
+            fn random(&self) -> Result<[u8; 32], String> {
+                self.inner.random()
+            }
+            fn now(&self) -> u64 {
+                self.inner.now()
+            }
+            fn checks(&self, l: bool) -> Result<Value, String> {
+                self.inner.checks(l)
+            }
+            fn versions(&self) -> Result<Value, String> {
+                self.inner.versions()
+            }
+            fn compute_service_id(&self) -> Option<String> {
+                self.inner.compute_service_id()
+            }
+            fn compute_service_version(&self) -> Option<String> {
+                self.inner.compute_service_version()
+            }
+            fn admin_get(&self, key: &str) -> Result<Option<Record>, String> {
+                if key == LEASE_KEY && !self.raced.replace(true) {
+                    // Worker B commits T1:
+                    self.inner.elapsed_s.set(0);
+                    self.inner.budget.set(self.inner.calls.get() + 64);
+                    let rep_b = run(&self.inner, true);
+                    assert_eq!(rep_b.status, FlushStatus::Committed);
+                    let t1_cursor_txn = self.inner.cursor().txn_id;
+
+                    // Worker C commits T2 (cursor txn_id moves from T1 -> T2):
+                    self.inner.put_kv(
+                        &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 39, Some("c")),
+                        cron_line("worker-c"),
+                    );
+                    self.inner.budget.set(self.inner.calls.get() + 64);
+                    let rep_c = run(&self.inner, true);
+                    assert_eq!(rep_c.status, FlushStatus::Committed);
+                    assert_ne!(self.inner.cursor().txn_id, t1_cursor_txn);
+
+                    if self.with_t3 {
+                        // Worker D starts T3 and hits WALL_STOP -> leaves active uncommitted T3 manifest:
+                        self.inner.put_kv(
+                            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 38, Some("d")),
+                            cron_line("worker-d"),
+                        );
+                        self.inner.elapsed_s.set(WALL_STOP.as_secs());
+                        self.inner.budget.set(self.inner.calls.get() + 64);
+                        let rep_d = run(&self.inner, true);
+                        assert_eq!(rep_d.status, FlushStatus::Stopped);
+                        let m_t3 = self.inner.get_kv(&manifest_key(SID)).unwrap();
+                        *self.t3_txn_id.borrow_mut() =
+                            Some(m_t3["txn_id"].as_str().unwrap().to_owned());
+                    }
+
+                    // Restore normal wall-clock and generous budget for Worker A:
+                    self.inner.elapsed_s.set(0);
+                    self.inner.budget.set(self.inner.calls.get() + 64);
+                }
+                self.inner.admin_get(key)
+            }
+            fn admin_cas(
+                &self,
+                key: &str,
+                generation: Option<&str>,
+                value: &Value,
+            ) -> Result<bool, String> {
+                self.inner.admin_cas(key, generation, value)
+            }
+            fn kv_list(
+                &self,
+                prefix: &str,
+                cursor: Option<&str>,
+                limit: u32,
+            ) -> Result<KvPage, String> {
+                self.inner.kv_list(prefix, cursor, limit)
+            }
+            fn kv_delete(&self, key: &str) -> Result<(), String> {
+                self.inner.kv_delete(key)
+            }
+            fn admin_fos(&self, req: FosRequest<'_>) -> Result<FosResponse, String> {
+                self.inner.admin_fos(req)
+            }
+            fn admin_remaining_calls(&self) -> u32 {
+                self.inner.admin_remaining_calls()
+            }
+            fn core_cache_lookup(
+                &self,
+                key: &str,
+            ) -> Result<Option<CoreCacheEntry>, CoreCacheError> {
+                self.inner.core_cache_lookup(key)
+            }
+            fn core_cache_replace(
+                &self,
+                key: &str,
+                surrogate_keys: &[&str],
+                ttl: Duration,
+                update: &dyn Fn(Option<CoreCacheEntry>) -> CoreCacheEntry,
+            ) -> Result<(), CoreCacheError> {
+                self.inner
+                    .core_cache_replace(key, surrogate_keys, ttl, update)
+            }
+            fn core_cache_purge(&self, surrogate: &str) -> Result<(), CoreCacheError> {
+                self.inner.core_cache_purge(surrogate)
+            }
+            fn vcpu_ms(&self) -> u64 {
+                self.inner.vcpu_ms()
+            }
+            fn admin_elapsed(&self, started: Instant) -> Duration {
+                self.inner.admin_elapsed(started)
+            }
+        }
+
+        let inner = Rt::new();
+        inner.set_cursor(NOW_MIN - 2);
+        inner.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 0,
+                "_audit_outbox": make_entries("t1_audit", 60, NOW_S - 200),
+            }),
+        );
+        inner.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("a")),
+            cron_line("worker-a"),
+        );
+        // Create uncommitted T1 manifest (Stopped at WALL_STOP):
+        inner.elapsed_s.set(WALL_STOP.as_secs());
+        inner.budget.set(inner.calls.get() + 64);
+        assert_eq!(run(&inner, true).status, FlushStatus::Stopped);
+        assert!(inner.get_kv(&manifest_key(SID)).is_some());
+
+        inner.elapsed_s.set(0);
+        inner.budget.set(inner.calls.get() + 64);
+        let race_rt = PreLeaseRaceRt {
+            inner,
+            with_t3,
+            raced: Cell::new(false),
+            t3_txn_id: RefCell::new(None),
+        };
+        let rep_a = log_flush(
+            &race_rt,
+            SID,
+            Some(&target()),
+            &OperationalLogSettings::default(),
+            true,
+            Instant::now(),
+        )
+        .unwrap();
+        assert!(race_rt.raced.get());
+        let rows_after = audit_rows(&race_rt.inner);
+        assert_eq!(
+            rows_after.len(),
+            60,
+            "M1 Probe A (with_t3={with_t3}): stale Worker A deleted T1's 60 committed FOS audit rows! status={:?}, remaining={}",
+            rep_a.status,
+            rows_after.len()
+        );
+        if with_t3 {
+            let expected_t3 = race_rt.t3_txn_id.borrow().clone().unwrap();
+            let cur_m = race_rt.inner.get_kv(&manifest_key(SID));
+            assert_eq!(
+                cur_m.as_ref().and_then(|v| v["txn_id"].as_str()),
+                Some(expected_t3.as_str()),
+                "M1 Probe A: stale Worker A deleted or clobbered T3's active manifest! got {cur_m:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn iter35_m5_legacy_svc_zero_anchor_without_prefix_anchor_fails_closed() {
+    let audit_rows = |r: &Rt| -> Vec<Value> {
+        r.objects
+            .borrow()
+            .iter()
+            .filter(|(k, _)| k.contains("/admin_audit/"))
+            .flat_map(|(_, body)| schema::from_parquet(LogKind::AdminAudit, body.clone()).unwrap())
+            .collect()
+    };
+
+    let head_entry = json!({
+        "actor": "admin",
+        "at": NOW_S - 100,
+        "event": "service.updated",
+        "config_version": 1,
+    });
+    let head_anchor = svc_entry_anchor(&head_entry);
+
+    // Challenger 1 Probe F — BOTH Branch 2b (svc_zero_virtual_base == 0) AND Branch 1b (svc_zero_virtual_base > 0):
+    // Head-only `svc_zero_anchor` cursors lacking full-slice `svc_prefix_anchor` MUST fail closed
+    // and re-archive all 50 entries instead of silently dropping 49 forged middle/boundary entries!
+    for (label, archived, virtual_base) in [
+        ("branch_2b_zero_vb", 50u64, 0u64),
+        ("branch_1b_nonzero_vb", 150u64, 100u64),
+    ] {
+        let rt = Rt::new();
+        rt.put_kv(
+            &cursor_key(SID),
+            json!({
+                "scan_min": NOW_MIN - 2,
+                "cache_min": NOW_MIN - 2,
+                "svc_outbox_archived": archived,
+                "svc_last_base": 0,
+                "svc_zero_anchor": head_anchor,
+                "svc_zero_virtual_base": virtual_base,
+                "last_flush_s": NOW_S,
+                "last_svc_flush_s": NOW_S,
+            }),
+        );
+        let mut entries = vec![head_entry.clone()];
+        for i in 1..50usize {
+            entries.push(json!({
+                "actor": "admin",
+                "at": NOW_S - 50 + (i as u64).min(40),
+                "event": format!("forged_{label}.{i}"),
+                "config_version": i + 1,
+            }));
+        }
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": 0,
+                "_audit_outbox": entries,
+            }),
+        );
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some(label)),
+            cron_line(label),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+
+        let rows = audit_rows(&rt);
+        assert_eq!(
+            rows.len(),
+            50,
+            "M5 Probe F ({label}): head-only svc_zero_anchor cursor failed open and dropped entries! archived={}",
+            rows.len()
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r["action"] == format!("forged_{label}.1")),
+            "M5 Probe F ({label}): forged entry 1 was silently dropped"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r["action"] == format!("forged_{label}.49")),
+            "M5 Probe F ({label}): forged entry 49 was silently dropped"
+        );
+        assert_eq!(rt.cursor().svc_outbox_archived, archived + 50);
+    }
+}
+
+#[test]
+fn iter35_m1_svc_outbox_u64_max_base_overflow_resets_cleanly() {
+    let audit_rows = |r: &Rt| -> Vec<Value> {
+        r.objects
+            .borrow()
+            .iter()
+            .filter(|(k, _)| k.contains("/admin_audit/"))
+            .flat_map(|(_, body)| schema::from_parquet(LogKind::AdminAudit, body.clone()).unwrap())
+            .collect()
+    };
+    let entries5: Vec<Value> = (0..5usize)
+        .map(|i| {
+            json!({
+                "actor": "admin",
+                "at": NOW_S - 50 + i as u64,
+                "event": format!("u64_ovf.{i}"),
+                "config_version": i + 1,
+            })
+        })
+        .collect();
+
+    // Case (a) archived=0 and Case (b) archived=10 with `_audit_outbox_base = u64::MAX - 2` (len=5 -> base+len overflows u64!):
+    for (label, archived) in [("ovf_arch0", 0u64), ("ovf_arch10", 10u64)] {
+        let rt = Rt::new();
+        rt.put_kv(
+            &cursor_key(SID),
+            json!({
+                "scan_min": NOW_MIN - 2,
+                "cache_min": NOW_MIN - 2,
+                "svc_outbox_archived": archived,
+                "svc_last_base": 0,
+                "last_flush_s": NOW_S - 600,
+            }),
+        );
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": u64::MAX - 2,
+                "_audit_outbox": entries5,
+            }),
+        );
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some(label)),
+            cron_line(label),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        assert_eq!(run(&rt, true).status, FlushStatus::Committed);
+        let rows = audit_rows(&rt);
+        assert_eq!(
+            rows.len(),
+            5,
+            "m1 ({label}): must cleanly reset overflow base and archive all 5 entries, got {}",
+            rows.len()
+        );
+        assert_eq!(rt.cursor().svc_outbox_archived, archived + 5);
+        assert_eq!(
+            rt.get_kv("svc:svc1").unwrap()["_audit_outbox_base"].as_u64(),
+            Some(archived),
+            "m1 ({label}): must rebase overflowed _audit_outbox_base cleanly to {archived}"
+        );
+    }
+
+    // Case (c): archived near u64::MAX (u64::MAX - 1) + raw_base = u64::MAX - 2 + len = 5 -> must NOT panic or wrap!
+    {
+        let rt = Rt::new();
+        rt.put_kv(
+            &cursor_key(SID),
+            json!({
+                "scan_min": NOW_MIN - 2,
+                "cache_min": NOW_MIN - 2,
+                "svc_outbox_archived": u64::MAX - 1,
+                "svc_last_base": u64::MAX - 2,
+                "svc_kv_archived": u64::MAX - 1,
+                "last_flush_s": NOW_S - 600,
+            }),
+        );
+        rt.put_kv(
+            "svc:svc1",
+            json!({
+                "service_id": SID,
+                "_audit_outbox_base": u64::MAX - 2,
+                "_audit_outbox": entries5,
+            }),
+        );
+        rt.put_kv(
+            &outbox_key(SID, NOW_S / OUTBOX_BUCKET_S - 40, Some("ovf_arch_max")),
+            cron_line("ovf_arch_max"),
+        );
+        rt.budget.set(rt.calls.get() + 64);
+        let rep = run(&rt, true);
+        assert_eq!(rep.status, FlushStatus::Committed);
+        assert_eq!(rt.cursor().svc_outbox_archived, u64::MAX - 1);
+    }
+}

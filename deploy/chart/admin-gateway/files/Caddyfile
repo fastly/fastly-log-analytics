@@ -17,6 +17,7 @@
 			wrap json
 			fields {
 				request>headers>X-Admin-Gateway-Token delete
+				request>headers>X-FLA-Admin-Gateway delete
 			}
 		}
 	}
@@ -52,17 +53,26 @@ https://:{$ADMIN_GATEWAY_PORT:8443} {
 		route {
 			request_header -X-Remote-Analyst
 			request_header -X-Proxied-By-Caddy
+			request_header -X-FLA-Public-Gateway
+			request_header -X-FLA-Frontend-Proxy
+			request_header -X-FLA-Admin-Gateway
 			request_header -Fastly-Client-IP
 			request_header X-Admin-Gateway-Token {env.ADMIN_GATEWAY_SECRET}
 			@api path /api/* /js/* /rum-beacon
 			reverse_proxy @api {$ADMIN_GATEWAY_BACKEND:127.0.0.1:8000} {
 				flush_interval -1
 				transport http {
+					# Below the app's 5 s keep-alive, so Caddy never reuses a socket it closed.
+					keepalive 4s
 					response_header_timeout 180s
 					read_timeout 180s
 				}
 			}
-			reverse_proxy {$ADMIN_GATEWAY_FRONTEND:127.0.0.1:3000}
+			reverse_proxy {$ADMIN_GATEWAY_FRONTEND:127.0.0.1:3000} {
+				transport http {
+					keepalive 4s
+				}
+			}
 		}
 	}
 	# Any other Host: close without proxying or injecting the credential.

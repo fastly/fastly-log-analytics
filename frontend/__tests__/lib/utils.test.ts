@@ -62,9 +62,9 @@ describe('downloadAsCsv', () => {
 })
 
 describe('isIpFamilyField, formatPopGeo & shouldLoadRumScript', () => {
-  it('matches client-IP-family columns and rejects non-IP / origin IP columns', () => {
-    for (const col of ['ip', 'client_ip', 'ip_address', 'remote_addr']) expect(isIpFamilyField(col)).toBe(true)
-    for (const col of ['oip', 'country', 'asn', 'city', 'url', 'ua', '']) expect(isIpFamilyField(col)).toBe(false)
+  it('matches client-IP-family and shared PII columns and rejects non-PII columns', () => {
+    for (const col of ['ip', 'client_ip', 'ip_address', 'remote_addr', 'oip']) expect(isIpFamilyField(col)).toBe(true)
+    for (const col of ['country', 'asn', 'city', 'url', 'ua', '']) expect(isIpFamilyField(col)).toBe(false)
     expect([...IP_FAMILY_FIELDS].sort()).toEqual(['client_ip', 'ip', 'ip_address', 'remote_addr'])
   })
 
@@ -225,6 +225,15 @@ describe('toUTCDate, formatTimeAgo & formatLocalDateTime', () => {
     expect(formatLocalDateTime('not-a-date')).toBe(new Date('not-a-date').toLocaleString())
     expect(formatLocalDateTime(iso, opts)).toBe(new Date(iso).toLocaleString(undefined, opts))
   })
+
+  it('treats timestamp strings without an offset as UTC consistently', () => {
+    const naive = '2026-07-01 12:34:56'
+    const utc = new Date('2026-07-01T12:34:56Z')
+    expect(formatLocalDateTime(naive)).toBe(utc.toLocaleString())
+    expect(formatLocalDateTime(naive, { dateStyle: 'short' })).toBe(
+      utc.toLocaleString(undefined, { dateStyle: 'short' }),
+    )
+  })
 })
 
 const ANCHOR = '2026-06-29T12:00:00Z', START = '2026-06-10T00:00:00Z', END = '2026-06-12T00:00:00Z', NOW = new Date(ANCHOR)
@@ -269,6 +278,8 @@ describe('formatCount, formatValue, calculateDelta, formatCountMaybe, formatAbbr
       ['requests', 1000, '1,000'], ['country', 'US', 'United States'], ['country', 'GB', 'United Kingdom'],
       ['city', 'new york', 'New York'], ['pop', 'jfk', 'JFK'], ['region', 'ca', 'CA'],
       ['proto', 3, '3'], ['tls', 1.3, '1.3'], ['proto', '2.0', '2'], ['tls', '1.3', '1.3'], ['proto', 'h2', 'h2'], ['tls', 'TLSv1.3', 'TLSv1.3'],
+      ['asn', 4812, 'AS4812'], ['asn', '4812', 'AS4812'], ['asn', 'AS4812', 'AS4812'], ['client_asn', 13335, 'AS13335'],
+      ['metro', 1234, '1234'], ['ttl', 3600.027, '3,600'], ['age', 12.6, '13'],
     ] as const) {
       expect(formatValue(col, val)).toBe(want)
     }
@@ -452,16 +463,12 @@ const ALLOWED_GAPS = new Set<string>([
   'POST /api/services/:service_id/cron-settings', 'DELETE /api/services/:service_id/time-range', 'POST /api/services/:service_id/ngwaf-sync', 'PATCH /api/services/:service_id/custom-fields/:field_name',
   'DELETE /api/cron-runs/:log_id', 'POST /api/assets/aggregates', 'GET /api/assets/aggregates', 'POST /api/sharing/deploy-frontend', 'POST /api/sharing/teardown-frontend',
   'GET /api/high-scale/request-facts', 'POST /api/high-scale/request-facts', 'GET /api/network/pop-health', 'GET /api/security/threat-intel', 'GET /api/cron-runs/:run_id/stream',
-  'GET /api/log-extents/stream', 'GET /api/admin/events/stream', 'GET /api/usage/operations', 'GET /api/usage/bandwidth', 'GET /api/usage/log-activity', 'GET /api/usage/rum-breakdown',
-  'GET /api/admin/compaction-stats', 'POST /api/admin/consolidate-rollups', 'POST /api/admin/compact/:service_id', 'GET /api/admin/compaction-status/:service_id', 'GET /api/admin/compaction-status',
-  'POST /api/admin/rollups/compact/:service_id', 'POST /api/admin/rollups/compact', 'POST /api/admin/rollups/heal/:service_id', 'POST /api/admin/rollups/heal',
-  'POST /api/admin/rollup-heal/:service_id', 'POST /api/admin/rollup-heal', 'GET /api/admin/rollups/status/:service_id', 'GET /api/admin/rollups/status',
-  'POST /api/admin/rebuild-time-series-rollups', 'POST /api/admin/partial-hour-merge/:service_id', 'POST /api/admin/partial-hour-merge',
-  'GET /api/admin/partial-hour-status/:service_id', 'GET /api/admin/partial-hour-status', 'GET /api/admin/metric-history', 'GET /api/admin/storage-tree',
+  'GET /api/log-extents/stream', 'GET /api/admin/events/stream', 'GET /api/usage/operations', 'GET /api/usage/bandwidth', 'GET /api/usage/log-activity', 'GET /api/usage/rum-breakdown', 'GET /api/usage/platform', 'GET /api/usage/geography',
+  'GET /api/admin/metric-history', 'GET /api/admin/storage-tree',
   'GET /api/admin/usage-log/export', 'GET /api/admin/slow-queries/count', 'GET /api/admin/slow-queries', 'GET /api/download-folder', 'GET /api/download', 'GET /api/download-all',
-  'POST /api/provision/reconcile', 'POST /api/admin/optimize-now', 'POST /api/admin/local-compact-now',
-  'POST /api/admin/backfill-bundle-rollups', 'POST /api/admin/usage-logging', 'POST /api/admin/reset-rum', 'POST /api/provision/teardown',
-  'PATCH /api/provision/services/:service_id/ngwaf-workspace', 'POST /api/admin/expire-snapshots/:service_id', 'POST /api/admin/metadata-cleanup/:service_id',
+  'POST /api/provision/reconcile',
+  'POST /api/admin/usage-logging', 'POST /api/admin/reset-rum', 'POST /api/provision/teardown',
+  'PATCH /api/provision/services/:service_id/ngwaf-workspace', 'POST /api/admin/metadata-cleanup/:service_id',
   'POST /api/admin/sync/:service_id', 'POST /api/admin/full-sweep/:service_id', 'POST /api/admin/gap-heal/:service_id', 'POST /api/admin/ledger/sweep/:service_id',
   'GET /api/admin/ledger/quarantine', 'POST /api/admin/rum/sync/:service_id', 'POST /api/admin/rum/discovery/:service_id', 'POST /api/services/:service_id/scoring/enable',
   'POST /api/services/:service_id/scoring/disable', 'GET /api/services/:service_id/scoring/status', 'GET /api/services/:service_id/scoring/labels', 'POST /api/services/:service_id/scoring/labels',
@@ -545,14 +552,14 @@ describe('middleware /admin gate (security)', () => {
 
   it('enforces spoof resistance, Server Action blocking, non-admin pass-through, and x-service-id propagation', () => {
     expect(middleware(makeReq('http://localhost/admin', { host: 'localhost', 'x-proxied-by-caddy': 'true' })).status).toBe(307)
-    expect(middleware(makeReq('http://localhost/admin', { 'x-proxied-by-caddy': 'maybe' })).status).toBe(200)
+    expect(middleware(makeReq('http://localhost/admin', { 'x-proxied-by-caddy': 'maybe' })).status).toBe(307)
     expect(middleware(makeReq('http://localhost/_next/data/build-id/admin/settings.json', { 'x-proxied-by-caddy': 'true' })).status).toBe(403)
     expect(middleware(makeReq('http://localhost/_next/data/build-id/admin.json')).status).toBe(200)
     expect(middleware(makeReq('http://localhost/', { 'x-proxied-by-caddy': 'true', 'next-action': 'some-action-id' })).status).toBe(403)
     expect(middleware(makeReq('http://localhost/', { 'next-action': 'some-action-id' })).status).toBe(200)
-    for (const p of ['/dashboard', '/logs', '/_next/data/build-id/logs.json']) {
-      expect(middleware(makeReq(`http://localhost${p}`, { 'x-proxied-by-caddy': 'true' })).status).toBe(200)
-    }
+    expect(middleware(makeReq('http://localhost/dashboard', { 'x-proxied-by-caddy': 'true' })).status).toBe(200)
+    expect(middleware(makeReq('http://localhost/logs', { 'x-proxied-by-caddy': 'true' })).status).toBe(307)
+    expect(middleware(makeReq('http://localhost/_next/data/build-id/logs.json', { 'x-proxied-by-caddy': 'true' })).status).toBe(403)
 
     const nextSpy = vi.spyOn(NextResponse, 'next')
     middleware(makeReq('http://localhost/dashboard?service=my-service-id'))
@@ -616,6 +623,31 @@ describe('upstream API/JS proxy route handler (ECONNRESET resilience)', () => {
     }
   })
 
+  it('returns a decoded body even when the client accepts compression, since Next strips Content-Encoding from route-handler responses', async () => {
+    const { gzipSync } = await import('node:zlib')
+    let seenAcceptEncoding: string | undefined
+    const payload = { services: [{ service_id: 'svc-1' }] }
+    const server = await withUpstreamServer((req, res) => {
+      seenAcceptEncoding = req.headers['accept-encoding']
+      res.setHeader('Content-Type', 'application/json')
+      if (/\bgzip\b/.test(seenAcceptEncoding || '')) {
+        res.setHeader('Content-Encoding', 'gzip')
+        res.end(gzipSync(JSON.stringify(payload)))
+        return
+      }
+      res.end(JSON.stringify(payload))
+    })
+    try {
+      const res = await apiGet(new NextRequest('http://localhost:3002/api/bootstrap', { headers: { 'accept-encoding': 'gzip, deflate, br, zstd' } }))
+      expect(res.status).toBe(200)
+      expect(res.headers.get('content-encoding')).toBeNull()
+      expect(await res.json()).toEqual(payload)
+      expect(seenAcceptEncoding).toBe('identity')
+    } finally {
+      await server.close()
+    }
+  })
+
   it('retries idempotent GET once when upstream socket resets with ECONNRESET before headers', async () => {
     let attempts = 0
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -667,6 +699,21 @@ describe('upstream API/JS proxy route handler (ECONNRESET resilience)', () => {
       expect(await jsRes.text()).toBe('window.__RUM__=1;')
     } finally {
       errorSpy.mockRestore()
+      await server.close()
+    }
+  })
+
+  it('surfaces a truncated upstream response as a stream error', async () => {
+    const server = await withUpstreamServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': '24' })
+      res.end('{"short":true}')
+    })
+    try {
+      const res = await apiGet(new NextRequest('http://localhost:3002/api/truncated'))
+      const reader = res.body!.getReader()
+      expect((await reader.read()).done).toBe(false)
+      await expect(reader.read()).rejects.toThrow()
+    } finally {
       await server.close()
     }
   })

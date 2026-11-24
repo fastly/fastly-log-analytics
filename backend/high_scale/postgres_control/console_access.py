@@ -10,12 +10,14 @@ import logging
 import os
 import re
 import threading
+import urllib.parse
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import Any
 
 from backend import config
 from backend.core.clickhouse import ClickHouseClient
-from backend.core.share_db import IP_FAMILY_KEYS, SESSION_ID_KEYS
+from backend.core.share_db import CMCD_SESSION_ALIAS_KEYS, SHARED_PII_KEYS, is_saved_view_pii_key
+from backend.high_scale._common import clickhouse_string_literal
 
 logger = logging.getLogger("backend.high_scale.postgres_control")
 
@@ -26,11 +28,139 @@ PROFILE = "fla_console_ro"
 MIN_SECRET_BYTES = 32
 MIN_DISTINCT_SECRET_BYTES = 8
 REDACTED = "[redacted]"
-MASKED_KEYS = tuple(
-    sorted(
-        IP_FAMILY_KEYS | SESSION_ID_KEYS | {"client_id", "sid", "x-forwarded-for", "true-client-ip", "fastly-client-ip"}
-    )
+MASKED_KEYS = tuple(sorted(SHARED_PII_KEYS))
+_EXTRA_MAP_MASKED_KEYS = frozenset(
+    {
+        "origin_ip",
+        "cf_connecting_ip",
+        "cf_connecting_ipv6",
+        "connecting_ip",
+        "connecting_ipv6",
+        "x_real_ip",
+        "x_client_ip",
+        "x_cluster_client_ip",
+        "x_original_forwarded_for",
+        "x_forwarded_client_ip",
+        "forwarded",
+        "forwarded_for",
+        "authorization",
+        "proxy_authorization",
+        "cookie",
+        "set_cookie",
+        "x_api_key",
+        "api_key",
+        "access_token",
+        "x_access_token",
+        "id_token",
+        "refresh_token",
+        "auth_token",
+        "x_auth_token",
+        "csrf_token",
+        "xsrf_token",
+        "x_csrf_token",
+        "x_xsrf_token",
+        "session",
+        "session_token",
+        "x_session_id",
+        "x_session_token",
+        "cmcd.sid",
+        "cmcd.cid",
+        "cmcd.session",
+        "src_ip",
+        "remote_ip",
+        "peer_ip",
+        "x_ip",
+        "x_cookie",
+        "x_authorization",
+        "bearer_token",
+        "session_cookie",
+    }
 )
+_MAP_MASKED_KEYS = tuple(sorted(SHARED_PII_KEYS | CMCD_SESSION_ALIAS_KEYS | _EXTRA_MAP_MASKED_KEYS))
+_MAP_MASKED_KEY_SET = frozenset(_MAP_MASKED_KEYS)
+_MAP_MASKED_NONWORD_KEYS = tuple(sorted({re.sub(r"[^a-z0-9]+", "", k.lower()) for k in _MAP_MASKED_KEYS}))
+_MAP_MASKED_NONWORD_SET = frozenset(_MAP_MASKED_NONWORD_KEYS)
+_PII_WS_RE2_CHARS = (
+    r"\x00-\x1f \x7f\x{0085}\x{00a0}\x{1680}\x{180e}\x{2000}-\x{200d}"
+    r"\x{2028}\x{2029}\x{202f}\x{205f}\x{2060}\x{3000}\x{feff}"
+)
+_PII_WS_PY_CHARS = "\x00-\x1f \x7f\x85\u00a0\u1680\u180e\u2000-\u200d\u2028\u2029\u202f\u205f\u2060\u3000\ufeff"
+_PII_WS_STRIP_CHARS = (
+    "".join(chr(c) for c in range(0x20))
+    + " \x7f\x85\u00a0\u1680\u180e"
+    + "".join(chr(c) for c in range(0x2000, 0x200E))
+    + "\u2028\u2029\u202f\u205f\u2060\u3000\ufeff"
+)
+_PII_WS_TRIM_RE2 = f"^[{_PII_WS_RE2_CHARS}]+|[{_PII_WS_RE2_CHARS}]+$"
+_PII_SPLIT_OUTER_RE2 = f"[\\[\\]/:;|,&=?{_PII_WS_RE2_CHARS}]+"
+_PII_SPLIT_ALL_RE2 = f"[.\\[\\]/:;|,&=?{_PII_WS_RE2_CHARS}]+"
+_PII_CAMEL_IPV_RE = re.compile(r"IP[vV]([46])")
+_PII_CAMEL_RE_1 = re.compile(r"([a-z0-9])([A-Z])")
+_PII_CAMEL_RE_2 = re.compile(r"([A-Z]+)([A-Z][a-z])")
+_PII_SPLIT_OUTER_RE = re.compile(f"[\\[\\]/:;|,&=?{_PII_WS_PY_CHARS}]+")
+_PII_SPLIT_ALL_RE = re.compile(f"[.\\[\\]/:;|,&=?{_PII_WS_PY_CHARS}]+")
+_PII_BRACKET_STRIP_RE = re.compile(r"\[[^\[\]]*\]")
+_PII_IPV_RE = re.compile(r"([a-z_])ipv[46](?:_|$)")
+_PII_AFFIX_PREFIX_RE = re.compile(
+    r"^(?:(?:x_?)?filter_|_?cf_|(?:req|resp|request|response|bereq|beresp|obj)_http_|http_|(?:req|resp|request|response)_|headers?_|(?:raw|orig|original)_)+"
+)
+_PII_SUFFIX_RE = re.compile(r"(?:_v[0-9]+|_hash|_addr|_?[0-9]+)+$")
+
+
+def _normalize_pii_unicode(value: str) -> str:
+    # Fold U+0130 ('İ') -> 'I' and U+212A ('K') -> 'K' (uppercase) and strip U+0307 BEFORE camelCase/IPv splitting,
+    # while remaining compatible with non-ICU ClickHouse/chdb.
+    return value.replace("\u0130", "I").replace("\u0307", "").replace("\u212a", "K")
+
+
+def _strip_pii_brackets(value: str) -> str:
+    cur = value
+    while True:
+        nxt = _PII_BRACKET_STRIP_RE.sub("", cur)
+        if nxt == cur:
+            return cur
+        cur = nxt
+
+
+def _is_console_pii_identifier(name: str) -> bool:
+    raw = _normalize_pii_unicode(name).strip(_PII_WS_STRIP_CHARS).lower()
+    if not raw:
+        return False
+    if raw in MASKED_KEYS or raw in _MAP_MASKED_KEY_SET or is_saved_view_pii_key(name):
+        return True
+    decoded = _normalize_pii_unicode(urllib.parse.unquote(urllib.parse.unquote(name)))
+    raw_lower = decoded.strip(_PII_WS_STRIP_CHARS).lower()
+    camel_src = _PII_CAMEL_IPV_RE.sub(r"Ipv\1", decoded)
+    camel = _PII_CAMEL_RE_2.sub(r"\1_\2", _PII_CAMEL_RE_1.sub(r"\1_\2", camel_src)).strip(_PII_WS_STRIP_CHARS).lower()
+    raw_unbrack = _strip_pii_brackets(raw_lower).strip(_PII_WS_STRIP_CHARS)
+    camel_unbrack = _strip_pii_brackets(camel).strip(_PII_WS_STRIP_CHARS)
+    candidates = [raw, raw_lower, camel, raw_unbrack, camel_unbrack]
+    for base in (raw_lower, camel, raw_unbrack, camel_unbrack):
+        if base:
+            candidates.extend(_PII_SPLIT_OUTER_RE.split(base))
+            candidates.extend(_PII_SPLIT_ALL_RE.split(base))
+    for seg in candidates:
+        if not seg:
+            continue
+        if seg in _MAP_MASKED_KEY_SET:
+            return True
+        canon = re.sub(r"[^a-z0-9]+", "_", seg).strip("_")
+        nw_under = re.sub(r"[^a-z0-9_]+", "", seg)
+        if not canon and not nw_under:
+            continue
+        ipv_norm = _PII_IPV_RE.sub(r"\1ip_", canon).strip("_") if canon else ""
+        affix_stripped = _PII_AFFIX_PREFIX_RE.sub("", ipv_norm).strip("_") if ipv_norm else ""
+        no_suffix = _PII_SUFFIX_RE.sub("", ipv_norm).strip("_") if ipv_norm else ""
+        stripped = _PII_SUFFIX_RE.sub("", affix_stripped).strip("_") if affix_stripped else ""
+        nw_ipv = _PII_IPV_RE.sub(r"\1ip_", nw_under) if nw_under else ""
+        nw_affix = _PII_AFFIX_PREFIX_RE.sub("", nw_ipv).strip("_") if nw_ipv else ""
+        nw_stripped = _PII_SUFFIX_RE.sub("", nw_affix).strip("_") if nw_affix else ""
+        for cand in (canon, ipv_norm, affix_stripped, no_suffix, stripped, nw_affix, nw_stripped):
+            if cand and (cand in _MAP_MASKED_KEY_SET or cand.replace("_", "") in _MAP_MASKED_NONWORD_SET):
+                return True
+    return False
+
+
 _DATABASE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 _PROFILE_SETTINGS = (
     "readonly = 1, additional_table_filters CHANGEABLE_IN_READONLY, "
@@ -49,7 +179,7 @@ _PROFILE_SETTINGS = (
 
 
 def _literal(value: str) -> str:
-    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+    return clickhouse_string_literal(value)
 
 
 def _service_hash(service_id: str) -> str:
@@ -83,11 +213,79 @@ def _redaction(name: str, type_: str, keys: str) -> str | None:
         match = re.fullmatch(r"Map\((.+?),\s*(.+)\)", type_)
         if not match or "String" not in match.group(1) or "String" not in match.group(2):
             raise RuntimeError(f"cannot redact column {name} of type {type_}")
-        return (
-            f"mapApply((k, v) -> (k, if(lower(k) IN ({keys}) AND NOT (isNull(v) OR v = ''), {redacted}, v)), "
-            f"`{name}`) AS `{name}`"
+        ws_trim_pat = _literal(_PII_WS_TRIM_RE2)
+        u_idot_pat = _literal(r"\x{0130}")
+        u_comb_dot_pat = _literal(r"\x{0307}")
+        u_kelvin_pat = _literal(r"\x{212a}")
+
+        def _ch_norm_u(expr: str) -> str:
+            return (
+                f"replaceRegexpAll(replaceRegexpAll(replaceRegexpAll({expr}, "
+                f"{u_idot_pat}, 'I'), {u_comb_dot_pat}, ''), {u_kelvin_pat}, 'K')"
+            )
+
+        k_raw_pre = f"lower(replaceRegexpAll({_ch_norm_u('toValidUTF8(k)')}, {ws_trim_pat}, ''))"
+        k_decoded = "toValidUTF8(decodeURLComponent(decodeURLComponent(k)))"
+        k_norm = _ch_norm_u(k_decoded)
+        k_raw_lower = f"lower(replaceRegexpAll({k_norm}, {ws_trim_pat}, ''))"
+        camel_ipv_pat = _literal(_PII_CAMEL_IPV_RE.pattern)
+        camel_ipv_repl = _literal(r"Ipv\1")
+        camel1_pat = _literal(_PII_CAMEL_RE_1.pattern)
+        camel2_pat = _literal(_PII_CAMEL_RE_2.pattern)
+        camel_repl = _literal(r"\1_\2")
+        k_camel_src = f"replaceRegexpAll({k_norm}, {camel_ipv_pat}, {camel_ipv_repl})"
+        k_camel = (
+            f"lower(replaceRegexpAll(replaceRegexpAll(replaceRegexpAll({k_camel_src}, "
+            f"{camel1_pat}, {camel_repl}), {camel2_pat}, {camel_repl}), {ws_trim_pat}, ''))"
         )
-    if name.lower() in MASKED_KEYS:
+        bracket_strip_pat = _literal(_PII_BRACKET_STRIP_RE.pattern)
+
+        def _ch_strip_brackets(expr: str) -> str:
+            cur_e = expr
+            for _ in range(3):
+                cur_e = f"replaceRegexpAll({cur_e}, {bracket_strip_pat}, '')"
+            return cur_e
+
+        k_raw_unbrack = f"replaceRegexpAll({_ch_strip_brackets(k_raw_lower)}, {ws_trim_pat}, '')"
+        k_camel_unbrack = f"replaceRegexpAll({_ch_strip_brackets(k_camel)}, {ws_trim_pat}, '')"
+        split_outer_pat = _literal(_PII_SPLIT_OUTER_RE2)
+        split_all_pat = _literal(_PII_SPLIT_ALL_RE2)
+        ipv_pat = _literal(_PII_IPV_RE.pattern)
+        ipv_repl = _literal(r"\1ip_")
+        affix_pat = _literal(_PII_AFFIX_PREFIX_RE.pattern)
+        suffix_pat = _literal(_PII_SUFFIX_RE.pattern)
+        seg_canon = "trimBoth(replaceRegexpAll(seg, '[^a-z0-9]+', '_'), '_')"
+        seg_ipv = f"trimBoth(replaceRegexpAll({seg_canon}, {ipv_pat}, {ipv_repl}), '_')"
+        seg_affix = f"trimBoth(replaceRegexpOne({seg_ipv}, {affix_pat}, ''), '_')"
+        seg_no_suf = f"trimBoth(replaceRegexpOne({seg_ipv}, {suffix_pat}, ''), '_')"
+        seg_stripped = f"trimBoth(replaceRegexpOne({seg_affix}, {suffix_pat}, ''), '_')"
+        seg_nw_under = "replaceRegexpAll(seg, '[^a-z0-9_]+', '')"
+        seg_nw_ipv = f"replaceRegexpAll({seg_nw_under}, {ipv_pat}, {ipv_repl})"
+        seg_nw_affix = f"trimBoth(replaceRegexpOne({seg_nw_ipv}, {affix_pat}, ''), '_')"
+        seg_nw_stripped = f"trimBoth(replaceRegexpOne({seg_nw_affix}, {suffix_pat}, ''), '_')"
+        nw_keys = ", ".join(_literal(nk) for nk in _MAP_MASKED_NONWORD_KEYS)
+        candidates_expr = (
+            f"arrayConcat([{k_raw_pre}, {k_raw_lower}, {k_camel}, {k_raw_unbrack}, {k_camel_unbrack}], "
+            f"splitByRegexp({split_outer_pat}, {k_raw_lower}), "
+            f"splitByRegexp({split_all_pat}, {k_raw_lower}), "
+            f"splitByRegexp({split_outer_pat}, {k_camel}), "
+            f"splitByRegexp({split_all_pat}, {k_camel}), "
+            f"splitByRegexp({split_outer_pat}, {k_raw_unbrack}), "
+            f"splitByRegexp({split_all_pat}, {k_raw_unbrack}), "
+            f"splitByRegexp({split_outer_pat}, {k_camel_unbrack}), "
+            f"splitByRegexp({split_all_pat}, {k_camel_unbrack}))"
+        )
+        cmcd_extra = f" OR {k_camel} = 'session'" if name.lower() == "cmcd" else ""
+        return (
+            f"mapApply((k, v) -> (k, if((arrayExists(seg -> seg != '' AND ("
+            f"seg IN ({keys}) OR arrayExists(cand -> cand != '' AND ("
+            f"cand IN ({keys}) OR replaceRegexpAll(cand, '_', '') IN ({nw_keys})"
+            f"), [{seg_canon}, {seg_ipv}, {seg_affix}, {seg_no_suf}, {seg_stripped}, "
+            f"{seg_nw_affix}, {seg_nw_stripped}])"
+            f"), {candidates_expr}){cmcd_extra}) "
+            f"AND NOT (isNull(v) OR v = ''), {redacted}, v)), `{name}`) AS `{name}`"
+        )
+    if _is_console_pii_identifier(name):
         if "String" not in type_:
             raise RuntimeError(f"cannot redact column {name} of type {type_}")
         return f"if(isNull(`{name}`) OR `{name}` = '', `{name}`, {redacted}) AS `{name}`"
@@ -103,7 +301,7 @@ def _view_select(database: str, table: str, columns: list[tuple[str, str]], serv
     source = f"FROM `{database}`.`{table}` WHERE service_id = {sid} AND publication_state = 'visible' AND {fence}"
     if not masked:
         return f"SELECT * {source}"
-    keys = ", ".join(_literal(key) for key in MASKED_KEYS)
+    keys = ", ".join(_literal(key) for key in _MAP_MASKED_KEYS)
     projection = ", ".join(_redaction(name, type_, keys) or f"`{name}`" for name, type_ in columns)
     return f"SELECT {projection} {source}"
 
@@ -114,7 +312,11 @@ def provision_console_access(admin: Any, database: str, service_id: str, secret:
         raise ValueError("ClickHouse database must be a simple identifier")
     db = f"`{database}`"
     schemas = {
-        table: [(str(row["name"]), str(row["type"])) for row in admin.execute(f"DESCRIBE TABLE {db}.`{table}`")]
+        table: [
+            (str(row["name"]), str(row["type"]))
+            for row in admin.execute(f"DESCRIBE TABLE {db}.`{table}`")
+            if str(row.get("default_type") or "").upper() not in ("MATERIALIZED", "ALIAS")
+        ]
         for table in FACT_DOMAINS
     }
     for table, columns in schemas.items():
@@ -249,12 +451,39 @@ class ConsoleClients:
             if not rows or int(rows[0].get("n", 1)) != 0:
                 raise RuntimeError(f"console identity for {service_id} failed the row isolation check on {view}")
         if masked:
+            req_view = access.tables["request_facts"]
+            desc_rows = access.client.execute(f"DESCRIBE TABLE {req_view}")
+            if any(str(row.get("name") or "").lower().startswith("_cf_") for row in desc_rows):
+                raise RuntimeError(
+                    f"console identity for {service_id} failed the masking check on {req_view}: "
+                    "materialized _cf_* columns exposed"
+                )
             red = _literal(REDACTED)
             unmasked = {
                 "request_facts": (
                     f"(client_ip != '' AND client_ip != {red}) "
                     f"OR custom_fields['cookie_session'] NOT IN ('', {red}) "
-                    f"OR custom_fields['cid'] NOT IN ('', {red})"
+                    f"OR custom_fields['cid'] NOT IN ('', {red}) "
+                    f"OR custom_fields['edge_sid'] NOT IN ('', {red}) "
+                    f"OR custom_fields['oip'] NOT IN ('', {red}) "
+                    f"OR custom_fields['cmcd_sid'] NOT IN ('', {red}) "
+                    f"OR custom_fields['cmcd_cid'] NOT IN ('', {red}) "
+                    f"OR custom_fields['cmcd_session'] NOT IN ('', {red}) "
+                    f"OR custom_fields['cf-connecting-ip'] NOT IN ('', {red}) "
+                    f"OR custom_fields['x-real-ip'] NOT IN ('', {red}) "
+                    f"OR custom_fields['authorization'] NOT IN ('', {red}) "
+                    f"OR custom_fields['cookie'] NOT IN ('', {red}) "
+                    f"OR custom_fields['set-cookie'] NOT IN ('', {red}) "
+                    f"OR custom_fields['filter-session-id'] NOT IN ('', {red}) "
+                    f"OR custom_fields['req.http.session_id'] NOT IN ('', {red}) "
+                    f"OR cmcd['sid'] NOT IN ('', {red}) "
+                    f"OR cmcd['cid'] NOT IN ('', {red}) "
+                    f"OR cmcd['cmcd_sid'] NOT IN ('', {red}) "
+                    f"OR cmcd['cmcd_cid'] NOT IN ('', {red}) "
+                    f"OR cmcd['cmcd_session'] NOT IN ('', {red}) "
+                    f"OR cmcd['cmcd.sid'] NOT IN ('', {red}) "
+                    f"OR cmcd['cmcd.cid'] NOT IN ('', {red}) "
+                    f"OR cmcd['cmcd.session'] NOT IN ('', {red})"
                 ),
                 "rum_vitals_facts": f"client_id != '' AND client_id != {red}",
                 "rum_error_facts": f"client_id != '' AND client_id != {red}",

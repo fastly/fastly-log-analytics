@@ -1,0 +1,1006 @@
+import { parquetMetadata } from "hyparquet";
+import { fnv1a32, fnv1a64 } from "../parquet-key";
+import type { FileRollupData, MinuteBucket, Scalar } from "./engine";
+import { Hll } from "./hll";
+import type { ManifestFile } from "./manifest";
+
+export type CardTint = { bg: string; border: string; dot: string };
+
+export type CardCategory = {
+  id: string;
+  label: string;
+  cardIds: string[];
+  tint: CardTint;
+};
+
+// v3 CARD_CATEGORIES narrowed to Top-N fields in app/src/logging/catalog.json:
+// NON_TOP_N numeric fields, virtual bot/WAF fields and cookie_session are
+// omitted, so the Origin and QUIC categories have no Top-N cards.
+export const CARD_CATEGORIES: CardCategory[] = [
+  {
+    id: "request",
+    label: "Request",
+    cardIds: [
+      "ip",
+      "asn",
+      "host",
+      "url",
+      "method",
+      "status",
+      "cache",
+      "proto",
+      "ua",
+      "referer",
+      "resp_header_content_encoding",
+    ],
+    tint: {
+      bg: "bg-blue-50/60 dark:bg-blue-950/40",
+      border: "border-blue-200/70 dark:border-blue-900/60",
+      dot: "bg-blue-500",
+    },
+  },
+  {
+    id: "cache",
+    label: "Cache",
+    cardIds: ["ttl", "age", "hits", "digest"],
+    tint: {
+      bg: "bg-amber-50/60 dark:bg-amber-950/40",
+      border: "border-amber-200/70 dark:border-amber-900/60",
+      dot: "bg-amber-500",
+    },
+  },
+  {
+    id: "geo",
+    label: "Geography",
+    cardIds: ["city", "region", "country", "metro"],
+    tint: {
+      bg: "bg-emerald-50/60 dark:bg-emerald-950/40",
+      border: "border-emerald-200/70 dark:border-emerald-900/60",
+      dot: "bg-emerald-500",
+    },
+  },
+  {
+    id: "network",
+    label: "Network & Connection",
+    cardIds: ["transport", "c_speed", "c_type"],
+    tint: {
+      bg: "bg-cyan-50/60 dark:bg-cyan-950/40",
+      border: "border-cyan-200/70 dark:border-cyan-900/60",
+      dot: "bg-cyan-500",
+    },
+  },
+  {
+    id: "edge",
+    label: "Edge Infrastructure",
+    cardIds: [
+      "pop",
+      "backend",
+      "edge",
+      "server_region",
+      "tls",
+      "is_ipv6",
+      "conn_requests",
+    ],
+    tint: {
+      bg: "bg-violet-50/60 dark:bg-violet-950/40",
+      border: "border-violet-200/70 dark:border-violet-900/60",
+      dot: "bg-violet-500",
+    },
+  },
+  {
+    id: "security",
+    label: "Security",
+    cardIds: [
+      "waf",
+      "waf_resp",
+      "waf_ms",
+      "p_type",
+      "p_desc",
+      "ja3",
+      "ja4",
+      "tls_ciphers_sha",
+    ],
+    tint: {
+      bg: "bg-rose-50/60 dark:bg-rose-950/40",
+      border: "border-rose-200/70 dark:border-rose-900/60",
+      dot: "bg-rose-500",
+    },
+  },
+  {
+    id: "io",
+    label: "Image Optimization",
+    cardIds: ["io_input_format", "io_output_format"],
+    tint: {
+      bg: "bg-fuchsia-50/60 dark:bg-fuchsia-950/40",
+      border: "border-fuchsia-200/70 dark:border-fuchsia-900/60",
+      dot: "bg-fuchsia-500",
+    },
+  },
+];
+
+export const CARD_LABELS: Record<string, string> = {
+  ip: "Client IP",
+  asn: "ASN",
+  host: "Host",
+  url: "URL",
+  method: "HTTP Method",
+  status: "Response Status",
+  cache: "Cache State",
+  proto: "HTTP Version",
+  ua: "User-Agent",
+  referer: "Referer",
+  resp_header_content_encoding: "Response Content-Encoding",
+  ttl: "Object TTL",
+  age: "Object Age",
+  hits: "Object Hit Count",
+  digest: "Content Digest",
+  city: "City",
+  region: "Region",
+  country: "Country",
+  metro: "Metro Code",
+  transport: "Transport Protocol",
+  c_speed: "Connection Speed Class",
+  c_type: "Connection Type",
+  pop: "Edge PoP",
+  backend: "Backend",
+  edge: "Edge Hit",
+  server_region: "Server Region",
+  tls: "TLS Version",
+  is_ipv6: "IPv6",
+  conn_requests: "Conn. Request Count",
+  waf: "WAF Executed",
+  waf_resp: "WAF Agent Response",
+  waf_ms: "WAF Latency (ms)",
+  p_type: "Proxy Type",
+  p_desc: "Proxy Description",
+  ja3: "JA3 Fingerprint",
+  ja4: "JA4 Fingerprint",
+  tls_ciphers_sha: "TLS Cipher Suite SHA",
+  io_input_format: "IO Input Format",
+  io_output_format: "IO Output Format",
+};
+
+export const CARD_FIELDS = CARD_CATEGORIES.flatMap((c) => c.cardIds);
+export type CardField = (typeof CARD_FIELDS)[number];
+
+/** A custom log field marked "Show in dashboard" (session `custom_dashboard_cards`). */
+export type CustomCard = {
+  id: string;
+  label: string;
+  type: "string" | "number" | "boolean";
+};
+
+// v3 DashboardWidgets CUSTOM_TINT.
+export const CUSTOM_TINT: CardTint = {
+  bg: "bg-slate-50/60 dark:bg-slate-900/30",
+  border: "border-slate-200/60 dark:border-slate-800/50",
+  dot: "bg-slate-400",
+};
+
+// Mirrors compute/cloud/src/ingest/summary.rs `custom_fields`.
+const SYSTEM_PREFIXES = ["cmcd_", "edge_", "rum_", "lt_", "_"];
+
+/**
+ * v3 useDashboardCardDefinitions: system-managed CMCD, edge, RUM and load-test
+ * fields and the request id never get a card, nor do duplicates of a built-in card.
+ * Underscore fields such as `_bot_name` render from the bots section instead.
+ */
+export function customCards(cards: readonly CustomCard[] | undefined) {
+  const builtIn = new Set<string>(CARD_FIELDS);
+  const seen = new Set<string>();
+  return (cards ?? []).filter((card) => {
+    if (
+      builtIn.has(card.id) ||
+      seen.has(card.id) ||
+      card.id === "fastly_req_id" ||
+      SYSTEM_PREFIXES.some((prefix) => card.id.startsWith(prefix))
+    ) {
+      return false;
+    }
+    seen.add(card.id);
+    return true;
+  });
+}
+
+/** Stable key of the custom fields a run aggregates, in request order. */
+export function customFieldsKey(
+  cards: readonly Pick<CustomCard, "id" | "type">[],
+): string {
+  return cards.map((card) => `${card.id}:${card.type}`).join(",");
+}
+
+/** `flp_summary` written by compute/cloud/src/ingest/summary.rs `SUMMARY_VERSION`. */
+export const SUMMARY_VERSION = "3";
+const MINUTE_MS = 60_000;
+
+const BOOLEAN_FIELDS = new Set(["edge", "is_ipv6", "waf"]);
+const NUMBER_FIELDS = new Set([
+  "asn",
+  "status",
+  "ttl",
+  "age",
+  "hits",
+  "metro",
+  "conn_requests",
+  "waf_resp",
+  "waf_ms",
+]);
+
+export function normalizeDashboardValue(
+  field: string,
+  value: Scalar | null | undefined,
+): Scalar | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string" && value === "") return null;
+  if (field === "ttl" || field === "age") {
+    const n = Number(value);
+    return Number.isFinite(n) ? Math.round(n) : null;
+  }
+  if (field === "conn_requests") {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    if (n === 1) return "1";
+    if (n <= 5) return "2–5";
+    if (n <= 20) return "6–20";
+    return "21+";
+  }
+  return value;
+}
+
+/** A custom field a run aggregates and its value type. */
+export type CustomField = Pick<CustomCard, "id" | "type">;
+
+/** Summaries store every value as text; this restores the raw column's type. */
+export function summaryValue(
+  field: string,
+  value: string,
+  type?: CustomField["type"],
+): Scalar | null {
+  if (type === "boolean" || (!type && BOOLEAN_FIELDS.has(field))) return value === "true";
+  if (type === "number" || (!type && NUMBER_FIELDS.has(field))) {
+    const n = Number(value);
+    return value === "" || Number.isNaN(n) ? null : n;
+  }
+  return normalizeDashboardValue(field, value);
+}
+
+/** FNV-1a 64 over each name followed by `\n` (app/src/ingest/bundle.rs `fingerprint`). */
+export function fingerprint(names: readonly string[]): bigint {
+  return fnv1a64(names);
+}
+
+/** `c{count}-n{rows}-h{fp}.parquet` of the sorted source names. */
+function covering(names: string[], rows: number): string {
+  const sorted = [...names].sort();
+  return `c${sorted.length}-n${rows}-h${fingerprint(sorted).toString(16).padStart(16, "0")}.parquet`;
+}
+
+const RAW_WINDOW =
+  /(?:^|\/)processed\/request\/(year=\d+\/month=\d+\/day=\d+\/)hour=(\d{2})\/window=(\d+-\d+-[^/]*-n(\d+))\.parquet$/;
+const RAW_COMPACT =
+  /(?:^|\/)processed\/request\/(year=\d+\/month=\d+\/day=\d+\/)hour=(\d{2})\/(?:catalog1\/[0-9a-f]{64}\/)?compact=(\d+-\d+-c(\d+)-n(\d+)(?:-[0-9a-f]+)?)\.parquet$/;
+const WINDOW_SUMMARY =
+  /(?:^|\/)processed\/summary\/request\/(year=\d+\/month=\d+\/day=\d+\/hour=\d{2}\/)summary=([^/]+)\.parquet$/;
+const HOUR_BUNDLE =
+  /(?:^|\/)processed\/summary_bundle\/request\/(?:sha256=[0-9a-f]{64}\/)?(year=\d+\/month=\d+\/day=\d+\/)hour_bundle=(\d{2})-(c(\d+)-n(\d+)-h[0-9a-f]{16}\.parquet)$/;
+const OPEN_BUNDLE =
+  /(?:^|\/)processed\/summary_bundle\/request\/(?:sha256=[0-9a-f]{64}\/)?(year=\d+\/month=\d+\/day=\d+\/)open_bundle=(\d{2})-(\d+)-(c(\d+)-n(\d+)-h[0-9a-f]{16}\.parquet)$/;
+const DAY_BUNDLE =
+  /(?:^|\/)processed\/summary_bundle\/request\/(?:sha256=[0-9a-f]{64}\/)?(year=\d+\/month=\d+\/day=\d+\/)day_bundle=(c(\d+)-n(\d+)-h[0-9a-f]{16}\.parquet)$/;
+
+export type SummaryUse = { file: ManifestFile; covers: ManifestFile[] };
+
+export type SummaryPlan = {
+  summaries: SummaryUse[];
+  /** Window files no summary answers exactly. */
+  raw: ManifestFile[];
+};
+
+type RawWindow = {
+  file: ManifestFile;
+  day: string;
+  hour: string;
+  suffix: string;
+  rows: number;
+  sources: number;
+  compacted: boolean;
+};
+
+/**
+ * Picks the summaries that answer raw windows wholly inside [fromMs, toMs).
+ * A window summary answers its own window; a bundle is used only when its name
+ * proves it covers exactly the remaining windows of its hour or day, so a late,
+ * missing or extra window sends that hour or day back to raw Parquet.
+ */
+export function planSummaries(
+  rawFiles: readonly ManifestFile[],
+  summaryFiles: readonly ManifestFile[],
+  fromMs: number,
+  toMs: number,
+): SummaryPlan {
+  const interior = new Map<string, RawWindow>();
+  const rawIds = new Map<string, string>();
+  const partialHours = new Set<string>();
+  const partialDays = new Set<string>();
+  // Earliest start of an hour's raw files outside the range: an open bundle
+  // ending at or before it cannot hold their rows.
+  const outsideFrom = new Map<string, number>();
+  for (const file of rawFiles) {
+    const windowMatch = RAW_WINDOW.exec(file.key);
+    const compactMatch = windowMatch ? null : RAW_COMPACT.exec(file.key);
+    if (!windowMatch && !compactMatch) continue;
+    const day = (windowMatch ?? compactMatch)![1];
+    const hour = (windowMatch ?? compactMatch)![2];
+    if (Date.parse(file.start) < fromMs || Date.parse(file.end) > toMs) {
+      const hourKey = `${day}hour=${hour}/`;
+      partialHours.add(hourKey);
+      partialDays.add(day);
+      outsideFrom.set(
+        hourKey,
+        Math.min(outsideFrom.get(hourKey) ?? Infinity, Date.parse(file.start)),
+      );
+      continue;
+    }
+    if (windowMatch) {
+      const id = `${day}hour=${hour}/${windowMatch[3]}`;
+      rawIds.set(file.key, id);
+      interior.set(id, {
+        file,
+        day,
+        hour,
+        suffix: windowMatch[3],
+        rows: Number(windowMatch[4]),
+        sources: 1,
+        compacted: false,
+      });
+    } else if (compactMatch) {
+      const id = `${day}hour=${hour}/compact=${compactMatch[3]}`;
+      rawIds.set(file.key, id);
+      interior.set(id, {
+        file,
+        day,
+        hour,
+        suffix: compactMatch[3],
+        rows: Number(compactMatch[5]),
+        sources: Number(compactMatch[4]),
+        compacted: true,
+      });
+    }
+  }
+  const claimed = new Set<string>();
+  const summaries: SummaryUse[] = [];
+  const byKind = (re: RegExp) =>
+    summaryFiles.flatMap((file) => {
+      const match = re.exec(file.key);
+      return match ? [{ file, match }] : [];
+    });
+  const unclaimed = (pred: (w: RawWindow) => boolean) =>
+    [...interior].filter(([id, w]) => !claimed.has(id) && pred(w));
+  const claim = (file: ManifestFile, windows: [string, RawWindow][]) => {
+    for (const [id] of windows) claimed.add(id);
+    summaries.push({ file, covers: windows.map(([, w]) => w.file) });
+  };
+  const hourBundleName = (windows: RawWindow[]) =>
+    covering(
+      windows.map((w) => `summary=${w.suffix}.parquet`),
+      windows.reduce((sum, w) => sum + w.rows, 0),
+    );
+
+  const openBundles = byKind(OPEN_BUNDLE).sort(
+    (a, b) =>
+      Number(b.match[3]) - Number(a.match[3]) ||
+      Number(b.match[5]) - Number(a.match[5]),
+  );
+  // Discovery lists an open bundle with only the windows its coverage leaves out, so the
+  // windows without a listed summary are the set it must name exactly; late windows sorting
+  // inside its range stay with their own summaries.
+  const listedWindows = new Set(
+    byKind(WINDOW_SUMMARY).map(({ match }) => `${match[1]}${match[2]}`),
+  );
+  for (const { file, match } of openBundles) {
+    const endMs = Number(match[3]);
+    const windows = unclaimed(
+      (w) =>
+        w.day === match[1] &&
+        w.hour === match[2] &&
+        Date.parse(w.file.end) <= endMs,
+    );
+    if (windows.length === 0) continue;
+    const unlisted = windows.filter(([id]) => !listedWindows.has(id));
+    if (
+      unlisted.length > 0 &&
+      unlisted.every(([, w]) => !w.compacted) &&
+      unlisted.reduce((sum, [, w]) => sum + w.rows, 0) === Number(match[6]) &&
+      hourBundleName(unlisted.map(([, w]) => w)) === match[4]
+    ) {
+      claim(file, unlisted);
+      continue;
+    }
+    const rowsOf = (set: [string, RawWindow][]) => set.reduce((sum, [, w]) => sum + w.rows, 0);
+    // Under steady ingest, windows ending at the bundle's last slot may land after it
+    // was built: those carry their own listed summaries, and the bundle holds the rest.
+    const held = rowsOf(windows) === Number(match[6]) ? windows
+      : unlisted.some(([, w]) => w.compacted) && rowsOf(unlisted) === Number(match[6]) ? unlisted : null;
+    if (!held) continue;
+    const list = held.map(([, w]) => w);
+    const hasCompact = list.some((w) => w.compacted);
+    // A live tail window that starts after the bundle and crosses `toMs`
+    // leaves the bundle's own rows wholly inside the range.
+    const matchesOpen = hasCompact
+      ? endMs <= toMs &&
+        endMs <= (outsideFrom.get(`${match[1]}hour=${match[2]}/`) ?? Infinity) &&
+        list.reduce((sum, w) => sum + w.sources, 0) <= Number(match[5])
+      : hourBundleName(list) === match[4];
+    if (matchesOpen) {
+      claim(file, held);
+    }
+  }
+  for (const { file, match } of byKind(WINDOW_SUMMARY)) {
+    const id = `${match[1]}${match[2]}`;
+    if (interior.has(id) && !claimed.has(id)) {
+      claim(file, [[id, interior.get(id)!]]);
+    }
+  }
+  for (const { file, match } of byKind(HOUR_BUNDLE)) {
+    const windows = unclaimed((w) => w.day === match[1] && w.hour === match[2]);
+    if (windows.length === 0) continue;
+    const list = windows.map(([, w]) => w);
+    const hasCompact = list.some((w) => w.compacted);
+    const matchesHour = hasCompact
+      ? !partialHours.has(`${match[1]}hour=${match[2]}/`) &&
+        list.reduce((sum, w) => sum + w.sources, 0) <= Number(match[4]) &&
+        list.reduce((sum, w) => sum + w.rows, 0) === Number(match[5])
+      : hourBundleName(list) === match[3];
+    if (matchesHour) {
+      claim(file, windows);
+    }
+  }
+  for (const { file, match } of byKind(DAY_BUNDLE)) {
+    const windows = unclaimed((w) => w.day === match[1]);
+    if (windows.length === 0) continue;
+    const hours = new Map<string, RawWindow[]>();
+    for (const [, w] of windows) {
+      hours.set(w.hour, [...(hours.get(w.hour) ?? []), w]);
+    }
+    const list = windows.map(([, w]) => w);
+    const rows = list.reduce((sum, w) => sum + w.rows, 0);
+    const hasCompact = list.some((w) => w.compacted);
+    const matchesDay = hasCompact
+      ? !partialDays.has(match[1]) &&
+        hours.size === Number(match[3]) &&
+        rows === Number(match[4])
+      : covering(
+          [...hours].map(
+            ([hour, hourList]) =>
+              `hour_bundle=${hour}-${hourBundleName(hourList)}`,
+          ),
+          rows,
+        ) === match[2];
+    if (matchesDay) {
+      claim(file, windows);
+    }
+  }
+  return {
+    summaries,
+    raw: rawFiles.filter((file) => {
+      const id = rawIds.get(file.key);
+      return !id || !claimed.has(id);
+    }),
+  };
+}
+
+/** Plans day bundles, then hour bundles, then window summaries, so the fewest files answer. */
+export function planCoarsestFirst(
+  rawFiles: readonly ManifestFile[],
+  summaryFiles: readonly ManifestFile[],
+  fromMs: number,
+  toMs: number,
+): { summaries: SummaryUse[]; raw: ManifestFile[] } {
+  const days = summaryFiles.filter((f) => f.key.includes("/day_bundle="));
+  const hours = summaryFiles.filter((f) => f.key.includes("/hour_bundle="));
+  const open = summaryFiles.filter((f) => f.key.includes("/open_bundle="));
+  const windows = summaryFiles.filter((f) => f.key.includes("/summary="));
+  const p1 = planSummaries(rawFiles, days, fromMs, toMs);
+  const p2 = planSummaries(p1.raw, hours, fromMs, toMs);
+  // Window summaries ride along so the open bundle's set proof sees which are listed.
+  const p2b = planSummaries(p2.raw, [...open, ...windows], fromMs, toMs);
+  const p3 = planSummaries(p2b.raw, windows, fromMs, toMs);
+  const p4 = planSummaries(p3.raw, summaryFiles, fromMs, toMs);
+  return {
+    summaries: [
+      ...p1.summaries,
+      ...p2.summaries,
+      ...p2b.summaries,
+      ...p3.summaries,
+      ...p4.summaries,
+    ],
+    raw: p4.raw,
+  };
+}
+
+/**
+ * Answers compacted raw files of an open hour from the window summaries the
+ * ingest worker wrote beside each window, so a page need not wait for the
+ * hour bundle. A compact whose name tags (sorted FNV-1a of its sources' file
+ * names, `telemetry/compact.rs` `compact_key`) all resolve to window summaries
+ * with matching rows is answered by exactly those summaries. Compacts merged
+ * from compacts name compacts that no longer exist, so an hour's remaining ones
+ * are answered together only when the hour is wholly in range and its unused
+ * window summaries hold exactly their rows. Several summaries answer one
+ * compact, so callers must treat the plan as all or nothing.
+ */
+export function planCompactsFromWindows(
+  rawFiles: readonly ManifestFile[],
+  summaryFiles: readonly ManifestFile[],
+  fromMs: number,
+  toMs: number,
+): SummaryPlan {
+  type Window = { file: ManifestFile; rows: number; used: boolean };
+  type OpenBundle = {
+    file: ManifestFile;
+    count: number;
+    rows: number;
+    endMs: number;
+  };
+  const windowsByHour = new Map<string, Map<number, Window>>();
+  const openByHour = new Map<string, OpenBundle>();
+  for (const file of summaryFiles) {
+    const openMatch = OPEN_BUNDLE.exec(file.key);
+    if (openMatch) {
+      const hourKey = `${openMatch[1]}hour=${openMatch[2]}/`;
+      const endMs = Number(openMatch[3]);
+      const count = Number(openMatch[5]);
+      const rows = Number(openMatch[6]);
+      const prev = openByHour.get(hourKey);
+      if (
+        !prev ||
+        endMs > prev.endMs ||
+        (endMs === prev.endMs && count > prev.count)
+      ) {
+        openByHour.set(hourKey, { file, count, rows, endMs });
+      }
+      continue;
+    }
+    const match = WINDOW_SUMMARY.exec(file.key);
+    const rows = match && /-n(\d+)$/.exec(match[2]);
+    if (!match || !rows) continue;
+    const hour = windowsByHour.get(match[1]) ?? new Map<number, Window>();
+    hour.set(fnv1a32(`window=${match[2]}.parquet`), {
+      file,
+      rows: Number(rows[1]),
+      used: false,
+    });
+    windowsByHour.set(match[1], hour);
+  }
+  const partialHours = new Set<string>();
+  const liveWindowTags = new Map<string, Set<number>>();
+  const merged = new Map<
+    string,
+    { file: ManifestFile; rows: number; sources: number }[]
+  >();
+  const summaries: SummaryUse[] = [];
+  const claimed = new Set<string>();
+  for (const file of rawFiles) {
+    const compact = RAW_COMPACT.exec(file.key);
+    const rawWin = compact ? null : RAW_WINDOW.exec(file.key);
+    const match = compact ?? rawWin;
+    if (!match) continue;
+    const hourKey = `${match[1]}hour=${match[2]}/`;
+    if (rawWin) {
+      const tags = liveWindowTags.get(hourKey) ?? new Set<number>();
+      tags.add(fnv1a32(`window=${rawWin[3]}.parquet`));
+      liveWindowTags.set(hourKey, tags);
+      if (Date.parse(file.start) < fromMs) partialHours.add(hourKey);
+      continue;
+    }
+    if (Date.parse(file.start) < fromMs || Date.parse(file.end) > toMs) {
+      partialHours.add(hourKey);
+      continue;
+    }
+    if (!compact) continue;
+    const name = /^\d+-\d+-c(\d+)-n(\d+)-([0-9a-f]+)$/.exec(compact[3]);
+    const sources = Number(compact[4]);
+    const rows = Number(compact[5]);
+    const hour = windowsByHour.get(hourKey);
+    const tags =
+      name && name[3].length === sources * 8
+        ? Array.from({ length: sources }, (_, i) =>
+            parseInt(name[3].slice(i * 8, i * 8 + 8), 16),
+          )
+        : [];
+    const named = tags.map((tag) => hour?.get(tag));
+    if (
+      tags.length > 0 &&
+      named.every((w) => w && !w.used) &&
+      named.reduce((sum, w) => sum + w!.rows, 0) === rows
+    ) {
+      for (const w of named) {
+        w!.used = true;
+        summaries.push({ file: w!.file, covers: [file] });
+      }
+      claimed.add(file.key);
+    } else {
+      merged.set(hourKey, [
+        ...(merged.get(hourKey) ?? []),
+        { file, rows, sources },
+      ]);
+    }
+  }
+  for (const [hourKey, compacts] of merged) {
+    if (partialHours.has(hourKey)) continue;
+    const liveTags = liveWindowTags.get(hourKey);
+    const unused = [...(windowsByHour.get(hourKey)?.entries() ?? [])]
+      .filter(([tag, w]) => !w.used && !liveTags?.has(tag))
+      .map(([, w]) => w);
+    const rows = compacts.reduce((sum, c) => sum + c.rows, 0);
+    const sources = compacts.reduce((sum, c) => sum + c.sources, 0);
+    const unusedRows = unused.reduce((sum, w) => sum + w.rows, 0);
+    if (unused.length >= sources && unusedRows === rows) {
+      const covers = compacts.map((c) => c.file);
+      for (const w of unused) {
+        w.used = true;
+        summaries.push({ file: w.file, covers });
+      }
+      for (const c of compacts) claimed.add(c.file.key);
+      continue;
+    }
+    const open = openByHour.get(hourKey);
+    if (
+      open &&
+      Date.parse(open.file.start) >= fromMs &&
+      Date.parse(open.file.end) <= toMs &&
+      open.count + unused.length >= sources &&
+      open.rows + unusedRows === rows
+    ) {
+      const covers = compacts.map((c) => c.file);
+      summaries.push({ file: open.file, covers });
+      for (const w of unused) {
+        w.used = true;
+        summaries.push({ file: w.file, covers });
+      }
+      for (const c of compacts) claimed.add(c.file.key);
+    }
+  }
+  return {
+    summaries,
+    raw: rawFiles.filter((file) => !claimed.has(file.key)),
+  };
+}
+
+/**
+ * Plans like `planRollup`: coarsest summaries first, then an open hour's compacts from the
+ * window summaries (or open bundle) holding their rows. Uses answering the same raw files are
+ * grouped, since only all of a group or none of it answers them.
+ */
+export function planFilteredSummaries(
+  rawFiles: readonly ManifestFile[],
+  summaryFiles: readonly ManifestFile[],
+  fromMs: number,
+  toMs: number,
+): { groups: SummaryUse[][]; raw: ManifestFile[] } {
+  const coarse = planCoarsestFirst(rawFiles, summaryFiles, fromMs, toMs);
+  const used = new Set(coarse.summaries.map((use) => use.file.key));
+  const compacted = planCompactsFromWindows(
+    coarse.raw,
+    summaryFiles.filter((file) => !used.has(file.key)),
+    fromMs,
+    toMs,
+  );
+  return {
+    groups: [
+      ...coarse.summaries.map((use) => [use]),
+      ...groupByCovers(compacted.summaries),
+    ],
+    raw: compacted.raw,
+  };
+}
+
+/** Groups uses that answer the same raw files: all of a group answers them or none does. */
+export function groupByCovers(uses: readonly SummaryUse[]): SummaryUse[][] {
+  const groups = new Map<string, SummaryUse[]>();
+  for (const use of uses) {
+    const key = use.covers.map((file) => file.key).sort().join("\n");
+    groups.set(key, [...(groups.get(key) ?? []), use]);
+  }
+  return [...groups.values()];
+}
+
+export type DecodedSummary = {
+  rollup: FileRollupData;
+  /** Card fields whose values were cut to the top K in some source. */
+  truncated: string[];
+  /** Distinct client IPs across the summary. */
+  ipSketch: Hll | null;
+  /**
+   * Per pivot field, the same rollup of only the rows with each value
+   * (`decodeSummary` with `slices`); undefined when they were not read.
+   */
+  slices?: ReadonlyMap<string, PivotSlices>;
+};
+
+/** One pivot field's slices of a summary (compute/cloud/src/ingest/summary.rs `PIVOT_FIELDS`). */
+export type PivotSlices = {
+  /** Rows with a non-null value, including values cut from `values`. */
+  total: number;
+  /** Some value was cut, so `values` misses rows. */
+  truncated: boolean;
+  /** Keyed by the stored text of the value. */
+  values: ReadonlyMap<string, DecodedSummary>;
+};
+
+/**
+ * Fields whose values summaries slice the dashboard rollups by
+ * (compute/cloud/src/ingest/summary.rs `PIVOT_FIELDS`).
+ */
+export const PIVOT_FIELDS: readonly string[] = ["status"];
+
+/** Summary groups holding the pivot slices. */
+export const SLICE_GROUPS = [
+  "pivot_totals",
+  "slice_overview",
+  "slice_ts",
+  "slice_totals",
+  "slice_fields",
+];
+
+export const SUMMARY_COLUMNS = [
+  "bundle",
+  "bucket",
+  "field",
+  "value",
+  "count",
+  "truncated",
+  "requests",
+  "status_4xx",
+  "status_5xx",
+  "hits",
+  "cache_total",
+  "resp_bytes_sum",
+];
+
+/** The columns that key slice rows, read with `SUMMARY_COLUMNS` when slices are wanted. */
+export const SLICE_COLUMNS = ["pivot", "pivot_value"];
+
+type SliceBuilder = {
+  buckets: Map<number, MinuteBucket>;
+  counts: Map<string, Map<Scalar, number>>;
+  nonNull: Record<string, number>;
+  cut: Set<string>;
+  ipSketch: Hll | null;
+  total: number;
+};
+
+const newSlice = (): SliceBuilder => ({
+  buckets: new Map(),
+  counts: new Map(),
+  nonNull: {},
+  cut: new Set(),
+  ipSketch: null,
+  total: 0,
+});
+
+function finishSlice(slice: SliceBuilder, slices?: ReadonlyMap<string, PivotSlices>): DecodedSummary {
+  const sorted = [...slice.buckets.values()].sort((a, b) => a.t - b.t);
+  return {
+    rollup: {
+      minTs: sorted.length ? sorted[0].t : Infinity,
+      maxTs: sorted.length ? sorted[sorted.length - 1].t : -Infinity,
+      totalRequests: slice.total,
+      hasBytes: true,
+      buckets: sorted,
+      counts: Object.fromEntries(
+        [...slice.counts].map(([name, map]) => [name, [...map]]),
+      ),
+      nonNull: slice.nonNull,
+    },
+    truncated: [...slice.cut],
+    ipSketch: slice.ipSketch,
+    ...(slices ? { slices } : {}),
+  };
+}
+
+const num = (value: unknown) =>
+  typeof value === "bigint"
+    ? Number(value)
+    : typeof value === "number"
+      ? value
+      : 0;
+
+function ms(value: unknown): number | null {
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === "bigint") return Number(value);
+  if (typeof value === "number") return value;
+  return null;
+}
+
+/**
+ * Decodes a window summary or bundle (whole, or the parts of a
+ * projection) into a rollup for the card fields, or
+ * returns null when it is another format version, reaches outside
+ * [fromMs, toMs) or never summarized one of `custom` (it predates the field),
+ * so the caller reads raw Parquet instead.
+ */
+export async function decodeSummary(
+  data: ArrayBuffer | readonly ArrayBuffer[],
+  fromMs: number,
+  toMs: number,
+  custom: readonly CustomField[] = [],
+  { slices: withSlices = false }: { slices?: boolean } = {},
+): Promise<DecodedSummary | null> {
+  const parts: readonly ArrayBuffer[] = Array.isArray(data) ? data : [data as ArrayBuffer];
+  const version = parquetMetadata(parts[0]).key_value_metadata?.find(
+    (kv) => kv.key === "flp_summary",
+  )?.value;
+  if (version !== SUMMARY_VERSION) return null;
+  const { readSummaryColumns } = await import("./summary-projection");
+  const { rows, columns } = await readSummaryColumns(
+    parts,
+    withSlices ? [...SUMMARY_COLUMNS, ...SLICE_COLUMNS] : SUMMARY_COLUMNS,
+  );
+  const binary = await readSummaryColumns(parts, ["ip_sketch"], false);
+  const col = (name: string) => columns.get(name) ?? [];
+  const [kind, bucket, field, value, count, truncated] = [
+    col("bundle"),
+    col("bucket"),
+    col("field"),
+    col("value"),
+    col("count"),
+    col("truncated"),
+  ];
+  const [requests, s4xx, s5xx, hits, cacheTotal, respBytes, sketch] = [
+    col("requests"),
+    col("status_4xx"),
+    col("status_5xx"),
+    col("hits"),
+    col("cache_total"),
+    col("resp_bytes_sum"),
+    binary.columns.get("ip_sketch") ?? [],
+  ];
+  const cards = new Set<string>(CARD_FIELDS);
+  const types = new Map(custom.map((field) => [field.id, field.type]));
+  for (const field of custom) cards.add(field.id);
+  const summarized = new Set<string>();
+  const base = newSlice();
+  const { counts, nonNull, cut } = base;
+  const [pivot, pivotValue] = [col("pivot"), col("pivot_value")];
+  const pivots = new Map<
+    string,
+    { total: number; truncated: boolean; values: Map<string, SliceBuilder> }
+  >();
+  const pivotOf = (i: number) => {
+    const name = pivot[i];
+    if (typeof name !== "string") return null;
+    let entry = pivots.get(name);
+    if (!entry) {
+      entry = { total: 0, truncated: false, values: new Map() };
+      pivots.set(name, entry);
+    }
+    return entry;
+  };
+  const sliceOf = (i: number) => {
+    const entry = pivotOf(i);
+    const value = pivotValue[i];
+    if (!entry || typeof value !== "string") return null;
+    let slice = entry.values.get(value);
+    if (!slice) {
+      slice = newSlice();
+      entry.values.set(value, slice);
+    }
+    return slice;
+  };
+  const addMinute = (into: Map<number, MinuteBucket>, i: number) => {
+    const t = ms(bucket[i]);
+    if (t === null || t < fromMs || t + MINUTE_MS > toMs) return false;
+    const b = into.get(t) ?? {
+      t,
+      requests: 0,
+      bytes: 0,
+      s4xx: 0,
+      s5xx: 0,
+      hits: 0,
+      cacheRows: 0,
+    };
+    b.requests += num(requests[i]);
+    b.bytes += num(respBytes[i]);
+    b.s4xx += num(s4xx[i]);
+    b.s5xx += num(s5xx[i]);
+    b.hits += num(hits[i]);
+    b.cacheRows += num(cacheTotal[i]);
+    into.set(t, b);
+    return true;
+  };
+  const mergeSketch = (into: SliceBuilder, i: number) => {
+    const blob = sketch[i];
+    const hll = blob instanceof Uint8Array ? Hll.fromBytes(blob) : null;
+    if (hll) {
+      if (into.ipSketch) into.ipSketch.merge(hll);
+      else into.ipSketch = hll;
+    }
+  };
+  for (let i = 0; i < rows; i++) {
+    switch (kind[i]) {
+      case "time_series": {
+        if (!addMinute(base.buckets, i)) return null;
+        base.total += num(requests[i]);
+        break;
+      }
+      case "overview": {
+        mergeSketch(base, i);
+        break;
+      }
+      case "field_totals": {
+        const name = field[i] as string;
+        if (!cards.has(name)) break;
+        summarized.add(name);
+        nonNull[name] = (nonNull[name] ?? 0) + num(count[i]);
+        if (truncated[i] === true) cut.add(name);
+        break;
+      }
+      case "all_fields": {
+        const name = field[i] as string;
+        if (!cards.has(name)) break;
+        const typed = summaryValue(name, value[i] as string, types.get(name));
+        if (typed === null) break;
+        const map = counts.get(name) ?? new Map<Scalar, number>();
+        map.set(typed, (map.get(typed) ?? 0) + num(count[i]));
+        counts.set(name, map);
+        break;
+      }
+      case "pivot_totals": {
+        if (!withSlices) break;
+        const entry = pivotOf(i);
+        if (!entry) break;
+        entry.total += num(count[i]);
+        if (truncated[i] === true) entry.truncated = true;
+        break;
+      }
+      case "slice_overview": {
+        const slice = withSlices && sliceOf(i);
+        if (slice) mergeSketch(slice, i);
+        break;
+      }
+      case "slice_ts": {
+        const slice = withSlices && sliceOf(i);
+        if (!slice) break;
+        if (!addMinute(slice.buckets, i)) return null;
+        slice.total += num(requests[i]);
+        break;
+      }
+      case "slice_totals": {
+        const name = field[i] as string;
+        const slice = withSlices && cards.has(name) && sliceOf(i);
+        if (!slice) break;
+        slice.nonNull[name] = (slice.nonNull[name] ?? 0) + num(count[i]);
+        if (truncated[i] === true) slice.cut.add(name);
+        break;
+      }
+      case "slice_fields": {
+        const name = field[i] as string;
+        const slice = withSlices && cards.has(name) && sliceOf(i);
+        if (!slice) break;
+        const typed = summaryValue(name, value[i] as string, types.get(name));
+        if (typed === null) break;
+        const map = slice.counts.get(name) ?? new Map<Scalar, number>();
+        map.set(typed, (map.get(typed) ?? 0) + num(count[i]));
+        slice.counts.set(name, map);
+        break;
+      }
+    }
+  }
+  if (custom.some((field) => !summarized.has(field.id))) return null;
+  const slices = withSlices
+    ? new Map(
+        [...pivots].map(([name, entry]) => [
+          name,
+          {
+            total: entry.total,
+            truncated: entry.truncated,
+            values: new Map(
+              [...entry.values].map(([v, slice]) => [v, finishSlice(slice)]),
+            ),
+          },
+        ]),
+      )
+    : undefined;
+  return finishSlice(base, slices);
+}

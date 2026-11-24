@@ -8,7 +8,7 @@ import {
   type Dispatch,
   type SetStateAction,
 } from 'react'
-import type { VisibilityState } from '@tanstack/react-table'
+import type { ColumnVisibilityState } from '@tanstack/react-table'
 import { formatDate, formatRelative, formatTimeAgo, getTimezoneAbbr } from '@/lib/utils'
 import { useTimezoneStore } from '@/stores/filterStore'
 
@@ -92,8 +92,8 @@ export function useOpenGeneration(open: boolean): number {
   return generation
 }
 
-export function useColumnVisibility(initial?: VisibilityState) {
-  const [visibility, setVisibility] = useState<VisibilityState>(initial ?? {})
+export function useColumnVisibility(initial?: ColumnVisibilityState) {
+  const [visibility, setVisibility] = useState<ColumnVisibilityState>(initial ?? {})
   const handleChange = useCallback(
     (id: string, vis: boolean) => setVisibility((prev) => ({ ...prev, [id]: vis })),
     [],

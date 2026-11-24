@@ -7,7 +7,7 @@
 import { renderHook, waitFor } from '@testing-library/react'
 import { hashKey, hydrate, QueryClient, useMutation, useQuery, type QueryKey } from '@tanstack/react-query'
 import { createTestQueryClient, makeQueryWrapper, invalidInput, setupNextHeadersMock, withTestHttpServer } from '../helpers/page-smoke'
-import { http, HttpResponse } from 'msw'
+import { http, HttpResponse } from 'msw/http'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 import { server } from '@/__tests__/helpers/msw/handlers'
@@ -17,9 +17,14 @@ import {
   fetchPerformanceServerSide, fetchSecurityServerSide, fetchInsightsServerSide,
   fetchOriginServerSide, fetchTosServerSide, fetchCronRunsServerSide,
   fetchUsageLogServerSide, resolveDefaultSsrRangeKey, resolveInsightsDefault,
+  resolveReportPageParams,
   PERFORMANCE_SSR_DEFAULTS, SECURITY_SSR_DEFAULTS, SECURITY_SSR_SECTIONS,
   ORIGIN_SSR_DEFAULTS, ORIGIN_SSR_SECTIONS,
 } from '@/lib/ssr/upstream'
+import {
+  analyticsReportQueryKey,
+  insightsReportQueryKey,
+} from '@/lib/report-query-key'
 
 const { setHeaders, setCookies } = setupNextHeadersMock({ cookies: 'session=abc123' })
 const inbound = setHeaders
@@ -55,7 +60,7 @@ vi.mock('@/stores/filterStore', async (importOriginal) => {
 
 import {
   client, extractApiError, customFieldsApi, adminJson, adminJsonResult,
-  queryKeys, throwIfStaleAggregates, isStaleDashboardViewError,
+  queryKeys, seedBootstrapDependentCaches, throwIfStaleAggregates, isStaleDashboardViewError,
   STALE_VIEW_RETRY_OPTIONS, STALE_VIEW_POLL_MS, ssrUpstreamGet,
   type CustomField, type VclLintRequest,
 } from '@/lib/api'
@@ -266,7 +271,7 @@ describe('X-User-Active request injection', () => {
 const LINT_BODY: VclLintRequest = { vcl_log_expression: 'req.url', collection_stage: 'edge' }
 const FIELD_BODY: Omit<CustomField, 'created_at' | 'updated_at'> = {
   name: 'new_field', label: 'New field', description: '', vcl_log_expression: 'req.url',
-  collection_stage: 'edge', origin_log_frequency: 'all', duckdb_type: 'VARCHAR',
+  collection_stage: 'edge', origin_log_frequency: 'all', sql_type: 'VARCHAR',
   value_type: 'string', bytes_estimate: 32, nullable: true, enabled: true,
   show_in_dashboard: false, show_in_logs: true, filterable: true,
 }
@@ -356,7 +361,7 @@ describe('customFieldsApi', () => {
 
 describe('adminJson & adminJsonResult', () => {
   it('adminJson returns parsed body on 2xx and throws default or custom status message on non-2xx', async () => {
-    server.use(http.get('*/api/admin/queries/summary', () => HttpResponse.json({ active_total: 2, by_db_type: { duckdb: 2 }, longest_ms: 12 })))
+    server.use(http.get('*/api/admin/queries/summary', () => HttpResponse.json({ active_total: 2, by_db_type: { clickhouse: 2 }, longest_ms: 12 })))
     expect((await adminJson('/api/admin/queries/summary', '/api/admin/queries/summary')).active_total).toBe(2)
 
     server.use(http.get('*/api/admin/queries/summary', () => HttpResponse.json({}, { status: 503 })))
@@ -403,6 +408,21 @@ describe('narrow helpers', () => {
   })
 })
 
+describe('seedBootstrapDependentCaches header keys', () => {
+  it('leaves sync-status and last-sync unseeded when the bootstrap omits them, so the header fetches', () => {
+    const qc = new QueryClient()
+    seedBootstrapDependentCaches(qc, { active_service_id: SVC })
+    expect(qc.getQueryState(queryKeys.syncStatus(SVC))).toBeUndefined()
+    expect(qc.getQueryState(queryKeys.lastSync(SVC))).toBeUndefined()
+
+    const status = { request: { latest_log_at: null, total_rows: 0 }, rum: null }
+    seedBootstrapDependentCaches(qc, { active_service_id: SVC, sync_status: status, last_sync: null })
+    expect(qc.getQueryData(queryKeys.syncStatus(SVC))).toEqual(status)
+    expect(qc.getQueryState(queryKeys.lastSync(SVC))?.status).toBe('success')
+    expect(qc.getQueryData(queryKeys.lastSync(SVC))).toBeNull()
+  })
+})
+
 describe('queryKeys.admin shapes', () => {
   const k = queryKeys.admin
   const cases: [string, readonly unknown[], readonly unknown[]][] = [
@@ -442,8 +462,6 @@ describe('queryKeys.admin shapes', () => {
     ['schemaAll', k.schemaAll(), ['admin', 'schema']],
     ['storage', k.storage('s'), ['admin', 'storage', 's']],
     ['storageAll', k.storageAll(), ['admin', 'storage']],
-    ['storageCalendar', k.storageCalendar('s'), ['admin', 'storage', 'calendar', 's']],
-    ['storageInfo', k.storageInfo('s'), ['admin', 'storage-info', 's']],
     ['storageTree', k.storageTree('s'), ['admin', 'storage-tree', 's']],
     ['rawTree', k.rawTree('s'), ['admin', 'raw-tree', 's']],
     ['fileTree storage', k.fileTree('storage', 's', 'p/'), ['admin', 'storage-tree', 's', 'p/']],
@@ -460,7 +478,7 @@ describe('queryKeys.admin shapes', () => {
     const qc = createTestQueryClient()
     qc.setQueryData(k.cronLogs('s', 'all', 'all'), 1)
     qc.setQueryData(k.cronLogs('other', 'all', 'all'), 2)
-    qc.setQueryData(k.storageCalendar('s'), 3)
+    qc.setQueryData(k.storage('s'), 3)
     qc.setQueryData(k.queryMonitorSnapshot(false), 4)
 
     qc.invalidateQueries({ queryKey: k.cronLogsFor('s') })
@@ -468,7 +486,7 @@ describe('queryKeys.admin shapes', () => {
     expect(qc.getQueryState(k.cronLogs('other', 'all', 'all'))?.isInvalidated).toBe(false)
 
     qc.invalidateQueries({ queryKey: k.storageAll() })
-    expect(qc.getQueryState(k.storageCalendar('s'))?.isInvalidated).toBe(true)
+    expect(qc.getQueryState(k.storage('s'))?.isInvalidated).toBe(true)
 
     qc.invalidateQueries({ queryKey: k.queryMonitorSnapshotAll() })
     expect(qc.getQueryState(k.queryMonitorSnapshot(false))?.isInvalidated).toBe(true)
@@ -661,6 +679,26 @@ describe('fetchBootstrapServerSide & fetchTosServerSide', () => {
       expect(await fetchTosServerSide()).toBe('unauthenticated')
     }, 401)
   })
+
+  it('never shares an admin SSR bootstrap cache across request cookie identities', async () => {
+    setCookies('admin_session=first')
+    inbound({ host: 'localhost:3001', 'x-service-id': 'svc-cache-identity' })
+    await withTestHttpServer(
+      (req, res) => {
+        const value = String(req.headers.cookie)
+        res.setHeader('Content-Type', 'application/json')
+        res.end(JSON.stringify({ active_service_id: value }))
+      },
+      async () => {
+        const first = await fetchBootstrapServerSide()
+        expect(first).toMatchObject({ active_service_id: 'admin_session=first' })
+
+        setCookies('admin_session=second')
+        const second = await fetchBootstrapServerSide()
+        expect(second).toMatchObject({ active_service_id: 'admin_session=second' })
+      },
+    )
+  })
 })
 
 describe('Streaming SSR fixture contract', () => {
@@ -722,6 +760,62 @@ describe('resolveDefaultSsrRangeKey & SSR-seed key ↔ client first-paint key by
     expect(a.anchor).toBe('2026-06-29T12:00:00Z')
   })
 
+  it('builds the exact analytics query keys used by SSR seeds and report clients', () => {
+    const { rangeToken, anchor } = resolveDefaultSsrRangeKey(NOW_ISO)
+    expect(analyticsReportQueryKey({
+      namespace: ['performance', 'aggregates'],
+      serviceId: 'svc-1',
+      rangeToken,
+      anchor,
+      filterPayload: {},
+      keyParts: [PERFORMANCE_SSR_DEFAULTS.sortBy],
+    })).toEqual([
+      'performance', 'aggregates', 'svc-1', '24h', anchor, {}, 'p99',
+    ])
+    expect(analyticsReportQueryKey({
+      namespace: ['origin', 'aggregates'],
+      serviceId: 'svc-1',
+      rangeToken,
+      anchor,
+      filterPayload: {},
+      keyParts: [
+        ORIGIN_SSR_DEFAULTS.bucketMinutes,
+        ORIGIN_SSR_DEFAULTS.metric,
+        ORIGIN_SSR_DEFAULTS.percentile,
+        ORIGIN_SSR_SECTIONS,
+      ],
+    })).toEqual([
+      'origin', 'aggregates', 'svc-1', '24h', anchor, {}, 1,
+      'ttfb', 'p95', [...ORIGIN_SSR_SECTIONS],
+    ])
+  })
+
+  it('builds the exact unfiltered insights key used by the SSR seed and client', () => {
+    expect(insightsReportQueryKey({
+      serviceId: 'svc-1',
+      windowHours: '24',
+      baselineHours: '168',
+    })).toEqual(['insights', 'svc-1', '24', '168'])
+  })
+
+  it.each([
+    { metric: 'ttfb' },
+    { percentile: 'p95' },
+    { sort_by: 'p99' },
+    { bucket_seconds: '300' },
+    { top_n: '30' },
+    { window: '24' },
+    { baseline: '168' },
+  ])('does not classify interactive report params as a default view: %o', async (interactive) => {
+    await expect(resolveReportPageParams(Promise.resolve({
+      service: 'svc-1',
+      ...interactive,
+    }))).resolves.toEqual({
+      serviceId: 'svc-1',
+      isDefaultView: false,
+    })
+  })
+
   it.each([
     {
       name: 'Performance',
@@ -741,7 +835,7 @@ describe('resolveDefaultSsrRangeKey & SSR-seed key ↔ client first-paint key by
       name: 'Origin',
       buildKeys: (serviceId: string, rangeToken: string, anchor: string) => [
         ['origin', 'aggregates', serviceId, rangeToken, anchor, {}, ORIGIN_SSR_DEFAULTS.bucketMinutes, ORIGIN_SSR_DEFAULTS.metric, ORIGIN_SSR_DEFAULTS.percentile, ORIGIN_SSR_SECTIONS],
-        ['origin', 'aggregates', serviceId, rangeToken, anchor, {}, 60, 'ttfb', 'p95', ['summary', 'timeseries', 'slow_urls', 'status_codes', 'path_breakdown', 'pop_latency', 'ip_health']],
+        ['origin', 'aggregates', serviceId, rangeToken, anchor, {}, 1, 'ttfb', 'p95', ['summary', 'timeseries', 'slow_urls', 'status_codes', 'path_breakdown', 'pop_latency', 'ip_health']],
       ],
     },
   ])('$name SSR-seed key === client useServiceQuery key', ({ buildKeys }) => {
@@ -970,7 +1064,7 @@ describe('certificate gateway SSR trust', () => {
         srv.clearRequests()
         setCookies('')
         expect(await fetchBootstrapServerSide()).toEqual({})
-        expect(srv.lastRequest).toBeUndefined()
+        expect(srv.lastRequest?.headers).not.toHaveProperty('cookie')
 
         inbound({ host: 'admin.example.com', 'x-admin-gateway-token': secret, 'x-service-id': 'analyst-response-cache-test' })
         upstreamBody = { settings: { is_remote_analyst: true } }
@@ -1060,6 +1154,18 @@ describe('ssrUpstreamGet — debug-responses cookie propagation & ECONNRESET ret
     })
   })
 
+  it.each([
+    { tag: 'camp-p10-s3-pg04-cold', expected: 'camp-p10-s3-pg04-cold' },
+    { tag: 'bad tag;drop', expected: undefined },
+  ])('forwards a valid x-fla-harness tag upstream ($tag)', async ({ tag, expected }) => {
+    setCookies('')
+    inbound({ host: 'localhost:3001', 'x-fla-harness': tag })
+    await withJsonServer({}, async (srv) => {
+      expect(await ssrUpstreamGet({ path: '/api/bootstrap', logPrefix: 'test' })).not.toBeNull()
+      expect(srv.lastRequest?.headers['x-fla-harness']).toBe(expected)
+    })
+  })
+
   it('disables keep-alive socket reuse (connection: close) and retries once on ECONNRESET', async () => {
     let attempts = 0
     let secondConnHeader: string | string[] | undefined
@@ -1088,10 +1194,9 @@ describe('ssrUpstreamGet — debug-responses cookie propagation & ECONNRESET ret
 })
 
 describe('Insights page barrel export', () => {
-  it('re-exports InsightsClient directly so client navigation mounts skeletons immediately without blocking on SSR', async () => {
+  it('re-exports InsightsClient for direct client use', async () => {
     const mod = await import('@/app/insights/page')
     const clientMod = await import('@/app/insights/_sections/InsightsClient')
-    expect(mod.default).toBe(clientMod.default)
     expect(mod.InsightsClient).toBe(clientMod.InsightsClient)
   })
 })

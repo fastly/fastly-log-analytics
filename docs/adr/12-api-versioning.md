@@ -5,7 +5,7 @@
 
 ## 1. Context & Motivation
 
-The HTTP surface is `/api/*` with no `/api/v1/` prefix. Semantic versioning lives on the app object (`app.version='3.0.0-rc1'` in [backend/main.py](../../backend/main.py)). The typed frontend client is openapi-typescript-generated from FastAPI's OpenAPI schema, with the pre-commit `regen-openapi` hook gating drift.
+The HTTP surface is `/api/*` with no `/api/v1/` prefix. Semantic versioning lives on the app object (`app.version` in [backend/main.py](../../backend/main.py)). The typed frontend client is openapi-typescript-generated from FastAPI's OpenAPI schema, with the pre-commit `regen-openapi` hook gating drift.
 
 The system is internally self-consistent but has no written rule for what counts as breaking. The 2026-06-10 sessions surfaced two related signals: (a) `/api/sync-status?skip_fos=true` was used as a soft-versioning mechanism (query-param "give me less"), and it failed because the underlying middleware 403'd analysts entirely regardless of the param; (b) the chosen fix was a sibling endpoint `/api/log-extents` rather than a versioned variant of `/api/sync-status`. That decision is the doctrine, but it lives in a session note rather than an ADR.
 
@@ -84,7 +84,9 @@ The most subtle versioning rule we have. Encoded in middleware via `_ANALYST_BLO
 ### 2.5 The contract for the typed client
 
 - `frontend/openapi.json` and `frontend/types/api.generated.ts` are committed to git. They are the snapshot of the API at HEAD.
+- `frontend/lib/cloud-engine/cloud-openapi.json` and `cloud-api.generated.ts` form the same contract pair for Cloud Compute. Generate the latter with `cd frontend && npm run gen:cloud-types`; the checked-in lockfile pins `openapi-typescript`.
 - The pre-commit `regen-openapi` hook fires on every `backend/*.py` or `scripts/generate_openapi.py` change and regenerates both files. Drift = failed commit. Re-stage and re-commit.
+- `make openapi-drift` regenerates both typed clients and the Cloud CI job fails on any tracked diff.
 - `frontend/openapi.json` is excluded from end-of-file-fixer (the generator strips trailing newlines; the fixer added them; commit 2026-06-10 broke the cycle).
 - Clients NOT in this repo (curl scripts, integrations) consume `openapi.json` directly; they get versioned via git history.
 

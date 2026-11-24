@@ -17,7 +17,8 @@ import {
 } from '@/components/ui/tooltip'
 import { showToast } from '@/lib/utils'
 import { DataTable } from '@/components/DataTable'
-import type { ColumnDef, VisibilityState } from '@tanstack/react-table'
+import type { ColumnVisibilityState } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import type { components } from '@/types/api.generated'
 
 type Alert = components['schemas']['Alert']
@@ -41,8 +42,8 @@ const METRIC_TO_DASHBOARD: Record<string, string> = {
 
 export interface AlertsListProps {
   alerts: Alert[]
-  columnVisibility: VisibilityState
-  setColumnVisibility: React.Dispatch<React.SetStateAction<VisibilityState>>
+  columnVisibility: ColumnVisibilityState
+  setColumnVisibility: React.Dispatch<React.SetStateAction<ColumnVisibilityState>>
   onEdit: (alert: Alert) => void
   onDelete: (alertId: string) => void
   isAnalyst?: boolean

@@ -3,7 +3,7 @@ import { act, render, renderHook, screen, waitFor, within } from '@testing-libra
 import userEvent from '@testing-library/user-event'
 import { axe } from 'vitest-axe'
 import { useQuery } from '@tanstack/react-query'
-import { http, HttpResponse } from 'msw'
+import { http, HttpResponse } from 'msw/http'
 import childProcess, { ChildProcess, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
@@ -167,7 +167,7 @@ function resetDefaultStores() {
   useInteractiveDataTableMock = false
   useMockActiveLogFields = false
   useSecurityActiveFields = false
-  mockIsDataReady = null
+  mockIsDataReady = true
   useMockHighScaleBootstrap = false
   mockPathname = '/dashboard'
   useServiceStore.setState({ activeServiceId: 'test-svc', isInitialized: true, services: [{ id: 'test-svc', name: 'Test' }] })
@@ -276,6 +276,21 @@ describe('Dashboard page & chart helpers', () => {
     renderWithQuery(<NuqsWrapper><DashboardClient /></NuqsWrapper>, { queryClient })
     expect(screen.getByText('Dashboard')).toBeInTheDocument()
     await waitFor(() => expect(screen.getByText('Traffic over Time')).toBeInTheDocument())
+  })
+
+  test('an unknown ?metric= deep link falls back to requests instead of sending an invalid chart_metric', async () => {
+    mockIsDataReady = true
+    mockGet.mockImplementation(async (url: string) => getOk(url.includes('/api/log-fields/catalog')
+      ? { fields: [{ id: 'status', label: 'HTTP Status' }], groups: [], presets: {} }
+      : { active_service_id: 'test-svc', services: [{ service_id: 'test-svc', name: 'Test' }] }))
+    mockPost.mockResolvedValue(postOk({ aggregates: { data: {}, time_series: [] }, data: {}, time_series: [] }))
+    const NuqsWrapper = withNuqsTestingAdapter({ searchParams: '?metric=bandwidth' })
+    renderWithQuery(<NuqsWrapper><DashboardClient /></NuqsWrapper>, { queryClient })
+    const chartMetrics = () => mockPost.mock.calls
+      .filter(([url]) => url === '/api/dashboard/bundle').map(([, options]) => options.body.chart_metric)
+    await waitFor(() => expect(chartMetrics().length).toBeGreaterThan(0))
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)) })
+    expect(new Set(chartMetrics())).toEqual(new Set(['requests']))
   })
 
   test.each([
@@ -444,7 +459,10 @@ describe('Assets & Shield page', () => {
     unmount()
 
     queryClient.clear()
-    mockPost.mockResolvedValue({ data: { ...MOCK_ASSETS_DATA, missing_fields: ['resp_header_content_encoding', 'ttl'] } })
+    useSecurityActiveFields = true
+    securityActiveFields.clear()
+    securityActiveFields.add('url')
+    mockPost.mockResolvedValue({ data: MOCK_ASSETS_DATA })
     const { unmount: unmount2 } = renderWithQuery(<AssetsClient />, { queryClient })
     expect(await screen.findByText('/static/bundle-huge.js')).toBeInTheDocument()
     expect(screen.getByText('/feed.json')).toBeInTheDocument()
@@ -455,7 +473,7 @@ describe('Assets & Shield page', () => {
     }
     expect(screen.getByText('60.0s')).toBeInTheDocument()
     const banner = await screen.findByTestId('missing-asset-fields-banner')
-    expect(within(banner).getByText(/resp_header_content_encoding, ttl/i)).toBeInTheDocument()
+    expect(within(banner).getByText(/ttl, resp_header_content_encoding/i)).toBeInTheDocument()
     expect(within(banner).getByRole('link', { name: /Configure Service Log Fields/i }).getAttribute('href')).toContain('/admin')
     unmount2()
 
@@ -878,7 +896,7 @@ describe('UI primitives & a11y', () => {
     expect(screen.queryByTestId('help-body')).not.toBeInTheDocument()
 
     rerender(<AnalyticsCard title="Loading Card" isLoading isFetching><p>placeholder</p></AnalyticsCard>)
-    expect(screen.getByText(/loading data/i)).toBeInTheDocument()
+    expect(screen.getByText('Loading Loading Card...')).toBeInTheDocument()
     expect(container.querySelector('svg.animate-spin')).toBeInTheDocument()
     expect(await axe(container)).toHaveNoViolations()
 
@@ -931,8 +949,8 @@ describe('extractApiError & openapi-fetch error paths', () => {
 })
 
 const rejected: Record<string, string> = {
-  METADATA_DSN: 'postgresql://example.invalid/operator', DUCKLAKE_CATALOG: 'postgres:example.invalid/operator',
-  DUCKLAKE_DATA_PATH: 's3://operator-placeholder/', CELERY_BROKER_URL: 'redis://example.invalid/0',
+  METADATA_DSN: 'postgresql://example.invalid/operator',
+  CELERY_BROKER_URL: 'redis://example.invalid/0',
   CELERY_RESULT_BACKEND: 'redis://example.invalid/1', CLICKHOUSE_PASSWORD: 'operator-placeholder',
   HOT_S3_SECRET: 'operator-placeholder', FASTLY_API_KEY: 'operator-placeholder',
   AWS_SECRET_ACCESS_KEY: 'operator-placeholder', REMOTE_SHARE_DB_DIR: '/operator-placeholder',
@@ -953,7 +971,6 @@ describe('backend harness child isolation', () => {
     vi.clearAllMocks()
     for (const [key, value] of Object.entries(rejected)) vi.stubEnv(key, value)
     for (const key of ['FLA_DEV_NO_CRONS', 'FASTLY_MOCK_MODE']) vi.stubEnv(key, '0')
-    vi.stubEnv('DEPLOYMENT_MODE', 'high_scale')
     vi.stubEnv('SSE_BACKPLANE', 'valkey')
     vi.stubEnv('OTEL_EXPORTER', 'otlp')
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }))
@@ -993,7 +1010,7 @@ describe('backend harness child isolation', () => {
       for (const [key, value] of Object.entries(rejected)) expect(env[key], key).not.toBe(value)
       expect(env).toMatchObject({
         PATH: process.env.PATH, DEBUG_RESPONSES: 'true', FASTLY_MOCK_MODE: '1', FLA_DEV_NO_CRONS: '1',
-        DEPLOYMENT_MODE: 'standard', SSE_BACKPLANE: 'local', OTEL_EXPORTER: 'none',
+        SSE_BACKPLANE: 'local', OTEL_EXPORTER: 'none',
         UV_NO_ENV_FILE: '1', UV_NO_CONFIG: '1', PYTHON_DOTENV_DISABLED: '1',
       })
       expect(env.CONTRACT_CONFIGS_DIR).toBe(join(env.CONTRACT_DATA_DIR!, '..', 'configs'))
@@ -1020,13 +1037,8 @@ describe('backend harness child isolation', () => {
     expect(() => contract.backendTestEnvironment('/tmp/data')).toThrow(/isolated test database/i)
 
     vi.stubEnv('FLA_CONTRACT_TEST_METADATA_POSTGRES_DSN', 'postgresql://fla:pw@localhost:5432/test_fla_contract')
-    vi.stubEnv('FLA_CONTRACT_TEST_CATALOG_POSTGRES_DSN', 'postgresql://fla:pw@localhost:5432/ducklake_live')
-    expect(() => contract.backendTestEnvironment('/tmp/data')).toThrow(/isolated test database/i)
-
-    vi.stubEnv('FLA_CONTRACT_TEST_CATALOG_POSTGRES_DSN', 'postgresql://fla:pw@localhost:5432/ducklake_contract_test')
     const validEnv = contract.backendTestEnvironment('/tmp/data')
     expect(validEnv.METADATA_DSN).toBe('postgresql://fla:pw@localhost:5432/test_fla_contract')
-    expect(validEnv.DUCKLAKE_CATALOG).toBe('postgresql://fla:pw@localhost:5432/ducklake_contract_test')
   })
 })
 

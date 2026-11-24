@@ -290,7 +290,7 @@ def main(argv=None):
                 raise CleanupError("Stop requires valid selected listener ports")
             listeners = {port: system.listening_pids(port) for port in args.port}
             db_dir = checkout / "data" / "services"
-            paths = sorted(p for p in db_dir.glob("*.duckdb") if p.is_file() and p.resolve() == p)
+            paths = sorted(p for p in db_dir.glob("*.lock") if p.is_file() and p.resolve() == p)
             roots = select_roots(snapshot, checkout, listeners, system.holding_pids(paths), system, excluded)
             captured = {pid: snapshot[pid] for pid in descendants(snapshot, roots, excluded) if pid in snapshot}
         else:

@@ -185,7 +185,7 @@ export interface CardGridProps {
 
 function CardSkeleton({ isReady }: { isReady: boolean }) {
   return (
-    <div data-empty-placeholder="true" className="border rounded-lg p-4 h-[300px] flex items-center justify-center bg-muted/20 [content-visibility:auto] [contain-intrinsic-size:300px]">
+    <div data-empty-placeholder="true" className="border rounded-lg p-4 h-[392px] flex items-center justify-center bg-muted/20 [content-visibility:auto] [contain-intrinsic-size:392px]">
       <span className="text-muted-foreground text-xs animate-pulse">{!isReady ? 'Initializing...' : 'Loading...'}</span>
     </div>
   )
@@ -238,7 +238,7 @@ export function CardGrid({
       : aggregates?.data?.[card.id]
 
     return (
-      <LazyMount key={card.id} minHeight={300}>
+      <LazyMount key={card.id} minHeight={392}>
         <TopTenTable
           title={card.label} icon={card.id === '_bot_name' ? <Bot className="h-4 w-4" /> : undefined}
           field={card.id} inActiveFormat={card.inActiveFormat} data={tableData}

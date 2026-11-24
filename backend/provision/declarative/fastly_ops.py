@@ -7,13 +7,14 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import urllib.parse
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from backend.core.fastly.client import fastly
+from backend.core.fastly.client import LOG_ENDPOINT_TYPES, fastly
 from backend.provision.declarative.models import (
     _AUTO_INJECTED_NAMES,
     MANAGED_BACKEND_NAMES,
@@ -27,6 +28,7 @@ from backend.provision.declarative.models import (
     VCLSnippet,
 )
 from backend.provision.declarative.vcl_builder import (
+    _is_managed_endpoint,
     _is_managed_snippet,
     build_rum_log_condition,
     desired_backends,
@@ -45,9 +47,35 @@ def upload_rum_tracker_js(*args: Any, **kwargs: Any) -> dict[str, Any]:
 class FileLock:
     """File-based lock for concurrency control backed by ``filelock.SoftFileLock``."""
 
-    def __init__(self, lock_path: Path, _lock: Any | None = None) -> None:
+    def __init__(
+        self,
+        lock_path: Path,
+        _lock: Any | None = None,
+        *,
+        heartbeat_interval: float | None = None,
+        owner: str | None = None,
+    ) -> None:
         self.lock_path = lock_path
         self._lock = _lock
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat: threading.Thread | None = None
+        self._heartbeat_interval = heartbeat_interval
+        self._owner = owner
+
+    def start_heartbeat(self) -> None:
+        if self._heartbeat_interval is None or self._owner is None:
+            return
+
+        def _beat() -> None:
+            while not self._heartbeat_stop.wait(self._heartbeat_interval):
+                try:
+                    if self.lock_path.read_text() == self._owner:
+                        self.lock_path.touch()
+                except OSError:
+                    return
+
+        self._heartbeat = threading.Thread(target=_beat, name="fdt-vcl-lock-heartbeat", daemon=True)
+        self._heartbeat.start()
 
     def __enter__(self) -> FileLock:
         return self
@@ -55,6 +83,9 @@ class FileLock:
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         from contextlib import suppress
 
+        self._heartbeat_stop.set()
+        if self._heartbeat is not None:
+            self._heartbeat.join(timeout=1)
         if self._lock is not None:
             with suppress(OSError):
                 self._lock.release()
@@ -85,9 +116,17 @@ def acquire_vcl_lock(service_id: str, timeout_sec: int = 300) -> FileLock:
                     lock_path.unlink(missing_ok=True)
             try:
                 flock.acquire(timeout=0)
+                owner = f"{os.getpid()} {time.time_ns()}"
                 with suppress(OSError):
-                    lock_path.write_text(f"{os.getpid()} {int(time.time())}")
-                return FileLock(lock_path, _lock=flock)
+                    lock_path.write_text(owner)
+                held = FileLock(
+                    lock_path,
+                    _lock=flock,
+                    heartbeat_interval=max(0.01, min(30.0, stale_seconds / 3)),
+                    owner=owner,
+                )
+                held.start_heartbeat()
+                return held
             except _FileLockTimeout:
                 if (elapsed := time.time() - start) > timeout_sec:
                     raise LockAcquisitionTimeout(service_id, elapsed) from None
@@ -108,13 +147,11 @@ def _upload_rum_tracker_best_effort(service_id: str, token: str, status_cb: Call
 
 
 def _update_local_config(service_id: str, mutate: Callable[[dict[str, Any]], None]) -> None:
-    """Best-effort locked edit of the local config cache."""
+    """Apply a required locked edit of the persisted local configuration."""
     from backend.config import mutate_config
 
-    try:
-        mutate_config(service_id, mutate)
-    except OSError as e:
-        logger.info("Skipped updating read-only config cache: %s", e)
+    if mutate_config(service_id, mutate) is None:
+        raise RuntimeError(f"No config found for service {service_id}")
 
 
 def fetch_active_version(service_id: str, token: str) -> int | None:
@@ -162,7 +199,7 @@ def _upsert_version_resource(
     except RuntimeError:
         return fastly("POST", collection_url, body, token=token)
     if (
-        resource_path == "logging/s3"
+        resource_path in ("logging/s3", "logging/fos")
         and body.get("compression_codec")
         and isinstance(existing, dict)
         and int(existing.get("gzip_level") or 0) > 0
@@ -189,9 +226,18 @@ def fetch_snippets(service_id: str, version: int, token: str) -> list[VCLSnippet
 
 
 def fetch_logging_endpoints(service_id: str, version: int, token: str) -> list[LoggingEndpoint]:
-    """Fetch all S3 logging endpoints for a service version."""
+    """Fetch the native FOS and legacy S3 logging endpoints for a service version."""
+    endpoints: list[LoggingEndpoint] = []
+    for endpoint_type in LOG_ENDPOINT_TYPES:
+        endpoints.extend(_fetch_logging_endpoints_of_type(service_id, version, endpoint_type, token))
+    return endpoints
+
+
+def _fetch_logging_endpoints_of_type(
+    service_id: str, version: int, endpoint_type: str, token: str
+) -> list[LoggingEndpoint]:
     try:
-        resp = fastly("GET", f"/service/{service_id}/version/{version}/logging/s3", token=token)
+        resp = fastly("GET", f"/service/{service_id}/version/{version}/logging/{endpoint_type}", token=token)
         endpoints: list[LoggingEndpoint] = []
         for item in _unwrap_fastly_list(resp):
             raw_codec = item.get("compression_codec")
@@ -204,7 +250,7 @@ def fetch_logging_endpoints(service_id: str, version: int, token: str) -> list[L
             endpoints.append(
                 LoggingEndpoint(
                     name=item.get("name", ""),
-                    endpoint_type="s3",
+                    endpoint_type=endpoint_type,
                     path=item.get("path", ""),
                     period=int(item.get("period", 3600)),
                     response_condition=item.get("response_condition", "true"),
@@ -223,24 +269,30 @@ def fetch_backends(service_id: str, version: int, token: str) -> list[Backend]:
     """Fetch all backends for a service version."""
     try:
         resp = fastly("GET", f"/service/{service_id}/version/{version}/backend", token=token)
-        return [
-            Backend(
-                name=item.get("name", ""),
-                address=item.get("address", ""),
-                port=int(item.get("port", 443)),
-                ssl_check_cert=item.get("ssl_check_cert", True),
-                ssl_hostname=item.get("ssl_hostname", ""),
-                connect_timeout=int(item.get("connect_timeout", 1000)),
-                first_byte_timeout=int(item.get("first_byte_timeout", 15000)),
-                between_bytes_timeout=int(item.get("between_bytes_timeout", 10000)),
-                auto_loadbalance=item.get("auto_loadbalance", True),
-                use_ssl=item.get("use_ssl", True),
-                override_host=item.get("override_host", ""),
-                shield=item.get("shield") or "",
-                request_condition=item.get("request_condition") or "",
+        backends: list[Backend] = []
+        for item in _unwrap_fastly_list(resp):
+            cert_host = item.get("ssl_cert_hostname") or item.get("ssl_hostname") or ""
+            sni_host = item.get("ssl_sni_hostname") or item.get("ssl_hostname") or ""
+            backends.append(
+                Backend(
+                    name=item.get("name", ""),
+                    address=item.get("address", ""),
+                    port=int(item.get("port", 443)),
+                    ssl_check_cert=item.get("ssl_check_cert", True),
+                    ssl_hostname=cert_host or sni_host,
+                    connect_timeout=int(item.get("connect_timeout", 1000)),
+                    first_byte_timeout=int(item.get("first_byte_timeout", 15000)),
+                    between_bytes_timeout=int(item.get("between_bytes_timeout", 10000)),
+                    auto_loadbalance=item.get("auto_loadbalance", True),
+                    use_ssl=item.get("use_ssl", True),
+                    override_host=item.get("override_host") or "",
+                    shield=item.get("shield") or "",
+                    request_condition=item.get("request_condition") or "",
+                    ssl_cert_hostname=cert_host,
+                    ssl_sni_hostname=sni_host,
+                )
             )
-            for item in _unwrap_fastly_list(resp)
-        ]
+        return backends
     except Exception:
         return []
 
@@ -301,8 +353,10 @@ def create_or_update_snippet(service_id: str, version: int, snippet: VCLSnippet,
     _upsert_version_resource(service_id, version, "snippet", snippet.name, body, token)
 
 
-def delete_logging_endpoint(service_id: str, version: int, endpoint_name: str, token: str) -> None:
-    _delete_version_resource(service_id, version, "logging/s3", endpoint_name, token)
+def delete_logging_endpoint(
+    service_id: str, version: int, endpoint_name: str, token: str, endpoint_type: str = "s3"
+) -> None:
+    _delete_version_resource(service_id, version, f"logging/{endpoint_type}", endpoint_name, token)
 
 
 def create_or_update_logging_endpoint(
@@ -314,28 +368,38 @@ def create_or_update_logging_endpoint(
     domain: str | None = None,
     access_key: str | None = None,
     secret_key: str | None = None,
+    region: str | None = None,
 ) -> None:
-    """Create or update an S3 logging endpoint."""
+    """Create or update a native FOS logging endpoint, or a legacy S3 one (domain and keys apply to S3 only)."""
     body: dict[str, Any] = {
         "name": endpoint.name,
         "path": endpoint.path,
         "period": endpoint.period,
         "format": endpoint.format_string,
         "placement": endpoint.placement,
-        "response_object_name": endpoint.response_object_name,
         "format_version": 2,
         "compression_codec": endpoint.compression_codec,
     }
-    for k, v in (
-        ("response_condition", endpoint.response_condition),
-        ("bucket_name", bucket_name),
-        ("domain", domain),
-        ("access_key", access_key),
-        ("secret_key", secret_key),
-    ):
+    optional: tuple[tuple[str, str | None], ...]
+    if endpoint.endpoint_type == "fos":
+        optional = (
+            ("response_condition", endpoint.response_condition),
+            ("bucket_name", bucket_name),
+            ("region", region),
+        )
+    else:
+        body["response_object_name"] = endpoint.response_object_name
+        optional = (
+            ("response_condition", endpoint.response_condition),
+            ("bucket_name", bucket_name),
+            ("domain", domain),
+            ("access_key", access_key),
+            ("secret_key", secret_key),
+        )
+    for k, v in optional:
         if v:
             body[k] = v
-    _upsert_version_resource(service_id, version, "logging/s3", endpoint.name, body, token)
+    _upsert_version_resource(service_id, version, f"logging/{endpoint.endpoint_type}", endpoint.name, body, token)
 
 
 def delete_backend(service_id: str, version: int, backend_name: str, token: str) -> None:
@@ -344,12 +408,15 @@ def delete_backend(service_id: str, version: int, backend_name: str, token: str)
 
 def create_or_update_backend(service_id: str, version: int, backend: Backend, token: str) -> None:
     """Create or update a backend."""
+    cert_host = backend.ssl_cert_hostname or backend.ssl_hostname
+    sni_host = backend.ssl_sni_hostname or backend.ssl_hostname
     body: dict[str, Any] = {
         "name": backend.name,
         "address": backend.address,
         "port": backend.port,
         "ssl_check_cert": backend.ssl_check_cert,
-        "ssl_hostname": backend.ssl_hostname,
+        "ssl_cert_hostname": cert_host or None,
+        "ssl_sni_hostname": sni_host or None,
         "connect_timeout": backend.connect_timeout,
         "first_byte_timeout": backend.first_byte_timeout,
         "between_bytes_timeout": backend.between_bytes_timeout,
@@ -368,15 +435,27 @@ def delete_dictionary(service_id: str, version: int, dict_name: str, token: str)
 
 
 def create_or_update_dictionary(service_id: str, version: int, dictionary: ServiceDictionary, token: str) -> None:
-    """Create or update a service dictionary and its items."""
-    resp = _upsert_version_resource(
-        service_id,
-        version,
-        "dictionary",
-        dictionary.name,
-        {"name": dictionary.name, "write_only": dictionary.write_only},
-        token,
-    )
+    """Create or update a service dictionary and its items without mutating immutable write_only."""
+    encoded_name = urllib.parse.quote(dictionary.name, safe="")
+    item_url = f"/service/{service_id}/version/{version}/dictionary/{encoded_name}"
+    collection_url = f"/service/{service_id}/version/{version}/dictionary"
+    try:
+        existing = fastly("GET", item_url, token=token)
+    except RuntimeError as exc:
+        err_text = str(exc)
+        if "404" not in err_text and "not found" not in err_text.lower():
+            raise
+        resp = fastly(
+            "POST",
+            collection_url,
+            {"name": dictionary.name, "write_only": dictionary.write_only},
+            token=token,
+        )
+    else:
+        if isinstance(existing, dict) and existing.get("id"):
+            resp = existing
+        else:
+            resp = fastly("PUT", item_url, {"name": dictionary.name}, token=token)
     if not (dict_id := resp.get("id", "")):
         raise RuntimeError(f"Failed to get dictionary ID for {dictionary.name}")
     if dictionary.items:
@@ -527,6 +606,7 @@ def _apply_diff(
     desired_state: FeatureState | None = None,
     status_cb: Callable[[str], None] | None = None,
     current_snippets: list[VCLSnippet] | None = None,
+    current_endpoints: list[LoggingEndpoint] | None = None,
 ) -> None:
     """Apply diff mutations on the draft version (Step 6)."""
     from backend.config import config_path as _config_path
@@ -564,13 +644,14 @@ def _apply_diff(
                     f"# declare local var.{var_name} STRING; (omitted to prevent collision with unmanaged snippet)",
                 )
         snippet.body = body
-    bucket_name = domain = access_key = secret_key = None
+    bucket_name = region = domain = access_key = secret_key = None
     config_path = _config_path(service_id)
     if config_path.exists():
         try:
             cfg = json.loads(config_path.read_text())
             bucket_name = cfg.get("fos_bucket") or cfg.get("fos_bucket_name")
-            domain = region_endpoint(cfg.get("fos_region") or "us-east-1")
+            region = cfg.get("fos_region") or "us-east-1"
+            domain = region_endpoint(region)
             access_key = cfg.get("fos_access_key_id") or cfg.get("fos_access_key")
             secret_key = cfg.get("fos_secret_access_key") or cfg.get("fos_secret_key")
         except Exception:
@@ -605,7 +686,15 @@ def _apply_diff(
         fastly_integration.delete_snippet,
         skip_fn=lambda n: not _is_managed_snippet(n),
     )
-    _purge_outdated(diff.endpoints_to_remove, "logging endpoint", fastly_integration.delete_logging_endpoint)
+    endpoint_types = {e.name: e.endpoint_type for e in current_endpoints or []}
+    _purge_outdated(
+        diff.endpoints_to_remove,
+        "logging endpoint",
+        lambda sid, ver, name, tok: fastly_integration.delete_logging_endpoint(
+            sid, ver, name, tok, endpoint_type=endpoint_types.get(name, "s3")
+        ),
+        skip_fn=lambda n: not _is_managed_endpoint(n, desired_state),
+    )
     _purge_outdated(
         diff.backends_to_remove,
         "backend",
@@ -687,17 +776,12 @@ def _apply_diff(
     for endpoint in diff.endpoints_to_add + diff.endpoints_to_update:
         if status_cb:
             status_cb(f"➕ Installing logging endpoint '{endpoint.name}'...")
+        if endpoint.endpoint_type == "fos":
+            target: dict[str, Any] = {"bucket_name": bucket_name, "region": region}
+        else:
+            target = {"bucket_name": bucket_name, "domain": domain, "access_key": access_key, "secret_key": secret_key}
         try:
-            fastly_integration.create_or_update_logging_endpoint(
-                service_id,
-                draft_version,
-                endpoint,
-                token,
-                bucket_name=bucket_name,
-                domain=domain,
-                access_key=access_key,
-                secret_key=secret_key,
-            )
+            fastly_integration.create_or_update_logging_endpoint(service_id, draft_version, endpoint, token, **target)
         except Exception as e:
             logger.exception(f"Failed to install/update logging endpoint '{endpoint.name}': {e}")
             if status_cb:

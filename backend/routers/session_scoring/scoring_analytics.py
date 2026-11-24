@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import logging
 import os
 import threading
 import time as _time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 
+from backend.core.fos_client import _safe_table_name, get_source_for_service
 from backend.core.request_context import (
     RequestContext,
     ServiceId,
@@ -21,7 +24,7 @@ from backend.core.request_context import (
     require_admin,
     seal_session_token,
 )
-from backend.core.storage import execute_with_stale_view_retry
+from backend.core.sql_validator import escape_sql_literal
 from backend.models.analytics import (
     ScoringAnalyticsResponse,
     ScoringComplianceBreakdownResponse,
@@ -46,13 +49,11 @@ from backend.models.analytics import (
     SessionsResponse,
 )
 from backend.models.common import DEFAULT_ERROR_RESPONSES
-from backend.repositories import sessions as _scoring_repo
-from backend.repositories import sessions as repo
 from backend.utils.auth import mask_ips_for, require_service_in_scope
 from backend.utils.bounded_cache import BoundedTTLCache as _BoundedTTLCache
 from backend.utils.date_utils import parse_iso_utc
 from backend.utils.remote_access import clamp_or_400, get_analyst_time_bounds
-from backend.utils.router_utils import make_error, not_found, query_errors
+from backend.utils.router_utils import make_error, not_found, query_errors, require_high_scale
 from backend.utils.telemetry import process_context_scope
 
 from .scoring_vcl import scoring_status
@@ -60,6 +61,78 @@ from .scoring_vcl import scoring_status
 logger = logging.getLogger(__name__)
 router = APIRouter()
 sessions_router = APIRouter(prefix="/api/sessions", tags=["sessions"], responses=DEFAULT_ERROR_RESPONSES)
+
+_SCORING_COLUMNS: frozenset[str] = frozenset(
+    {
+        "edge_score",
+        "edge_score_l1",
+        "edge_score_l2",
+        "edge_sid",
+        "edge_score_reason",
+        "edge_cookie_compliance",
+        "edge_score_rtt_us",
+        "edge_score_exec_us",
+    }
+)
+
+
+def query_logs(service_id: str, sql: str, params: dict | tuple = ()) -> list[dict]:
+    """Execute ClickHouse SQL against request_facts for ``service_id`` and return ``list[dict]``."""
+    from backend.core.clickhouse import get_clickhouse_client
+    from backend.high_scale.ingest_controller import get_high_scale_service_registry
+    from backend.utils.telemetry import get_queries
+
+    if get_source_for_service(service_id) is None:
+        raise HTTPException(status_code=404, detail={"error": f"No service {service_id}"})
+    hs = get_high_scale_service_registry().resolve(service_id)
+    client = hs.client if hs is not None and getattr(hs, "client", None) is not None else get_clickhouse_client()
+    if client is None:
+        raise HTTPException(status_code=503, detail={"error": "ClickHouse client unavailable"})
+    t0 = _time.monotonic()
+    try:
+        bind_params = {"service_id": service_id, **(params if isinstance(params, dict) else {})}
+        rows = client.execute(sql, bind_params)
+        result = [dict(r) for r in (rows or [])]
+        get_queries().append(
+            {
+                "sql": " ".join(sql.strip().split()),
+                "time_ms": round((_time.monotonic() - t0) * 1000, 2),
+                "rows": len(result),
+                "engine": "ClickHouse",
+            }
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail={"error": str(e)})
+
+
+def _scoring_source(table: str, cols: set[str] | None = None) -> str:
+    del table, cols
+    return (
+        "("
+        "SELECT "
+        "event_timestamp AS timestamp, "
+        "client_ip AS ip, "
+        "url, "
+        "country, "
+        "custom_fields['ua'] AS ua, "
+        "toInt32OrZero(custom_fields['status']) AS status, "
+        "(lower(custom_fields['edge']) IN ('1', 'true')) AS edge, "
+        "custom_fields['edge_sid'] AS edge_sid, "
+        "toFloat64OrNull(nullIf(custom_fields['edge_score'], '')) AS edge_score, "
+        "toFloat64OrNull(nullIf(custom_fields['edge_score_l1'], '')) AS edge_score_l1, "
+        "toFloat64OrNull(nullIf(custom_fields['edge_score_l2'], '')) AS edge_score_l2, "
+        "nullIf(custom_fields['edge_cookie_compliance'], '') AS edge_cookie_compliance, "
+        "nullIf(custom_fields['edge_score_reason'], '') AS edge_score_reason, "
+        "toInt64OrNull(nullIf(custom_fields['edge_score_rtt_us'], '')) AS edge_score_rtt_us, "
+        "toInt64OrNull(nullIf(custom_fields['edge_score_exec_us'], '')) AS edge_score_exec_us "
+        "FROM request_facts "
+        "WHERE service_id = {service_id:String} "
+        "AND publication_state = 'visible'"
+        ")"
+    )
 
 
 def _enforce_scoring_service_scope(request: Request | None, service_id: str) -> None:
@@ -177,22 +250,15 @@ _table_columns_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=128, ttl_secon
 
 
 def _table_columns(service_id: str) -> set[str]:
-    from backend.core.duckdb import _safe_table_name
-
     in_test = bool(os.getenv("PYTEST_CURRENT_TEST"))
     if not in_test and (cached := _table_columns_cache.get(service_id)) is not None:
         return cached
-    try:
-        rows = _scoring_repo.describe_table(service_id, _safe_table_name(service_id))
-    except Exception:  # noqa: BLE001
-        return set()
-    cols = {str(r.get("column_name")) for r in rows if r.get("column_name")}
-    if cols and not in_test:
+    cols = set(_SCORING_COLUMNS)
+    if not in_test:
         _table_columns_cache[service_id] = cols
     return cols
 
 
-_scoring_source = _scoring_repo.scoring_source
 _RECONSTRUCT_CACHE_TTL = 5.0
 _reconstruct_labeled_sessions_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=64, ttl_seconds=_RECONSTRUCT_CACHE_TTL)
 
@@ -202,11 +268,88 @@ def _labels_fingerprint(labels: list[dict]) -> str:
     return hashlib.sha256(json.dumps(pairs, separators=(",", ":")).encode()).hexdigest()
 
 
+def _fetch_session_events(
+    service_id: str,
+    sids: list[str],
+    since_days: int = 30,
+    limit_per_sid: int = 500,
+    *,
+    ts_predicate: str | None = None,
+) -> dict[str, list[dict]]:
+    """Return per-sid event list within the last ``since_days`` days from ClickHouse."""
+    if not sids:
+        return {}
+    src = _scoring_source(_safe_table_name(service_id), _table_columns(service_id))
+    sids_in = ", ".join(escape_sql_literal(str(s)) for s in sids)
+    where_ts = ts_predicate or f"timestamp >= now() - INTERVAL {int(since_days)} DAY"
+    per_sid_cap = int(limit_per_sid)
+    sql = f"""
+        SELECT edge_sid, ts, url, status, ip, ua,
+               edge_score, edge_cookie_compliance, edge_score_reason
+        FROM (
+            SELECT edge_sid, timestamp AS ts, url, status, ip, ua,
+                   edge_score, edge_cookie_compliance, edge_score_reason,
+                   row_number() OVER (PARTITION BY edge_sid ORDER BY timestamp) AS _rn
+            FROM {src}
+            WHERE edge_sid IN ({sids_in})
+              AND {where_ts}
+        )
+        WHERE _rn <= {per_sid_cap}
+        ORDER BY edge_sid, ts
+    """
+    rows = query_logs(service_id, sql)
+    grouped: dict[str, list[dict]] = {}
+    for r in rows:
+        sid = r.get("edge_sid")
+        if not sid:
+            continue
+        bucket = grouped.setdefault(sid, [])
+        if len(bucket) >= limit_per_sid:
+            continue
+        ts = r.get("ts")
+        ts_str = None if ts is None else (ts.isoformat() if hasattr(ts, "isoformat") else str(ts))
+        bucket.append(
+            {
+                "ts": ts_str,
+                "url": r.get("url") or "/",
+                "status": r.get("status"),
+                "ip": r.get("ip"),
+                "ua": r.get("ua"),
+                "edge_score": r.get("edge_score"),
+                "edge_cookie_compliance": r.get("edge_cookie_compliance"),
+                "edge_score_reason": r.get("edge_score_reason"),
+            }
+        )
+    return grouped
+
+
 def _reconstruct_labeled_sessions(service_id: str, labels: list[dict]) -> list[tuple[dict, str]]:
     cache_key = (service_id, _labels_fingerprint(labels))
     if (cached := _reconstruct_labeled_sessions_cache.get(cache_key)) is not None:
         return cached
-    result = _scoring_repo.reconstruct_labeled_sessions(service_id, labels)
+    if not labels:
+        return []
+    sid_to_label = {row["sid"]: row["label"] for row in labels if row.get("sid")}
+    if not sid_to_label:
+        return []
+    grouped = _fetch_session_events(service_id, list(sid_to_label.keys()), since_days=30)
+    result: list[tuple[dict, str]] = []
+    for sid, label in sid_to_label.items():
+        events = grouped.get(sid, [])
+        if not events:
+            continue
+        scored_values: list[float] = [v for e in events if (v := e.get("edge_score")) is not None]
+        max_score = max(scored_values) if scored_values else None
+        result.append(
+            (
+                {
+                    "session_id": sid,
+                    "events": events,
+                    "max_edge_score": max_score,
+                },
+                label,
+            )
+        )
     _reconstruct_labeled_sessions_cache[cache_key] = result
     return result
 
@@ -269,14 +412,16 @@ def _scoring_time_window(request: Request, since_hours: int) -> tuple[str, str |
         now.isoformat(),
         analyst_session=session,
     )
-    return f"timestamp >= TIMESTAMPTZ '{start_iso}' AND timestamp < TIMESTAMPTZ '{end_iso}'", f"{start_iso}|{end_iso}"
+    return (
+        f"timestamp >= parseDateTime64BestEffort('{start_iso}', 3, 'UTC') "
+        f"AND timestamp < parseDateTime64BestEffort('{end_iso}', 3, 'UTC')",
+        f"{start_iso}|{end_iso}",
+    )
 
 
 def _prepare_scoring_query(
     request: Request, service_id: str, since_hours: int
 ) -> tuple[str, set[str], str, str | None]:
-    from backend.core.duckdb import _safe_table_name
-
     _enforce_scoring_service_scope(request, service_id)
     cols = _table_columns(service_id)
     return _scoring_source(_safe_table_name(service_id), cols), cols, *_scoring_time_window(request, since_hours)
@@ -288,7 +433,200 @@ def _cached_scoring_rows(cache_key: tuple, since_hours: int, fetch_fn, ts_field:
     )
 
 
-_fetch_session_events = _scoring_repo.fetch_session_events
+def _top_flagged_rows(service_id: str, src: str, ts_pred: str, limit: int) -> list[dict]:
+    sql = f"""
+        SELECT
+            timestamp,
+            edge_sid,
+            edge_score,
+            edge_score_l1,
+            edge_score_l2,
+            edge_cookie_compliance,
+            edge_score_reason,
+            ip,
+            ua,
+            url,
+            status,
+            country
+        FROM {src}
+        WHERE edge_score IS NOT NULL
+          AND {ts_pred}
+        ORDER BY edge_score DESC, timestamp DESC
+        LIMIT {int(limit)}
+    """
+    return query_logs(service_id, sql)
+
+
+def _score_distribution_rows(service_id: str, src: str, ts_pred: str) -> list[dict]:
+    sql = f"""
+        SELECT
+            toStartOfHour(timestamp) AS hour,
+            multiIf(
+                edge_score < 25, '0-25',
+                edge_score < 50, '25-50',
+                edge_score < 75, '50-75',
+                '75-100'
+            ) AS bucket,
+            count() AS count
+        FROM {src}
+        WHERE edge_score IS NOT NULL
+          AND {ts_pred}
+        GROUP BY hour, bucket
+        ORDER BY hour, bucket
+    """
+    return query_logs(service_id, sql)
+
+
+def _compliance_breakdown_rows(service_id: str, src: str, ts_pred: str) -> list[dict]:
+    sql = f"""
+        SELECT
+            toStartOfHour(timestamp) AS hour,
+            edge_cookie_compliance AS compliance,
+            count() AS count
+        FROM {src}
+        WHERE edge_cookie_compliance IS NOT NULL
+          AND edge_cookie_compliance != ''
+          AND {ts_pred}
+        GROUP BY hour, compliance
+        ORDER BY hour, compliance
+    """
+    return query_logs(service_id, sql)
+
+
+def _latency_timeseries_rows(
+    service_id: str, src: str, ts_pred: str, bucket: str, has_rtt: bool, has_exec: bool
+) -> list[dict]:
+    bucket_fn = "toStartOfMinute" if bucket == "minute" else "toStartOfHour"
+    select_parts = [
+        f"{bucket_fn}(timestamp) AS hour",
+        "countIf(edge_score IS NOT NULL) AS scored_count",
+        "countIf(positionCaseInsensitive(ifNull(edge_score_reason, ''), 'compute-unavailable') > 0) AS fail_open_count",
+        "count() AS total_count",
+    ]
+    if has_rtt:
+        select_parts += [
+            "CAST(quantileIf(0.5)(edge_score_rtt_us, edge_score_rtt_us IS NOT NULL) AS Nullable(Int64)) AS rtt_p50_us",
+            "CAST(quantileIf(0.95)(edge_score_rtt_us, edge_score_rtt_us IS NOT NULL) AS Nullable(Int64)) AS rtt_p95_us",
+            "CAST(quantileIf(0.99)(edge_score_rtt_us, edge_score_rtt_us IS NOT NULL) AS Nullable(Int64)) AS rtt_p99_us",
+        ]
+    if has_exec:
+        select_parts += [
+            "CAST(quantileIf(0.5)(edge_score_exec_us, edge_score_exec_us IS NOT NULL) AS Nullable(Int64)) AS exec_p50_us",
+            "CAST(quantileIf(0.95)(edge_score_exec_us, edge_score_exec_us IS NOT NULL) AS Nullable(Int64)) AS exec_p95_us",
+        ]
+    sql = f"""
+        SELECT {", ".join(select_parts)}
+        FROM {src}
+        WHERE (edge = 1 OR edge_score IS NOT NULL)
+          AND {ts_pred}
+        GROUP BY hour
+        ORDER BY hour
+    """
+    return query_logs(service_id, sql)
+
+
+def _health_snapshot_row(service_id: str, src: str, ts_pred: str, has_rtt: bool, has_exec: bool) -> dict:
+    select_parts = [
+        "count() AS total_edge_rows",
+        "countIf(edge_score IS NOT NULL) AS scored_rows",
+        "uniqExactIf(edge_sid, edge_score IS NOT NULL AND edge_sid != '') AS distinct_sids",
+        "avgIf(edge_score, edge_score IS NOT NULL) AS avg_score",
+        "quantileIf(0.5)(edge_score, edge_score IS NOT NULL) AS p50_score",
+        "quantileIf(0.95)(edge_score, edge_score IS NOT NULL) AS p95_score",
+        "maxIf(edge_score, edge_score IS NOT NULL) AS max_score",
+        "countIf(edge_score IS NOT NULL AND positionCaseInsensitive(ifNull(edge_score_reason, ''), 'compute-unavailable') > 0) AS scorer_errors",
+        "countIf(edge_score IS NOT NULL AND edge_score_l2 IS NOT NULL) AS l2_evaluated",
+        "countIf(edge_score IS NOT NULL AND edge_score_l2 >= 50) AS l2_high_count",
+    ]
+    if has_rtt:
+        select_parts += [
+            "CAST(quantileIf(0.5)(edge_score_rtt_us, edge_score_rtt_us IS NOT NULL) AS Nullable(Int64)) AS rtt_p50_us",
+            "CAST(quantileIf(0.95)(edge_score_rtt_us, edge_score_rtt_us IS NOT NULL) AS Nullable(Int64)) AS rtt_p95_us",
+            "CAST(quantileIf(0.99)(edge_score_rtt_us, edge_score_rtt_us IS NOT NULL) AS Nullable(Int64)) AS rtt_p99_us",
+            "maxIf(edge_score_rtt_us, edge_score_rtt_us IS NOT NULL) AS rtt_max_us",
+        ]
+    if has_exec:
+        select_parts += [
+            "CAST(quantileIf(0.5)(edge_score_exec_us, edge_score IS NOT NULL AND edge_score_exec_us IS NOT NULL) AS Nullable(Int64)) AS exec_p50_us",
+            "CAST(quantileIf(0.95)(edge_score_exec_us, edge_score IS NOT NULL AND edge_score_exec_us IS NOT NULL) AS Nullable(Int64)) AS exec_p95_us",
+        ]
+    sql = f"""
+        SELECT {", ".join(select_parts)}
+        FROM {src}
+        WHERE (edge = 1 OR edge_score IS NOT NULL)
+          AND {ts_pred}
+    """
+    rows = query_logs(service_id, sql)
+    if not rows:
+        return {}
+    row = dict(rows[0])
+    if "top_reasons" not in row and int(row.get("scored_rows") or 0) > 0:
+        reason_sql = f"""
+            SELECT
+                trimBoth(reason) AS reason,
+                count() AS count
+            FROM {src}
+            ARRAY JOIN splitByChar(',', ifNull(edge_score_reason, '')) AS reason
+            WHERE edge_score IS NOT NULL
+              AND edge_score_reason IS NOT NULL
+              AND edge_score_reason != ''
+              AND {ts_pred}
+              AND trimBoth(reason) != ''
+            GROUP BY reason
+            ORDER BY count DESC
+        """
+        reason_rows = query_logs(service_id, reason_sql)
+        row["top_reasons"] = [{"reason": r["reason"], "count": int(r["count"])} for r in reason_rows[:10]]
+        row["fail_open_breakdown"] = [
+            {"reason": r["reason"], "count": int(r["count"])}
+            for r in reason_rows
+            if str(r.get("reason") or "").lower().startswith(("compute-unavailable", "internal-error"))
+        ]
+    return row
+
+
+def _threshold_preview_counts(
+    service_id: str, src: str, ts_pred: str, threshold: int, labeled_pairs: list[tuple[str, str]]
+) -> dict:
+    threshold_int = int(threshold)
+    if labeled_pairs:
+        good_sids = [escape_sql_literal(str(s)) for s, lbl in labeled_pairs if lbl == "good"]
+        bad_sids = [escape_sql_literal(str(s)) for s, lbl in labeled_pairs if lbl == "bad"]
+        good_cond = f"edge_sid IN ({', '.join(good_sids)})" if good_sids else "0 = 1"
+        bad_cond = f"edge_sid IN ({', '.join(bad_sids)})" if bad_sids else "0 = 1"
+        sql = f"""
+            SELECT
+                count() AS total,
+                countIf(max_score >= {threshold_int}) AS flagged_total,
+                countIf(max_score >= {threshold_int} AND {good_cond}) AS flagged_good,
+                countIf(max_score >= {threshold_int} AND {bad_cond}) AS flagged_bad,
+                countIf(max_score < {threshold_int} AND {good_cond}) AS passed_good,
+                countIf(max_score < {threshold_int} AND {bad_cond}) AS passed_bad
+            FROM (
+                SELECT edge_sid, max(edge_score) AS max_score
+                FROM {src}
+                WHERE edge_score IS NOT NULL
+                  AND edge_sid != ''
+                  AND {ts_pred}
+                GROUP BY edge_sid
+            )
+        """
+    else:
+        sql = f"""
+            SELECT
+                count() AS total,
+                countIf(max_score >= {threshold_int}) AS flagged_total
+            FROM (
+                SELECT edge_sid, max(edge_score) AS max_score
+                FROM {src}
+                WHERE edge_score IS NOT NULL
+                  AND edge_sid != ''
+                  AND {ts_pred}
+                GROUP BY edge_sid
+            )
+        """
+    rows = query_logs(service_id, sql)
+    return rows[0] if rows else {}
 
 
 @router.get(
@@ -301,17 +639,29 @@ def scoring_analytics_composite(
 ) -> dict:
     """Composite of the analytics endpoints into a single round-trip."""
     _enforce_scoring_service_scope(request, service_id)
+    _table_columns(service_id)
     sh = int(since_hours)
-    result = {
-        "top_flagged": scoring_top_flagged(request=request, service_id=service_id, since_hours=sh, limit=200),
-        "score_distribution": scoring_score_distribution(request=request, service_id=service_id, since_hours=sh),
-        "compliance_breakdown": scoring_compliance_breakdown(request=request, service_id=service_id, since_hours=sh),
-        "latency_timeseries": scoring_latency_timeseries(request=request, service_id=service_id, since_hours=sh),
-        "health": scoring_health(request=request, service_id=service_id, since_hours=sh),
+    tasks = {
+        "top_flagged": lambda: scoring_top_flagged(request=request, service_id=service_id, since_hours=sh, limit=200),
+        "score_distribution": lambda: scoring_score_distribution(
+            request=request, service_id=service_id, since_hours=sh
+        ),
+        "compliance_breakdown": lambda: scoring_compliance_breakdown(
+            request=request, service_id=service_id, since_hours=sh
+        ),
+        "latency_timeseries": lambda: scoring_latency_timeseries(
+            request=request, service_id=service_id, since_hours=sh
+        ),
+        "health": lambda: scoring_health(request=request, service_id=service_id, since_hours=sh),
     }
     if not _is_analyst_request(request):
-        result["evaluation"] = scoring_evaluation(request=request, service_id=service_id)
-        result["evaluation_per_reason"] = scoring_evaluation_per_reason(service_id=service_id)
+        tasks["evaluation"] = lambda: scoring_evaluation(request=request, service_id=service_id)
+        tasks["evaluation_per_reason"] = lambda: scoring_evaluation_per_reason(service_id=service_id)
+    result: dict = {}
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futs = {k: pool.submit(contextvars.copy_context().run, fn) for k, fn in tasks.items()}
+        for k, fut in futs.items():
+            result[k] = fut.result()
     return result
 
 
@@ -406,12 +756,18 @@ def scoring_top_flagged(
 ) -> dict:
     """Recent rows with non-null edge_score, sorted by score DESC."""
     src, _cols, ts_pred, win_disc = _prepare_scoring_query(request, service_id, since_hours)
-    return _cached_scoring_rows(
+    out = _cached_scoring_rows(
         ("top-flagged", service_id, since_hours, limit, win_disc),
         since_hours,
-        lambda: _scoring_repo.top_flagged_rows(service_id, src, ts_pred, limit),
+        lambda: _top_flagged_rows(service_id, src, ts_pred, limit),
         ts_field="timestamp",
     )
+    analyst_session = getattr(getattr(request, "state", None), "analyst_session", None)
+    if mask_ips_for(analyst_session):
+        from backend.core.share_db import apply_pii_policy
+
+        out = apply_pii_policy(out, {"mask_ips": True})
+    return out
 
 
 @router.get(
@@ -427,7 +783,7 @@ def scoring_score_distribution(
     return _cached_scoring_rows(
         ("score-distribution", service_id, since_hours, win_disc),
         since_hours,
-        lambda: _scoring_repo.score_distribution_rows(service_id, src, ts_pred),
+        lambda: _score_distribution_rows(service_id, src, ts_pred),
     )
 
 
@@ -444,7 +800,7 @@ def scoring_compliance_breakdown(
     return _cached_scoring_rows(
         ("compliance-breakdown", service_id, since_hours, win_disc),
         since_hours,
-        lambda: _scoring_repo.compliance_breakdown_rows(service_id, src, ts_pred),
+        lambda: _compliance_breakdown_rows(service_id, src, ts_pred),
     )
 
 
@@ -463,7 +819,7 @@ def scoring_latency_timeseries(
     return _cached_scoring_rows(
         ("latency-timeseries", service_id, since_hours, win_disc),
         since_hours,
-        lambda: _scoring_repo.latency_timeseries_rows(service_id, src, ts_pred, bucket, has_rtt, has_exec),
+        lambda: _latency_timeseries_rows(service_id, src, ts_pred, bucket, has_rtt, has_exec),
         has_latency=has_rtt or has_exec,
         granularity=bucket,
     )
@@ -478,7 +834,7 @@ def scoring_health(
     has_rtt, has_exec = "edge_score_rtt_us" in cols, "edge_score_exec_us" in cols
 
     def _produce() -> dict:
-        row = _scoring_repo.health_snapshot_row(service_id, src, ts_pred, has_rtt, has_exec)
+        row = _health_snapshot_row(service_id, src, ts_pred, has_rtt, has_exec)
         total, scored = int(row.get("total_edge_rows") or 0), int(row.get("scored_rows") or 0)
         l2_evaluated, l2_high = int(row.get("l2_evaluated") or 0), int(row.get("l2_high_count") or 0)
         l2_high_pct = (l2_high / l2_evaluated * 100.0) if l2_evaluated else 0.0
@@ -598,7 +954,7 @@ def scoring_curves(
                 "min_per_class": _MIN_LABELS_PER_CLASS,
                 "n_good": n_good,
                 "n_bad": n_bad,
-                "note": "labels exist but none of their sids have landed in DuckDB yet",
+                "note": "labels exist but none of their sids have landed in ClickHouse yet",
             }
         total_pos = sum(1 for _, lbl in scored if lbl == "bad")
         total_neg = sum(1 for _, lbl in scored if lbl == "good")
@@ -651,7 +1007,7 @@ def scoring_threshold_preview(
     def _produce() -> dict:
         sid_to_label = {row["sid"]: row["label"] for row in _labels.list_labels(service_id) if row.get("sid")}
         labeled_pairs = [(s, lbl) for s, lbl in sid_to_label.items() if s]
-        counts_row = _scoring_repo.threshold_preview_counts(service_id, src, ts_pred, threshold_int, labeled_pairs)
+        counts_row = _threshold_preview_counts(service_id, src, ts_pred, threshold_int, labeled_pairs)
         total, flagged_total = int(counts_row.get("total") or 0), int(counts_row.get("flagged_total") or 0)
         passed_total = total - flagged_total
         flagged_good, flagged_bad, passed_good, passed_bad = (
@@ -694,6 +1050,16 @@ def scoring_session_events(
 ) -> dict:
     """Return the event timeline for a single session (up to 500 events)."""
     _enforce_scoring_service_scope(request, service_id)
+    analyst_session = getattr(getattr(request, "state", None), "analyst_session", None)
+    if mask_ips_for(analyst_session):
+        raise HTTPException(
+            status_code=403,
+            detail=make_error(
+                "pii_policy_violation",
+                "Raw session event drill-down is blocked when IP masking is enabled",
+                field="sid",
+            ),
+        )
     ts_pred, disc = _scoring_time_window(request, int(since_days) * 24)
     grouped = _fetch_session_events(
         service_id, [sid], since_days=since_days, ts_predicate=(ts_pred if disc is not None else None)
@@ -754,9 +1120,6 @@ def scoring_dashboard(
     cache_key = ("scoring-dashboard", service_id, since_hours, threshold, n_good, n_bad, n_neutral)
 
     def _produce() -> dict:
-        import contextvars
-        from concurrent.futures import ThreadPoolExecutor
-
         cfg = svcconfig.load_config(service_id)
         status_block: dict = scoring_status(service_id=service_id) if cfg else {"enabled": False}
         _table_columns(service_id)
@@ -797,10 +1160,9 @@ def scoring_dashboard(
     return _cached(cache_key, _produce)
 
 
-def _dispatch_sessions_query(ctx: RequestContext, hs_fn, duck_fn) -> dict:
-    if ctx.high_scale is not None:
-        return hs_fn(ctx.high_scale)
-    return execute_with_stale_view_retry(ctx.con, ctx.source, duck_fn)
+def _dispatch_sessions_query(ctx: RequestContext, hs_fn, duck_fn=None) -> dict:
+    del duck_fn
+    return hs_fn(require_high_scale(ctx))
 
 
 def _seal_session_rows(rows: list[dict], service_id: str) -> None:
@@ -823,33 +1185,25 @@ def sessions_endpoint(req: SessionsRequest, ctx: RequestContext = Depends(build_
             _now = datetime.now(UTC)
             end_time = end_time or _now.isoformat()
             start_time = start_time or (_now - timedelta(days=7)).isoformat()
+        from backend.high_scale.sessions import sessions_endpoint as hs_sessions
 
-        def _hs_list(hs):
-            from backend.high_scale.sessions import sessions_endpoint as hs_sessions
-
-            return hs_sessions(hs, req, start_time, end_time)
-
-        result = _dispatch_sessions_query(
-            ctx,
-            _hs_list,
-            lambda con: repo.get_sessions(
-                con=con,
-                src=ctx.source,
-                start_time=start_time,
-                end_time=end_time,
-                filters=req.filters,
-                page=req.page,
-                limit=req.limit,
-                sort_by=req.sort_by,
-                sort_dir=req.sort_dir,
-                flagged_only=req.flagged_only,
-                min_reqs_flag=req.min_reqs_flag,
-                min_4xx_pct_flag=req.min_4xx_pct_flag,
-                streaming_only=req.streaming_only,
-            ),
-        )
+        result = hs_sessions(require_high_scale(ctx), req, start_time, end_time)
         _seal_session_rows(result.get("sessions", []), ctx.service_id)
         return SessionsResponse.with_telemetry(**result)
+
+
+def _scrub_string_leaves(obj: object) -> object:
+    from backend.core.share_db import scrub_ip_text
+
+    if isinstance(obj, str):
+        return scrub_ip_text(obj) if obj and obj != "[redacted]" else obj
+    if isinstance(obj, dict):
+        return {k: _scrub_string_leaves(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_scrub_string_leaves(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_scrub_string_leaves(v) for v in obj)
+    return obj
 
 
 @sessions_router.post("/detail", response_model=SessionDetailResponse)
@@ -879,19 +1233,15 @@ def sessions_detail(req: SessionDetailRequest, ctx: RequestContext = Depends(bui
         start_time, end_time = ctx.clamp(start_raw, end_raw)
         if start_time is None or end_time is None:
             raise RuntimeError("clamp returned no bounds although both were supplied")
+        from backend.high_scale.sessions import sessions_detail as hs_detail
 
-        def _hs_detail(hs):
-            from backend.high_scale.sessions import sessions_detail as hs_detail
+        res = hs_detail(require_high_scale(ctx), req, start_time, end_time, ip, ja4)
+        if mask_ips_for(ctx.analyst_session):
+            from backend.core.share_db import apply_pii_policy
 
-            return hs_detail(hs, req, start_time, end_time, ip, ja4)
-
-        res = _dispatch_sessions_query(
-            ctx,
-            _hs_detail,
-            lambda con: repo.get_session_detail(
-                con=con, src=ctx.source, ip=ip, ja4=ja4, session_start=start_time, session_end=end_time
-            ),
-        )
+            res = apply_pii_policy(dict(res), {"mask_ips": True})
+            if isinstance(res.get("data"), list):
+                res["data"] = _scrub_string_leaves(res["data"])
         return SessionDetailResponse.with_telemetry(**res)
 
 

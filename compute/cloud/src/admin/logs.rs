@@ -1,0 +1,1894 @@
+//! Operational-log admin endpoints and the maintenance stages a clock tick dispatches to the
+//! worker service (`/_internal/stage`).
+
+use super::{
+    admit_stage, fos_credentials, load_installed_service, reset, transport, StageRow, VcpuSpan,
+};
+use crate::{
+    admin::{ApiRequest, Service},
+    http::{Request, Response},
+    ingest::{
+        bundle, compaction,
+        retention::{self, SWEEP_INTERVAL_S},
+        scope,
+        storage::Store,
+    },
+    shell::Runtime,
+    telemetry::{
+        self, compact,
+        flush::{self as log_flush, ClearError, FlushStatus, FlushTarget},
+        write_log, LogBuffer, LogKind, OperationalLogSettings, Tier, WritableLogKind,
+    },
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::time::{Duration, Instant};
+
+const JOB_KEY: &str = "logs:delete_history";
+const LAST_SWEEP_KEY: &str = "retention:last_sweep";
+const MAX_HISTORY_DAYS: u64 = 3650;
+/// CDN key read, state read and write, and the smallest useful chunk.
+const MIN_COMPACT_CALLS: u32 = 6;
+/// CDN key read, state and watermark reads, a LIST, a GET and the state write.
+const MIN_BUNDLE_CALLS: u32 = 6;
+/// Calls the storage reconcile step is admitted with.
+const RECONCILE_CALLS: u32 = 4;
+
+pub struct Outcome {
+    pub response: Response,
+    /// `(action, target)` the shell records in the auth audit after a successful action.
+    pub audit: Option<(String, String)>,
+}
+
+fn reply(status: u16, body: Value) -> Response {
+    Response::json(status, &body)
+}
+
+fn fail(status: u16, detail: &str) -> Outcome {
+    Outcome {
+        response: reply(status, json!({"detail": detail, "error": detail})),
+        audit: None,
+    }
+}
+
+fn done(body: Value, audit: Option<(&str, String)>) -> Outcome {
+    Outcome {
+        response: reply(200, body),
+        audit: audit.map(|(action, target)| (action.to_owned(), target)),
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct HistoryJob {
+    kind: String,
+    older_than_days: Option<u64>,
+    cutoff_ts: i64,
+    /// `deleting`, `purging` or `complete`.
+    status: String,
+    actor: String,
+    started_at: u64,
+    updated_at: u64,
+    deleted: u64,
+    error: Option<String>,
+}
+
+fn body_of(request: &Request) -> Result<Value, Box<Outcome>> {
+    if request.body.is_empty() {
+        return Ok(Value::Null);
+    }
+    if request.body.len() > 65_536 {
+        return Err(Box::new(fail(413, "body_too_large")));
+    }
+    request
+        .json()
+        .map_err(|_| Box::new(fail(400, "invalid_input")))
+}
+
+struct Installed {
+    service: Service,
+    access_key: String,
+    secret_key: String,
+}
+
+impl Installed {
+    fn load(runtime: &impl Runtime) -> Result<Self, Box<Outcome>> {
+        let service = load_installed_service(runtime)
+            .map_err(|e| Box::new(fail(503, &e)))?
+            .1
+            .ok_or_else(|| Box::new(fail(409, "service_not_configured")))?;
+        let (access_key, secret_key) = fos_credentials(runtime, &service)
+            .ok_or_else(|| Box::new(fail(503, "fos_credentials_unavailable")))?;
+        Ok(Self {
+            service,
+            access_key,
+            secret_key,
+        })
+    }
+
+    fn store<'a, R: Runtime>(&'a self, runtime: &'a R, started: Instant) -> Store<'a, R> {
+        Store {
+            runtime,
+            service: &self.service,
+            access_key: self.access_key.clone(),
+            secret_key: self.secret_key.clone(),
+            started,
+            vcpu_start: 0,
+        }
+    }
+}
+
+pub fn handle(runtime: &impl Runtime, actor: &str, request: &Request) -> Outcome {
+    if let Some(("/api/admin/usage/geography", query)) = request.path.split_once('?') {
+        if request.method == "GET" {
+            return geography(runtime, query);
+        }
+    }
+    if request.method == "GET" && request.path == "/api/admin/usage/geography" {
+        return geography(runtime, "");
+    }
+    if let Some(("/api/admin/usage/platform", query)) = request.path.split_once('?') {
+        if request.method == "GET" {
+            return platform_usage(runtime, query);
+        }
+    }
+    if request.method == "GET" && request.path == "/api/admin/usage/platform" {
+        return platform_usage(runtime, "");
+    }
+    if let Some(("/api/admin/usage/compute-billing", query)) = request.path.split_once('?') {
+        if request.method == "GET" {
+            return compute_billing(runtime, query);
+        }
+    }
+    if request.method == "GET" && request.path == "/api/admin/usage/logged-traffic" {
+        return logged_traffic(runtime);
+    }
+    if let Some(("/api/admin/usage/service-stats", query)) = request.path.split_once('?') {
+        if request.method == "GET" {
+            return service_stats(runtime, query);
+        }
+    }
+    let route = (request.method.as_str(), request.path.as_str());
+    match route {
+        ("GET", "/api/admin/operational-logging") => done(
+            json!({
+                "settings": telemetry::api::operational_settings(runtime),
+                "defaults": OperationalLogSettings::default(),
+                "dev_telemetry_available": telemetry::dev_telemetry_available(runtime),
+            }),
+            None,
+        ),
+        ("PATCH", "/api/admin/operational-logging") => patch_settings(runtime, request),
+        ("GET", "/api/admin/logs/status") => status(runtime),
+        ("POST", "/api/admin/logs/flush") => flush(runtime),
+        ("POST", "/api/admin/logs/clear-cache") => clear_cache(runtime, request),
+        ("POST", "/api/admin/logs/delete-history") => delete_history(runtime, actor, request),
+        ("POST", "/api/admin/logs/sweep") => sweep(runtime),
+        ("POST", "/api/admin/logs/backfill") => backfill(runtime, actor, request),
+        ("POST", "/api/admin/usage/reconcile-storage") => reconcile(runtime, actor),
+        _ => fail(404, "not_found"),
+    }
+}
+
+fn patch_settings(runtime: &impl Runtime, request: &Request) -> Outcome {
+    let patch = match body_of(request) {
+        Ok(patch) => patch,
+        Err(outcome) => return *outcome,
+    };
+    match telemetry::api::patch_operational_settings(runtime, &patch) {
+        Ok((settings, changed)) => {
+            let audit =
+                (!changed.is_empty()).then(|| ("operational_logging_updated", changed.join(",")));
+            done(
+                json!({
+                    "settings": settings,
+                    "changed": changed,
+                    "dev_telemetry_available": telemetry::dev_telemetry_available(runtime),
+                }),
+                audit,
+            )
+        }
+        Err(error) if error == "settings_conflict" => fail(409, &error),
+        Err(error) => fail(400, &error),
+    }
+}
+
+fn status(runtime: &impl Runtime) -> Outcome {
+    let get = |key: &str| runtime.admin_get(key).ok().flatten().map(|r| r.value);
+    // Only a running reconcile; the completed record stays behind for the hourly schedule.
+    let reconcile = get("storage:reconcile")
+        .filter(|state| state["completed_at"].is_null())
+        .map(|state| json!({"requested_at": state["requested_at"], "actor": state["actor"]}));
+    done(
+        json!({
+            "delete_history": get(JOB_KEY),
+            "storage_reconcile": reconcile,
+            "last_sweep": get(LAST_SWEEP_KEY),
+            "backfill": get(crate::ingest::BACKFILL_KEY),
+        }),
+        None,
+    )
+}
+
+fn flush_status(status: FlushStatus) -> &'static str {
+    match status {
+        FlushStatus::Unprovisioned => "unprovisioned",
+        FlushStatus::NotDue => "not_due",
+        FlushStatus::Busy => "busy",
+        FlushStatus::Deferred => "deferred",
+        FlushStatus::Stopped => "stopped",
+        FlushStatus::GcPending => "gc_pending",
+        FlushStatus::Committed => "committed",
+    }
+}
+
+fn flush(runtime: &impl Runtime) -> Outcome {
+    let installed = match Installed::load(runtime) {
+        Ok(installed) => installed,
+        Err(outcome) => return *outcome,
+    };
+    let service = &installed.service;
+    let ops_prefix = format!("{}processed/ops/", scope(service));
+    let target = FlushTarget {
+        region: &service.fos_region,
+        bucket: &service.fos_bucket,
+        access_key: &installed.access_key,
+        secret_key: &installed.secret_key,
+        ops_prefix: &ops_prefix,
+    };
+    let settings = telemetry::api::operational_settings(runtime);
+    match log_flush::log_flush_reserving(
+        runtime,
+        &service.service_id,
+        Some(&target),
+        &settings,
+        true,
+        Instant::now(),
+        TAIL + 2,
+    ) {
+        Ok(report) => {
+            let _ = crate::admin::purge_status_cache(runtime, &service.service_id);
+            done(
+                json!({
+                    "status": flush_status(report.status), "rows": report.rows,
+                    "files": report.files, "purged": report.purged,
+                    "outbox_depth": report.outbox_depth,
+                }),
+                Some(("log_flush_requested", "flush".into())),
+            )
+        }
+        Err(error) => fail(502, &error),
+    }
+}
+
+fn clear_cache(runtime: &impl Runtime, request: &Request) -> Outcome {
+    let body = match body_of(request) {
+        Ok(body) => body,
+        Err(outcome) => return *outcome,
+    };
+    let kind = match body["kind"].as_str() {
+        Some("all") => None,
+        Some(name) => match LogKind::parse(name)
+            .filter(|k| k.tier() == Tier::Cache && *k != LogKind::CronTicks)
+        {
+            Some(kind) => Some(kind),
+            None => return fail(400, "kind_not_clearable"),
+        },
+        None => return fail(400, "invalid_input"),
+    };
+    let service = match load_installed_service(runtime) {
+        Ok((_, Some(service), _)) => service,
+        Ok(_) => return fail(409, "service_not_configured"),
+        Err(error) => return fail(503, &error),
+    };
+    match log_flush::clear_cache(runtime, &service.service_id, kind) {
+        Ok(()) => done(
+            json!({"cleared": kind.map_or("all", LogKind::as_str)}),
+            Some((
+                "log_cache_cleared",
+                kind.map_or("all", LogKind::as_str).into(),
+            )),
+        ),
+        Err(ClearError::Busy) => fail(409, "flush_in_progress"),
+        Err(ClearError::ScanBehind) => fail(409, "scan_behind"),
+        Err(ClearError::Failed(error)) => fail(502, &error),
+    }
+}
+
+fn floor_hour(ts: i64) -> i64 {
+    ts - ts.rem_euclid(3600)
+}
+
+fn delete_history(runtime: &impl Runtime, actor: &str, request: &Request) -> Outcome {
+    let body = match body_of(request) {
+        Ok(body) => body,
+        Err(outcome) => return *outcome,
+    };
+    let Some(kind) = body["kind"].as_str().and_then(LogKind::parse) else {
+        return fail(400, "invalid_input");
+    };
+    let days = match &body["older_than_days"] {
+        Value::Null => None,
+        value => match value
+            .as_u64()
+            .filter(|d| (1..=MAX_HISTORY_DAYS).contains(d))
+        {
+            Some(days) => Some(days),
+            None => return fail(400, "invalid_input"),
+        },
+    };
+    let installed = match Installed::load(runtime) {
+        Ok(installed) => installed,
+        Err(outcome) => return *outcome,
+    };
+    let existing = match runtime.admin_get(JOB_KEY) {
+        Ok(record) => record,
+        Err(error) => return fail(503, &error),
+    };
+    let generation = existing.as_ref().map(|r| r.generation.clone());
+    if existing
+        .as_ref()
+        .and_then(|r| serde_json::from_value::<HistoryJob>(r.value.clone()).ok())
+        .is_some_and(|job| job.status != "complete")
+    {
+        return fail(409, "history_job_in_progress");
+    }
+    let now = runtime.now();
+    let cutoff_ts = match days {
+        Some(days) => floor_hour(now as i64 - days as i64 * 86_400),
+        None => floor_hour(now as i64) + 2 * 3600,
+    };
+    let mut job = HistoryJob {
+        kind: kind.as_str().into(),
+        older_than_days: days,
+        cutoff_ts,
+        status: "deleting".into(),
+        actor: actor.into(),
+        started_at: now,
+        updated_at: now,
+        deleted: 0,
+        error: None,
+    };
+    let value = serde_json::to_value(&job).unwrap_or(Value::Null);
+    match runtime.admin_cas(JOB_KEY, generation.as_deref(), &value) {
+        Ok(true) => {}
+        Ok(false) => return fail(409, "history_job_in_progress"),
+        Err(error) => return fail(503, &error),
+    }
+    let settings = telemetry::api::operational_settings(runtime);
+    let store = installed.store(runtime, Instant::now());
+    let generation = runtime
+        .admin_get(JOB_KEY)
+        .ok()
+        .flatten()
+        .map(|r| r.generation);
+    if let Err(error) = step_history(runtime, &store, &settings, &mut job, generation, 0) {
+        job.error = Some(error);
+    }
+    let target = match days {
+        Some(days) => format!("{}:older_than_days={days}", kind.as_str()),
+        None => format!("{}:all", kind.as_str()),
+    };
+    done(
+        json!({"job": job}),
+        Some(("log_history_delete_started", target)),
+    )
+}
+
+/// Advances a delete-history job as far as the budget allows and persists it. A job whose
+/// sweep finished goes on to its one front-service purge in the same step when calls remain.
+fn step_history<R: Runtime>(
+    runtime: &R,
+    store: &Store<'_, R>,
+    settings: &OperationalLogSettings,
+    job: &mut HistoryJob,
+    generation: Option<String>,
+    reserve: u32,
+) -> Result<(), String> {
+    let room = |need: u32| runtime.admin_remaining_calls() >= reserve + need;
+    let kind = LogKind::parse(&job.kind).ok_or("history_job_invalid")?;
+    let before = (job.status.clone(), job.deleted, job.error.clone());
+    if job.status == "deleting" && room(3) {
+        let report = retention::history_sweep(store, kind, job.cutoff_ts, settings, reserve)?;
+        job.deleted += report.deleted;
+        if !report.more_pending {
+            runtime.kv_delete(&format!("history:{}", job.kind))?;
+            job.status = "purging".into();
+        }
+    }
+    if job.status == "purging" && room(3) {
+        let front = runtime
+            .config("front_service_id")?
+            .filter(|id| !id.is_empty())
+            .ok_or("front_service_id_missing")?;
+        let token = runtime
+            .secret(&store.service.fastly_token_ref)?
+            .ok_or("fastly_token_missing")?;
+        let path = format!(
+            "/service/{}/purge/flp-fos-ops-{}",
+            transport::encode(&front),
+            job.kind
+        );
+        let response = runtime.admin_api(ApiRequest {
+            method: "POST",
+            path: &path,
+            query: "",
+            token: &token,
+            body: None,
+            timeout: transport::request_timeout(
+                transport::FASTLY_API_TIMEOUT,
+                runtime.admin_elapsed(store.started),
+            ),
+        })?;
+        if (200..300).contains(&response.status) {
+            job.status = "complete".into();
+            job.error = None;
+        } else {
+            job.error = Some(format!("purge_status_{}", response.status));
+        }
+    }
+    if (job.status.clone(), job.deleted, job.error.clone()) != before {
+        job.updated_at = runtime.now();
+        let value = serde_json::to_value(&*job).map_err(|_| "state_encoding_failed")?;
+        runtime.admin_cas(JOB_KEY, generation.as_deref(), &value)?;
+    }
+    Ok(())
+}
+
+fn sweep(runtime: &impl Runtime) -> Outcome {
+    let installed = match Installed::load(runtime) {
+        Ok(installed) => installed,
+        Err(outcome) => return *outcome,
+    };
+    if reset::fencing(&installed.service) {
+        return fail(409, "data_reset_in_progress");
+    }
+    let settings = telemetry::api::operational_settings(runtime);
+    let last = runtime.admin_get(LAST_SWEEP_KEY).ok().flatten();
+    let resume_from = last
+        .as_ref()
+        .filter(|record| !record.value["complete"].as_bool().unwrap_or(true))
+        .map_or(0, |record| {
+            record.value["next"].as_u64().unwrap_or(0) as usize
+        });
+    let store = installed.store(runtime, Instant::now());
+    let report =
+        match retention::retention_sweep_from(&store, &settings, AUDIT_TAIL, None, resume_from) {
+            Ok(report) => report,
+            Err(error) => return fail(502, &error),
+        };
+    if !report.deleted_keys.is_empty() && runtime.admin_remaining_calls() >= AUDIT_TAIL + 4 {
+        let buffer = LogBuffer::new(&installed.service.service_id, "manual-retention");
+        write_parquet_deleted_logs(
+            runtime,
+            &buffer,
+            "manual-retention",
+            "retention",
+            &report.deleted_keys,
+        );
+        telemetry::flush_request_buffer(runtime, &buffer);
+    }
+    note_sweep(
+        runtime,
+        last.as_ref().map(|r| r.generation.as_str()),
+        report.more_pending,
+        report.resume_from,
+    );
+    done(
+        json!({
+            "deleted": report.deleted, "failed": report.failed, "bytes": report.bytes,
+            "more_pending": report.more_pending, "datasets": report.datasets,
+            "backend_calls": report.backend_calls,
+        }),
+        Some(("log_retention_sweep_requested", "retention".into())),
+    )
+}
+
+fn note_sweep(
+    runtime: &impl Runtime,
+    generation: Option<&str>,
+    more_pending: bool,
+    resume_from: usize,
+) {
+    let value = json!({"at": runtime.now(), "complete": !more_pending, "next": resume_from});
+    let _ = runtime.admin_cas(LAST_SWEEP_KEY, generation, &value);
+}
+
+/// Most hours one billing read may cover: 31 days of hourly buckets per field.
+const BILLING_MAX_SPAN_S: u64 = 31 * 86_400;
+
+fn geography(runtime: &impl Runtime, query: &str) -> Outcome {
+    let param = |name: &str| {
+        url::form_urlencoded::parse(query.as_bytes())
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.into_owned())
+    };
+    let group_by = param("group_by").unwrap_or_else(|| "region".into());
+    if !matches!(group_by.as_str(), "region" | "datacenter") {
+        return fail(400, "invalid_group");
+    }
+    let parse_time = |value: String| {
+        if value.chars().all(|character| character.is_ascii_digit()) {
+            return value
+                .parse::<u64>()
+                .ok()
+                .map(|milliseconds| (milliseconds / 1000, milliseconds % 1000 != 0));
+        }
+        time::OffsetDateTime::parse(&value, &time::format_description::well_known::Rfc3339)
+            .ok()
+            .and_then(|timestamp| u64::try_from(timestamp.unix_timestamp()).ok())
+            .map(|seconds| (seconds, false))
+    };
+    let start = param("start").or_else(|| param("from"));
+    let end = param("end").or_else(|| param("to"));
+    let (Some((from, _)), Some((to, to_remainder))) =
+        (start.and_then(parse_time), end.and_then(parse_time))
+    else {
+        return fail(400, "invalid_range");
+    };
+    let to = to.saturating_add(u64::from(to_remainder));
+    if from >= to || to - from > BILLING_MAX_SPAN_S {
+        return fail(400, "invalid_range");
+    }
+    done(
+        crate::telemetry::usage::platform_geography_usage(runtime, from, to, &group_by),
+        None,
+    )
+}
+
+fn platform_usage(runtime: &impl Runtime, query: &str) -> Outcome {
+    let param = |name: &str| {
+        url::form_urlencoded::parse(query.as_bytes())
+            .find(|(key, _)| key == name)
+            .and_then(|(_, value)| value.parse::<u64>().ok())
+    };
+    let (Some(from), Some(to)) = (param("from"), param("to")) else {
+        return fail(400, "invalid_range");
+    };
+    let (from, to) = (from / 1000, to.div_ceil(1000));
+    if from >= to || to - from > BILLING_MAX_SPAN_S {
+        return fail(400, "invalid_range");
+    }
+    let include_billing = url::form_urlencoded::parse(query.as_bytes())
+        .find(|(key, _)| key == "include_billing")
+        .is_some_and(|(_, value)| value == "1");
+    done(
+        crate::telemetry::usage::platform_usage(runtime, from, to, include_billing),
+        None,
+    )
+}
+
+/// Fastly's billed Compute usage for `from`..`to` (epoch ms), to reconcile the logged counts.
+fn compute_billing(runtime: &impl Runtime, query: &str) -> Outcome {
+    let param = |name: &str| {
+        url::form_urlencoded::parse(query.as_bytes())
+            .find(|(key, _)| key == name)
+            .and_then(|(_, value)| value.parse::<u64>().ok())
+    };
+    let (Some(from), Some(to)) = (param("from"), param("to")) else {
+        return fail(400, "invalid_range");
+    };
+    let (from, to) = (from / 1000, to.div_ceil(1000));
+    if from >= to || to - from > BILLING_MAX_SPAN_S {
+        return fail(400, "invalid_range");
+    }
+    match runtime.compute_billing(from, to) {
+        Ok(billing) => done(billing, None),
+        Err(error) => fail(502, &error),
+    }
+}
+
+/// Stats fields matching what the logs count: every node's requests, delivered bytes (body plus
+/// headers, as `resp.bytes_written`) and cache hits, or the edge-only fields when only edges log.
+const SERVICE_STATS_FIELDS: [[&str; 4]; 2] = [
+    ["requests", "resp_body_bytes", "resp_header_bytes", "hits"],
+    [
+        "edge_requests",
+        "edge_resp_body_bytes",
+        "edge_resp_header_bytes",
+        "edge_hit_requests",
+    ],
+];
+
+/// The logged service's Fastly-reported requests, bytes and hits per whole UTC hour inside
+/// `from`..`to` (epoch ms), with the sampling settings that relate them to the logged rows.
+fn service_stats(runtime: &impl Runtime, query: &str) -> Outcome {
+    let param = |name: &str| {
+        url::form_urlencoded::parse(query.as_bytes())
+            .find(|(key, _)| key == name)
+            .and_then(|(_, value)| value.parse::<u64>().ok())
+    };
+    let (Some(from), Some(to)) = (param("from"), param("to")) else {
+        return fail(400, "invalid_range");
+    };
+    let (from, to) = (from.div_ceil(1000), to / 1000);
+    if from >= to || to - from > BILLING_MAX_SPAN_S {
+        return fail(400, "invalid_range");
+    }
+    let service = match load_installed_service(runtime) {
+        Ok((_, Some(service), _)) => service,
+        Ok(_) => return fail(409, "service_not_configured"),
+        Err(error) => return fail(503, &error),
+    };
+    let (from, to) = (from.div_ceil(3600) * 3600, to / 3600 * 3600);
+    let [requests, body, header, hits] = SERVICE_STATS_FIELDS[usize::from(service.edge_only)];
+    let rows = if from < to {
+        match runtime.service_stats(
+            &service.service_id,
+            from,
+            to,
+            &[requests, body, header, hits],
+        ) {
+            Ok(rows) => rows,
+            Err(error) => return fail(502, &error),
+        }
+    } else {
+        json!([])
+    };
+    let num = |row: &Value, field: &str| row[field].as_f64().unwrap_or(0.0).round() as u64;
+    let hours: Vec<Value> = rows
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            let start = row["start_time"]
+                .as_u64()
+                .filter(|s| (from..to).contains(s))?;
+            Some(json!({
+                "start_time": start,
+                "requests": num(row, requests),
+                "bandwidth_bytes": num(row, body) + num(row, header),
+                "hits": num(row, hits),
+            }))
+        })
+        .collect();
+    done(
+        json!({
+            "service_id": service.service_id, "from": from, "to": to,
+            "sample_rate": service.sample_rate.clamp(1, 100), "edge_only": service.edge_only,
+            "hours": hours,
+        }),
+        None,
+    )
+}
+
+/// Complete UTC days of logged-service traffic the cost estimate averages, as in v3's prefill.
+const TRAFFIC_DAYS: u64 = 3;
+
+/// The logged service's daily Fastly-reported requests over the last complete UTC days, with the
+/// logging settings that turn them into raw files and per-day ingested Parquet row accounting.
+fn logged_traffic(runtime: &impl Runtime) -> Outcome {
+    let service = match load_installed_service(runtime) {
+        Ok((_, Some(service), _)) => service,
+        Ok(_) => return fail(409, "service_not_configured"),
+        Err(error) => return fail(503, &error),
+    };
+    let today = runtime.now() / 86_400 * 86_400;
+    match runtime.logged_traffic(&service.service_id, today - TRAFFIC_DAYS * 86_400, today) {
+        Ok(mut traffic) => {
+            let store = fos_credentials(runtime, &service).map(|(access_key, secret_key)| Store {
+                runtime,
+                service: &service,
+                access_key,
+                secret_key,
+                started: Instant::now(),
+                vcpu_start: 0,
+            });
+            let sample = service.sample_rate.clamp(1, 100) as f64 / 100.0;
+            if let Some(days) = traffic["days"].as_array_mut() {
+                for day in days {
+                    let base = if service.edge_only {
+                        day["edge_requests"]
+                            .as_f64()
+                            .or_else(|| day["requests"].as_f64())
+                            .unwrap_or(0.0)
+                    } else {
+                        day["requests"].as_f64().unwrap_or(0.0)
+                    };
+                    let expected = (base * sample).round() as u64;
+                    day["expected_rows"] = json!(expected);
+                    if let (Some(store), Some(day_ts)) = (store.as_ref(), day["day"].as_u64()) {
+                        let min_dir = crate::ingest::minute_dir(day_ts as i64);
+                        let day_dir = min_dir.split("/hour=").next().unwrap_or(&min_dir);
+                        let prefix = format!("{}processed/request/{day_dir}/", scope(&service));
+                        if runtime.admin_remaining_calls() > 2 {
+                            if let Ok(page) = store.list(&prefix, None, None, 1000, None) {
+                                let mut keys: Vec<String> =
+                                    page.objects.into_iter().map(|o| o.key).collect();
+                                if let Some(token) = page
+                                    .next_token
+                                    .filter(|_| runtime.admin_remaining_calls() > 2)
+                                {
+                                    if let Ok(page2) =
+                                        store.list(&prefix, None, Some(&token), 1000, None)
+                                    {
+                                        keys.extend(page2.objects.into_iter().map(|o| o.key));
+                                    }
+                                }
+                                let rows: u64 = crate::ingest::processed_spans(&keys)
+                                    .iter()
+                                    .map(|(_, _, rows)| rows)
+                                    .sum();
+                                day["ingested_rows"] = json!(rows);
+                            }
+                        }
+                    }
+                }
+            }
+            traffic["logging"] = json!({
+                "log_period": service.log_period, "sample_rate": service.sample_rate,
+                "edge_only": service.edge_only, "delete_after": service.delete_after,
+                "log_retention_days": service.log_retention_days,
+                "fos_region": service.fos_region,
+                "rum_enabled": service.rum.enabled, "rum_log_period": service.rum.log_period,
+                "rum_sample_rate": service.rum.sample_rate,
+                "rum_retention_days": service.rum_retention_days,
+                "compaction": service.compaction,
+                "ingest_relay": crate::ingest::coordinator::relay_shards(runtime),
+            });
+            done(traffic, None)
+        }
+        Err(error) => fail(502, &error),
+    }
+}
+
+fn opt_ts(body: &Value, key: &str) -> Result<Option<u64>, Box<Outcome>> {
+    match &body[key] {
+        Value::Null => Ok(None),
+        value => value
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| Box::new(fail(400, "invalid_input"))),
+    }
+}
+
+fn backfill(runtime: &impl Runtime, actor: &str, request: &Request) -> Outcome {
+    let body = match body_of(request) {
+        Ok(body) => body,
+        Err(outcome) => return *outcome,
+    };
+    let from_ts = match opt_ts(&body, "from_ts") {
+        Ok(ts) => ts,
+        Err(outcome) => return *outcome,
+    };
+    let to_ts = match opt_ts(&body, "to_ts") {
+        Ok(ts) => ts,
+        Err(outcome) => return *outcome,
+    };
+    if let (Some(from), Some(to)) = (from_ts, to_ts) {
+        if from > to {
+            return fail(400, "invalid_input");
+        }
+    }
+    let service = match load_installed_service(runtime) {
+        Ok((_, Some(service), _)) => service,
+        Ok(_) => return fail(409, "service_not_configured"),
+        Err(error) => return fail(503, &error),
+    };
+    if reset::fencing(&service) {
+        return fail(409, "data_reset_in_progress");
+    }
+    let existing = match runtime.admin_get(crate::ingest::BACKFILL_KEY) {
+        Ok(record) => record,
+        Err(error) => return fail(503, &error),
+    };
+    let generation = existing.as_ref().map(|r| r.generation.clone());
+    let restart = body["restart"].as_bool().unwrap_or(false);
+    if !restart
+        && existing
+            .as_ref()
+            .and_then(|r| {
+                serde_json::from_value::<crate::ingest::BackfillJob>(r.value.clone()).ok()
+            })
+            .is_some_and(|job| job.status == "running")
+    {
+        return fail(409, "backfill_in_progress");
+    }
+    let raw_prefix = format!("{}raw/request/", scope(&service));
+    let after_key = from_ts
+        .map(|from| {
+            let min = from - (from % 60);
+            format!("{raw_prefix}{}/", crate::ingest::minute_dir(min as i64))
+        })
+        .unwrap_or_default();
+    let to_key = to_ts
+        .map(|to| {
+            let next_min = (to - (to % 60)) + 60;
+            format!(
+                "{raw_prefix}{}/",
+                crate::ingest::minute_dir(next_min as i64)
+            )
+        })
+        .unwrap_or_default();
+    let now = runtime.now();
+    let job = crate::ingest::BackfillJob {
+        status: "running".into(),
+        actor: actor.into(),
+        started_at: now,
+        updated_at: now,
+        from_ts,
+        to_ts,
+        after_key,
+        to_key,
+        scanned: 0,
+        planned: 0,
+    };
+    let value = serde_json::to_value(&job).unwrap_or(Value::Null);
+    match runtime.admin_cas(crate::ingest::BACKFILL_KEY, generation.as_deref(), &value) {
+        Ok(true) => {}
+        Ok(false) => return fail(409, "backfill_in_progress"),
+        Err(error) => return fail(503, &error),
+    }
+    if let Ok(Some(record)) = runtime.admin_get("cron:state") {
+        let mut state = record.value;
+        state["jobs"]["ingest"]["more_pending"] = Value::Bool(true);
+        state["jobs"]["ingest"]["retry_after"] = Value::from(0);
+        state["jobs"]["ingest"]["idle_streak"] = Value::from(0);
+        let _ = runtime.admin_cas("cron:state", Some(&record.generation), &state);
+    }
+    let target = match (from_ts, to_ts) {
+        (None, None) => "full".to_owned(),
+        (from, to) => format!("{}:{}", from.unwrap_or(0), to.unwrap_or(0)),
+    };
+    done(
+        json!({"backfill": job}),
+        Some(("log_backfill_requested", target)),
+    )
+}
+
+fn reconcile(runtime: &impl Runtime, actor: &str) -> Outcome {
+    match retention::request_storage_reconcile(runtime, actor) {
+        Ok(started) => done(
+            json!({"started": started}),
+            started.then(|| ("storage_reconcile_requested", "storage".into())),
+        ),
+        Err(error) => fail(503, &error),
+    }
+}
+
+pub struct TickContext<'a> {
+    pub service: &'a Service,
+    pub access_key: &'a str,
+    pub secret_key: &'a str,
+    pub run_id: &'a str,
+    pub tick_id: &'a str,
+    pub trigger: &'a str,
+    pub actor: &'a str,
+    pub bucket: u64,
+    pub started: Instant,
+}
+
+/// Maintenance stages in `cron:state.maint_next` round-robin order. Each clock tick dispatches
+/// one stage execution, which runs the first of these, from `maint_next` on, that has work.
+/// `request_compact` is listed for its cron row and schedule entry but runs on its own job
+/// ([`compact_execution`]), not in the rotation.
+pub const MAINT_STAGES: [&str; 7] = [
+    "retention_sweep",
+    "log_compact",
+    "delete_history",
+    "storage_reconcile",
+    "summary_bundle",
+    "request_compact",
+    "delete_data",
+];
+
+/// Calls kept back for the cron_runs outbox write and the sweep marker after a stage.
+const TAIL: u32 = 3;
+/// Calls kept back on synchronous HTTP admin routes for `note_sweep` (1), `ProjectedStore`
+/// `record_admin_action` (6 KV calls: 2 snapshot reads + 1 root CAS + 2 audit projection calls
+/// + 1 projection marker), and request buffer flush (1).
+const AUDIT_TAIL: u32 = 8;
+
+pub(super) struct MaintOutcome {
+    /// Index into `MAINT_STAGES` of the stage that did work, if any.
+    pub(super) ran: Option<usize>,
+    /// Where the next tick's stage execution starts.
+    pub(super) next: usize,
+    pub(super) rows: Vec<StageRow>,
+    pub(super) worker_executions_metrics: Vec<telemetry::execution::WorkerExecutionMetrics>,
+    /// Delete Data stopped only for this execution's budget, with more to delete now.
+    pub(super) delete_pending: bool,
+    /// `summary_bundle`'s turn came and it left work (`Some(true)`) or none (`Some(false)`);
+    /// `None` when the rotation did not reach it.
+    pub(super) bundle_pending: Option<bool>,
+}
+
+pub(super) struct CompactOutcome {
+    /// The request then the RUM compaction row, for those that ran.
+    pub(super) rows: Vec<StageRow>,
+    pub(super) worker_executions_metrics: Vec<telemetry::execution::WorkerExecutionMetrics>,
+    /// Request or RUM compaction ran and has more to do.
+    pub(super) compact_pending: bool,
+}
+
+/// A maintenance execution runs no rotating stage once the Delete Data step left it past this.
+const ROTATING_VCPU_MS: u64 = 300;
+
+/// Runs the first maintenance stage at or after `start` (cyclically) that has work, and writes
+/// its cron_runs row (a sweep that ran but found nothing to delete writes none, as before).
+/// Stages with nothing to do cost one or two reads and pass the turn on in the same execution.
+/// `next` is the stage after the one that ran, or `start` when none did. The rotation skips
+/// request compaction, which has its own job and execution.
+pub(super) fn maintenance_stage(
+    runtime: &impl Runtime,
+    tick: &TickContext<'_>,
+    settings: &OperationalLogSettings,
+    start: usize,
+) -> MaintOutcome {
+    let buffer = LogBuffer::new(&tick.service.service_id, &format!("{}-maint", tick.run_id));
+    let store = Store {
+        runtime,
+        service: tick.service,
+        access_key: tick.access_key.to_owned(),
+        secret_key: tick.secret_key.to_owned(),
+        started: tick.started,
+        vcpu_start: 0,
+    };
+    let start = start % MAINT_STAGES.len();
+    let mut outcome = MaintOutcome {
+        ran: None,
+        next: start,
+        rows: Vec::new(),
+        worker_executions_metrics: Vec::new(),
+        delete_pending: false,
+        bundle_pending: None,
+    };
+    let fencing = reset::fencing(tick.service);
+    if store.within_wall() {
+        outcome.rows.extend(reset::reset_stage(&store));
+    }
+    // A rotating stage checks the execution's vCPU only between units of work, so none follows
+    // a reset step that already spent much of the allowance.
+    let spent = runtime.vcpu_ms() > ROTATING_VCPU_MS;
+    let reset_ran = !outcome.rows.is_empty();
+    for offset in 0..MAINT_STAGES.len() {
+        let index = (start + offset) % MAINT_STAGES.len();
+        if spent || !store.within_wall() {
+            break;
+        }
+        if index == 5 || (index == 6 && reset_ran) || (fencing && matches!(index, 0 | 3 | 4)) {
+            if index == 4 {
+                outcome.bundle_pending = Some(false);
+            }
+            continue;
+        }
+        let row = match index {
+            0 => sweep_stage(&store, &buffer, tick.run_id, settings),
+            1 => compact_stage(&store, settings),
+            2 => history_stage(&store, settings),
+            3 => reconcile_stage(&store, &buffer),
+            4 => bundle_stage(&store),
+            6 => reset::reset_stage(&store),
+            _ => unreachable!("MAINT_STAGES has seven entries; request_compact has its own job"),
+        };
+        if index == 4 {
+            outcome.bundle_pending = Some(row.as_ref().is_some_and(compact_backlog));
+        }
+        if let Some(row) = row {
+            outcome.rows.push(row);
+            outcome.ran = Some(index);
+            outcome.next = (index + 1) % MAINT_STAGES.len();
+            break;
+        }
+    }
+    outcome.delete_pending = outcome
+        .rows
+        .iter()
+        .any(|row| row.kind == "delete_data" && row.more_pending);
+    for row in outcome.rows.iter().filter(|row| row.outcome != "idle") {
+        write_log(
+            runtime,
+            &buffer,
+            WritableLogKind::CronRuns,
+            row.json(
+                tick.run_id,
+                tick.tick_id,
+                tick.trigger,
+                tick.actor,
+                tick.bucket,
+            ),
+        );
+    }
+    if let Some(error) = telemetry::flush_request_buffer(runtime, &buffer).outbox_error {
+        runtime.admin_event(json!({"event": "log.outbox_error", "error": error}));
+    }
+    outcome
+}
+
+/// The compaction execution: its own job, dispatched beside the ingest fan-out on its own
+/// cadence, with the whole stage wall time for chained worker passes. Request compaction runs
+/// first, holding back [`RUM_COMPACT_RESERVE`] when a RUM table is due, then RUM compaction.
+/// Writes a cron_runs row for each that did anything.
+pub(super) fn compact_execution(runtime: &impl Runtime, tick: &TickContext<'_>) -> CompactOutcome {
+    let buffer = LogBuffer::new(
+        &tick.service.service_id,
+        &format!("{}-compact", tick.run_id),
+    );
+    let store = Store {
+        runtime,
+        service: tick.service,
+        access_key: tick.access_key.to_owned(),
+        secret_key: tick.secret_key.to_owned(),
+        started: tick.started,
+        vcpu_start: 0,
+    };
+    let mut outcome = CompactOutcome {
+        rows: Vec::new(),
+        worker_executions_metrics: Vec::new(),
+        compact_pending: false,
+    };
+    if reset::fencing(tick.service) || !store.within_wall() {
+        return outcome;
+    }
+    let rum_due = rum_compact_due(&store);
+    let reserve = if rum_due.is_empty() {
+        Duration::ZERO
+    } else {
+        RUM_COMPACT_RESERVE
+    };
+    let row = request_compact_stage(
+        &store,
+        &buffer,
+        tick.run_id,
+        &mut outcome.worker_executions_metrics,
+        reserve,
+    );
+    let rum_row = (!rum_due.is_empty() && store.within_wall())
+        .then(|| {
+            rum_compact_stage(
+                &store,
+                &buffer,
+                tick.run_id,
+                &mut outcome.worker_executions_metrics,
+                &rum_due,
+            )
+        })
+        .flatten();
+    for row in row.iter().chain(&rum_row) {
+        outcome.compact_pending |= compact_backlog(row);
+        if row.outcome != "idle" {
+            write_log(
+                runtime,
+                &buffer,
+                WritableLogKind::CronRuns,
+                row.json(
+                    tick.run_id,
+                    tick.tick_id,
+                    tick.trigger,
+                    tick.actor,
+                    tick.bucket,
+                ),
+            );
+        }
+    }
+    outcome.rows.extend(row.into_iter().chain(rum_row));
+    if let Some(error) = telemetry::flush_request_buffer(runtime, &buffer).outbox_error {
+        runtime.admin_event(json!({"event": "log.outbox_error", "error": error}));
+    }
+    outcome
+}
+
+/// A failed run retries on the regular cadence rather than the catch-up one. Used for
+/// compaction and for `summary_bundle`.
+fn compact_backlog(row: &StageRow) -> bool {
+    row.more_pending && row.outcome != "error"
+}
+
+fn enough(runtime: &impl Runtime, needed: u32) -> bool {
+    admit_stage(runtime.admin_remaining_calls(), TAIL + needed)
+}
+
+fn caller(runtime: &impl Runtime, name: &'static str) {
+    if let Some(usage) = runtime.usage_agg() {
+        usage.set_caller(name);
+    }
+}
+
+/// Records deleted Parquet keys in `ingest_files` in bounded batches so each row stays well
+/// below `telemetry::MAX_ROW_BYTES`.
+fn write_parquet_deleted_logs(
+    runtime: &impl Runtime,
+    buffer: &LogBuffer,
+    run_id: &str,
+    dataset: &str,
+    keys: &[String],
+) {
+    const MAX_JSON_BYTES: usize = 2400;
+    let mut batch: Vec<&str> = Vec::new();
+    let mut batch_bytes = 2; // "[]"
+    for key in keys {
+        let encoded_len = serde_json::to_string(key).map_or(key.len() + 2, |s| s.len());
+        let sep = usize::from(!batch.is_empty());
+        if !batch.is_empty() && batch_bytes + sep + encoded_len > MAX_JSON_BYTES {
+            write_log(
+                runtime,
+                buffer,
+                WritableLogKind::IngestFiles,
+                json!({
+                    "run_id": run_id,
+                    "dataset": dataset,
+                    "status": "parquet_deleted",
+                    "output_keys_json": json!(batch).to_string(),
+                }),
+            );
+            batch.clear();
+            batch_bytes = 2;
+        }
+        batch_bytes += usize::from(!batch.is_empty()) + encoded_len;
+        batch.push(key.as_str());
+    }
+    if !batch.is_empty() {
+        write_log(
+            runtime,
+            buffer,
+            WritableLogKind::IngestFiles,
+            json!({
+                "run_id": run_id,
+                "dataset": dataset,
+                "status": "parquet_deleted",
+                "output_keys_json": json!(batch).to_string(),
+            }),
+        );
+    }
+}
+
+/// The retention sweep, every `SWEEP_INTERVAL_S` or until a started sweep completes.
+fn sweep_stage<R: Runtime>(
+    store: &Store<'_, R>,
+    buffer: &LogBuffer,
+    run_id: &str,
+    settings: &OperationalLogSettings,
+) -> Option<StageRow> {
+    let runtime = store.runtime;
+    caller(runtime, "cron:retention");
+    if !enough(runtime, 5) {
+        return None;
+    }
+    let last = runtime.admin_get(LAST_SWEEP_KEY).ok()?;
+    let resume_from = last
+        .as_ref()
+        .filter(|record| !record.value["complete"].as_bool().unwrap_or(true))
+        .map_or(0, |record| {
+            record.value["next"].as_u64().unwrap_or(0) as usize
+        });
+    let due = last.as_ref().is_none_or(|record| {
+        !record.value["complete"].as_bool().unwrap_or(false)
+            || runtime
+                .now()
+                .saturating_sub(record.value["at"].as_u64().unwrap_or(0))
+                >= SWEEP_INTERVAL_S
+    });
+    if !due {
+        return None;
+    }
+    let mut row = StageRow::new("retention_sweep", runtime.now());
+    let span = VcpuSpan::start(runtime);
+    let began = Instant::now();
+    let before = runtime.admin_remaining_calls();
+    match retention::retention_sweep_from(store, settings, TAIL + 1, None, resume_from) {
+        Ok(report) => {
+            if !report.deleted_keys.is_empty() {
+                write_parquet_deleted_logs(
+                    runtime,
+                    buffer,
+                    run_id,
+                    "retention",
+                    &report.deleted_keys,
+                );
+            }
+            row.deleted = report.deleted;
+            row.bytes = report.bytes;
+            row.more_pending = report.more_pending;
+            row.details = Some(json!({"datasets": report.datasets, "failed": report.failed}));
+            // Logged even when nothing expired, so the six-hourly cadence shows in cron_runs.
+            row.outcome = if report.more_pending {
+                "partial"
+            } else {
+                "done"
+            };
+            note_sweep(
+                runtime,
+                last.as_ref().map(|r| r.generation.as_str()),
+                report.more_pending,
+                report.resume_from,
+            );
+        }
+        Err(error) => {
+            row.outcome = "error";
+            row.error = Some(error);
+        }
+    }
+    finish_row(runtime, &mut row, before, began, &span);
+    Some(row)
+}
+
+fn compact_stage<R: Runtime>(
+    store: &Store<'_, R>,
+    settings: &OperationalLogSettings,
+) -> Option<StageRow> {
+    let runtime = store.runtime;
+    if !settings.compaction_enabled || !enough(runtime, MIN_COMPACT_CALLS) {
+        return None;
+    }
+    let cdn_key = runtime
+        .secret("cdn_key")
+        .ok()
+        .flatten()
+        .filter(|key| !key.is_empty())?;
+    caller(runtime, "cron:log_compact");
+    let mut row = StageRow::new("log_compact", runtime.now());
+    let span = VcpuSpan::start(runtime);
+    let began = Instant::now();
+    let before = runtime.admin_remaining_calls();
+    match compact::log_compact(store, &cdn_key, settings, TAIL + 1) {
+        Ok(report) => {
+            row.listed = report.sources;
+            row.files = u64::from(report.chunks);
+            row.rows = report.rows;
+            row.bytes = report.bytes_written;
+            row.deleted = report.deleted;
+            row.more_pending = report.more_pending;
+            row.error = report.errors.first().cloned();
+            if report.chunks > 0 || report.deleted > 0 || report.failed > 0 {
+                row.outcome = if report.more_pending {
+                    "partial"
+                } else {
+                    "done"
+                };
+            } else if row.error.is_some() {
+                row.outcome = "error";
+            } else if report.more_pending {
+                row.outcome = "partial";
+            }
+        }
+        Err(error) => {
+            row.outcome = "error";
+            row.error = Some(error);
+        }
+    }
+    if row.outcome == "idle" {
+        return None;
+    }
+    finish_row(runtime, &mut row, before, began, &span);
+    Some(row)
+}
+
+/// Compaction passes one maintenance turn may chain. Each is a fresh worker execution with its
+/// own 32-call budget (`ingest::worker::WORKER_CALLS`). A 32-source compact uploads in about two
+/// and commits in the next, which writes the state once.
+const MAX_COMPACT_PASSES: u32 = 8;
+/// The wall time request compaction leaves for RUM compaction when a RUM table is due.
+const RUM_COMPACT_RESERVE: Duration = Duration::from_secs(15);
+/// A further pass starts only with this much of the stage's wall time left.
+const MIN_COMPACT_PASS_WALL: Duration = Duration::from_secs(5);
+/// How long past a pass's own wall budget the stage waits for its reply (the old 40 s/45 s gap).
+const COMPACT_REPLY_MARGIN: Duration = Duration::from_secs(5);
+
+/// Merges small request window files when the service's `compaction` setting asks for it,
+/// chaining worker passes while the stage has calls and wall time and the last pass progressed.
+/// Chains passes until `reserve` is all that is left of the stage's wall time. Each pass is
+/// numbered within the turn `turn`, so a pass can hand its lease to the next.
+fn request_compact_stage<R: Runtime>(
+    store: &Store<'_, R>,
+    buffer: &LogBuffer,
+    turn: &str,
+    worker_metrics: &mut Vec<telemetry::execution::WorkerExecutionMetrics>,
+    reserve: Duration,
+) -> Option<StageRow> {
+    let runtime = store.runtime;
+    store.service.compaction.target_bytes()?;
+    if !enough(runtime, MIN_COMPACT_CALLS) {
+        return None;
+    }
+    let watermark = runtime.admin_get(crate::ingest::WATERMARK_KEY).ok()?;
+    let catalog = crate::ingest::catalog::head(
+        watermark
+            .as_ref()
+            .map(|record| &record.value)
+            .unwrap_or(&Value::Null),
+    )
+    .ok()?;
+    if catalog.version != crate::ingest::catalog::VERSION
+        || (!catalog.compaction_due && catalog.next_compaction_check > runtime.now())
+    {
+        return None;
+    }
+    caller(runtime, "cron:request_compact");
+    let mut chain = PassChain::new(runtime, "request_compact");
+    chain.run(
+        store,
+        buffer,
+        worker_metrics,
+        (reserve, MAX_COMPACT_PASSES),
+        None,
+        turn,
+    );
+    chain.finish(runtime)
+}
+
+/// The RUM tables whose compaction state asks for a pass, when the service compacts and RUM is
+/// on. Reads nothing otherwise.
+fn rum_compact_due<R: Runtime>(store: &Store<'_, R>) -> Vec<&'static str> {
+    let runtime = store.runtime;
+    let service = store.service;
+    if service.compaction.target_bytes().is_none()
+        || !service.rum.enabled
+        || service.data_reset.is_some()
+        || !enough(
+            runtime,
+            MIN_COMPACT_CALLS + compaction::RUM_TABLES.len() as u32 + 1,
+        )
+    {
+        return Vec::new();
+    }
+    let now = runtime.now();
+    let rum_watermark_gen = runtime
+        .admin_get(&crate::ingest::watermark_key(crate::ingest::rum::STREAM))
+        .ok()
+        .flatten()
+        .map(|r| r.generation);
+    compaction::RUM_TABLES
+        .into_iter()
+        .filter(|table| {
+            let key = compaction::Dataset::Rum(table).state_key();
+            runtime.admin_get(key).is_ok_and(|record| {
+                compaction::rum_due(
+                    record.as_ref().map(|r| &r.value),
+                    rum_watermark_gen.as_deref(),
+                    now,
+                )
+            })
+        })
+        .collect()
+}
+
+/// Merges small RUM window files of each `due` table, chaining each table's passes in turn
+/// within the stage's remaining wall time and [`MAX_COMPACT_PASSES`] in all, of which each table
+/// but the last takes at most its even share.
+fn rum_compact_stage<R: Runtime>(
+    store: &Store<'_, R>,
+    buffer: &LogBuffer,
+    turn: &str,
+    worker_metrics: &mut Vec<telemetry::execution::WorkerExecutionMetrics>,
+    due: &[&'static str],
+) -> Option<StageRow> {
+    let runtime = store.runtime;
+    let left =
+        crate::ingest::storage::WALL_STOP.saturating_sub(runtime.admin_elapsed(store.started));
+    if !enough(runtime, MIN_COMPACT_CALLS) || left < MIN_COMPACT_PASS_WALL {
+        return None;
+    }
+    caller(runtime, "cron:rum_compact");
+    let mut chain = PassChain::new(runtime, "rum_compact");
+    let mut pending = false;
+    let share = MAX_COMPACT_PASSES / due.len().max(1) as u32;
+    for (i, table) in due.iter().enumerate() {
+        let turn = format!("{turn}:{table}");
+        let limit = if i + 1 < due.len() {
+            chain.passes + share
+        } else {
+            MAX_COMPACT_PASSES
+        };
+        chain.run(
+            store,
+            buffer,
+            worker_metrics,
+            (Duration::ZERO, limit),
+            Some(table),
+            &turn,
+        );
+        pending |= chain.row.more_pending;
+    }
+    chain.row.more_pending = pending;
+    chain.finish(runtime)
+}
+
+/// A compaction row's chain of worker passes and what they reported.
+struct PassChain {
+    row: StageRow,
+    span: VcpuSpan,
+    began: Instant,
+    before: u32,
+    worker_vcpu: u64,
+    passes: u32,
+    stopped: Option<String>,
+    lease_generation: Option<String>,
+    errors: Vec<String>,
+    failed: u64,
+}
+
+impl PassChain {
+    fn new(runtime: &impl Runtime, kind: &'static str) -> Self {
+        Self {
+            row: StageRow::new(kind, runtime.now()),
+            span: VcpuSpan::start(runtime),
+            began: Instant::now(),
+            before: runtime.admin_remaining_calls(),
+            worker_vcpu: 0,
+            passes: 0,
+            stopped: None,
+            lease_generation: None,
+            errors: Vec::new(),
+            failed: 0,
+        }
+    }
+
+    /// Chains passes over the request dataset, or the RUM `table`, until one leaves nothing
+    /// pending, is blocked or fails, the stage is down to `reserve` of its wall time, or the
+    /// chain has made `limit` passes.
+    fn run<R: Runtime>(
+        &mut self,
+        store: &Store<'_, R>,
+        buffer: &LogBuffer,
+        worker_metrics: &mut Vec<telemetry::execution::WorkerExecutionMetrics>,
+        (reserve, limit): (Duration, u32),
+        table: Option<&str>,
+        turn: &str,
+    ) {
+        let runtime = store.runtime;
+        let maintenance = self.row.kind;
+        let mut pass = 0u32;
+        loop {
+            let left = crate::ingest::storage::WALL_STOP
+                .saturating_sub(runtime.admin_elapsed(store.started))
+                .saturating_sub(reserve);
+            if self.passes >= limit
+                || self.passes > 0
+                    && (self.passes >= MAX_COMPACT_PASSES
+                        || left < MIN_COMPACT_PASS_WALL
+                        || !enough(runtime, 1))
+            {
+                break;
+            }
+            let wall = left.max(MIN_COMPACT_PASS_WALL);
+            pass += 1;
+            self.passes += 1;
+            let mut body = json!({
+                "maintenance": maintenance,
+                "service": store.service,
+                "wall_ms": wall.as_millis() as u64,
+                "turn": turn,
+                "pass": pass,
+                "last": self.passes >= limit.min(MAX_COMPACT_PASSES),
+            });
+            if let Some(table) = table {
+                body["table"] = table.into();
+            }
+            let requests = [(crate::ingest::worker::PATH.to_owned(), body)];
+            let reply = runtime
+                .worker_dispatch(&requests, wall + COMPACT_REPLY_MARGIN)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| Err("compact_worker_reply_missing".into()));
+            worker_metrics.push(telemetry::execution::WorkerExecutionMetrics::from_reply(
+                maintenance,
+                None,
+                reply.as_ref().ok(),
+            ));
+            let report = reply.and_then(|reply| {
+                self.worker_vcpu += reply["vcpu_ms"].as_u64().unwrap_or(0);
+                if let Some(rows) = reply["usage"].as_array() {
+                    for value in rows {
+                        write_log(runtime, buffer, WritableLogKind::FosUsage, value.clone());
+                    }
+                }
+                if reply["status"] != "ok" {
+                    return Err(reply["error"]
+                        .as_str()
+                        .unwrap_or("compact_worker_failed")
+                        .to_owned());
+                }
+                serde_json::from_value::<compaction::Report>(reply["report"].clone())
+                    .map_err(|e| e.to_string())
+            });
+            let report = match report {
+                Ok(report) => report,
+                Err(error) => {
+                    self.errors.push(error);
+                    break;
+                }
+            };
+            let dataset = if table.is_some() { "rum" } else { "request" };
+            for file in &report.created_files {
+                write_log(
+                    runtime,
+                    buffer,
+                    WritableLogKind::IngestFiles,
+                    json!({
+                        "run_id": turn,
+                        "dataset": dataset,
+                        "status": "compacted",
+                        "output_keys_json": json!([{"key": file.key, "bytes": file.bytes}]).to_string(),
+                        "timestamp": file.at.saturating_mul(1000),
+                    }),
+                );
+            }
+            if !report.deleted_keys.is_empty() {
+                write_parquet_deleted_logs(runtime, buffer, turn, dataset, &report.deleted_keys);
+            }
+            let row = &mut self.row;
+            row.listed += report.sources;
+            row.files += u64::from(report.compacts);
+            row.rows += report.rows;
+            row.bytes += report.bytes_written;
+            row.deleted += report.deleted;
+            self.failed += report.failed;
+            row.more_pending = report.more_pending;
+            // Call, wall, vCPU and heap stops end only that execution; a fresh pass resets them.
+            let blocked = matches!(
+                report.stopped.as_deref(),
+                Some("lease_held" | "lease_conflict" | "state_lag")
+            );
+            self.stopped = report.stopped.or(self.stopped.take());
+            self.lease_generation = report.lease_generation.or(self.lease_generation.take());
+            let done = !report.more_pending || !report.errors.is_empty();
+            self.errors.extend(report.errors);
+            if done || blocked {
+                break;
+            }
+        }
+    }
+
+    fn finish(mut self, runtime: &impl Runtime) -> Option<StageRow> {
+        let row = &mut self.row;
+        row.error = self.errors.first().cloned();
+        if self.passes > 0 {
+            // Each pass is its own worker execution: its vCPU belongs beside the row, as the
+            // ingest rows report it, not inside the admin execution's own `vcpu_ms`.
+            row.details = Some(json!({
+                "passes": self.passes,
+                "stopped": self.stopped,
+                "lease_generation": self.lease_generation,
+                "worker_vcpu_ms": self.worker_vcpu,
+            }));
+        }
+        if row.files > 0 || row.deleted > 0 || self.failed > 0 {
+            row.outcome = if row.more_pending { "partial" } else { "done" };
+        } else if row.error.is_some() {
+            row.outcome = "error";
+        } else if row.more_pending {
+            row.outcome = "partial";
+        }
+        if row.outcome == "idle" {
+            return None;
+        }
+        finish_row(runtime, row, self.before, self.began, &self.span);
+        Some(self.row)
+    }
+}
+
+/// Merges closed hours' window summaries into hour bundles and closed days into day bundles.
+fn bundle_stage<R: Runtime>(store: &Store<'_, R>) -> Option<StageRow> {
+    let runtime = store.runtime;
+    if !enough(runtime, MIN_BUNDLE_CALLS) {
+        return None;
+    }
+    let cdn_key = runtime
+        .secret("cdn_key")
+        .ok()
+        .flatten()
+        .filter(|key| !key.is_empty())?;
+    caller(runtime, "cron:summary_bundle");
+    let mut row = StageRow::new("summary_bundle", runtime.now());
+    let span = VcpuSpan::start(runtime);
+    let began = Instant::now();
+    let before = runtime.admin_remaining_calls();
+    // The two datasets share the execution's calls and vCPU; `bundle_datasets` alternates which
+    // goes first, so a backlog in one cannot hold the other back until it clears.
+    let reports = bundle::bundle_datasets(store, &cdn_key, TAIL + 1, MIN_BUNDLE_CALLS);
+    let (request, cmcd, cmcd_first) = match reports {
+        Ok(r) => (
+            r.request
+                .unwrap_or_else(|| Ok(bundle::BundleReport::default())),
+            r.cmcd,
+            r.cmcd_first,
+        ),
+        Err(error) => (Err(error), None, false),
+    };
+    // A leading CMCD run's work still counts when the request run after it fails.
+    let request = match (request, &cmcd) {
+        (Err(error), Some(Ok(_))) => {
+            row.error = Some(error);
+            Ok(bundle::BundleReport {
+                more_pending: true,
+                ..bundle::BundleReport::default()
+            })
+        }
+        (request, _) => request,
+    };
+    match request {
+        Ok(report) => {
+            let cmcd = match cmcd {
+                Some(Ok(cmcd)) => Some(cmcd),
+                Some(Err(error)) => {
+                    row.error = Some(error);
+                    None
+                }
+                None => None,
+            };
+            let both = cmcd
+                .as_ref()
+                .map_or(report.clone(), |c| bundle::BundleReport {
+                    hours: report.hours + c.hours,
+                    days: report.days + c.days,
+                    partials: report.partials + c.partials,
+                    sources: report.sources + c.sources,
+                    rows: report.rows + c.rows,
+                    bytes_written: report.bytes_written + c.bytes_written,
+                    deleted: report.deleted + c.deleted,
+                    discarded: report.discarded + c.discarded,
+                    more_pending: report.more_pending || c.more_pending,
+                    stopped: report.stopped.or(c.stopped),
+                    backend_calls: report.backend_calls + c.backend_calls,
+                    errors: report.errors.iter().chain(&c.errors).cloned().collect(),
+                });
+            row.listed = both.sources;
+            row.files = u64::from(both.hours + both.days + both.partials);
+            row.rows = both.rows;
+            row.bytes = both.bytes_written;
+            row.deleted = both.deleted;
+            row.more_pending = both.more_pending;
+            row.error = both.errors.first().cloned().or(row.error.take());
+            row.details = Some(json!({
+                "hours": report.hours,
+                "days": report.days,
+                "partials": report.partials,
+                "discarded": both.discarded,
+                "stopped": report.stopped,
+                "cmcd_first": cmcd_first,
+                "cmcd": cmcd.as_ref().map(|c| json!({
+                    "hours": c.hours,
+                    "days": c.days,
+                    "partials": c.partials,
+                    "stopped": c.stopped,
+                    "more_pending": c.more_pending,
+                })),
+            }));
+            if row.files > 0 || both.deleted > 0 {
+                row.outcome = if both.more_pending { "partial" } else { "done" };
+            } else if row.error.is_some() {
+                row.outcome = "error";
+            } else if both.more_pending {
+                row.outcome = "partial";
+            }
+        }
+        Err(error) => {
+            row.outcome = "error";
+            row.error = Some(error);
+        }
+    }
+    if row.outcome == "idle" {
+        return None;
+    }
+    finish_row(runtime, &mut row, before, began, &span);
+    Some(row)
+}
+
+fn history_stage<R: Runtime>(
+    store: &Store<'_, R>,
+    settings: &OperationalLogSettings,
+) -> Option<StageRow> {
+    let runtime = store.runtime;
+    caller(runtime, "cron:retention");
+    if !enough(runtime, 4) {
+        return None;
+    }
+    let record = runtime.admin_get(JOB_KEY).ok().flatten()?;
+    let mut job = serde_json::from_value::<HistoryJob>(record.value).ok()?;
+    if job.status == "complete" {
+        return None;
+    }
+    let mut row = StageRow::new("delete_history", runtime.now());
+    let span = VcpuSpan::start(runtime);
+    let began = Instant::now();
+    let before = runtime.admin_remaining_calls();
+    let deleted_before = job.deleted;
+    match step_history(
+        runtime,
+        store,
+        settings,
+        &mut job,
+        Some(record.generation),
+        TAIL,
+    ) {
+        Ok(()) => {
+            row.deleted = job.deleted - deleted_before;
+            row.more_pending = job.status != "complete";
+            row.outcome = if row.more_pending { "partial" } else { "done" };
+            row.details = Some(json!({"kind": job.kind, "status": job.status}));
+            row.error = job.error.clone();
+        }
+        Err(error) => {
+            row.outcome = "error";
+            row.error = Some(error);
+        }
+    }
+    finish_row(runtime, &mut row, before, began, &span);
+    Some(row)
+}
+
+fn reconcile_stage<R: Runtime>(store: &Store<'_, R>, buffer: &LogBuffer) -> Option<StageRow> {
+    let runtime = store.runtime;
+    caller(runtime, "cron:storage_reconcile");
+    if !enough(runtime, RECONCILE_CALLS) {
+        return None;
+    }
+    let began = Instant::now();
+    let span = VcpuSpan::start(runtime);
+    let before = runtime.admin_remaining_calls();
+    let mut row = StageRow::new("storage_reconcile", runtime.now());
+    // Usage needs a recent complete inventory snapshot for live storage; one is taken on its own
+    // every `RECONCILE_INTERVAL_S` (the retention sweep's 6 hours).
+    if let Err(error) = retention::request_scheduled_reconcile(runtime) {
+        row.outcome = "error";
+        row.error = Some(error);
+        finish_row(runtime, &mut row, before, began, &span);
+        return Some(row);
+    }
+    match retention::storage_reconcile_step(store, TAIL) {
+        Ok(Some(report)) => {
+            for inv_row in report.inventory_rows {
+                write_log(runtime, buffer, WritableLogKind::StorageInventory, inv_row);
+            }
+            if let Some(snapshot) = report.snapshot {
+                row.outcome = "done";
+                row.details = Some(snapshot);
+            } else {
+                row.outcome = "partial";
+                row.more_pending = true;
+            }
+        }
+        Ok(None) => return None,
+        Err(error) if error == "reconcile_state_conflict" => {
+            row.outcome = "busy";
+            row.more_pending = true;
+        }
+        Err(error) => {
+            row.outcome = "error";
+            row.error = Some(error);
+        }
+    }
+    finish_row(runtime, &mut row, before, began, &span);
+    Some(row)
+}
+
+fn finish_row(
+    runtime: &impl Runtime,
+    row: &mut StageRow,
+    calls_before: u32,
+    began: Instant,
+    span: &VcpuSpan,
+) {
+    row.calls = calls_before.saturating_sub(runtime.admin_remaining_calls());
+    row.duration_ms = began.elapsed().as_millis() as u64;
+    row.apply_span(runtime, span);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::admin::Record;
+    use crate::shell::KvPage;
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+
+    #[derive(Default)]
+    struct TestRt {
+        kv: RefCell<BTreeMap<String, Value>>,
+        seq: std::cell::Cell<u8>,
+    }
+
+    impl crate::setup::SetupStores for TestRt {
+        fn config_present(&self, _: &str) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn secret_present(&self, _: &str) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn state_linked(&self) -> Result<bool, String> {
+            Ok(true)
+        }
+    }
+
+    impl Runtime for TestRt {
+        fn config(&self, _: &str) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+        fn secret(&self, _: &str) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+        fn random(&self) -> Result<[u8; 32], String> {
+            let next = self.seq.get().wrapping_add(1);
+            self.seq.set(next);
+            Ok([next; 32])
+        }
+        fn now(&self) -> u64 {
+            1_700_000_000
+        }
+        fn checks(&self, _: bool) -> Result<Value, String> {
+            Ok(json!({}))
+        }
+        fn versions(&self) -> Result<Value, String> {
+            Ok(json!({}))
+        }
+        fn compute_service_id(&self) -> Option<String> {
+            None
+        }
+        fn compute_service_version(&self) -> Option<String> {
+            None
+        }
+        fn admin_get(&self, key: &str) -> Result<Option<Record>, String> {
+            Ok(self.kv.borrow().get(key).map(|value| Record {
+                value: value.clone(),
+                generation: "1".into(),
+            }))
+        }
+        fn admin_cas(&self, key: &str, _: Option<&str>, value: &Value) -> Result<bool, String> {
+            self.kv.borrow_mut().insert(key.into(), value.clone());
+            Ok(true)
+        }
+        fn kv_delete(&self, key: &str) -> Result<(), String> {
+            self.kv.borrow_mut().remove(key);
+            Ok(())
+        }
+        fn kv_list(&self, prefix: &str, _: Option<&str>, _: u32) -> Result<KvPage, String> {
+            let keys = self
+                .kv
+                .borrow()
+                .keys()
+                .filter(|k| k.starts_with(prefix))
+                .cloned()
+                .collect();
+            Ok(KvPage {
+                keys,
+                next_cursor: None,
+            })
+        }
+        fn admin_fos(
+            &self,
+            _: crate::admin::FosRequest<'_>,
+        ) -> Result<crate::admin::FosResponse, String> {
+            Err("unused".into())
+        }
+        fn worker_dispatch(
+            &self,
+            _: &[(String, Value)],
+            _: Duration,
+        ) -> Vec<Result<Value, String>> {
+            Vec::new()
+        }
+        fn admin_event(&self, _: Value) {}
+    }
+
+    #[test]
+    fn write_parquet_deleted_logs_splits_large_batches_under_row_cap() {
+        let rt = TestRt::default();
+        let buffer = LogBuffer::new("svc1", "run-1");
+        let keys: Vec<String> = (0..60)
+            .map(|i| format!("processed/request/2026/11/23/00/window=file-{i:04}-abcdef.parquet"))
+            .collect();
+        write_parquet_deleted_logs(&rt, &buffer, "run-1", "request", &keys);
+        let outbox = telemetry::flush_request_buffer(&rt, &buffer);
+        assert!(outbox.outbox_error.is_none());
+        let rows = telemetry::read_live(
+            &rt,
+            "svc1",
+            telemetry::LogKind::IngestFiles,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .rows;
+        assert!(rows.len() > 1);
+        let mut recorded = Vec::new();
+        for row in rows {
+            assert_eq!(row["status"], "parquet_deleted");
+            assert_eq!(row["dataset"], "request");
+            let parsed: Vec<String> =
+                serde_json::from_str(row["output_keys_json"].as_str().unwrap()).unwrap();
+            recorded.extend(parsed);
+        }
+        recorded.sort();
+        assert_eq!(recorded, keys);
+    }
+}

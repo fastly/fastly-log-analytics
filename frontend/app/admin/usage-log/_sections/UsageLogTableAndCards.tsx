@@ -2,7 +2,7 @@
 
 import React from 'react'
 import { Database, Zap, Globe, DollarSign } from 'lucide-react'
-import type { ColumnDef } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import { formatAbbreviatedCount, formatBytes, formatCount } from '@/lib/utils'
 import type { components } from '@/types/api'
 import { Button } from '@/components/ui/button'

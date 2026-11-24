@@ -3,41 +3,53 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { usePathname } from 'next/navigation'
 import { useDebugStore } from '@/stores/filterStore'
-import { useServiceStore } from '@/stores/filterStore'
 import { Button } from '@/components/ui/button'
 import { CopyButton } from '@/components/ui/confirm-dialog'
 import { ChevronDown, ChevronUp, Database, HardDrive, Network, Trash2 } from 'lucide-react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Badge } from '@/components/ui/badge'
-import { client, extractApiError } from '@/lib/api'
+import { client, extractApiError, getPageLoadId } from '@/lib/api'
 import { unwrapClient } from '@/lib/api'
 import { DEBUG_RESPONSES_COOKIE } from '@/lib/utils'
+import { IS_CLOUD_MODE, isCloudMode } from '@/lib/cloud-engine/mode'
 import type { components } from '@/types/api.generated'
 import type { DebugCall as ApiDebugCall, DebugQuery as ApiDebugQuery } from '@/types/api'
+import { summarizeCalls, type ServerTimingEntry } from '@/lib/call-timeline'
 
 type SqliteRecentResponse = components['schemas']['RecentSqliteResponse']
 type SqliteEntry = components['schemas']['SqliteProfilerEntry']
 
-type DebugQuery = Omit<ApiDebugQuery, 'is_cached'> & { id: string; is_cached?: boolean }
+type DebugQuery = Omit<ApiDebugQuery, 'is_cached'> & {
+  id: string
+  is_cached?: boolean
+  vcpu_ms?: number | null
+}
 
 type DebugCall = Omit<ApiDebugCall, 'status' | 'caller' | 'details'> & {
   id: string
   caller?: string
   status: string
   details?: string
+  vcpu_ms?: number | null
+  start_ms?: number
+  server_timing?: ServerTimingEntry[]
 }
 
+const formatServerTiming = (entries: ServerTimingEntry[]) =>
+  entries
+    .map((e) => [e.name, e.desc, e.dur === undefined ? undefined : `${e.dur}ms`].filter(Boolean).join(' '))
+    .join(' · ')
+
 export function DebugPanel() {
-  const { enabled, apiCallsEnabled } = useDebugStore()
-  const activeServiceId = useServiceStore((s) => s.activeServiceId)
-  const services = useServiceStore((s) => s.services)
+  const { enabled, apiCallsEnabled, apiCalls } = useDebugStore()
+  const cloudActive = IS_CLOUD_MODE || isCloudMode()
   const [isQueryOpen, setIsQueryOpen] = React.useState(false)
   const [isCallsOpen, setIsCallsOpen] = React.useState(false)
   const [isSqliteOpen, setIsSqliteOpen] = React.useState(false)
   const pathname = usePathname()
   const queryClient = useQueryClient()
   const [queries, setQueries] = useState<DebugQuery[]>([])
-  const [calls, setCalls] = useState<DebugCall[]>([])
+  const [responseCalls, setCalls] = useState<DebugCall[]>([])
   // SQLite scope: 'page' shows the statements embedded in this page's API
   // responses (_debug_sqlite, request-scoped on the backend); 'buffer'
   // shows the process-global ring buffer, which includes cron/background
@@ -71,7 +83,7 @@ export function DebugPanel() {
       if (error) throw new Error(extractApiError(error) || 'recent-postgres failed')
       return data as SqliteRecentResponse
     },
-    enabled: enabled && sqliteScope === 'buffer',
+    enabled: enabled && sqliteScope === 'buffer' && !cloudActive,
     refetchInterval: 5000,
     refetchIntervalInBackground: false,
     staleTime: 0,
@@ -271,22 +283,50 @@ export function DebugPanel() {
 
   if (!enabled && !apiCallsEnabled) return null
 
+  const pageLoadId = cloudActive ? getPageLoadId() : null
+  const calls: DebugCall[] = [
+    ...responseCalls,
+    ...(cloudActive && apiCallsEnabled
+      ? apiCalls.filter(call => call.page_load_id === pageLoadId).map((call, index) => ({
+          id: `cloud-call-${index}`,
+          service: call.source,
+          method: call.method,
+          path: call.path,
+          time_ms: call.duration_ms,
+          status: call.status == null ? 'Unavailable' : String(call.status),
+          caller: call.endpoint,
+          details: call.details,
+          vcpu_ms: call.vcpu_ms,
+          start_ms: call.start_ms,
+          server_timing: call.server_timing,
+        }))
+      : []),
+  ]
   const totalQueryTime = queries.reduce((acc, q) => acc + q.time_ms, 0)
-  const totalCallTime = calls.reduce((acc, c) => acc + c.time_ms, 0)
+  const callTimeline = summarizeCalls(calls)
+  const totalCallTime = callTimeline.summedMs
+  const ms = (value: number | null) => (value === null ? 'n/a' : `${value.toFixed(0)}ms`)
+  const callSummaryText = [
+    `Wall clock: ${ms(callTimeline.wallMs)}`,
+    `In flight: ${ms(callTimeline.busyMs)}`,
+    `Critical path: ${callTimeline.criticalPath ? `${callTimeline.criticalPath.calls} calls, ${ms(callTimeline.criticalPath.ms)}` : 'n/a'}`,
+    `Summed: ${totalCallTime.toFixed(2)}ms`,
+  ].join(', ')
+  const callSourceText = callTimeline.bySource
+    .map((s) => `${s.source} ${s.count} (${s.ms.toFixed(0)}ms)`)
+    .join(' · ')
   const isCached = queries.some(q => q.is_cached)
-  const activeService = services.find((s) => s.id === activeServiceId) ?? services[0]
-  const isHighScaleService = Boolean(activeService?.is_high_scale)
-  const defaultEngine = isHighScaleService ? 'ClickHouse' : 'DuckDB'
+  const defaultEngine = cloudActive ? 'DuckDB' : 'ClickHouse'
   const queryEngines = Array.from(
     new Set(
       queries
         .map((q) => q.engine)
-        .filter((e): e is string => Boolean(e) && (isHighScaleService || e !== 'ClickHouse')),
+        .filter((e): e is string => Boolean(e)),
     ),
   )
   const engineLabel = queryEngines.length > 0 ? queryEngines.join(' / ') : defaultEngine
 
-  const duckDbCopyText = `Data Queries (${engineLabel}) (Total Time: ${totalQueryTime.toFixed(2)}ms)
+  const queryCopyText = `Data Queries (${engineLabel}) (Total Time: ${totalQueryTime.toFixed(2)}ms)
 ${queries.map((q, idx) => `QUERY #${idx + 1} (${q.time_ms}ms${q.engine ? `, ${q.engine}` : ''}${q.is_cached ? ', Cached' : ''}):
 ${q.sql}`).join('\n\n')}`
 
@@ -294,8 +334,9 @@ ${q.sql}`).join('\n\n')}`
 ${sqliteEntries.map((q) => `[${q.ts}] #${q.seq} ${q.op} (${q.time_ms.toFixed(2)}ms, rows: ${q.rows}):
 ${q.sql}`).join('\n\n')}`
 
-  const callsCopyText = `Fastly API & FOS Calls (Total Time: ${totalCallTime.toFixed(2)}ms)
-${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_ms.toFixed(1)}ms)${c.details ? `\nDetails: ${c.details}` : ''}`).join('\n\n')}`
+  const callsCopyText = `Fastly API & FOS Calls (${callSummaryText})
+By source: ${callSourceText}
+${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_ms.toFixed(1)}ms)${c.server_timing?.length ? `\nServer-Timing: ${formatServerTiming(c.server_timing)}` : ''}${c.details ? `\nDetails: ${c.details}` : ''}`).join('\n\n')}`
 
   return (
     <div className="mt-12 border-t pt-8 space-y-8 pb-12">
@@ -322,7 +363,7 @@ ${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_
                 {isCached && <span className="text-blue-500 font-bold mr-2 uppercase tracking-wider text-[10px] bg-blue-500/10 px-1.5 py-0.5 rounded">Cached Result</span>}
                 <span>Total query time: <span className="font-bold text-foreground">{totalQueryTime.toFixed(2)}ms</span></span>
                 <span className="w-[1px] h-3 bg-border" />
-                <CopyButton text={duckDbCopyText} />
+                <CopyButton text={queryCopyText} />
               </div>
             </div>
           </div>
@@ -339,6 +380,11 @@ ${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_
                           {q.engine}
                         </Badge>
                       )}
+                      {q.vcpu_ms != null && (
+                        <Badge variant="secondary" className="text-[9px] font-mono">
+                          vCPU: {q.vcpu_ms}ms
+                        </Badge>
+                      )}
                       {q.is_cached && <span className="text-blue-500 text-[10px]">(CACHED)</span>}
                     </span>
                     <Badge variant={q.time_ms > 1000 ? "destructive" : q.time_ms > 200 ? "secondary" : "outline"} className="font-mono">
@@ -353,7 +399,7 @@ ${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_
         </section>
       )}
 
-      {enabled && (
+      {enabled && !cloudActive && (
         <section>
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-3">
@@ -493,12 +539,29 @@ ${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_
             </div>
             <div className="flex items-center gap-3">
               <div className="text-xs font-mono bg-muted/50 border px-2.5 py-1.5 rounded-md text-muted-foreground flex items-center gap-2">
-                <span>Total call time: <span className="font-bold text-foreground">{totalCallTime.toFixed(2)}ms</span></span>
+                <span title="First call start to last call end">Wall clock: <span className="font-bold text-foreground">{ms(callTimeline.wallMs)}</span></span>
+                <span className="w-[1px] h-3 bg-border" />
+                <span title="Longest chain of calls that ran one after another">
+                  Critical path: <span className="font-bold text-foreground">{callTimeline.criticalPath ? `${ms(callTimeline.criticalPath.ms)} (${callTimeline.criticalPath.calls})` : 'n/a'}</span>
+                </span>
+                <span className="w-[1px] h-3 bg-border" />
+                <span title="Sum of per-call durations; overlapping calls count more than once">Summed: <span className="font-bold text-foreground">{totalCallTime.toFixed(2)}ms</span></span>
                 <span className="w-[1px] h-3 bg-border" />
                 <CopyButton text={callsCopyText} />
               </div>
             </div>
           </div>
+
+          {calls.length > 0 && (
+            <div className="mb-3 flex flex-wrap gap-2 text-[10px] font-mono text-muted-foreground">
+              <span>In flight: {ms(callTimeline.busyMs)}</span>
+              {callTimeline.bySource.map((s) => (
+                <Badge key={s.source} variant="outline" className="text-[10px] font-mono">
+                  {s.source}: {s.count} · {s.ms.toFixed(0)}ms
+                </Badge>
+              ))}
+            </div>
+          )}
 
           {isCallsOpen && (
             <div className="grid gap-3 max-h-[500px] overflow-auto pr-2 custom-scrollbar">
@@ -523,7 +586,7 @@ ${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_
                         <span className="text-muted-foreground break-all">{c.path}</span>
                       </div>
                       <div className="flex items-center gap-2">
-                        <Badge variant={c.status === 'Error' ? 'destructive' : 'outline'} className="text-[10px]">
+                        <Badge variant={c.status === 'Error' || Number(c.status) >= 400 ? 'destructive' : 'outline'} className="text-[10px]">
                           {c.status}
                         </Badge>
                         <span className={`font-bold ${c.time_ms > 1000 ? 'text-red-500' : c.time_ms > 200 ? 'text-yellow-600' : 'text-green-500'}`}>
@@ -531,6 +594,11 @@ ${calls.map((c) => `[${c.service}] ${c.method} ${c.path} (${c.status}, ${c.time_
                         </span>
                       </div>
                     </div>
+                    {c.server_timing && c.server_timing.length > 0 && (
+                      <div className="text-[10px] text-muted-foreground">
+                        Server-Timing: {formatServerTiming(c.server_timing)}
+                      </div>
+                    )}
                     {c.details && (
                       <div className="text-[10px] text-muted-foreground bg-muted/50 p-2 rounded border border-muted/50">
                         {c.details}

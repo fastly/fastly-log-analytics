@@ -1,6 +1,7 @@
 "use client"
 
 import React from 'react'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { Dialog, DialogContent } from '@/components/ui/dialog'
 import { cn, panelDialogContent } from '@/lib/utils'
 import { type ProvisionWizardProps, type WizardState } from './types'
@@ -49,7 +50,7 @@ export function ProvisionWizard({ open, onOpenChange }: ProvisionWizardProps) {
         className={cn("sm:max-w-5xl h-[85vh]", panelDialogContent)}
         showCloseButton={s.status !== "streaming" && s.setupPhase !== "done"}
       >
-        {s.pendingDraft && s.mode === null && (
+        {s.pendingDraft && (s.mode === null || (isCloudMode() && s.step === "token")) && (
           <ResumeBanner
             draft={s.pendingDraft}
             onResume={s.resumeDraft}

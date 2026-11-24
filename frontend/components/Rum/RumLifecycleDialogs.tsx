@@ -9,6 +9,7 @@ import { Switch } from '@/components/ui/switch'
 import { ShieldCheck, AlertCircle, AlertTriangle, Trash2 } from 'lucide-react'
 import { useSSE, useOpenGeneration } from '@/hooks/useSSE'
 import { SSEActionDialogShell, SSEExecutionSection } from '@/components/SSEModal'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import type { ServiceConfig } from '@/types/api'
 
 export interface EnableRumDialogProps {
@@ -110,6 +111,7 @@ export function DisableRumDialog(props: DisableRumDialogProps) {
 }
 
 function DisableRumDialogBody({ service, open, onOpenChange, onComplete }: DisableRumDialogProps) {
+  const isCloud = isCloudMode()
   const [removeCloudFiles, setRemoveCloudFiles] = useState(true)
   const [removeBucket, setRemoveBucket] = useState(false)
   const [isExecuting, setIsExecuting] = useState(false)
@@ -124,7 +126,7 @@ function DisableRumDialogBody({ service, open, onOpenChange, onComplete }: Disab
   const handleExecute = () => {
     setIsExecuting(true)
     const disableUrl = `/api/services/${service.service_id}/rum/disable`
-    start(disableUrl, {
+    start(disableUrl, isCloud ? {} : {
       remove_cloud_files: removeCloudFiles,
       remove_bucket: isLoggingEnabled ? false : removeBucket,
     })
@@ -166,7 +168,14 @@ function DisableRumDialogBody({ service, open, onOpenChange, onComplete }: Disab
           </AlertDescription>
         </Alert>
 
-        <div className="space-y-4">
+        {isCloud ? (
+          <Alert role="status">
+            <AlertDescription>
+              Cloud disables beacon collection through a native service reconcile job and preserves retained RUM data.
+              Deleting RUM logs or the FOS bucket is not supported by this action.
+            </AlertDescription>
+          </Alert>
+        ) : <div className="space-y-4">
           <div className="flex items-center gap-2 mb-1">
             <Trash2 className="h-4 w-4 text-muted-foreground" />
             <h4 className="text-xs font-bold uppercase tracking-widest text-muted-foreground">Resource Removal Options</h4>
@@ -193,7 +202,7 @@ function DisableRumDialogBody({ service, open, onOpenChange, onComplete }: Disab
               <Switch id="rum-rem-buck" checked={isLoggingEnabled ? false : removeBucket} onCheckedChange={setRemoveBucket} disabled={isLoggingEnabled} />
             </div>
           </div>
-        </div>
+        </div>}
       </div>
     </SSEActionDialogShell>
   )

@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { http, HttpResponse } from 'msw'
+import { http, HttpResponse } from 'msw/http'
 import { describe, expect, it, vi, beforeAll, beforeEach, afterEach } from 'vitest'
 import { useServiceStore, useFilterStore } from '@/stores/filterStore'
 import { server } from '@/__tests__/helpers/msw/handlers'
@@ -13,8 +13,11 @@ import {
 import { getApiBase, queryKeys } from '@/lib/api'
 import RumPageClient, { RumFaroVersionCard, RumStatusPanel } from '@/app/rum/_sections/RumClient'
 import { RumSettingsDialog } from '@/components/Rum/RumSettingsDialog'
+import { DisableRumDialog } from '@/components/Rum/RumLifecycleDialogs'
+import { setCloudModeRuntime } from '@/lib/cloud-engine/mode'
 import type { PlotlyChart } from '@/components/PlotlyChart'
 import React, { type ComponentProps } from 'react'
+import { renderToString } from 'react-dom/server'
 
 beforeAll(() => {
   stubResizeObserver()
@@ -252,6 +255,7 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
   }
 
   beforeEach(() => {
+    setCloudModeRuntime(false)
     resetDefaultStores()
     useRealApiClient = true
     useMockAdminFetch = false
@@ -261,6 +265,7 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
   })
 
   afterEach(() => {
+    setCloudModeRuntime(false)
     server.resetHandlers()
   })
 
@@ -312,13 +317,61 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
     )
   }
 
-  function renderClient() {
+  function seededClient() {
     const qc = createTestQueryClient()
+    qc.setQueryData(queryKeys.bootstrap(), { active_service_id: SVC })
+    return qc
+  }
+
+  function renderClient() {
+    const qc = seededClient()
     return render(
       <RumPageClient initialServiceId={SVC} />,
       { wrapper: makeQueryWrapper(qc) },
     )
   }
+
+  describe('RUM query failures', () => {
+    it('replaces failed analytics skeletons with a retry that recovers the report', async () => {
+      useServiceStore.setState({
+        activeServiceId: SVC,
+        services: [{ id: SVC, name: 'Test Service' }],
+        isInitialized: true,
+      })
+      mockRumEndpoints()
+      let failed = true
+      server.use(http.get('/api/services/:service_id/rum/analytics', () =>
+        failed ? HttpResponse.json({ error: 'unavailable' }, { status: 503 }) : HttpResponse.json(analytics()),
+      ))
+      renderClient()
+
+      expect(await screen.findByText('RUM analytics unavailable')).toBeInTheDocument()
+      failed = false
+      await userEvent.click(screen.getByRole('button', { name: 'Retry' }))
+      expect(await screen.findByText('Largest Contentful Paint (LCP)')).toBeInTheDocument()
+      expect(screen.queryByText('RUM analytics unavailable')).not.toBeInTheDocument()
+    })
+
+    it('does not disguise failed live events as an empty activity table', async () => {
+      useServiceStore.setState({
+        activeServiceId: SVC,
+        services: [{ id: SVC, name: 'Test Service' }],
+        isInitialized: true,
+      })
+      mockRumEndpoints()
+      let failed = true
+      server.use(http.get('/api/services/:service_id/rum/live-events', () =>
+        failed ? HttpResponse.json({ error: 'unavailable' }, { status: 503 }) : HttpResponse.json([]),
+      ))
+      renderClient()
+
+      expect(await screen.findByText('Live activity unavailable')).toBeInTheDocument()
+      expect(screen.getByText('Largest Contentful Paint (LCP)')).toBeInTheDocument()
+      failed = false
+      await userEvent.click(screen.getByRole('button', { name: 'Retry' }))
+      await waitFor(() => expect(screen.queryByText('Live activity unavailable')).not.toBeInTheDocument())
+    })
+  })
 
   describe('RumClient — Faro version card placement', () => {
     it('admin: renders the Faro version card alongside the vitals dashboard when RUM is enabled', async () => {
@@ -488,7 +541,7 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
         }),
       )
 
-      const qc = createTestQueryClient()
+      const qc = seededClient()
       render(<RumPageClient initialServiceId={SVC} />, { wrapper: makeQueryWrapper(qc) })
       expect(await screen.findByText('Largest Contentful Paint (LCP)')).toBeInTheDocument()
 
@@ -502,6 +555,87 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
         .map((q) => q.queryKey as unknown[])
         .find((k) => k[0] === 'rum-analytics')
       expect(key).toEqual(['rum-analytics', SVC, '24h', params?.get('anchor'), {}])
+    })
+
+    it('hydrates a cold 1h load without first fetching the default 24h window', async () => {
+      useServiceStore.setState({
+        activeServiceId: SVC,
+        services: [{ id: SVC, name: 'Test Service' }],
+        isInitialized: true,
+      })
+      useFilterStore.getState().resetAll()
+      const now = Date.now()
+      useFilterStore.getState().setRelativeRange('1h', new Date(now - 3_600_000).toISOString(), new Date(now).toISOString())
+      mockRumEndpoints()
+      const analyticsTokens: (string | null)[] = []
+      const liveEventSpans: number[] = []
+      server.use(
+        http.get('/api/services/:service_id/rum/analytics', ({ request }) => {
+          analyticsTokens.push(new URL(request.url).searchParams.get('range_token'))
+          return HttpResponse.json(analytics())
+        }),
+        http.get('/api/services/:service_id/rum/live-events', ({ request }) => {
+          const params = new URL(request.url).searchParams
+          liveEventSpans.push(Date.parse(params.get('end_time') ?? '') - Date.parse(params.get('start_time') ?? ''))
+          return HttpResponse.json([])
+        }),
+      )
+      const seededClient = () => {
+        const qc = createTestQueryClient()
+        qc.setQueryData(queryKeys.bootstrap(), { active_service_id: SVC })
+        return qc
+      }
+      const ui = <RumPageClient initialServiceId={SVC} />
+      const container = document.createElement('div')
+      const ServerWrapper = makeQueryWrapper(seededClient())
+      container.innerHTML = renderToString(<ServerWrapper>{ui}</ServerWrapper>)
+      document.body.appendChild(container)
+      const onRecoverableError = vi.fn()
+
+      try {
+        render(ui, { container, hydrate: true, onRecoverableError, wrapper: makeQueryWrapper(seededClient()) })
+        expect(await screen.findByText('Largest Contentful Paint (LCP)')).toBeInTheDocument()
+        await waitFor(() => expect(liveEventSpans.length).toBeGreaterThanOrEqual(1))
+
+        expect(onRecoverableError).not.toHaveBeenCalled()
+        expect(analyticsTokens).toEqual(['1h'])
+        expect(liveEventSpans.every((span) => span === 3_600_000)).toBe(true)
+      } finally {
+        container.remove()
+      }
+    })
+
+    it('drops filter fields RUM has no column for so a status filter carried over from another page cannot 400 the report', async () => {
+      useServiceStore.setState({
+        activeServiceId: SVC,
+        services: [{ id: SVC, name: 'Test Service' }],
+        isInitialized: true,
+      })
+      useFilterStore.getState().resetAll()
+      useFilterStore.getState().addFilter('status', '200', 'include')
+      useFilterStore.getState().addFilter('country', 'US', 'include')
+      mockRumEndpoints()
+      const seen: string[] = []
+      server.use(
+        http.get('/api/services/:service_id/rum/analytics', ({ request }) => {
+          seen.push(new URL(request.url).searchParams.get('filters') ?? '')
+          return HttpResponse.json(analytics())
+        }),
+        http.get('/api/services/:service_id/rum/live-events', ({ request }) => {
+          seen.push(new URL(request.url).searchParams.get('filters') ?? '')
+          return HttpResponse.json([])
+        }),
+      )
+
+      const qc = seededClient()
+      render(<RumPageClient initialServiceId={SVC} />, { wrapper: makeQueryWrapper(qc) })
+      expect(await screen.findByText('Largest Contentful Paint (LCP)')).toBeInTheDocument()
+      await waitFor(() => expect(seen.length).toBeGreaterThanOrEqual(2))
+
+      for (const raw of seen) {
+        const filters = JSON.parse(raw) as Record<string, unknown>
+        expect(Object.keys(filters)).toEqual(['country'])
+      }
     })
   })
 
@@ -770,6 +904,35 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
       expect(screen.getByText(/423 B/i)).toBeInTheDocument()
     })
 
+    it('submits the zero-capture configuration and surfaces settings errors', async () => {
+      const user = userEvent.setup()
+      const { onComplete } = renderDialog({ currentVersion: '1.9.0', latestVersion: '1.9.0' })
+
+      for (const label of [/core web vitals/i, /performance timings/i, /javascript errors/i, /custom events/i]) {
+        await user.click(screen.getByRole('switch', { name: label }))
+      }
+      expect(screen.getByText(/Est\. ~0 B/i)).toBeInTheDocument()
+
+      mockAdminFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 422,
+        json: async () => ({ detail: 'At least one capture category must remain enabled' }),
+      })
+      await user.click(screen.getByRole('button', { name: /apply settings/i }))
+
+      expect(mockAdminFetch).toHaveBeenCalledWith('/api/services/svc-1/rum/settings', expect.objectContaining({
+        body: JSON.stringify({
+          capture_vitals: false,
+          capture_performance: false,
+          capture_errors: false,
+          capture_events: false,
+          custom_condition: '',
+        }),
+      }))
+      expect(await screen.findByText(/At least one capture category must remain enabled/i)).toBeInTheDocument()
+      expect(onComplete).not.toHaveBeenCalled()
+    })
+
     it('returns null without a serviceId', () => {
       const { container } = renderDialog({ serviceId: null })
       expect(container).toBeEmptyDOMElement()
@@ -829,6 +992,45 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
       expect(await screen.findByRole('button', { name: /enable rum/i })).toBeInTheDocument()
       expect(screen.getByRole('button', { name: /disable rum/i })).toBeInTheDocument()
       expect(screen.queryByText(/rum not enabled/i)).not.toBeInTheDocument()
+    })
+
+    it('Cloud disable preserves retained data rather than advertising High-Scale deletion options', async () => {
+      setCloudModeRuntime(true)
+      sseState.status = 'idle'
+      mockStart.mockClear()
+      const qc = createTestQueryClient()
+      render(
+        <DisableRumDialog
+          service={{ service_id: SVC_PANEL, name: 'Cloud Service', logging_enabled: false }}
+          open
+          onOpenChange={vi.fn()}
+        />,
+        { wrapper: makeQueryWrapper(qc) },
+      )
+      expect(await screen.findByRole('status')).toHaveTextContent(/Cloud.*preserves retained RUM data/i)
+      expect(screen.queryByRole('switch', { name: /delete/i })).not.toBeInTheDocument()
+      await userEvent.click(screen.getByRole('button', { name: 'Disable RUM' }))
+      expect(mockStart).toHaveBeenLastCalledWith(`/api/services/${SVC_PANEL}/rum/disable`, {})
+    })
+
+    it('High-Scale disable retains its supported resource-removal options', async () => {
+      sseState.status = 'idle'
+      mockStart.mockClear()
+      const qc = createTestQueryClient()
+      render(
+        <DisableRumDialog
+          service={{ service_id: SVC_PANEL, name: 'High-Scale Service', logging_enabled: false }}
+          open
+          onOpenChange={vi.fn()}
+        />,
+        { wrapper: makeQueryWrapper(qc) },
+      )
+      expect(screen.getByRole('switch', { name: 'Delete RUM cloud files' })).toBeChecked()
+      expect(screen.getByRole('switch', { name: 'Delete FOS bucket and all data' })).not.toBeChecked()
+      await userEvent.click(screen.getByRole('button', { name: 'Disable RUM' }))
+      expect(mockStart).toHaveBeenLastCalledWith(`/api/services/${SVC_PANEL}/rum/disable`, {
+        remove_cloud_files: true, remove_bucket: false,
+      })
     })
   })
 })

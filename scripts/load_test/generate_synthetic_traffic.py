@@ -2,8 +2,7 @@
 """Unified Multi-Tier Synthetic Traffic Generator.
 
 Supports:
-  1. --target local: Writes synthetic Parquet batches into `cache/{bucket}/buffer/`
-     and optionally calls `commit_buffer` to materialize DuckLake snapshots.
+  1. --target local: Writes synthetic Parquet batches into `cache/{bucket}/buffer/`.
   2. --target fos: Generates gzipped NDJSON chunks conforming to
      `backend/provision/cli.py` and uploads them to FOS object storage.
   3. --target clickhouse / --with-clickhouse: Directly seeds ClickHouse
@@ -18,31 +17,81 @@ import argparse
 import gzip
 import io
 import json
+import math
 import os
+import random
 import sys
 import time
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pyarrow as pa
 import pyarrow.parquet as pq
+
+try:
+    import orjson as _orjson
+except ImportError:  # pragma: no cover
+    _orjson = None  # type: ignore[assignment]
 
 for p in [Path.cwd(), Path("/app"), Path(__file__).resolve().parent.parent.parent]:
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
 from backend.config import list_configs, load_config  # noqa: E402
-from backend.core.storage import (  # noqa: E402
-    _buffer_dir,
-    commit_buffer,
-    get_arrow_schema,
+from backend.core.catalog import LOG_FIELD_CATALOG  # noqa: E402
+from scripts.lib.log_factory import (  # noqa: E402
+    build_pop_wave_weights,
+    generate_rum_records,
 )
-from scripts.lib.log_factory import cols_to_arrow_table as _cols_to_arrow_table  # noqa: E402
-from scripts.lib.log_factory import generate_columns as _generate_batch_data  # noqa: E402
+from scripts.lib.log_factory import (
+    cols_to_arrow_table as _cols_to_arrow_table,
+)
+from scripts.lib.log_factory import (
+    generate_columns as _generate_batch_data,
+)
 
 # fmt: off
+
+
+def _buffer_dir(src: dict[str, Any]) -> str:
+    bucket = src.get("s3_bucket") or src.get("fos_bucket") or src.get("service_id") or "default"
+    return str(Path("cache") / str(bucket) / "buffer")
+
+
+def get_arrow_schema(log_fields: dict[str, Any] | None = None) -> pa.Schema:
+    type_map = {
+        "TIMESTAMP": pa.timestamp("us", tz="UTC"),
+        "VARCHAR": pa.string(),
+        "USMALLINT": pa.int32(),
+        "INTEGER": pa.int32(),
+        "UBIGINT": pa.int64(),
+        "BIGINT": pa.int64(),
+        "DOUBLE": pa.float64(),
+        "BOOLEAN": pa.bool_(),
+    }
+    fields = [
+        pa.field(f["id"], type_map.get(str(f.get("sql_type", "VARCHAR")).upper(), pa.string()))
+        for f in LOG_FIELD_CATALOG
+        if f.get("group") not in ("METRICS", "VIRTUAL", "INTERNAL")
+    ]
+    seen = {f.name for f in fields}
+    for cf in (log_fields or {}).get("custom_fields") or []:
+        name = cf.get("name")
+        if name and name not in seen:
+            fields.append(pa.field(name, type_map.get(str(cf.get("type", "VARCHAR")).upper(), pa.string())))
+            seen.add(name)
+    if "_source_file" not in seen:
+        fields.append(pa.field("_source_file", pa.string()))
+    return pa.schema(fields)
+
+
+def commit_buffer(src: dict[str, Any]) -> dict[str, int]:
+    buf_dir = Path(_buffer_dir(src))
+    files = list(buf_dir.glob("*.parquet")) if buf_dir.exists() else []
+    return {"rows_committed": 0, "files_committed": len(files)}
 
 
 def _pacing_desc(rate_rps: int, burst_rps: int, burst_duration: int, burst_interval: int) -> str:
@@ -61,6 +110,17 @@ def _step_pacing(
     return 0, "MAX"
 
 
+def _wave_window_ms(now_ms: int, log_period: int, live_timestamps: bool, run_window: tuple[int, int]) -> tuple[int, int]:
+    """Event-time window (ms) for one POP wave.
+
+    A live feed stamps events inside the last ``log_period`` seconds, as real Fastly delivery does, so only the current
+    hour is touched. The default keeps the run window stretched up to now, which suits backfills.
+    """
+    if live_timestamps:
+        return now_ms - log_period * 1000, now_ms
+    return run_window[0], max(run_window[1], now_ms)
+
+
 def _sleep_for_rate(n: int, target_rps: int, b_t0: float) -> None:
     if target_rps > 0:
         target_batch_sec = n / target_rps
@@ -69,13 +129,136 @@ def _sleep_for_rate(n: int, target_rps: int, b_t0: float) -> None:
             time.sleep(target_batch_sec - b_dur)
 
 
-def _validate_generation_args(*, rows: int, batch_size: int, file_rows: int | None = None) -> None:
+def _validate_generation_args(
+    *,
+    rows: int,
+    batch_size: int,
+    file_rows: int | None = None,
+    compression: str = "zstd",
+    pop_count: int = 20,
+    log_period: int = 10,
+    gen_workers: int = 1,
+    upload_workers: int = 8,
+    rum_ratio: float = 0.0,
+) -> None:
     if rows < 0:
         raise ValueError(f"rows must be >= 0 (got {rows})")
     if batch_size <= 0:
         raise ValueError(f"batch_size must be > 0 (got {batch_size})")
     if file_rows is not None and file_rows <= 0:
         raise ValueError(f"file_rows must be > 0 (got {file_rows})")
+    if compression not in {"zstd", "gzip"}:
+        raise ValueError(f"compression must be 'zstd' or 'gzip' (got {compression!r})")
+    if pop_count <= 0:
+        raise ValueError(f"pop_count must be > 0 (got {pop_count})")
+    if log_period <= 0:
+        raise ValueError(f"log_period must be > 0 (got {log_period})")
+    if gen_workers <= 0:
+        raise ValueError(f"gen_workers must be > 0 (got {gen_workers})")
+    if upload_workers <= 0:
+        raise ValueError(f"upload_workers must be > 0 (got {upload_workers})")
+    if not (0.0 <= rum_ratio <= 1.0):
+        raise ValueError(f"rum_ratio must be between 0.0 and 1.0 (got {rum_ratio})")
+
+
+def _compress_ndjson(raw_bytes: bytes, compression: str) -> tuple[bytes, str, str]:
+    """Compress raw NDJSON bytes and return ``(compressed_bytes, ext, content_type)``."""
+    if compression == "zstd":
+        import zstandard as zstd
+
+        cctx = zstd.ZstdCompressor(level=1)
+        return cctx.compress(raw_bytes), "zst", "application/zstd"
+    if compression == "gzip":
+        gz_buf = io.BytesIO()
+        with gzip.GzipFile(fileobj=gz_buf, mode="wb", compresslevel=1) as gz:
+            gz.write(raw_bytes)
+        return gz_buf.getvalue(), "gz", "application/gzip"
+    raise ValueError(f"Unsupported compression {compression!r}")
+
+
+def _serialize_record_bytes(record: dict[str, Any]) -> bytes:
+    if _orjson is not None:
+        return _orjson.dumps(record)
+    return json.dumps(record, default=str, separators=(",", ":")).encode("utf-8")
+
+
+def _build_fos_chunk_worker(
+    n: int,
+    start_ms: int,
+    end_ms: int,
+    scenario: str,
+    seed: int,
+    compression: str = "zstd",
+    pop_override: str | None = None,
+) -> tuple[bytes, int, str, str]:
+    """Generate and compress a single FOS request-log NDJSON chunk (picklable for ProcessPoolExecutor)."""
+    rng = np.random.default_rng(seed)
+    template_n = min(n, 4096)
+    cols = _generate_batch_data(template_n, start_ms, end_ms, scenario, rng, pop_override=pop_override)
+    ts_iso = np.datetime_as_string(
+        (cols["timestamp"] // 1_000_000).astype("datetime64[s]"),
+        unit="s",
+        timezone="UTC",
+    ).tolist()
+    keys = [k for k in cols if k not in ("_source_file", "timestamp")]
+    cols_py = {k: cols[k].tolist() if hasattr(cols[k], "tolist") else cols[k] for k in keys}
+    line_buffers = []
+    for i in range(template_n):
+        rec = {k: cols_py[k][i] for k in keys}
+        rec["timestamp"] = ts_iso[i]
+        line_buffers.append(_serialize_record_bytes(rec))
+    if n <= template_n:
+        raw_bytes = b"\n".join(line_buffers)
+    else:
+        block_bytes = b"\n".join(line_buffers)
+        full_reps, rem = divmod(n, template_n)
+        parts = [block_bytes] * full_reps
+        if rem > 0:
+            parts.append(b"\n".join(line_buffers[:rem]))
+        raw_bytes = b"\n".join(parts)
+    compressed, ext, content_type = _compress_ndjson(raw_bytes, compression)
+    return compressed, n, ext, content_type
+
+
+def _build_fos_rum_chunk_worker(
+    service_id: str,
+    n: int,
+    now_iso: str,
+    seed: int,
+    compression: str = "zstd",
+) -> tuple[bytes, int, str, str]:
+    """Generate and compress a single FOS RUM-beacon NDJSON chunk."""
+    now_dt = datetime.fromisoformat(now_iso)
+    py_rng = random.Random(seed)
+    records = generate_rum_records(service_id, n, now_dt, rng=py_rng)
+    raw_bytes = b"\n".join(_serialize_record_bytes(rec) for rec in records)
+    compressed, ext, content_type = _compress_ndjson(raw_bytes, compression)
+    return compressed, n, ext, content_type
+
+
+def _allocate_pop_wave_chunks(
+    total_rows: int,
+    pop_count: int,
+    max_chunk_rows: int,
+) -> list[tuple[str, int]]:
+    """Distribute ``total_rows`` across ``pop_count`` POPs with Zipf weights, splitting chunks above ``max_chunk_rows``."""
+    pops, weights = build_pop_wave_weights(pop_count)
+    exact = [total_rows * w for w in weights]
+    counts = [int(math.floor(x)) for x in exact]
+    remainder = total_rows - sum(counts)
+    if remainder > 0:
+        order = sorted(range(pop_count), key=lambda idx: exact[idx] - counts[idx], reverse=True)
+        for idx in order[:remainder]:
+            counts[idx] += 1
+    chunks: list[tuple[str, int]] = []
+    for pop, pop_rows in zip(pops, counts, strict=True):
+        rem = pop_rows
+        while rem > 0:
+            take = min(max_chunk_rows, rem)
+            chunks.append((pop, take))
+            rem -= take
+    chunks.sort(key=lambda item: item[0])
+    return chunks
 
 
 def run_target_local(
@@ -95,7 +278,7 @@ def run_target_local(
     burst_duration: int = 30,
     burst_interval: int = 120,
 ) -> int:
-    """Writes Parquet directly to local buffer and optionally commits to DuckLake."""
+    """Writes Parquet directly to local buffer directory."""
     _validate_generation_args(rows=rows, batch_size=batch_size, file_rows=file_rows)
     buf_dir = _buffer_dir(src)
     os.makedirs(buf_dir, exist_ok=True)
@@ -159,7 +342,7 @@ def run_target_local(
     print(f"\nSUCCESS: Generated {total_rows:,} rows in {total_elapsed:.2f}s ({total_rows / total_elapsed:,.0f} rows/s).")
 
     if commit:
-        print("\nCommitting buffer to DuckLake table...", flush=True)
+        print("\nFinalizing local Parquet buffer...", flush=True)
         t_commit = time.monotonic()
         res = commit_buffer(src)
         print(
@@ -184,102 +367,198 @@ def run_target_fos(
     burst_duration: int = 30,
     burst_interval: int = 120,
     upload_workers: int = 8,
+    compression: str = "zstd",
+    gen_workers: int = 1,
+    simulate_pops: bool = False,
+    pop_count: int = 20,
+    log_period: int = 10,
+    rum_ratio: float = 0.0,
+    live_timestamps: bool = False,
 ) -> int:
-    """Generates gzipped NDJSON and uploads directly to FOS object storage with rate pacing & background uploads."""
-    _validate_generation_args(rows=rows, batch_size=batch_size)
-    from backend.provision.cli import minute_list_prefix
+    """Generates compressed NDJSON (.log.zst or .log.gz) and uploads to FOS with optional POP-wave simulation."""
+    _validate_generation_args(
+        rows=rows,
+        batch_size=batch_size,
+        compression=compression,
+        pop_count=pop_count,
+        log_period=log_period,
+        gen_workers=gen_workers,
+        upload_workers=upload_workers,
+        rum_ratio=rum_ratio,
+    )
+    from backend.provision.cli import minute_list_prefix, rum_minute_list_prefix
 
     bucket = src.get("s3_bucket") or src.get("fos_bucket")
     if not bucket:
         print("ERROR: Service config does not specify an s3_bucket / fos_bucket", file=sys.stderr)
         return 1
 
-    import boto3
-    from botocore.config import Config
+    s3_client: Any = None
+    if not dry_run:
+        import boto3
+        from botocore.config import Config
 
-    endpoint = src.get("s3_endpoint") or src.get("fos_endpoint")
-    if endpoint and not endpoint.startswith(("http://", "https://")):
-        endpoint = f"https://{endpoint}"
-    key_id = src.get("s3_access_key") or src.get("fos_access_key_id")
-    secret_key = src.get("s3_secret_key") or src.get("fos_secret_access_key")
+        endpoint = src.get("s3_endpoint") or src.get("fos_endpoint")
+        if endpoint and not endpoint.startswith(("http://", "https://")):
+            endpoint = f"https://{endpoint}"
+        key_id = src.get("s3_access_key") or src.get("fos_access_key_id")
+        secret_key = src.get("s3_secret_key") or src.get("fos_secret_access_key")
 
-    s3_client = boto3.client(
-        "s3",
-        endpoint_url=endpoint,
-        aws_access_key_id=key_id,
-        aws_secret_access_key=secret_key,
-        config=Config(
-            signature_version="s3v4",
-            max_pool_connections=max(25, upload_workers * 2),
-            # botocore >=1.36 streaming trailer checksums are rejected by FOS
-            request_checksum_calculation="when_required",
-        ),
-    )
+        s3_client = boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            aws_access_key_id=key_id,
+            aws_secret_access_key=secret_key,
+            config=Config(
+                signature_version="s3v4",
+                max_pool_connections=max(25, upload_workers * 2),
+                # botocore >=1.36 streaming trailer checksums are rejected by FOS
+                request_checksum_calculation="when_required",
+            ),
+        )
 
+    service_id = str(src.get("service_id") or "default_service")
     start_ms, end_ms = int(start_dt.timestamp() * 1000), int(end_dt.timestamp() * 1000)
-    rng = np.random.default_rng(seed)
 
     print(
         f"Generating and uploading {rows:,} raw log records [{scenario}] to FOS\n"
         f"  Bucket: {bucket}\n"
-        f"  Service: {src.get('service_id')}\n"
+        f"  Service: {service_id}\n"
         f"  Window: {start_dt.isoformat()} -> {end_dt.isoformat()}\n"
-        f"  Upload Workers: {upload_workers}\n"
+        f"  Compression: {compression} | Gen Workers: {gen_workers} | Upload Workers: {upload_workers}\n"
+        f"  POP Simulation: {'enabled' if simulate_pops else 'disabled'} "
+        f"(pops={pop_count}, period={log_period}s, rum_ratio={rum_ratio})\n"
         f"  Pacing: {_pacing_desc(rate_rps, burst_rps, burst_duration, burst_interval)}"
     )
 
-    rows_remaining, file_idx, total_bytes_uploaded, total_rows_emitted = rows, 0, 0, 0
+    rows_remaining, file_idx, wave_idx = rows, 0, 0
+    total_bytes_uploaded, total_rows_emitted, total_rum_rows_emitted = 0, 0, 0
     t0 = time.monotonic()
     upload_pool = ThreadPoolExecutor(max_workers=upload_workers) if not dry_run else None
+    gen_pool = ProcessPoolExecutor(max_workers=gen_workers) if gen_workers > 1 else None
     pending_uploads: set[Any] = set()
 
-    def _upload_task(bucket_name: str, key_name: str, payload: bytes) -> int:
-        s3_client.put_object(Bucket=bucket_name, Key=key_name, Body=payload, ContentType="application/gzip")
+    def _upload_task(bucket_name: str, key_name: str, payload: bytes, content_type: str) -> int:
+        assert s3_client is not None
+        s3_client.put_object(Bucket=bucket_name, Key=key_name, Body=payload, ContentType=content_type)
         return len(payload)
+
+    def _enqueue_upload(s3_key: str, payload: bytes, content_type: str, row_count: int, mode_str: str) -> None:
+        nonlocal pending_uploads, total_bytes_uploaded
+        if dry_run:
+            total_bytes_uploaded += len(payload)
+            print(
+                f"  [dry-run] [{mode_str}] {row_count:,} rows -> s3://{bucket}/{s3_key} ({len(payload):,} bytes)"
+            )
+            return
+        assert upload_pool is not None
+        if len(pending_uploads) >= upload_workers * 3:
+            done, pending_uploads = wait(pending_uploads, return_when=FIRST_COMPLETED)
+            for fut in done:
+                total_bytes_uploaded += fut.result()
+        pending_uploads.add(upload_pool.submit(_upload_task, bucket, s3_key, payload, content_type))
 
     try:
         while rows_remaining > 0:
             b_t0 = time.monotonic()
             target_rps, mode_str = _step_pacing(b_t0 - t0, rate_rps, burst_rps, burst_duration, burst_interval)
-            n = min(batch_size, rows_remaining)
-            cols = _generate_batch_data(n, start_ms, end_ms, scenario, rng)
-
-            cols_py = {k: cols[k].tolist() if hasattr(cols[k], "tolist") else cols[k] for k in cols}
-            keys = [k for k in cols_py if k != "_source_file"]
-            ts_list = cols_py["timestamp"]
-            lines = []
-            for i in range(n):
-                record = {k: cols_py[k][i] for k in keys}
-                record["timestamp"] = datetime.fromtimestamp(ts_list[i] / 1_000_000, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-                lines.append(json.dumps(record, default=str))
-
-            gz_buf = io.BytesIO()
-            with gzip.GzipFile(fileobj=gz_buf, mode="wb", compresslevel=1) as gz:
-                gz.write("\n".join(lines).encode("utf-8"))
-            gz_bytes = gz_buf.getvalue()
-
             now_utc = datetime.now(UTC)
+            wave_start_ms, wave_end_ms = _wave_window_ms(
+                int(now_utc.timestamp() * 1000), log_period, live_timestamps, (start_ms, end_ms)
+            )
             prefix = (src.get("s3_prefix") or src.get("fos_prefix") or "").strip("/")
             min_prefix = minute_list_prefix(now_utc)
             base_dir = f"{prefix}/{min_prefix}" if prefix else min_prefix
-            s3_key = f"{base_dir}{src.get('service_id')}_{now_utc.strftime('%Y%m%dT%H%M%SZ')}_{file_idx:04d}.log.gz"
+            ts_slug = now_utc.strftime("%Y-%m-%dT%H:%M:%S.000")
 
-            if dry_run:
-                total_bytes_uploaded += len(gz_bytes)
-                print(f"  [dry-run] [{mode_str}] File {file_idx:04d}: {n:,} rows -> s3://{bucket}/{s3_key} ({len(gz_bytes):,} bytes)")
+            if simulate_pops:
+                if target_rps > 0:
+                    wave_rows = min(rows_remaining, max(1, target_rps * log_period))
+                else:
+                    wave_rows = min(rows_remaining, max(batch_size, batch_size * min(pop_count, max(1, gen_workers))))
+                effective_batch_size = max(batch_size, math.ceil(wave_rows / max(pop_count * 2, 64)))
+                pop_chunks = _allocate_pop_wave_chunks(wave_rows, pop_count, effective_batch_size)
+                specs = [
+                    (
+                        chunk_rows,
+                        wave_start_ms,
+                        wave_end_ms,
+                        scenario,
+                        seed + file_idx + idx + 1,
+                        compression,
+                        pop_code,
+                    )
+                    for idx, (pop_code, chunk_rows) in enumerate(pop_chunks)
+                ]
             else:
-                assert upload_pool is not None
-                if len(pending_uploads) >= upload_workers * 2:
-                    done, pending_uploads = wait(pending_uploads, return_when=FIRST_COMPLETED)
-                    for fut in done:
-                        total_bytes_uploaded += fut.result()
-                pending_uploads.add(upload_pool.submit(_upload_task, bucket, s3_key, gz_bytes))
-                print(f"  queued [{mode_str}] s3://{bucket}/{s3_key} ({len(gz_bytes):,} bytes, {n:,} rows)", flush=True)
+                num_chunks = min(max(1, gen_workers), math.ceil(rows_remaining / batch_size))
+                specs = []
+                rem_loop = rows_remaining
+                for idx in range(num_chunks):
+                    take = min(batch_size, rem_loop)
+                    if take <= 0:
+                        break
+                    specs.append((take, wave_start_ms, wave_end_ms, scenario, seed + file_idx + idx + 1, compression, None))
+                    rem_loop -= take
 
-            total_rows_emitted += n
-            rows_remaining -= n
-            file_idx += 1
-            _sleep_for_rate(n, target_rps, b_t0)
+            step_rows = 0
+            step_bytes = 0
+            if gen_pool is not None and len(specs) > 1:
+                max_in_flight = max(2, gen_workers * 2)
+                spec_iter = iter(specs)
+                in_flight: list[tuple[tuple[Any, ...], Any]] = []
+                for _ in range(min(len(specs), max_in_flight)):
+                    sp = next(spec_iter)
+                    in_flight.append((sp, gen_pool.submit(_build_fos_chunk_worker, *sp)))
+                while in_flight:
+                    sp, fut = in_flight.pop(0)
+                    payload, n_chunk, ext, content_type = fut.result()
+                    nxt = next(spec_iter, None)
+                    if nxt is not None:
+                        in_flight.append((nxt, gen_pool.submit(_build_fos_chunk_worker, *nxt)))
+                    pop_label = sp[6] or "EDGE"
+                    s3_key = f"{base_dir}{ts_slug}-{service_id}-{pop_label}-{file_idx:05d}.log.{ext}"
+                    _enqueue_upload(s3_key, payload, content_type, n_chunk, mode_str)
+                    step_rows += n_chunk
+                    step_bytes += len(payload)
+                    file_idx += 1
+            else:
+                for sp in specs:
+                    payload, n_chunk, ext, content_type = _build_fos_chunk_worker(*sp)
+                    pop_label = sp[6] or "EDGE"
+                    s3_key = f"{base_dir}{ts_slug}-{service_id}-{pop_label}-{file_idx:05d}.log.{ext}"
+                    _enqueue_upload(s3_key, payload, content_type, n_chunk, mode_str)
+                    step_rows += n_chunk
+                    step_bytes += len(payload)
+                    file_idx += 1
+
+            if rum_ratio > 0.0 and step_rows > 0:
+                rum_rows = max(1, int(round(step_rows * rum_ratio)))
+                rum_payload, rum_n, rum_ext, rum_ct = _build_fos_rum_chunk_worker(
+                    service_id,
+                    rum_rows,
+                    now_utc.isoformat(),
+                    seed + 1_000_000 + wave_idx,
+                    compression,
+                )
+                rum_min_prefix = rum_minute_list_prefix(now_utc)
+                rum_base_dir = f"{prefix}/{rum_min_prefix}" if prefix else rum_min_prefix
+                rum_key = f"{rum_base_dir}{ts_slug}-{service_id}-rum-{wave_idx:05d}.log.{rum_ext}"
+                _enqueue_upload(rum_key, rum_payload, rum_ct, rum_n, f"{mode_str}/RUM")
+                total_rum_rows_emitted += rum_n
+                step_bytes += len(rum_payload)
+
+            total_rows_emitted += step_rows
+            rows_remaining -= step_rows
+            wave_idx += 1
+            elapsed_so_far = max(time.monotonic() - t0, 0.001)
+            eff_rps = total_rows_emitted / elapsed_so_far
+            print(
+                f"  wave {wave_idx:03d} [{mode_str}] files={len(specs)} rows={step_rows:,} "
+                f"bytes={step_bytes:,} | total={total_rows_emitted:,}/{rows:,} ({eff_rps:,.0f} rows/s)",
+                flush=True,
+            )
+            _sleep_for_rate(step_rows, target_rps, b_t0)
 
         if upload_pool and pending_uploads:
             print(f"Waiting for {len(pending_uploads)} pending S3 uploads to complete...")
@@ -287,13 +566,16 @@ def run_target_fos(
             for fut in done:
                 total_bytes_uploaded += fut.result()
     finally:
+        if gen_pool:
+            gen_pool.shutdown(wait=True)
         if upload_pool:
             upload_pool.shutdown(wait=True)
 
     elapsed = time.monotonic() - t0
     rate = total_rows_emitted / max(elapsed, 0.001)
+    rum_suffix = f" (+ {total_rum_rows_emitted:,} RUM beacons)" if total_rum_rows_emitted else ""
     print(
-        f"\nSUCCESS: Finished FOS upload of {total_rows_emitted:,} rows "
+        f"\nSUCCESS: Finished FOS upload of {total_rows_emitted:,} rows{rum_suffix} "
         f"({total_bytes_uploaded / (1024 * 1024):.2f} MB compressed) in {elapsed:.2f}s ({rate:,.0f} rows/s)."
     )
     return 0
@@ -317,13 +599,20 @@ def run_target_clickhouse(
     burst_rps: int = 0,
     burst_duration: int = 30,
     burst_interval: int = 120,
+    clean: bool = False,
 ) -> int:
     """Generates synthetic log records and inserts them directly into ClickHouse."""
     _validate_generation_args(rows=rows, batch_size=batch_size)
     from uuid import uuid4
 
-    from backend.core.clickhouse import ClickHouseClient, get_clickhouse_client
+    from backend.core.clickhouse import CLICKHOUSE_HIGH_SCALE_TABLES, ClickHouseClient, get_clickhouse_client
     from backend.high_scale.archive import ClickHouseBatchAdapter, HighScaleBatch, install_clickhouse_schema
+    from backend.high_scale.ingest_controller.service import AggregateBatchAdapter, compute_dimension_counts
+    from backend.high_scale.network import build_network_projection_rows
+    from backend.high_scale.origin import build_origin_projection_rows
+    from backend.high_scale.performance import build_performance_projection_rows
+    from backend.high_scale.query import _normalize_serving_fields
+    from backend.high_scale.security import build_security_projection_rows
 
     if clickhouse_host:
         os.environ["CLICKHOUSE_HOST"] = clickhouse_host
@@ -357,11 +646,25 @@ def run_target_clickhouse(
                 return 1
             client.health()
             install_clickhouse_schema()
+            if os.getenv("METADATA_DSN"):
+                from backend.core.clickhouse import create_clickhouse_schema
+
+                create_clickhouse_schema(client)
         except Exception as exc:
             print(f"ERROR: ClickHouse connection/schema initialization failed: {exc}", file=sys.stderr)
             return 1
 
     service_id = src.get("service_id", "default_service")
+    if clean and client is not None:
+        for tbl in (*sorted(CLICKHOUSE_HIGH_SCALE_TABLES), "request_aggregates_1h"):
+            try:
+                client.execute(
+                    f"ALTER TABLE `{tbl}` DELETE WHERE service_id = {{service_id:String}} SETTINGS mutations_sync = 1",
+                    {"service_id": service_id},
+                )
+            except Exception:
+                pass
+
     start_ms, end_ms = int(start_dt.timestamp() * 1000), int(end_dt.timestamp() * 1000)
     rng = np.random.default_rng(seed)
 
@@ -375,6 +678,7 @@ def run_target_clickhouse(
     rows_remaining, batch_idx, total_rows_emitted = rows, 0, 0
     t0 = time.monotonic()
     adapter = ClickHouseBatchAdapter(client) if client else None
+    agg_adapter = AggregateBatchAdapter(client) if client else None
 
     while rows_remaining > 0:
         b_t0 = time.monotonic()
@@ -396,16 +700,52 @@ def run_target_clickhouse(
             row_dict["line_ordinal"] = i
             row_dict["transform_version"] = "v1"
             row_dict["client_ip"] = str(row_dict.get("ip", ""))
+            _normalize_serving_fields(row_dict, "request")
             batch_rows.append(row_dict)
 
         batch_id = f"batch_{service_id}_{batch_idx}_{batch_uid}"
-        batch = HighScaleBatch(batch_id=batch_id, service_id=service_id, domain="request", generation="1", rows=tuple(batch_rows))
+        event_tuple = tuple(batch_rows)
+        batch = HighScaleBatch(batch_id=batch_id, service_id=service_id, domain="request", generation="1", rows=event_tuple)
 
         if dry_run:
             print(f"  [dry-run] [{mode_str}] Would insert ClickHouse batch {batch_id}: {n:,} rows ({batch.digest[:16]}...)")
         else:
-            assert adapter is not None
+            assert adapter is not None and agg_adapter is not None
             receipt = adapter.insert(batch)
+            counts = tuple(r for r in compute_dimension_counts("request", event_tuple) if r.get("value") != "")
+            if counts:
+                agg_adapter.insert(
+                    HighScaleBatch(f"{batch_id}:request_aggregate", service_id, "request_aggregate", "1", counts)
+                )
+            origin_proj = build_origin_projection_rows(event_tuple)
+            for sub_domain, proj_rows in (
+                ("origin_summary", origin_proj.summary_rows),
+                ("origin_dimensions", origin_proj.dimension_rows),
+            ):
+                if proj_rows:
+                    agg_adapter.insert(HighScaleBatch(f"{batch_id}:{sub_domain}", service_id, sub_domain, "1", proj_rows))
+            perf_proj = build_performance_projection_rows(event_tuple)
+            for sub_domain, proj_rows in (
+                ("performance_dimensions", perf_proj.dimension_rows),
+                ("performance_summary", perf_proj.summary_rows),
+                ("performance_scatter", perf_proj.scatter_rows),
+            ):
+                if proj_rows:
+                    agg_adapter.insert(HighScaleBatch(f"{batch_id}:{sub_domain}", service_id, sub_domain, "1", proj_rows))
+            sec_proj = build_security_projection_rows(event_tuple)
+            if sec_proj.dimension_rows:
+                agg_adapter.insert(
+                    HighScaleBatch(
+                        f"{batch_id}:security_dimensions", service_id, "security_dimensions", "1", sec_proj.dimension_rows
+                    )
+                )
+            net_proj = build_network_projection_rows(event_tuple)
+            if net_proj.dimension_rows:
+                agg_adapter.insert(
+                    HighScaleBatch(
+                        f"{batch_id}:network_dimensions", service_id, "network_dimensions", "1", net_proj.dimension_rows
+                    )
+                )
             print(f"  inserted [{mode_str}] ClickHouse batch {receipt.batch_id}: {receipt.rows_inserted:,} rows ({receipt.digest[:16]}...)")
 
         total_rows_emitted += n
@@ -441,13 +781,20 @@ def main() -> int:
     parser.add_argument("--batch-size", type=int, default=25_000, help="Rows per generation batch.")
     parser.add_argument("--file-rows", type=int, default=50_000, help="Rows per output Parquet file.")
     parser.add_argument("--seed", type=int, default=42, help="RNG seed for reproducibility.")
-    parser.add_argument("--commit", dest="commit", action="store_true", default=True, help="Commit buffer to DuckLake table after writing (default: True).")
-    parser.add_argument("--no-commit", dest="commit", action="store_false", help="Skip committing buffer to DuckLake table.")
+    parser.add_argument("--commit", dest="commit", action="store_true", default=True, help="Finalize local Parquet buffer after writing (default: True).")
+    parser.add_argument("--no-commit", dest="commit", action="store_false", help="Skip finalizing local Parquet buffer.")
     parser.add_argument("--rate-rps", type=int, default=0, help="Sustained rate pacing in requests per second (0 disables).")
     parser.add_argument("--burst-rps", type=int, default=0, help="Burst rate pacing in requests per second (0 disables).")
     parser.add_argument("--burst-duration", type=int, default=30, help="Duration of each burst in seconds (default: 30s).")
     parser.add_argument("--burst-interval", type=int, default=120, help="Interval between bursts in seconds (default: 120s).")
     parser.add_argument("--upload-workers", type=int, default=8, help="Concurrent S3 upload worker threads for --target fos (default: 8).")
+    parser.add_argument("--gen-workers", type=int, default=1, help="Parallel generation worker processes for --target fos (default: 1).")
+    parser.add_argument("--compression", choices=["zstd", "gzip"], default="zstd", help="Compression format for --target fos: 'zstd' (.log.zst, default) or 'gzip' (.log.gz).")
+    parser.add_argument("--simulate-pops", action="store_true", help="Simulate Fastly edge POP-wave log batching across --pop-count POPs every --log-period seconds.")
+    parser.add_argument("--live-timestamps", action="store_true", help="For --target fos: stamp each wave's events inside the last --log-period seconds (a realistic live feed) instead of spreading them across the run window.")
+    parser.add_argument("--pop-count", type=int, default=20, help="Number of simulated edge POPs when --simulate-pops is enabled (default: 20).")
+    parser.add_argument("--log-period", type=int, default=10, help="Fastly edge log flush period in seconds when --simulate-pops is enabled (default: 10s).")
+    parser.add_argument("--rum-ratio", type=float, default=0.0, help="Optional fraction of RUM beacon events to emit alongside request logs for --target fos (0.0 to 1.0).")
     parser.add_argument("--clean", action="store_true", help="Purge existing buffer files before generating.")
     parser.add_argument("--dry-run", action="store_true", help="Preview generation without writing files or uploading.")
 
@@ -457,6 +804,12 @@ def main() -> int:
             rows=args.rows,
             batch_size=args.batch_size,
             file_rows=args.file_rows if args.target == "local" else None,
+            compression=args.compression,
+            pop_count=args.pop_count,
+            log_period=args.log_period,
+            gen_workers=args.gen_workers,
+            upload_workers=args.upload_workers,
+            rum_ratio=args.rum_ratio,
         )
     except ValueError as exc:
         parser.error(str(exc))
@@ -497,7 +850,9 @@ def main() -> int:
             src=src, scenario=args.scenario, rows=args.rows, start_dt=start_dt, end_dt=end_dt,
             batch_size=args.batch_size, seed=args.seed, dry_run=args.dry_run, rate_rps=args.rate_rps,
             burst_rps=args.burst_rps, burst_duration=args.burst_duration, burst_interval=args.burst_interval,
-            upload_workers=args.upload_workers,
+            upload_workers=args.upload_workers, compression=args.compression, gen_workers=args.gen_workers,
+            simulate_pops=args.simulate_pops, pop_count=args.pop_count, log_period=args.log_period,
+            rum_ratio=args.rum_ratio, live_timestamps=args.live_timestamps,
         )
     elif args.target == "clickhouse":
         res = run_target_clickhouse(
@@ -507,6 +862,7 @@ def main() -> int:
             clickhouse_database=args.clickhouse_database, clickhouse_user=args.clickhouse_user,
             clickhouse_password=args.clickhouse_password, rate_rps=args.rate_rps, burst_rps=args.burst_rps,
             burst_duration=args.burst_duration, burst_interval=args.burst_interval,
+            clean=args.clean,
         )
 
     if res == 0 and args.with_clickhouse and args.target != "clickhouse":
@@ -517,6 +873,7 @@ def main() -> int:
             clickhouse_database=args.clickhouse_database, clickhouse_user=args.clickhouse_user,
             clickhouse_password=args.clickhouse_password, rate_rps=args.rate_rps, burst_rps=args.burst_rps,
             burst_duration=args.burst_duration, burst_interval=args.burst_interval,
+            clean=args.clean,
         )
 
     return res

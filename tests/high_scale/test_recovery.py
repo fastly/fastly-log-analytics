@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -434,6 +435,74 @@ def test_replay_manifest_filters_mixed_rum_rows_by_serving_domain() -> None:
         manifest, archive, ClickHousePublication(InMemoryBatchManifestStore(), StrictRumErrorClient())
     )
     assert result.rows_read == 0 and result.publication.rows_visible == 0 and inserted == []
+
+
+@pytest.mark.parametrize("domain", ["rum_vitals", "rum_errors"])
+@pytest.mark.parametrize("encoding", ["body", "query"])
+def test_rum_receipt_identity_survives_canonical_archive_replay(domain: str, encoding: str, tmp_path: Path) -> None:
+    from backend.high_scale.archive.clickhouse_batch import _DOMAIN_COLUMNS, _rows_for_domain
+    from backend.high_scale.query import decode_source_object
+
+    req_id = "run-20261106-seq-000042-not-a-uuid"
+    record = {
+        "timestamp": NOW.isoformat(),
+        "fastly_req_id": req_id,
+        "rum_cid": "session-kept-separate",
+        "rum_body": json.dumps(
+            {
+                "measurements": [{"type": "web-vitals", "values": {"lcp": 123.5, "cls": 0.02}}],
+                "exceptions": [{"value": "boom"}, {"value": "another error"}],
+            }
+        ),
+    }
+    if encoding == "query":
+        del record["rum_body"]
+        record["rum_raw_query"] = (
+            "/beacon?rum_metric_name=LCP&rum_metric_value=123.5&rum_metric_name=CLS&rum_metric_value=0.02"
+            "&rum_error_message=boom&rum_error_message=another+error"
+        )
+    source = ArchiveSourceObject("svc", domain, "raw/rum/receipt.gz", "sha256:source", 100, "v1")
+    decoded = decode_source_object(source, gzip.compress(json.dumps(record).encode()), transform_version="normalize.v1")
+    legacy = {key: value for key, value in decoded.events[0].items() if key != "req_id"}
+    legacy["event_id"] = "legacy-event"
+    rows = [*decoded.events, legacy]
+    manifest = write_batch_archive_checkpoint(
+        tmp_path,
+        service_id="svc",
+        domain=domain,
+        source_batches=[(source, rows)],
+        archive_epoch=1,
+        schema_version=f"{domain}.v1",
+        transform_version="normalize.v1",
+        coverage_start=NOW,
+        coverage_end=NOW,
+        retention_seconds=86400,
+    )
+    artifact = Path(manifest.artifact.uri.removeprefix("file://")).read_bytes()
+    manifest = replace(
+        manifest, artifact=replace(manifest.artifact, uri=f"s3://archive/artifacts/{manifest.manifest_id}.parquet")
+    )
+    archive = ArchivePublication(InMemoryObjectStore())
+    archive.publish(manifest, artifact)
+    projected: list[dict[str, Any]] = []
+
+    class FactReplayClient(ReplayClient):
+        def insert(self, batch: HighScaleBatch) -> InsertReceipt:
+            projected.extend(
+                dict(zip(_DOMAIN_COLUMNS[domain], row, strict=True))
+                for row in _rows_for_domain(batch, "00000000-0000-0000-0000-000000000001")
+            )
+            return super().insert(batch)
+
+    client = FactReplayClient()
+    publication = ClickHousePublication(InMemoryBatchManifestStore(), client)
+    result = replay_manifest(manifest, archive, publication)
+    assert result.rows_read == result.publication.rows_visible == 3
+    assert [row["req_id"] for row in projected] == [req_id, req_id, ""]
+    assert len({row["event_id"] for row in projected}) == 3
+    assert all(row["client_id"] == "session-kept-separate" and row["request_event_id"] is None for row in projected)
+    assert replay_manifest(manifest, archive, publication).publication.duplicate
+    assert len(projected) == 3 and client.insert_calls == [f"replay:{manifest.manifest_id}"]
 
 
 _GOOD = dict(
@@ -983,6 +1052,7 @@ def test_rebuild_rum_facts_from_fos_auto_wraps_aggregate_batch_adapter() -> None
     assert "rum_vitals_aggregates" in inserted_tables
 
 
+@pytest.mark.no_postgres
 def test_ingest_batch_rum_sibling_failure_records_fail_sources_batch() -> None:
     from backend.high_scale.archive import ArchiveState
     from backend.high_scale.ingest_controller import HighScaleIngestController, SourceObjectDescriptor
@@ -1021,7 +1091,7 @@ def test_ingest_batch_rum_sibling_failure_records_fail_sources_batch() -> None:
         def transition_archive_manifest(self, *_a, **_kw):
             return None
 
-        def fail_sources_batch(self, service_id, object_keys, error, *, expected_owner_epoch):
+        def fail_sources_batch(self, service_id, object_keys, error, *, expected_owner_epoch, **_kwargs):
             failed_calls.append((service_id, tuple(object_keys), error, expected_owner_epoch))
             return []
 
@@ -1063,6 +1133,14 @@ def test_ingest_batch_rum_sibling_failure_records_fail_sources_batch() -> None:
         service_id="svc",
         domain="rum_vitals",
         sources_payloads=((src_desc, payload),),
+        claim_tokens=(
+            SimpleNamespace(
+                object_key=src_desc.object_key,
+                owner="worker-test",
+                owner_epoch=7,
+                lease_generation=1,
+            ),
+        ),
         now=NOW,
     )
     assert outcome.derived_publication_complete is False
@@ -1070,3 +1148,56 @@ def test_ingest_batch_rum_sibling_failure_records_fail_sources_batch() -> None:
     svc_id, keys, err, epoch = failed_calls[0]
     assert svc_id == "svc" and keys == ("raw/rum_vitals/obj1.log",) and epoch == 7
     assert "rum_errors" in err
+
+
+def test_clickhouse_batch_adapter_count_rows_prunes_by_timestamp_bounds() -> None:
+    from backend.high_scale.archive.clickhouse_batch import ClickHouseBatchAdapter
+
+    class _RecordingClickHouse:
+        def __init__(self) -> None:
+            self.queries: list[tuple[str, dict]] = []
+
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            self.queries.append((sql, dict(params or {})))
+            if "SELECT count()" in sql:
+                return [{"row_count": 0}]
+            return []
+
+        def insert_rows(self, table: str, columns: list[str], rows: list[tuple]) -> None:
+            pass
+
+        def delete_batch_rows(self, table: str, batch_id: str) -> None:
+            pass
+
+    ch = _RecordingClickHouse()
+    adapter = ClickHouseBatchAdapter(ch)
+    now_dt = datetime(2026, 9, 14, 12, 0, 0, tzinfo=UTC)
+    later_dt = datetime(2026, 9, 14, 12, 5, 0, tzinfo=UTC)
+
+    count_facts = adapter._count_rows(
+        "request_facts",
+        type("B", (), {"service_id": "svc"})(),
+        "00000000-0000-0000-0000-000000000001",
+        columns=["service_id", "batch_id", "event_timestamp"],
+        mapped_rows=[("svc", "b1", now_dt), ("svc", "b1", later_dt)],
+    )
+    assert count_facts == 0
+    sql_facts, params_facts = ch.queries[-1]
+    assert "event_timestamp >= {min_ts:DateTime64(3, 'UTC')}" in sql_facts
+    assert "event_timestamp <= {max_ts:DateTime64(3, 'UTC')}" in sql_facts
+    assert params_facts["min_ts"] == now_dt
+    assert params_facts["max_ts"] == later_dt
+
+    count_aggs = adapter._count_rows(
+        "request_aggregates",
+        type("B", (), {"service_id": "svc"})(),
+        "00000000-0000-0000-0000-000000000002",
+        columns=["service_id", "batch_id", "bucket_start"],
+        mapped_rows=[("svc", "b2", now_dt), ("svc", "b2", later_dt)],
+    )
+    assert count_aggs == 0
+    sql_aggs, params_aggs = ch.queries[-1]
+    assert "bucket_start >= toDateTime({min_ts:DateTime64(3, 'UTC')})" in sql_aggs
+    assert "bucket_start <= toDateTime({max_ts:DateTime64(3, 'UTC')})" in sql_aggs
+    assert params_aggs["min_ts"] == now_dt
+    assert params_aggs["max_ts"] == later_dt

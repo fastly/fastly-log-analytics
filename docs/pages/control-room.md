@@ -27,7 +27,7 @@ All in [`backend/routers/control_room.py`](../../backend/routers/control_room.py
 
 - `GET /api/services/{service_id}/realtime-seed`: last 60 ticks (`RealtimeSeedResponse`) from the in-process publisher, or a fresh fetch from the Fastly real-time API; it also starts the poller for the service.
 - `GET /api/services/{service_id}/realtime-stream` (SSE): live metric ticks. The poller (`backend/core/realtime`) runs on a dedicated daemon thread with a pooled HTTP client and transforms each real-time response into a typed tick.
-- `GET /api/services/{service_id}/control-room/error-stream` (SSE): polls every 2 s for recent 4xx/5xx requests (`error_event` events with an `event_id`, de-duplicated). Standard mode queries DuckDB; high-scale mode queries ClickHouse `request_facts`. `client_ip` is masked for masking analysts.
+- `GET /api/services/{service_id}/control-room/error-stream` (SSE): polls every 2 s for recent 4xx/5xx requests (`error_event` events with an `event_id`, de-duplicated) from ClickHouse `request_facts`. `client_ip` is masked for masking analysts.
 - `POST /api/services/{service_id}/control-room/correlate` (`CorrelateRequest`: `dimension`, `window_minutes` 1 to 60 default 5, `limit` 1 to 100 default 10): top values of a dimension among recent errors; the `ip` dimension is masked for masking analysts.
 - `GET /api/services/{service_id}/control-room/{tab}`: static tab payloads (`overview`, ...); unknown tabs are `404 unknown_tab`.
 - `GET /api/services/{service_id}/log-field-audit`: which log fields are enabled and which features they support.

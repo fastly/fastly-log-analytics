@@ -1,8 +1,7 @@
-"""Cross-engine response shaping and post-processing helpers.
+"""Response shaping and post-processing helpers.
 
-Shared between DuckDB repositories (``backend/repositories/*``) and ClickHouse
-high-scale services (``backend/high_scale/*``) so both analytical engines share
-a single source of truth for:
+Shared across analytical services (``backend/high_scale/*``) and repositories
+(``backend/repositories/*``) for:
 1. ASN label enrichment (``asn.py``)
 2. Time-bucket alignment & zero-filling (``time_buckets.py``)
 3. Latency & percentile normalization, empty-response scaffolding, and domain shaping (``domains.py``)
@@ -11,10 +10,13 @@ a single source of truth for:
 from __future__ import annotations
 
 import math as math  # noqa: F401
+import re
+import time
 from collections.abc import Callable, Iterable, Mapping, Sequence  # noqa: F401
 from datetime import UTC, datetime, timedelta  # noqa: F401
 from typing import TYPE_CHECKING, Any
 
+from backend.core.fos_client import _safe_table_name
 from backend.repositories.utils.response_shaping import asn as _asn_mod
 from backend.repositories.utils.response_shaping import domains as _domains_mod
 from backend.repositories.utils.response_shaping import time_buckets as _time_buckets_mod
@@ -34,6 +36,7 @@ from backend.repositories.utils.response_shaping.asn import (
 from backend.repositories.utils.response_shaping.domains import (
     ORIGIN_SUMMARY_KEYS,
     PERF_SECTION_DEFAULTS,
+    PERF_TTL_BUCKET_EDGES,
     PERF_TTL_BUCKETS,
     PERF_TTL_LAST_BUCKET,
     SECURITY_CONN_REUSE_BUCKETS,
@@ -49,16 +52,20 @@ from backend.repositories.utils.response_shaping.domains import (
     build_cache_collapse_breakdown,
     build_insights_envelope,
     build_query_response_envelope,
+    build_telemetry_response_envelope,
     compute_network_global_summary,
     compute_network_health_score,
     compute_share_pct,
+    compute_summary_from_dims,
     deduplicate_metro_leaderboard,
+    empty_assets_aggregates,
     empty_cmcd_aggregates,
     empty_dashboard_aggregates,
     empty_network_quality,
     empty_origin_aggregates,
     empty_origin_summary,
     empty_performance_aggregates,
+    empty_rum_analytics,
     empty_security_aggregates,
     empty_security_proxies,
     empty_sessions_response,
@@ -87,6 +94,7 @@ from backend.repositories.utils.response_shaping.domains import (
     shape_perf_ttl_dist_rows,
     shape_pop_latency_rows,
     shape_protocol_distribution,
+    shape_rum_environments,
     shape_security_bucket_rows,
     shape_security_fingerprint_row,
     shape_security_ngwaf_bot_row,
@@ -168,6 +176,47 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+_PARQUET_LIST_RE = re.compile(
+    r"read_parquet\(\s*\[\s*'([^']+)'(?:\s*,\s*'[^']*')+\s*\]",
+    re.IGNORECASE,
+)
+
+
+def _compact_sql_for_debug(sql: str) -> str:
+    """Collapse long ``read_parquet([...])`` file lists in debug SQL payloads."""
+
+    def _sub(m: re.Match[str]) -> str:
+        first = m.group(1)
+        n = m.group(0).count("'") // 2
+        return f"read_parquet(['{first}', ... ({n} files)"
+
+    return _PARQUET_LIST_RE.sub(_sub, sql)
+
+
+class SectionTimer:
+    """Collects per-section timing entries (``[{"section": ..., "time_ms": ...}]``)."""
+
+    __slots__ = ("entries",)
+
+    def __init__(self, entries: list[dict[str, Any]] | None = None) -> None:
+        self.entries: list[dict[str, Any]] = entries if entries is not None else []
+
+    def mark(self, name: str, t0: float, **observation: Any) -> None:
+        self.entries.append({"section": name, "time_ms": round((time.perf_counter() - t0) * 1000, 2), **observation})
+
+    def call(self, name: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        t0 = time.perf_counter()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            self.mark(name, t0)
+
+
+def _safe_table(name: str) -> str:
+    """Return the canonical SQL table alias for a service name."""
+    return _safe_table_name(name)
+
+
 _SUBMODULES = (
     _asn_mod,
     _time_buckets_mod,
@@ -183,6 +232,7 @@ __all__ = [
     "INSIGHT_BUCKET_INTERVALS",
     "ORIGIN_SUMMARY_KEYS",
     "PERF_SECTION_DEFAULTS",
+    "PERF_TTL_BUCKET_EDGES",
     "PERF_TTL_BUCKETS",
     "PERF_TTL_LAST_BUCKET",
     "SECURITY_CONN_REUSE_BUCKETS",
@@ -194,7 +244,10 @@ __all__ = [
     "SESSIONS_DEFAULT_MIN_4XX_PCT_FLAG",
     "SESSIONS_DEFAULT_MIN_REQS_FLAG",
     "SESSIONS_SORTABLE_COLUMNS",
+    "SectionTimer",
     "WATERFALL_KEYS",
+    "_compact_sql_for_debug",
+    "_safe_table",
     "avg_bucket_health_score",
     "build_asn_label_map",
     "build_asn_speed_mix",
@@ -207,6 +260,7 @@ __all__ = [
     "build_insufficient_baseline_card",
     "build_network_asn_leaderboard",
     "build_query_response_envelope",
+    "build_telemetry_response_envelope",
     "chart_interval_seconds",
     "clamp_bucket_seconds",
     "clamp_insight_window",
@@ -216,13 +270,16 @@ __all__ = [
     "compute_network_global_summary",
     "compute_network_health_score",
     "compute_share_pct",
+    "compute_summary_from_dims",
     "deduplicate_metro_leaderboard",
+    "empty_assets_aggregates",
     "empty_cmcd_aggregates",
     "empty_dashboard_aggregates",
     "empty_network_quality",
     "empty_origin_aggregates",
     "empty_origin_summary",
     "empty_performance_aggregates",
+    "empty_rum_analytics",
     "empty_security_aggregates",
     "empty_security_proxies",
     "empty_sessions_response",
@@ -270,6 +327,7 @@ __all__ = [
     "shape_performance_asn_rows",
     "shape_pop_latency_rows",
     "shape_protocol_distribution",
+    "shape_rum_environments",
     "shape_security_bucket_rows",
     "shape_security_fingerprint_row",
     "shape_security_ngwaf_bot_row",

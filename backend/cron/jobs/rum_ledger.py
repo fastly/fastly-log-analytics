@@ -1,16 +1,143 @@
-"""Celery/ledger-mode RUM and request ingest discovery & sweep cron jobs."""
+"""High-Scale RUM and request ingest discovery & ledger sweep cron jobs."""
 
 from __future__ import annotations
 
 import logging
 import sys as _sys
+import time
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from backend import config as svcconfig
+from backend.core.fos_client import _get_fos_client, get_source_for_service
 from backend.cron.jobs._common import _refuse_if_dev_no_crons
 from backend.cron.scheduler import cron_run, cron_task
+from backend.high_scale.ingest_controller import (
+    INITIAL_SOURCE_CURSOR,
+    MAX_SOURCE_PAGE_SIZE,
+    S3SourceObjectLister,
+)
+from backend.high_scale.postgres_control import PostgresControlPlane
 
 logger = logging.getLogger("backend.scheduler")
+
+
+def _discover_high_scale_prefix(
+    service_id: str,
+    *,
+    domain: str,
+    prefix_subpath: str | None = None,
+    max_files: int | None = None,
+    max_seconds: float | None = None,
+) -> int:
+    if max_files is not None and max_files <= 0:
+        return 0
+    if max_seconds is not None and max_seconds <= 0:
+        return 0
+    src = get_source_for_service(service_id)
+    if src is None or not src.get("bucket"):
+        return 0
+    fos_client = _get_fos_client(src)
+    lister = S3SourceObjectLister(
+        fos_client,
+        bucket=str(src["bucket"]),
+        prefix=str(src.get("prefix") or ""),
+    )
+    sub_prefix = ""
+    if prefix_subpath:
+        clean = prefix_subpath.lstrip("/")
+        for base in ("raw/request/", "raw/rum/"):
+            if clean.startswith(base):
+                clean = clean[len(base) :]
+                break
+        sub_prefix = clean
+
+    deadline = (time.monotonic() + max_seconds) if max_seconds is not None else None
+    cursor: str | None = None
+    discovered_total = 0
+    control: PostgresControlPlane | None = None
+    owner: Any = None
+
+    while True:
+        if max_files is not None:
+            remaining = max_files - discovered_total
+            if remaining <= 0:
+                break
+            page_size = min(MAX_SOURCE_PAGE_SIZE, remaining)
+        else:
+            page_size = MAX_SOURCE_PAGE_SIZE
+
+        page = lister.list_source_objects(
+            service_id,
+            domain,
+            page_size=page_size,
+            cursor=cursor,
+            partition_prefix=sub_prefix,
+        )
+        if page.objects:
+            if control is None:
+                control = PostgresControlPlane()
+                owner = control.initialize_owner(service_id, owner="high_scale", source_cursor=INITIAL_SOURCE_CURSOR)
+            batch = page.objects[: max_files - discovered_total] if max_files is not None else page.objects
+            by_key = control.discover_sources_batch(
+                service_id,
+                domain,
+                batch,
+                expected_owner=owner.current_owner,
+                expected_owner_epoch=owner.owner_epoch,
+            )
+            discovered_total += sum(1 for rec in by_key.values() if getattr(rec, "status", None) == "discovered")
+
+        if max_files is None and max_seconds is None:
+            break
+        if not page.next_cursor:
+            break
+        if max_files is not None and discovered_total >= max_files:
+            break
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+        cursor = page.next_cursor
+
+    return discovered_total
+
+
+def discover_rum_prefix(
+    service_id: str,
+    prefix_subpath: str | None = None,
+    run_id: int | None = None,
+) -> int:
+    del run_id
+    return _discover_high_scale_prefix(service_id, domain="rum_vitals", prefix_subpath=prefix_subpath)
+
+
+def _sweep_high_scale_ledger(service_id: str, *, domain: str, run_id: int | None = None) -> dict[str, Any]:
+    del run_id
+    control = PostgresControlPlane()
+    control.initialize_owner(service_id, owner="high_scale", source_cursor=INITIAL_SOURCE_CURSOR)
+    expired = control.expired_claims(service_id, domain, limit=MAX_SOURCE_PAGE_SIZE)
+    discovered = _discover_high_scale_prefix(service_id, domain=domain)
+    snap = control.operational_snapshot(service_id)
+    dead_letter = sum(
+        int(row.get("count", 0))
+        for row in snap.get("source_objects", [])
+        if row.get("domain") == domain and row.get("status") == "source_missing"
+    )
+    return {
+        "reclaimed": len(expired),
+        "redispatched": len(expired),
+        "discovered": discovered,
+        "dead_letter": dead_letter,
+    }
+
+
+def sweep_ledger_once(service_id: str, lookback_hours: int = 4, run_id: int | None = None) -> dict[str, Any]:
+    del lookback_hours
+    return _sweep_high_scale_ledger(service_id, domain="request", run_id=run_id)
+
+
+def sweep_rum_ledger_once(service_id: str, lookback_hours: int = 4, run_id: int | None = None) -> dict[str, Any]:
+    del lookback_hours
+    return _sweep_high_scale_ledger(service_id, domain="rum_vitals", run_id=run_id)
 
 
 def _resolve_reconcile_faro_bundle():
@@ -32,21 +159,15 @@ def _resolve_reconcile_faro_bundle():
 
 @cron_task("cron_rum_discovery", job_name="rum_discovery")
 def _run_rum_discovery_cron(service_id: str, run_id: int | None = None) -> None:
-    """Discover new ``raw/rum/`` beacon files and dispatch batched
-    ``convert_batch_rum_files`` calls covering them. Runs inline so the
-    cron_runs row carries the real per-tick outcome instead of a fake instant
-    success.
-    """
+    """Discover new ``raw/rum/`` beacon files and register them in the high-scale control plane."""
     if _refuse_if_dev_no_crons(service_id, "RUM discovery"):
         return
-
-    from backend.core.duckdb import get_source_for_service
 
     cfg = svcconfig.load_config(service_id)
     if not cfg or not svcconfig.is_rum_enabled(cfg):
         return
     src = get_source_for_service(service_id)
-    if src is None or not svcconfig.is_high_scale_mode(src):
+    if src is None:
         return
 
     with cron_run(
@@ -72,14 +193,6 @@ def _run_rum_discovery_cron(service_id: str, run_id: int | None = None) -> None:
                 "[rum_discovery] %s: Faro bundle reconcile failed (non-fatal): %s", service_id, fe, exc_info=True
             )
 
-        if not svcconfig.CELERY_BROKER_URL:
-            run.fail(
-                "Celery RUM ingest misconfigured: no broker URL",
-                error_message="DEPLOYMENT_MODE=high_scale requires CELERY_BROKER_URL",
-            )
-            return
-
-        from backend.core.ingest import discover_rum_prefix
         from backend.provision.cli import rum_minute_list_prefix
 
         now = datetime.now(UTC)
@@ -120,13 +233,11 @@ def _run_ledger_sweep_impl(
     if _refuse_if_dev_no_crons(service_id, label):
         return
 
-    from backend.core.duckdb import get_source_for_service
-
     cfg = svcconfig.load_config(service_id)
     if not cfg or (require_rum and not svcconfig.is_rum_enabled(cfg)):
         return
     src = get_source_for_service(service_id)
-    if src is None or not svcconfig.is_high_scale_mode(src):
+    if src is None:
         return
 
     row_prefix = "RUM " if require_rum else ""
@@ -146,8 +257,6 @@ def _run_ledger_sweep_impl(
 
         summary = sweep_fn(service_id, run_id=run.run_id)
         warnings = []
-        if not summary.get("broker_ok", True):
-            warnings.append("Celery broker/queue depth probe failed")
         if summary.get("dead_letter", 0) > 0:
             warnings.append(f"{summary['dead_letter']} dead-letter/quarantined {row_prefix}row(s)")
 
@@ -164,10 +273,8 @@ def _run_ledger_sweep_impl(
 
 @cron_task("ledger_sweep", job_name="ledger_sweep")
 def _run_ledger_sweep(service_id: str, run_id: int | None = None) -> None:
-    """Celery-mode crash net: reclaim stale ledger claims, re-dispatch stuck
-    rows, and diff a lookback FOS LIST against the ledger."""
-    from backend.core.ingest import sweep_ledger_once
-
+    """Crash net: reclaim stale ledger claims, re-dispatch stuck rows, and
+    diff a lookback FOS LIST against the ledger."""
     _run_ledger_sweep_impl(
         service_id, run_id, job_name="ledger_sweep", sweep_fn=sweep_ledger_once, label="ledger sweep"
     )
@@ -175,9 +282,7 @@ def _run_ledger_sweep(service_id: str, run_id: int | None = None) -> None:
 
 @cron_task("ledger_rum_sweep", job_name="ledger_rum_sweep")
 def _run_rum_ledger_sweep(service_id: str, run_id: int | None = None) -> None:
-    """Celery-mode crash net for the RUM ledger pipeline."""
-    from backend.core.ingest import sweep_rum_ledger_once
-
+    """Crash net for the RUM ledger pipeline."""
     _run_ledger_sweep_impl(
         service_id,
         run_id,

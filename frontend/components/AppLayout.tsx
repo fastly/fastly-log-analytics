@@ -15,10 +15,13 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { ServiceSwitcher, SyncStatusBadge } from '@/components/SyncStatusBadge/SyncStatusBadge'
 import { useDebugStore, useServiceStore } from '@/stores/filterStore'
 import {
-  useBootstrap, useBootstrapSyncEffects, useIsAnalyst,
+  cloudCacheIdentity, useBootstrap, useBootstrapSyncEffects, useIsAnalyst,
   useEnforceMaskedFilters, useAnalystHeartbeat, useAnalystLogout,
 } from '@/hooks/useBootstrap'
 import { PlotlyPrewarm, MapPrewarm } from '@/components/PlotlyChart'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
+import { CLOUD_RAW_SCAN_PREFIXES, matchesCloudRoute } from '@/lib/cloud-engine/boot-routes'
+import { CloudLoadingProgress } from '@/components/LoadingProgress'
 import packageJson from '../package.json'
 import {
   SrLiveRegion,
@@ -28,7 +31,10 @@ import {
   useShareStatusBanner,
   SERVICE_NAVIGATION,
   SYSTEM_NAVIGATION,
+  CLOUD_PRUNED_NAV_HREFS,
+  CLOUD_PRUNED_ADMIN_HREFS,
   UrlServiceSync,
+  ServiceUrlWriteback,
   RouteFocus,
   RawQueryModeProbe,
   SidebarNavList,
@@ -37,7 +43,28 @@ import {
 
 export { ThemeToggle, TimezoneSwitcher, useShareStatusBanner }
 
-const FilterBar = dynamic(() => import('@/components/FilterBar/FilterBar').then(m => ({ default: m.FilterBar })))
+function FilterBarPlaceholder({ compact = false }: { compact?: boolean }) {
+  return (
+    <div
+      data-testid="filter-bar-placeholder"
+      aria-hidden="true"
+      className={cn(
+        'border-b bg-background shrink-0',
+        compact ? 'min-h-[89px] min-[1400px]:min-h-[49px]' : 'min-h-[89px]',
+      )}
+    />
+  )
+}
+
+function FilterBarDynamicLoading() {
+  const pathname = usePathname()
+  return <FilterBarPlaceholder compact={pathname === '/usage' || pathname.startsWith('/usage/')} />
+}
+
+const FilterBar = dynamic(
+  () => import('@/components/FilterBar/FilterBar').then(m => ({ default: m.FilterBar })),
+  { loading: () => <FilterBarDynamicLoading /> },
+)
 const ActiveFiltersBanner = dynamic(() => import('@/components/FilterBar/FilterBar').then(m => ({ default: m.ActiveFiltersBanner })), { ssr: false })
 const DebugPanel = dynamic(() => import('@/components/DebugPanel').then(m => ({ default: m.DebugPanel })), { ssr: false })
 
@@ -49,13 +76,32 @@ const PLOTLY_PREWARM_PREFIXES = [
   '/insights', '/fastly-value', '/usage', '/streaming', '/control-room', '/sessions/stream',
 ] as const
 
+// Layout re-renders (bootstrap, service store, sidebar) must not reach a page
+// boundary that is still hydrating: React would discard the server HTML and
+// client-render the page behind the null fallback. The server-provided
+// children reference is stable, so memoizing bails those re-renders out.
+const PageBoundary = React.memo(function PageBoundary({ children }: { children: React.ReactNode }) {
+  return (
+    <React.Suspense fallback={null}>
+      {children}
+      <ServiceUrlWriteback />
+    </React.Suspense>
+  )
+})
+
 export function AppLayout({
-  children, initialCollapsed = false, ssrActiveServiceId, ssrIsRumEnabled, serverFooter,
+  children,
+  initialCollapsed = false,
+  ssrActiveServiceId,
+  ssrIsRumEnabled,
+  ssrIsCmcdEnabled,
+  serverFooter,
 }: {
   children: React.ReactNode
   initialCollapsed?: boolean
   ssrActiveServiceId?: string | null
   ssrIsRumEnabled?: boolean
+  ssrIsCmcdEnabled?: boolean
   serverFooter?: React.ReactNode
 }) {
   const pathname = usePathname()
@@ -118,31 +164,32 @@ export function AppLayout({
 
   const currentServiceId = activeServiceId || ssrActiveServiceId || bootstrapData?.active_service_id
   const activeSvc = bootstrapData?.services?.find(s => s.service_id === currentServiceId)
-  const activeSvcStatus = (activeSvc as Record<string, unknown> | undefined)?.status as { schema?: { name: string }[] } | undefined
-  const hasCmcd = activeSvcStatus?.schema?.some(col => col.name === 'cmcd_sid') ?? false
-  const hasRum = activeServiceId ? (activeSvc?.rum_enabled ?? false) : (ssrIsRumEnabled ?? activeSvc?.rum_enabled ?? false)
+  const hasCmcd = activeSvc ? activeSvc.cmcd_enabled === true : ssrIsCmcdEnabled === true
+  const hasRum = activeSvc ? activeSvc.rum_enabled === true : ssrIsRumEnabled === true
 
   const navActiveServiceId = activeServiceId || ssrActiveServiceId || null
 
   const visibleNav = SERVICE_NAVIGATION.filter(item => {
+    if (IS_CLOUD_MODE && CLOUD_PRUNED_NAV_HREFS.has(item.href)) return false
     if (item.requiresCmcd && !hasCmcd) return false
     if (item.requiresRum && !hasRum) return false
     if (isShareAnalyst) return item.shareAnalystVisible ?? item.analystVisible ?? false
     if (isAnalyst) return item.analystVisible
     return true
   })
-  const visibleSystemNav = isAnalyst ? [] : SYSTEM_NAVIGATION
+  const visibleSystemNav = isAnalyst ? SYSTEM_NAVIGATION.filter(item => item.href !== '/admin') : SYSTEM_NAVIGATION
 
   const hasServices = isSuccess
     ? !!(bootstrapData?.services?.length)
     : services.length > 0 || !!activeServiceId || !!ssrActiveServiceId
 
   const needsLogin = bootstrapSettings?.needs_login === true
+  const isPublicPage = pathname.startsWith('/how-it-works')
   const analystBlocked =
-    (isAnalyst && matchesPrefix(pathname, ['/admin', '/usage', '/alerts', '/high-scale'])) ||
-    ((isAnalyst || isShareAnalyst) && pathname.startsWith('/logs'))
-  const needsSignIn = needsLogin && !pathname.startsWith('/share-login')
-  const needsWizard = !needsLogin && !isAnalyst && !hasServices && !pathname.startsWith('/admin')
+    (isAnalyst && matchesPrefix(pathname, IS_CLOUD_MODE ? ['/admin', '/alerts', '/high-scale'] : ['/admin', '/usage', '/alerts', '/high-scale'])) ||
+    (!IS_CLOUD_MODE && (isAnalyst || isShareAnalyst) && pathname.startsWith('/logs'))
+  const needsSignIn = needsLogin && !isPublicPage && !pathname.startsWith('/share-login')
+  const needsWizard = !needsLogin && !isAnalyst && !hasServices && !isPublicPage && !pathname.startsWith('/admin') && !pathname.startsWith('/cache') && !pathname.startsWith('/share-login')
 
   const redirectAnnouncement = isLoading
     ? ''
@@ -157,8 +204,12 @@ export function AppLayout({
   React.useEffect(() => {
     if (isLoading) return
     if (needsSignIn) {
-      if (typeof window !== 'undefined') window.location.replace('/share-login')
-      else React.startTransition(() => router.replace('/share-login'))
+      if (typeof window !== 'undefined') {
+        const target = pathname === '/sessions/detail'
+          ? `/share-login?${new URLSearchParams({ return: pathname + window.location.search })}`
+          : '/share-login'
+        window.location.replace(target)
+      } else React.startTransition(() => router.replace('/share-login'))
       return
     }
     if (analystBlocked) {
@@ -169,8 +220,37 @@ export function AppLayout({
     }
     if (needsWizard) {
       React.startTransition(() => router.replace('/admin'))
+      return
     }
-  }, [isLoading, needsSignIn, analystBlocked, needsWizard, router, activeServiceId])
+    if (IS_CLOUD_MODE) {
+      if (CLOUD_PRUNED_ADMIN_HREFS.has(pathname)) {
+        React.startTransition(() => router.replace('/admin'))
+        return
+      }
+      if (CLOUD_PRUNED_NAV_HREFS.has(pathname)) {
+        const target = activeServiceId ? `/dashboard?service=${activeServiceId}` : '/dashboard'
+        React.startTransition(() => router.replace(target))
+      }
+    }
+  }, [isLoading, needsSignIn, analystBlocked, needsWizard, router, activeServiceId, pathname])
+
+  const needsPlotlyPrewarm = matchesPrefix(pathname, PLOTLY_PREWARM_PREFIXES)
+  // Other analytical routes scan in the page's own DuckDB; a dashboard worker
+  // there would download and compile a second copy of the WASM for nothing.
+  const needsDashboardEngine = matchesPrefix(pathname, ['/dashboard'])
+  const needsCloudBoot = needsPlotlyPrewarm || matchesCloudRoute(pathname, CLOUD_RAW_SCAN_PREFIXES)
+  const cloudIdentity = isSuccess && bootstrapData ? cloudCacheIdentity(bootstrapData) : null
+  React.useEffect(() => {
+    if (!IS_CLOUD_MODE || !needsCloudBoot || needsLogin || cloudIdentity === null) return
+    // Setting a new session identity terminates the engine worker, so a worker
+    // prewarmed before it would be killed mid-download.
+    void import('@/lib/cloud-engine/dashboard/client').then(async ({ setDashboardCacheIdentity, prewarmDashboardEngine }) => {
+      await setDashboardCacheIdentity(cloudIdentity)
+      if (needsDashboardEngine) prewarmDashboardEngine()
+      const { bootCloudEngine } = await import('@/lib/cloud-engine/boot')
+      bootCloudEngine(pathname)
+    })
+  }, [needsCloudBoot, needsDashboardEngine, needsLogin, cloudIdentity, pathname])
 
   const isLoginPage = pathname.startsWith('/share-login')
   if (isLoginPage || needsLogin) {
@@ -182,20 +262,23 @@ export function AppLayout({
             <main id="main" tabIndex={0} className="flex-1 outline-none">{children}</main>
             {serverFooter && !isAnalyst && serverFooter}
           </div>
+        ) : isPublicPage ? (
+          <div className="h-screen flex flex-col bg-background">
+            <main id="main" tabIndex={0} className="flex-1 overflow-auto p-4 md:p-6 outline-none">{children}</main>
+          </div>
         ) : null}
       </>
     )
   }
 
-  const needsGeoPreload = matchesPrefix(pathname, ['/dashboard', '/network'])
-  const needsPlotlyPrewarm = matchesPrefix(pathname, PLOTLY_PREWARM_PREFIXES)
   const needsMapPrewarm = matchesPrefix(pathname, ['/dashboard', '/network', '/security'])
 
   const isQueryRawMode = pathname.startsWith('/query') && isRawQueryMode
-  const hideFilterBar =
-    matchesPrefix(pathname, ['/admin', '/insights', '/alerts', '/control-room']) ||
-    isQueryRawMode ||
-    !hasServices
+  const routeHidesFilterBar =
+    matchesPrefix(pathname, ['/admin', '/cache', '/insights', '/alerts', '/control-room', '/how-it-works', '/sessions/detail', '/sessions/stream']) ||
+    isQueryRawMode
+  const hideFilterBar = routeHidesFilterBar || !hasServices
+  const reserveFilterBar = !routeHidesFilterBar && !hasServices && isLoading
 
   if (isInitializing) {
     return (
@@ -257,7 +340,6 @@ export function AppLayout({
 
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-background">
-      {needsGeoPreload && <link rel="prefetch" href="/geo/world.topo.json" as="fetch" />}
       {shareBanner.node}
       <div className="flex flex-1 overflow-hidden min-h-0">
         {isAnalyst && disconnected && (
@@ -370,14 +452,20 @@ export function AppLayout({
               </div>
             </header>
             {!hideFilterBar && <FilterBar />}
-            {hideFilterBar && <ActiveFiltersBanner />}
+            {reserveFilterBar && <FilterBarPlaceholder compact={pathname.startsWith('/usage')} />}
+            {hideFilterBar && !reserveFilterBar && <ActiveFiltersBanner />}
 
-            <main id="main" tabIndex={0} className="flex-1 overflow-auto p-4 md:p-6 outline-none">
+                <main id="main" tabIndex={0} className="flex-1 overflow-auto p-4 md:p-6 outline-none">
               {isLoading && !bootstrapData ? (
                 <CenteredSpinner label="Loading app configuration…" />
-              ) : !hasServices && !matchesPrefix(pathname, ['/admin', '/share-login']) ? (
-                <CenteredSpinner label="Setting up your workspace…" />
-              ) : children}
+              ) : !hasServices && !matchesPrefix(pathname, ['/admin', '/cache', '/share-login', '/how-it-works']) ? (
+                <>
+                  <CenteredSpinner label="Setting up your workspace…" />
+                  <ServiceUrlWriteback />
+                </>
+              ) : (
+                <PageBoundary>{children}</PageBoundary>
+              )}
               {debugEnabled && <DebugPanel />}
               {serverFooter && !isAnalyst && serverFooter}
             </main>
@@ -385,6 +473,7 @@ export function AppLayout({
         </TooltipProvider>
       </div>
 
+      {IS_CLOUD_MODE && <CloudLoadingProgress />}
       <MobileNavDrawer
         open={mobileNavOpen}
         onOpenChange={setMobileNavOpen}

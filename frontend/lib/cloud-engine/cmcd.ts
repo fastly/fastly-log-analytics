@@ -1,0 +1,663 @@
+import {
+  duckSqlString,
+  getDuckDBEngine,
+  type DuckDBAnalyticalEngine,
+  type DuckDBReadContext,
+} from "./dashboard/duckdb";
+import type { FiltersPayload } from "@/types/api";
+import { parseEpochMs, roundTo } from "./engine-utils";
+import { cmcdFromRollup, cmcdRollupEligible, type CmcdRollupSource } from "./cmcd-rollup";
+import { analyticsFiltersToSql, rangeServiceSql } from "./query-params";
+import { formatAsnDisplayLabel, loadAsnNames } from "./asn-names";
+
+export const CMCD_COLUMNS = [
+  "cmcd_sid",
+  "cmcd_cid",
+  "cmcd_br",
+  "cmcd_bl",
+  "cmcd_bs",
+  "cmcd_mtp",
+  "cmcd_ot",
+  "cmcd_sf",
+  "cmcd_st",
+  "cmcd_tb",
+  "cmcd_d",
+  "cmcd_pr",
+  "cmcd_rtp",
+  "cmcd_su",
+  "cmcd_dl",
+] as const;
+
+export const CMCD_SESSION_DURATION_BUCKETS = ["<30s", "30s–2m", "2–5m", "5–10m", "10–30m", "30m–1h", ">1h"] as const;
+
+export const CMCD_TS_DEFAULTS = {
+  sessions_ts: {
+    active_sessions: 0,
+    rebuffer_events: 0,
+    rebuffer_rate: 0.0,
+  },
+  buffer_health_ts: {
+    avg_buffer_ms: 0.0,
+    p10_buffer_ms: 0.0,
+    p50_buffer_ms: 0.0,
+    rebuffer_events: 0,
+  },
+  bitrate_ts: {
+    avg_encoded_bitrate: 0.0,
+    avg_top_bitrate: 0.0,
+    utilization_ratio: 0.0,
+  },
+  throughput_ts: {
+    avg_throughput_kbps: 0.0,
+    avg_bitrate_kbps: 0.0,
+    headroom_ratio: 0.0,
+  },
+  startup_ts: {
+    startup_requests: 0,
+    avg_startup_buffer_ms: 0.0,
+    avg_startup_ttfb_ms: 0.0,
+  },
+} as const;
+
+export interface CmcdQueryParams {
+  start_time?: string | number;
+  end_time?: string | number;
+  service_id?: string;
+  filter_sf?: string;
+  filter_ot?: string;
+  filter_st?: string;
+  filter_cid?: string;
+  filters?: FiltersPayload;
+  bucket_seconds?: number;
+  top_n?: number;
+  engine?: Pick<DuckDBAnalyticalEngine, "executeSql" | "getPresentColumns"> & Partial<Pick<DuckDBReadContext, "getCustomColumnTypes">>;
+  rollupSource?: CmcdRollupSource;
+  customColumnTypes?: ReturnType<DuckDBReadContext["getCustomColumnTypes"]>;
+  signal?: AbortSignal;
+}
+
+export function classifySessionDurationBucket(durationSeconds: number): string {
+  if (durationSeconds < 30) return "<30s";
+  if (durationSeconds < 120) return "30s–2m";
+  if (durationSeconds < 300) return "2–5m";
+  if (durationSeconds < 600) return "5–10m";
+  if (durationSeconds < 1800) return "10–30m";
+  if (durationSeconds < 3600) return "30m–1h";
+  return ">1h";
+}
+
+const MAX_PADDED_BUCKETS = 2000;
+
+function padSeries(
+  rows: Record<string, unknown>[],
+  fromMs: number | null,
+  toMs: number | null,
+  bucketMs: number,
+  emptyRow: (tsIso: string) => Record<string, unknown>,
+): Record<string, unknown>[] {
+  if (rows.length === 0 || bucketMs <= 0 || fromMs == null || toMs == null || toMs <= fromMs) {
+    return rows;
+  }
+  const stAligned = Math.floor(fromMs / bucketMs) * bucketMs;
+  const etAligned = Math.floor((toMs - 1) / bucketMs) * bucketMs;
+  if (etAligned < stAligned || Math.floor((etAligned - stAligned) / bucketMs) + 1 > MAX_PADDED_BUCKETS) {
+    return rows;
+  }
+  const byBucket = new Map<string, Record<string, unknown>>();
+  for (const row of rows) {
+    if (typeof row.bucket === "string") byBucket.set(row.bucket, row);
+  }
+  const out: Record<string, unknown>[] = [];
+  for (let ts = stAligned; ts <= etAligned; ts += bucketMs) {
+    const tsIso = new Date(ts).toISOString();
+    out.push(byBucket.get(tsIso) ?? emptyRow(tsIso));
+  }
+  return out;
+}
+
+export function padCmcdTimeseries(
+  series: {
+    sessions_ts: Record<string, unknown>[];
+    buffer_health_ts: Record<string, unknown>[];
+    bitrate_ts: Record<string, unknown>[];
+    throughput_ts: Record<string, unknown>[];
+    startup_ts: Record<string, unknown>[];
+  },
+  startTime: string | number | undefined,
+  endTime: string | number | undefined,
+  bucketMs: number,
+) {
+  const fromMs = parseEpochMs(startTime);
+  const toMs = parseEpochMs(endTime);
+  return {
+    sessions_ts: padSeries(series.sessions_ts, fromMs, toMs, bucketMs, (tsIso) => ({
+      bucket: tsIso,
+      concurrent_sessions: 0,
+      new_sessions: 0,
+      rebuffer_session_pct: null,
+      timestamp: tsIso,
+      active_sessions: 0,
+      rebuffer_events: 0,
+      rebuffer_rate: 0,
+    })),
+    buffer_health_ts: padSeries(series.buffer_health_ts, fromMs, toMs, bucketMs, (tsIso) => ({
+      bucket: tsIso,
+      p50_buffer: null,
+      p95_buffer: null,
+      starvation_rate: null,
+      timestamp: tsIso,
+      avg_buffer_ms: 0,
+      p10_buffer_ms: 0,
+      p50_buffer_ms: 0,
+      rebuffer_events: 0,
+    })),
+    bitrate_ts: padSeries(series.bitrate_ts, fromMs, toMs, bucketMs, (tsIso) => ({
+      bucket: tsIso,
+      avg_bitrate: null,
+      timestamp: tsIso,
+      avg_encoded_bitrate: 0,
+      avg_top_bitrate: 0,
+      utilization_ratio: null,
+    })),
+    throughput_ts: padSeries(series.throughput_ts, fromMs, toMs, bucketMs, (tsIso) => ({
+      bucket: tsIso,
+      p50: null,
+      p95: null,
+      p99: null,
+      timestamp: tsIso,
+      avg_throughput_kbps: 0,
+      avg_bitrate_kbps: 0,
+      headroom_ratio: 0,
+    })),
+    startup_ts: padSeries(series.startup_ts, fromMs, toMs, bucketMs, (tsIso) => ({
+      bucket: tsIso,
+      startup_ratio: null,
+      timestamp: tsIso,
+      startup_requests: 0,
+      avg_startup_buffer_ms: 0,
+      avg_startup_ttfb_ms: 0,
+    })),
+  };
+}
+
+export function emptyCmcdAggregates() {
+  return {
+    available: true,
+    has_data: false,
+    overview: {
+      active_sessions: 0, peak_viewers: 0, avg_session_duration: null as number | null,
+      rebuffer_rate: null as number | null, avg_bitrate: null as number | null,
+      avg_buffer_length: null as number | null, median_throughput: null as number | null,
+    },
+    summary: {
+      active_sessions: 0,
+      total_requests: 0,
+      rebuffer_events: 0,
+      rebuffer_rate: 0,
+      avg_bitrate_kbps: 0,
+      avg_buffer_ms: 0,
+      avg_throughput_kbps: 0,
+      peak_viewers: 0,
+      avg_session_duration: 0,
+      utilization_ratio: 0,
+    },
+    sessions_ts: [] as Record<string, unknown>[],
+    buffer_health_ts: [] as Record<string, unknown>[],
+    bitrate_ts: [] as Record<string, unknown>[],
+    throughput_ts: [] as Record<string, unknown>[],
+    startup_ts: [] as Record<string, unknown>[],
+    top_content: [] as Record<string, unknown>[],
+    rebuffer_by_country: [] as Record<string, unknown>[],
+    rebuffer_by_asn: [] as Record<string, unknown>[],
+    object_type_dist: [] as Record<string, unknown>[],
+    streaming_format_dist: [] as Record<string, unknown>[],
+    session_duration_dist: [] as Record<string, unknown>[],
+  };
+}
+
+
+function buildCmcdWhere(params: CmcdQueryParams): string {
+  const clauses: string[] = [
+    rangeServiceSql(params, [
+      "(NULLIF(cmcd_sid, '') IS NOT NULL OR cmcd_br IS NOT NULL OR cmcd_bl IS NOT NULL OR NULLIF(cmcd_ot, '') IS NOT NULL)",
+    ]),
+  ];
+  if (params.filter_sf) {
+    clauses.push(`cmcd_sf = ${duckSqlString(String(params.filter_sf))}`);
+  }
+  if (params.filter_ot) {
+    clauses.push(`cmcd_ot = ${duckSqlString(String(params.filter_ot))}`);
+  }
+  if (params.filter_st) {
+    clauses.push(`cmcd_st = ${duckSqlString(String(params.filter_st))}`);
+  }
+  if (params.filter_cid) {
+    clauses.push(`cmcd_cid = ${duckSqlString(String(params.filter_cid))}`);
+  }
+  clauses.push(analyticsFiltersToSql(params.filters, params.customColumnTypes));
+  return clauses.join(" AND ");
+}
+
+/** Every request column the /api/cmcd/aggregates scans read. */
+export const CMCD_SCAN_COLUMNS = [
+  "timestamp", "ts_ms", "service_id", "cmcd_sid", "cmcd_cid", "cmcd_br", "cmcd_bl", "cmcd_bs", "cmcd_mtp", "cmcd_ot",
+  "cmcd_sf", "cmcd_st", "cmcd_tb", "cmcd_su", "geo_country", "country", "client_asn", "asn",
+  "as_name", "ttfb_ms", "ttfb", "time_elapsed_usec", "elapsed",
+] as const;
+
+/** The columns a projected /api/cmcd/aggregates load needs, or null when the filters can't name theirs. */
+export function cmcdScanColumns(filters: unknown): string[] | null {
+  if (filters == null || filters === "") return [...CMCD_SCAN_COLUMNS];
+  if (typeof filters !== "object" || Array.isArray(filters)) return null;
+  return [...new Set([...CMCD_SCAN_COLUMNS, ...Object.keys(filters)])];
+}
+
+export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
+  if (params.rollupSource && cmcdRollupEligible(params)) {
+    const rollup = await cmcdFromRollup(params, params.rollupSource, params.signal);
+    if (rollup) return rollup;
+  }
+  const asnNamesReady = loadAsnNames();
+  const engine = params.engine ?? getDuckDBEngine().readContext();
+  params = { ...params, customColumnTypes: engine.getCustomColumnTypes?.() };
+  const where = buildCmcdWhere(params);
+  const bucketMs = Math.max(1, Math.min(14400, Math.floor(params.bucket_seconds ?? 60))) * 1000;
+  const topN = Math.max(1, Math.min(100, Math.floor(params.top_n ?? 30)));
+  const nullable = (value: unknown) => value == null ? null : Number(value);
+
+  const summaryRows = await engine.executeSql<Record<string, unknown>>(
+    `SELECT
+      COUNT(*)::BIGINT AS total_requests,
+      COUNT(DISTINCT NULLIF(cmcd_sid, ''))::BIGINT AS active_sessions,
+      (COUNT(*) FILTER (WHERE cmcd_bs IS TRUE))::BIGINT AS rebuffer_events,
+      COUNT(cmcd_bs) AS has_bs,
+      COUNT(DISTINCT NULLIF(cmcd_sid, '')) FILTER (WHERE cmcd_bs IS TRUE) AS rebuffer_sessions,
+      AVG(cmcd_br)::DOUBLE AS avg_bitrate_kbps,
+      AVG(cmcd_tb)::DOUBLE AS avg_top_bitrate_kbps,
+      AVG(cmcd_bl)::DOUBLE AS avg_buffer_ms,
+      AVG(cmcd_mtp)::DOUBLE AS avg_throughput_kbps,
+      QUANTILE_CONT(cmcd_mtp, 0.5)::DOUBLE AS median_throughput,
+      COUNT(NULLIF(cmcd_ot, '')) AS has_ot,
+      COUNT(cmcd_bl) AS has_bl,
+      COUNT(cmcd_br) AS has_br,
+      COUNT(cmcd_mtp) AS has_mtp,
+      COUNT(cmcd_su) AS has_su,
+      COUNT(NULLIF(cmcd_cid, '')) AS has_cid,
+      AVG(cmcd_br) FILTER (WHERE cmcd_ot = 'v')::DOUBLE AS video_avg_bitrate,
+      AVG(cmcd_bl) FILTER (WHERE cmcd_ot = 'v')::DOUBLE AS video_avg_buffer,
+      QUANTILE_CONT(cmcd_mtp, 0.5) FILTER (WHERE cmcd_ot = 'v')::DOUBLE AS video_median_throughput,
+      MIN(ts_ms)::BIGINT AS min_ts,
+      MAX(ts_ms)::BIGINT AS max_ts
+    FROM requests
+    WHERE ${where}`,
+    [],
+    params.signal,
+  );
+
+  const s = summaryRows[0];
+  const totalRequests = Number(s?.total_requests ?? 0);
+  if (totalRequests === 0) {
+    return emptyCmcdAggregates();
+  }
+
+  const activeSessions = Number(s.active_sessions ?? 0);
+  // Like High-Scale, quality measurements cover video segments once the window reports object types.
+  const hasOt = Number(s.has_ot) > 0;
+  const video = hasOt ? "cmcd_ot = 'v'" : "TRUE";
+  // High-Scale omits a section when the window never reported the CMCD keys it needs.
+  const has = (key: string) => Number(s[`has_${key}`]) > 0;
+  // cmcd_bs is a sparse flag (1 only on starvation, NULL otherwise), so buffer-length telemetry
+  // proves starvation tracking is active even in healthy windows with 0 starvations.
+  const hasBsEffective = has("bs") || has("bl");
+  const hasSu = has("su");
+  const rebufferEvents = Number(s.rebuffer_events ?? 0);
+  const rebufferRate =
+    totalRequests > 0 ? roundTo((rebufferEvents * 100) / totalRequests, 2) : 0;
+  const avgBitrate = Number(s.avg_bitrate_kbps ?? 0);
+  const avgTopBitrate = Number(s.avg_top_bitrate_kbps ?? 0);
+  const utilizationRatio =
+    avgTopBitrate > 0 ? roundTo((avgBitrate * 100) / avgTopBitrate, 2) : 0;
+
+  const bucketRows = await engine.executeSql<Record<string, unknown>>(
+    `SELECT
+      (floor(ts_ms / ${bucketMs}) * ${bucketMs})::BIGINT AS bucket_ms,
+      COUNT(*)::BIGINT AS reqs,
+      COUNT(DISTINCT NULLIF(cmcd_sid, ''))::BIGINT AS active_sessions,
+      (COUNT(*) FILTER (WHERE cmcd_bs IS TRUE))::BIGINT AS rebuffer_events,
+      COUNT(DISTINCT NULLIF(cmcd_sid, '')) FILTER (WHERE cmcd_bs IS TRUE) AS rebuffer_sessions,
+      COUNT(cmcd_bs) AS has_bs,
+      COUNT(cmcd_su) AS has_su,
+      AVG(cmcd_bl)::DOUBLE AS avg_buffer_ms,
+      QUANTILE_CONT(cmcd_bl, 0.1) FILTER (WHERE ${video})::DOUBLE AS p10_buffer_ms,
+      QUANTILE_CONT(cmcd_bl, 0.5) FILTER (WHERE ${video})::DOUBLE AS p50_buffer_ms,
+      QUANTILE_CONT(cmcd_bl, 0.95) FILTER (WHERE ${video})::DOUBLE AS p95_buffer_ms,
+      AVG(cmcd_br) FILTER (WHERE ${video})::DOUBLE AS avg_encoded_bitrate,
+      AVG(cmcd_tb) FILTER (WHERE ${video})::DOUBLE AS avg_top_bitrate,
+      AVG(cmcd_br / cmcd_tb) FILTER (WHERE ${video} AND cmcd_tb > 0)::DOUBLE AS utilization_ratio,
+      AVG(cmcd_mtp)::DOUBLE AS avg_throughput_kbps,
+      QUANTILE_CONT(cmcd_mtp, 0.5) FILTER (WHERE ${video})::DOUBLE AS p50_throughput,
+      QUANTILE_CONT(cmcd_mtp, 0.95) FILTER (WHERE ${video})::DOUBLE AS p95_throughput,
+      QUANTILE_CONT(cmcd_mtp, 0.99) FILTER (WHERE ${video})::DOUBLE AS p99_throughput,
+      (COUNT(*) FILTER (WHERE cmcd_su IS TRUE))::BIGINT AS startup_requests,
+      AVG(cmcd_bl) FILTER (WHERE cmcd_su IS TRUE)::DOUBLE AS avg_startup_buffer_ms,
+      AVG(COALESCE(ttfb_ms, ttfb * 1000.0, time_elapsed_usec / 1000.0, elapsed / 1000.0)) FILTER (WHERE cmcd_su IS TRUE)::DOUBLE AS avg_startup_ttfb_ms
+    FROM requests
+    WHERE ${where}
+    GROUP BY 1
+    ORDER BY 1`,
+    [],
+    params.signal,
+  );
+
+  let peakViewers = 0;
+  const sessions_ts: Record<string, unknown>[] = [];
+  const buffer_health_ts: Record<string, unknown>[] = [];
+  const bitrate_ts: Record<string, unknown>[] = [];
+  const throughput_ts: Record<string, unknown>[] = [];
+  const startup_ts: Record<string, unknown>[] = [];
+
+  for (const b of bucketRows) {
+    const tsIso = new Date(Number(b.bucket_ms ?? 0)).toISOString();
+    const sess = Number(b.active_sessions ?? 0);
+    if (sess > peakViewers) peakViewers = sess;
+    const reqs = Number(b.reqs ?? 0);
+    const rebuf = Number(b.rebuffer_events ?? 0);
+    const encBr = Number(b.avg_encoded_bitrate ?? 0);
+    const topBr = Number(b.avg_top_bitrate ?? 0);
+    const mtp = Number(b.avg_throughput_kbps ?? 0);
+
+    sessions_ts.push({
+      bucket: tsIso,
+      concurrent_sessions: sess,
+      new_sessions: 0,
+      rebuffer_session_pct: hasBsEffective && sess > 0 ? roundTo(Number(b.rebuffer_sessions) * 100 / sess, 2) : null,
+      timestamp: tsIso,
+      active_sessions: sess,
+      rebuffer_events: rebuf,
+      rebuffer_rate: reqs > 0 ? roundTo((rebuf * 100) / reqs, 2) : 0,
+    });
+    buffer_health_ts.push({
+      bucket: tsIso,
+      p50_buffer: nullable(b.p50_buffer_ms),
+      p95_buffer: nullable(b.p95_buffer_ms),
+      starvation_rate: hasBsEffective && reqs > 0 ? roundTo(rebuf * 100 / reqs, 2) : null,
+      timestamp: tsIso,
+      avg_buffer_ms: roundTo(Number(b.avg_buffer_ms ?? 0), 1),
+      p10_buffer_ms: roundTo(Number(b.p10_buffer_ms ?? 0), 1),
+      p50_buffer_ms: roundTo(Number(b.p50_buffer_ms ?? 0), 1),
+      rebuffer_events: rebuf,
+    });
+    bitrate_ts.push({
+      bucket: tsIso,
+      avg_bitrate: nullable(b.avg_encoded_bitrate),
+      timestamp: tsIso,
+      avg_encoded_bitrate: roundTo(encBr, 1),
+      avg_top_bitrate: roundTo(topBr, 1),
+      utilization_ratio: b.utilization_ratio == null ? null : roundTo(Number(b.utilization_ratio), 2),
+    });
+    throughput_ts.push({
+      bucket: tsIso,
+      p50: nullable(b.p50_throughput),
+      p95: nullable(b.p95_throughput),
+      p99: nullable(b.p99_throughput),
+      timestamp: tsIso,
+      avg_throughput_kbps: roundTo(mtp, 1),
+      avg_bitrate_kbps: roundTo(encBr, 1),
+      headroom_ratio: encBr > 0 ? roundTo(mtp / encBr, 2) : 0,
+    });
+    startup_ts.push({
+      bucket: tsIso,
+      startup_ratio: hasSu && reqs > 0 ? roundTo(Number(b.startup_requests) * 100 / reqs, 2) : null,
+      timestamp: tsIso,
+      startup_requests: Number(b.startup_requests ?? 0),
+      avg_startup_buffer_ms: roundTo(Number(b.avg_startup_buffer_ms ?? 0), 1),
+      avg_startup_ttfb_ms: roundTo(Number(b.avg_startup_ttfb_ms ?? 0), 2),
+    });
+  }
+
+  // Session durations & session_duration_dist
+  const sessionRows = await engine.executeSql<{
+    sid: string;
+    first_ts: number;
+    duration: number;
+  }>(
+    `SELECT
+      cmcd_sid AS sid,
+      MIN(ts_ms)::BIGINT AS first_ts,
+      (MAX(ts_ms) - MIN(ts_ms)) / 1000.0 AS duration
+    FROM requests
+    WHERE ${where} AND cmcd_sid IS NOT NULL AND cmcd_sid != ''
+    GROUP BY 1`,
+    [],
+    params.signal,
+  );
+
+  const durationBucketCounts = new Map<string, number>();
+  for (const label of CMCD_SESSION_DURATION_BUCKETS) {
+    durationBucketCounts.set(label, 0);
+  }
+  let totalDurationSec = 0;
+  for (const sr of sessionRows) {
+    const dur = Number(sr.duration ?? 0);
+    totalDurationSec += dur;
+    const label = classifySessionDurationBucket(dur);
+    durationBucketCounts.set(label, (durationBucketCounts.get(label) ?? 0) + 1);
+  }
+  const avgSessionDuration =
+    sessionRows.length > 0
+      ? roundTo(totalDurationSec / sessionRows.length, 1)
+      : 0;
+  const durations = sessionRows.map((row) => Number(row.duration)).filter((duration) => duration > 0);
+  for (const point of sessions_ts) {
+    point.new_sessions = sessionRows.filter((row) =>
+      new Date(Math.floor(Number(row.first_ts) / bucketMs) * bucketMs).toISOString() === point.bucket,
+    ).length;
+  }
+  const session_duration_dist = CMCD_SESSION_DURATION_BUCKETS.filter((bucket) => durationBucketCounts.get(bucket)).map((bucket) => {
+    const count = durationBucketCounts.get(bucket) ?? 0;
+    return {
+      bucket,
+      duration_bucket: bucket,
+      session_count: count,
+      sessions: count,
+      pct:
+        sessionRows.length > 0
+          ? roundTo((count * 100) / sessionRows.length, 2)
+          : 0,
+    };
+  });
+
+  const rebufferRateSql = hasBsEffective
+    ? "COUNT(DISTINCT NULLIF(cmcd_sid, '')) FILTER (WHERE cmcd_bs IS TRUE) * 100.0 / NULLIF(COUNT(DISTINCT NULLIF(cmcd_sid, '')), 0)"
+    : "NULL";
+
+  const [
+    topContentRows,
+    countryRows,
+    asnRows,
+    otRows,
+    sfRows,
+  ] = await Promise.all([
+    engine.executeSql<Record<string, unknown>>(
+      `SELECT
+        cmcd_cid AS content_id,
+        COUNT(DISTINCT NULLIF(cmcd_sid, ''))::BIGINT AS sessions,
+        COUNT(*)::BIGINT AS requests,
+        AVG(cmcd_br) FILTER (WHERE ${video})::DOUBLE AS avg_bitrate_kbps,
+        AVG(cmcd_bl) FILTER (WHERE ${video})::DOUBLE AS avg_buffer_length,
+        ${rebufferRateSql} AS rebuffer_rate
+      FROM requests
+      WHERE ${where} AND cmcd_cid <> ''
+      GROUP BY 1
+      ORDER BY sessions DESC, content_id
+      LIMIT ${topN}`,
+      [],
+      params.signal,
+    ),
+    engine.executeSql<Record<string, unknown>>(
+      `SELECT
+        COALESCE(NULLIF(geo_country, ''), country) AS country,
+        COUNT(DISTINCT NULLIF(cmcd_sid, ''))::BIGINT AS sessions,
+        COUNT(*)::BIGINT AS requests,
+        (COUNT(*) FILTER (WHERE cmcd_bs IS TRUE))::BIGINT AS rebuffer_events,
+        QUANTILE_CONT(cmcd_mtp, 0.5) FILTER (WHERE ${video})::DOUBLE AS median_throughput,
+        ${rebufferRateSql} AS rebuffer_rate
+      FROM requests
+      WHERE ${where} AND COALESCE(NULLIF(geo_country, ''), NULLIF(country, '')) IS NOT NULL
+      GROUP BY 1
+      ORDER BY sessions DESC, country ASC
+      LIMIT ${topN}`,
+      [],
+      params.signal,
+    ),
+    engine.executeSql<Record<string, unknown>>(
+      `SELECT
+        COALESCE(client_asn, asn)::BIGINT AS asn,
+        COALESCE(NULLIF(as_name, ''), 'AS' || CAST(COALESCE(client_asn, asn) AS VARCHAR)) AS as_name,
+        COUNT(DISTINCT NULLIF(cmcd_sid, ''))::BIGINT AS sessions,
+        COUNT(*)::BIGINT AS requests,
+        (COUNT(*) FILTER (WHERE cmcd_bs IS TRUE))::BIGINT AS rebuffer_events,
+        AVG(cmcd_br) FILTER (WHERE ${video})::DOUBLE AS avg_bitrate,
+        AVG(cmcd_bl) FILTER (WHERE ${video})::DOUBLE AS avg_buffer_length,
+        ${rebufferRateSql} AS rebuffer_rate,
+        AVG(cmcd_mtp)::DOUBLE AS avg_throughput_kbps
+      FROM requests
+      WHERE ${where} AND COALESCE(client_asn, asn) IS NOT NULL
+      GROUP BY 1, 2
+      ORDER BY sessions DESC, asn ASC
+      LIMIT ${topN}`,
+      [],
+      params.signal,
+    ),
+    engine.executeSql<{ object_type: string; requests: number }>(
+      `SELECT cmcd_ot AS object_type, COUNT(*)::BIGINT AS requests FROM requests WHERE ${where} AND cmcd_ot <> '' GROUP BY 1 ORDER BY requests DESC, object_type`,
+      [],
+      params.signal,
+    ),
+    engine.executeSql<{ format: string; requests: number; sessions: number }>(
+      `SELECT cmcd_sf AS format, COUNT(*)::BIGINT AS requests, COUNT(DISTINCT NULLIF(cmcd_sid, ''))::BIGINT AS sessions FROM requests WHERE ${where} AND cmcd_sf <> '' GROUP BY 1 ORDER BY sessions DESC, format`,
+      [],
+      params.signal,
+    ),
+  ]);
+  await asnNamesReady;
+
+  return {
+    available: true,
+    has_data: true,
+    overview: {
+      active_sessions: activeSessions,
+      peak_viewers: peakViewers,
+      avg_session_duration: durations.length ? Math.round(durations.reduce((sum, duration) => sum + duration, 0) / durations.length) : null,
+      rebuffer_rate: hasBsEffective && activeSessions ? roundTo(Number(s.rebuffer_sessions) * 100 / activeSessions, 2) : null,
+      avg_bitrate: nullable(hasOt ? s.video_avg_bitrate : s.avg_bitrate_kbps),
+      avg_buffer_length: nullable(hasOt ? s.video_avg_buffer : s.avg_buffer_ms),
+      median_throughput: nullable(hasOt ? s.video_median_throughput : s.median_throughput),
+    },
+    summary: {
+      active_sessions: activeSessions,
+      total_requests: totalRequests,
+      rebuffer_events: rebufferEvents,
+      rebuffer_rate: rebufferRate,
+      avg_bitrate_kbps: roundTo(avgBitrate, 1),
+      avg_buffer_ms: roundTo(Number(s.avg_buffer_ms ?? 0), 1),
+      avg_throughput_kbps: roundTo(Number(s.avg_throughput_kbps ?? 0), 1),
+      peak_viewers: peakViewers,
+      avg_session_duration: avgSessionDuration,
+      utilization_ratio: utilizationRatio,
+    },
+    ...padCmcdTimeseries(
+      {
+        sessions_ts,
+        buffer_health_ts: has("bl") ? buffer_health_ts : [],
+        bitrate_ts: has("br") ? bitrate_ts : [],
+        throughput_ts: has("mtp") ? throughput_ts : [],
+        startup_ts: hasSu ? startup_ts : [],
+      },
+      params.start_time,
+      params.end_time,
+      bucketMs,
+    ),
+    top_content: !has("cid") ? [] : topContentRows.map((r) => ({
+      content_id: String(r.content_id ?? "Unknown"),
+      sessions: Number(r.sessions ?? 0),
+      session_count: Number(r.sessions ?? 0),
+      requests: Number(r.requests ?? 0),
+      avg_bitrate_kbps: roundTo(Number(r.avg_bitrate_kbps ?? 0), 1),
+      avg_bitrate: nullable(r.avg_bitrate_kbps),
+      avg_buffer_length: nullable(r.avg_buffer_length),
+      rebuffer_rate: nullable(r.rebuffer_rate),
+    })),
+    rebuffer_by_country: !hasBsEffective ? [] : countryRows.map((r) => ({
+      country: String(r.country ?? "Unknown"),
+      session_count: Number(r.sessions ?? 0),
+      median_throughput: nullable(r.median_throughput),
+      sessions: Number(r.sessions ?? 0),
+      requests: Number(r.requests ?? 0),
+      rebuffer_events: Number(r.rebuffer_events ?? 0),
+      rebuffer_rate: nullable(r.rebuffer_rate),
+    })),
+    rebuffer_by_asn: !hasBsEffective ? [] : asnRows.map((r) => {
+      const asn = Number(r.asn ?? 0);
+      const rawName = String(r.as_name ?? "").trim();
+      const label = formatAsnDisplayLabel(asn, rawName);
+      return {
+        asn,
+        as_name: rawName && !/^AS\d+$/i.test(rawName) ? rawName : label,
+        label,
+        session_count: Number(r.sessions ?? 0),
+        avg_bitrate: nullable(r.avg_bitrate),
+        avg_buffer_length: nullable(r.avg_buffer_length),
+        sessions: Number(r.sessions ?? 0),
+        requests: Number(r.requests ?? 0),
+        rebuffer_events: Number(r.rebuffer_events ?? 0),
+        rebuffer_rate: nullable(r.rebuffer_rate),
+        avg_throughput_kbps: roundTo(Number(r.avg_throughput_kbps ?? 0), 1),
+      };
+    }),
+    object_type_dist: otRows.map((r) => ({
+      object_type: String(r.object_type ?? "unknown"),
+      request_count: Number(r.requests ?? 0),
+      requests: Number(r.requests ?? 0),
+      pct:
+        totalRequests > 0
+          ? roundTo((Number(r.requests ?? 0) * 100) / totalRequests, 2)
+          : 0,
+    })),
+    streaming_format_dist: sfRows.map((r) => ({
+      format: String(r.format ?? "unknown"),
+      streaming_format: String(r.format ?? "unknown"),
+      session_count: Number(r.sessions ?? 0),
+      requests: Number(r.requests ?? 0),
+      pct:
+        totalRequests > 0
+          ? roundTo((Number(r.requests ?? 0) * 100) / totalRequests, 2)
+          : 0,
+    })),
+    session_duration_dist,
+  };
+}
+
+export async function queryCmcdStatus(serviceId = "default") {
+  return {
+    service_id: serviceId,
+    enabled: true,
+    fields: [...CMCD_COLUMNS],
+  };
+}
+
+export async function handleCmcdRequest(
+  path: string,
+  params: CmcdQueryParams = {},
+) {
+  if (path.includes("/api/cmcd/aggregates")) {
+    return queryCmcdAggregates(params);
+  }
+  if (path.includes("/cmcd/status")) {
+    return queryCmcdStatus(params.service_id ?? "default");
+  }
+  if (path.includes("/cmcd/enable") || path.includes("/cmcd/disable")) {
+    return { status: "complete", service_id: params.service_id ?? "default" };
+  }
+  return queryCmcdAggregates(params);
+}

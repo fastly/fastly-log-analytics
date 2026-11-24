@@ -86,6 +86,18 @@ export function useScoringQuery<TData>(
   })
 }
 
+export function useScoringStatus(serviceId: string) {
+  return useScoringQuery(
+    ['scoring-status', serviceId],
+    (signal) =>
+      client.GET('/api/services/{service_id}/scoring/status', {
+        params: { path: { service_id: serviceId } },
+        signal,
+      }),
+    { enabled: Boolean(serviceId) },
+  )
+}
+
 export type LatencyRow = components['schemas']['ScoringLatencyRow']
 export type LatencyResponse = components['schemas']['ScoringLatencyTimeseriesResponse']
 

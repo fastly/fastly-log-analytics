@@ -13,6 +13,8 @@ export const queryKeys = {
 
   views: (serviceId: string | null | undefined) => ["views", serviceId] as const,
 
+  presets: (serviceId: string | null | undefined) => ["query", "presets", serviceId] as const,
+
   logExtents: (serviceId: string | null | undefined) => ["log-extents", serviceId] as const,
   logExtentsAll: () => ["log-extents"] as const,
 
@@ -83,8 +85,6 @@ export const queryKeys = {
 
     storage: (serviceId: string | null | undefined) => ["admin", "storage", serviceId] as const,
     storageAll: () => ["admin", "storage"] as const,
-    storageCalendar: (serviceId: string | null | undefined) => ["admin", "storage", "calendar", serviceId] as const,
-    storageInfo: (serviceId: string | null | undefined) => ["admin", "storage-info", serviceId] as const,
     storageTree: (serviceId: string | null | undefined) => ["admin", "storage-tree", serviceId] as const,
     rawTree: (serviceId: string | null | undefined) => ["admin", "raw-tree", serviceId] as const,
     fileTree: (type: "storage" | "raw", serviceId: string | null | undefined, prefix: string) =>
@@ -124,6 +124,24 @@ export interface BootstrapCacheSeedSource {
   } | null;
 }
 
+/**
+ * Log field settings change only when a user saves them, so everything derived from them
+ * (bootstrap's `active_log_field_ids` included) is refreshed on that save and not otherwise.
+ */
+export function invalidateLogFieldQueries(
+  queryClient: { invalidateQueries: (filters: { queryKey: readonly unknown[] }) => unknown },
+  serviceId: string,
+): void {
+  for (const queryKey of [
+    queryKeys.bootstrap(),
+    queryKeys.services(),
+    ['custom-fields', serviceId],
+    queryKeys.logFieldsCatalog(serviceId),
+  ]) {
+    void queryClient.invalidateQueries({ queryKey })
+  }
+}
+
 export function seedBootstrapDependentCaches(
   queryClient: { setQueryData: (queryKey: readonly unknown[], updater: unknown) => unknown },
   data: BootstrapCacheSeedSource | null | undefined,
@@ -137,7 +155,10 @@ export function seedBootstrapDependentCaches(
     if (data.log_fields_catalog) {
       queryClient.setQueryData(queryKeys.logFieldsCatalog(sid), data.log_fields_catalog);
     }
-    queryClient.setQueryData(queryKeys.syncStatus(sid), data.sync_status ?? null);
+    // Cloud's bootstrap carries neither; a seeded null would count as fresh and stop the header fetching.
+    if (data.sync_status !== undefined) {
+      queryClient.setQueryData(queryKeys.syncStatus(sid), data.sync_status);
+    }
     if (data.log_extents) {
       queryClient.setQueryData(queryKeys.logExtents(sid), data.log_extents);
     }
@@ -156,7 +177,9 @@ export function seedBootstrapDependentCaches(
     if (data.cron_runs_first_page) {
       queryClient.setQueryData(queryKeys.admin.cronLogsRecent(sid), data.cron_runs_first_page);
     }
-    queryClient.setQueryData(queryKeys.lastSync(sid), data.last_sync ?? null);
+    if (data.last_sync !== undefined) {
+      queryClient.setQueryData(queryKeys.lastSync(sid), data.last_sync);
+    }
     if (data.scoring_labels) {
       queryClient.setQueryData(queryKeys.scoringLabels(sid), data.scoring_labels);
     }

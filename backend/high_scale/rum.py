@@ -354,6 +354,25 @@ def rum_analytics(
     return result
 
 
+def rum_beacons_by_date(service: HighScaleService, start_time: str | None, end_time: str | None) -> dict[str, int]:
+    """``{UTC date: distinct visible beacons}`` across vitals and errors in the inclusive window."""
+    start, end = parse_time_window(start_time, end_time, utc=True, now=datetime.now(UTC))
+    if end < start:
+        raise ValueError("RUM end time precedes start time")
+    window = ["event_timestamp >= {start:DateTime64(3, 'UTC')}", "event_timestamp <= {end:DateTime64(3, 'UTC')}"]
+    where_vitals = " AND ".join([*visible_fact_clauses("rum_vitals"), *window])
+    where_errors = " AND ".join([*visible_fact_clauses("rum_errors"), *window])
+    rows = service.client.execute(
+        f"WITH events AS (SELECT event_timestamp, {_BEACON_IDENTITY} AS beacon_id FROM rum_vitals_facts "
+        f"WHERE {where_vitals} UNION ALL SELECT event_timestamp, {_BEACON_IDENTITY} AS beacon_id "
+        f"FROM rum_error_facts WHERE {where_errors}) "
+        "/* rum_beacons_by_date */ SELECT toString(toDate(event_timestamp, 'UTC')) AS date, "
+        "uniqExact(beacon_id) AS beacons FROM events GROUP BY date ORDER BY date",
+        {"service_id": service.service_id, "start": start, "end": end},
+    )
+    return {str(row["date"]): int(row["beacons"]) for row in rows}
+
+
 def _ttfb_ms(value: Any) -> int | None:
     """Beacons report TTFB in seconds or milliseconds; the live feed always shows whole milliseconds."""
     if value is None:

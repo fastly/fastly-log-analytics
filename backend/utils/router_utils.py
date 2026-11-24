@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable, Collection, Mapping
-from typing import Any, get_args
+from typing import TYPE_CHECKING, Any, get_args
 
 from fastapi import HTTPException, Request
 
@@ -183,6 +183,10 @@ from backend.utils.sse import (
     stream_sse_from_worker,
 )
 
+if TYPE_CHECKING:
+    from backend.core.request_context import RequestContext
+    from backend.high_scale.ingest_controller import HighScaleService
+
 logger = logging.getLogger(__name__)
 
 
@@ -218,13 +222,13 @@ def start_or_resume_cron(
 
     Consolidates the 3 hand-rolled copies of this routine across
     ``backend.routers.admin.ingest`` (sync) and
-    ``backend.routers.admin.compaction`` (commit). Each used to duplicate the
+    ``backend.routers.admin.metadata_storage`` (cleanup). Each used to duplicate the
     same ``try: start_cron_run -> spawn thread -> return {ok}; except
     RuntimeError: scan list_active_runs -> return {ok, in_progress_msg};
     else: raise HTTPException(503)`` shape with only the task name +
     target kwargs varying.
     """
-    from backend.core.duckdb import start_cron_run
+    from backend.core.fos_client import start_cron_run
     from backend.cron.scheduler import list_active_runs, start_progress
 
     service_id = source["name"]
@@ -258,24 +262,16 @@ def run_admin_cron_trigger(
     success_msg: str,
     in_progress_msg: str,
     invalidate_cache: bool = True,
-    require_high_scale: bool = False,
-    high_scale_detail: Any = None,
     precheck: Callable[[], None] | None = None,
 ) -> SyncStartResponse:
     """Shared execution wrapper for manual admin cron trigger routes."""
-    if require_high_scale and not svcconfig.is_high_scale_mode(source):
-        raise HTTPException(
-            status_code=400,
-            detail=high_scale_detail or f"{task_name} is only supported under high-scale mode.",
-        )
-
     if precheck is not None:
         precheck()
 
     if invalidate_cache:
-        from backend.repositories.dashboard import invalidate_service
+        from backend.repositories.utils.response_cache import invalidate_service_cache
 
-        invalidate_service(source["name"])
+        invalidate_service_cache(source["name"])
 
     res = start_or_resume_cron(
         source,
@@ -384,6 +380,15 @@ def require_service_id(service_id: str | None) -> str:
     if not service_id:
         raise HTTPException(status_code=400, detail=make_error("service_id_required"))
     return service_id
+
+
+def require_high_scale(ctx: RequestContext) -> HighScaleService:
+    if ctx.high_scale is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "ClickHouse service is not available for this service"},
+        )
+    return ctx.high_scale
 
 
 # ── Section-selector validation ───────────────────────────────────────────────
@@ -497,7 +502,7 @@ def run_cached_repo_endpoint(
     """Run a repository aggregate endpoint with peek-before-checkout caching.
 
     When ``get_fn`` has not been monkeypatched away from ``repo_module``, peeks
-    the cache before checking out a pooled DuckDB connection.
+    the cache before checking out a pooled database connection.
     """
     is_real_repo = getattr(get_fn, "__module__", "") == repo_module
     if is_real_repo:
@@ -655,6 +660,7 @@ __all__ = [
     "redact_error_text",
     "register_salt",
     "require_fastly_token",
+    "require_high_scale",
     "require_json_content_type",
     "require_owned_row",
     "require_service_id",

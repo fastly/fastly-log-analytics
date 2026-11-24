@@ -12,6 +12,7 @@ import { LabelWithInfo } from '@/components/ui/confirm-dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Badge } from '@/components/ui/badge'
 import { cn, formatBytes, PERIOD_LABELS } from '@/lib/utils'
+import { allowedLogPeriods } from '@/lib/serviceDefaults'
 import type { ServiceConfig, LogFieldsConfig, components } from '@/types/api'
 
 type Catalog = components['schemas']['LogFieldsCatalogResponse']
@@ -231,7 +232,7 @@ export function StandardFieldsStep({
                 <SelectValue>{PERIOD_LABELS[period] ?? period}</SelectValue>
               </SelectTrigger>
               <SelectContent>
-                {PERIOD_OPTIONS.map((v) => <SelectItem key={v} value={v}>{PERIOD_LABELS[v]}</SelectItem>)}
+                {allowedLogPeriods(PERIOD_OPTIONS).map((v) => <SelectItem key={v} value={v}>{PERIOD_LABELS[v]}</SelectItem>)}
               </SelectContent>
             </Select>
             {(period === '1' || period === '5') && (
@@ -323,7 +324,7 @@ export function StandardFieldsStep({
         </div>
 
         <div className="space-y-2">
-          {catalog && (catalog.groups || []).map((group) => (
+          {catalog && (catalog.groups || []).filter((group) => group.id !== 'METRICS').map((group) => (
             <CollapsibleGroup
               key={group.id || 'core'}
               group={group}

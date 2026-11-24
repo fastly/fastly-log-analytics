@@ -190,7 +190,7 @@ def test_generate_capture_vcl_custom_edge_and_origin_fields():
                     "name": "my_custom",
                     "enabled": True,
                     "collection_stage": "edge",
-                    "duckdb_type": "VARCHAR",
+                    "sql_type": "VARCHAR",
                     "value_type": "string",
                     "vcl_log_expression": "req.url",
                     "bytes_estimate": 20,
@@ -209,7 +209,7 @@ def test_generate_capture_vcl_custom_edge_and_origin_fields():
                     "name": "my_origin_field",
                     "enabled": True,
                     "collection_stage": "origin",
-                    "duckdb_type": "VARCHAR",
+                    "sql_type": "VARCHAR",
                     "value_type": "string",
                     "vcl_log_expression": "beresp.status",
                     "bytes_estimate": 20,
@@ -236,7 +236,7 @@ def _miss_pass_cfg(frequency: str) -> dict:
                 "name": "origin_cache_state",
                 "enabled": True,
                 "collection_stage": "origin",
-                "duckdb_type": "VARCHAR",
+                "sql_type": "VARCHAR",
                 "value_type": "string",
                 "vcl_log_expression": "beresp.http.X-Cache",
                 "origin_log_frequency": frequency,
@@ -366,7 +366,7 @@ def test_remove_logging_endpoint_no_op_when_no_active_version():
 
 
 def _run_remove_endpoint_scenario(
-    endpoints: list[str],
+    endpoints: dict[str, str],
     *,
     snippets: list[dict] | None = None,
     snippet_delete_404: bool = False,
@@ -388,7 +388,7 @@ def _run_remove_endpoint_scenario(
 
     with (
         patch("backend.provision.fastly_api.get_active_version", return_value=5),
-        patch("backend.provision.fastly_api.list_s3_endpoints", return_value=endpoints),
+        patch("backend.provision.fastly_api.list_log_endpoints", return_value=endpoints),
         patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly),
     ):
         fastly_api.remove_logging_endpoint("svc-id", "MyEndpoint", "tok")
@@ -398,20 +398,39 @@ def _run_remove_endpoint_scenario(
 @pytest.mark.usefixtures("_isolate_configs_dir")
 def test_remove_logging_endpoint_absent_vs_present_and_404_tolerance():
     """Absent endpoint skips endpoint DELETE; present endpoint deletes endpoint+snippets; 404 on snippet is swallowed."""
-    absent_calls = _run_remove_endpoint_scenario(["OtherEndpoint"])
+    absent_calls = _run_remove_endpoint_scenario({"OtherEndpoint": "s3"})
     assert any("clone" in p for _, p in absent_calls)
     assert not any("logging/s3/MyEndpoint" in p for m, p in absent_calls if m == "DELETE")
     assert any("validate" in p for _, p in absent_calls)
 
     present_calls = _run_remove_endpoint_scenario(
-        ["MyEndpoint"],
+        {"MyEndpoint": "s3"},
         snippets=[{"name": "Fastly Log Analytics - vcl_recv"}, {"name": "Fastly Log Analytics - vcl_deliver"}],
     )
     assert any("logging/s3/MyEndpoint" in p for m, p in present_calls if m == "DELETE")
     assert any("snippet/" in p for m, p in present_calls if m == "DELETE")
     assert any("activate" in p for m, p in present_calls if m == "PUT")
 
-    _run_remove_endpoint_scenario(["MyEndpoint"], snippet_delete_404=True)
+    _run_remove_endpoint_scenario({"MyEndpoint": "s3"}, snippet_delete_404=True)
+
+
+@pytest.mark.usefixtures("_isolate_configs_dir")
+def test_remove_logging_endpoint_deletes_each_managed_endpoint_through_its_type():
+    calls = _run_remove_endpoint_scenario(
+        {
+            "MyEndpoint": "fos",
+            "Fastly RUM Logs": "s3",
+            "Fastly Object Storage Logs": "fos",
+            "MyEndpoint (copy)": "fos",
+            "Customer Archive": "s3",
+        }
+    )
+    deleted = sorted(p.split("/version/6/", 1)[1] for m, p in calls if m == "DELETE" and "/logging/" in p)
+    assert deleted == [
+        "logging/fos/Fastly%20Object%20Storage%20Logs",
+        "logging/fos/MyEndpoint",
+        "logging/s3/Fastly%20RUM%20Logs",
+    ]
 
 
 @pytest.mark.usefixtures("_isolate_configs_dir")
@@ -430,7 +449,7 @@ def test_remove_logging_endpoint_rolls_back_on_validation_failure():
 
     with (
         patch("backend.provision.fastly_api.get_active_version", return_value=5),
-        patch("backend.provision.fastly_api.list_s3_endpoints", return_value=["MyEndpoint"]),
+        patch("backend.provision.fastly_api.list_log_endpoints", return_value={"MyEndpoint": "s3"}),
         patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly),
     ):
         with pytest.raises(RuntimeError, match="Validation failed"):
@@ -442,14 +461,18 @@ def test_remove_logging_endpoint_rolls_back_on_validation_failure():
 # ── ensure_cdn_service & redeploy_cdn_vcl ─────────────────────────────────
 
 
-def _reconciler_writing_cdn_id(cdn_id: str, *, then_raise: Exception | None = None, version: int = 1) -> MagicMock:
+def _reconciler_writing_cdn_id(
+    cdn_id: str, *, then_raise: Exception | None = None, version: int = 1, created: bool = True
+) -> MagicMock:
     """Stand-in for ``reconcile_cdn_service_state`` that persists the CDN id the way the real one does."""
 
-    def _reconcile(logging_service_id, token, status_cb=None, activate=True):
+    def _reconcile(logging_service_id, token, status_cb=None, activate=True, on_created=None):
         svcconfig.mutate_config(logging_service_id, lambda c: c.setdefault("fos_proxy", {}).update(service_id=cdn_id))
+        if created and on_created is not None:
+            on_created(cdn_id)
         if then_raise is not None:
             raise then_raise
-        return ReconciliationResult(service_id=cdn_id, activated_version=version)
+        return ReconciliationResult(service_id=cdn_id, activated_version=version, created=created)
 
     return MagicMock(side_effect=_reconcile)
 
@@ -508,12 +531,12 @@ def test_ensure_cdn_service_success():
         patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=True) as mock_detect,
     ):
         result = fastly_api.ensure_cdn_service(input_cfg, "AK", "SK", "tok", status_cb=statuses.append)
-        assert result == {"id": "cdn-new-123", "name": "MyCDN", "rate_limiting": True}
+        assert result == {"id": "cdn-new-123", "name": "MyCDN", "rate_limiting": True, "created": True}
         written_json = svcconfig.load_config("log-svc-123")
         assert written_json["fos_access_key_id"] == "AK" and written_json["fos_secret_access_key"] == "SK"
         assert written_json["cdn_service_name"] == "MyCDN"
         mock_reconcile.assert_called_with(
-            logging_service_id="log-svc-123", token="tok", status_cb=statuses.append, activate=True
+            logging_service_id="log-svc-123", token="tok", status_cb=statuses.append, activate=True, on_created=None
         )
         mock_detect.assert_called_with("tok", "log-svc-123")
 
@@ -533,13 +556,21 @@ def test_ensure_cdn_service_rate_limiting_scenarios(detection_val):
 
 
 @pytest.mark.usefixtures("_isolate_configs_dir")
-@pytest.mark.parametrize("then_raise", [None, RuntimeError("Validation failed")], ids=["success", "after_failure"])
-def test_ensure_cdn_service_on_created_callback(then_raise):
+@pytest.mark.parametrize(
+    ("then_raise", "created", "expected_ids"),
+    [
+        (None, True, ["cdn-new-123"]),
+        (RuntimeError("Validation failed"), True, ["cdn-new-123"]),
+        (None, False, []),
+    ],
+    ids=["success", "after_failure", "existing_reused"],
+)
+def test_ensure_cdn_service_on_created_callback(then_raise, created, expected_ids):
     created_ids = []
     with (
         patch(
             "backend.provision.declarative.reconciler.reconcile_cdn_service_state",
-            _reconciler_writing_cdn_id("cdn-new-123", then_raise=then_raise),
+            _reconciler_writing_cdn_id("cdn-new-123", then_raise=then_raise, created=created),
         ),
         patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=None),
     ):
@@ -552,7 +583,7 @@ def test_ensure_cdn_service_on_created_callback(then_raise):
             fastly_api.ensure_cdn_service(
                 {"logging_service_id": "log-svc-123"}, "AK", "SK", "tok", on_created=created_ids.append
             )
-    assert created_ids == ["cdn-new-123"]
+    assert created_ids == expected_ids
 
 
 # ── update_logging_endpoint (SSE generator) ──────────────────────────────
@@ -698,8 +729,8 @@ def test_update_logging_endpoint_cmcd_and_custom_fields_convergence():
             "schema_version": 2,
             "groups": ["A", "B"],
             "custom_fields": [
-                {"name": "my_custom", "duckdb_type": "VARCHAR", "enabled": True},
-                {"name": "cmcd_sid", "duckdb_type": "VARCHAR", "enabled": True},
+                {"name": "my_custom", "sql_type": "VARCHAR", "enabled": True},
+                {"name": "cmcd_sid", "sql_type": "VARCHAR", "enabled": True},
             ],
         },
     }
@@ -901,7 +932,7 @@ def _run_remove(snippet_names, deleted_sink):
     with (
         patch.object(fastly_api, "fastly", side_effect=fake_fastly),
         patch.object(fastly_api, "get_active_version", return_value=98),
-        patch.object(fastly_api, "list_s3_endpoints", return_value=["Fastly Object Storage Logs"]),
+        patch.object(fastly_api, "list_log_endpoints", return_value={"Fastly Object Storage Logs": "s3"}),
     ):
         fastly_api.remove_logging_endpoint("svc-td", "Fastly Object Storage Logs", "tok")
 
@@ -1124,7 +1155,7 @@ def test_load_vcl_with_rate_limiting_false_strips_ratelimit_blocks():
 # ── Merged from test_fastly_mock_mode.py ──────────────────────────────────────────────
 
 from backend.core.fastly.client import fastly, is_mock_mode, mock_response
-from backend.core.rollups.security_dims import fetch_verified_bots_paged
+from backend.cron.jobs.metadata import fetch_verified_bots_paged
 
 
 def test_is_mock_mode_reads_env(monkeypatch):
@@ -1675,7 +1706,6 @@ import backend.utils.telemetry as sqlite_profiler
 import backend.utils.telemetry as structlog_config
 import backend.utils.tunnel as _session_mod
 from backend.core.metadata import base
-from backend.core.rollups._common import parse_hour_token
 from backend.utils import remote_access, tunnel
 from backend.utils.bounded_cache import BoundedLRUCache, BoundedTTLCache, CacheRegistry
 from backend.utils.date_utils import (
@@ -1728,9 +1758,19 @@ ROOT = Path(__file__).resolve().parents[2]
 _NOW = datetime(2026, 6, 29, 12, 30, 45, tzinfo=UTC)
 _INSIGHTS_NOW = datetime(2026, 7, 7, 12, 0, 0, tzinfo=UTC)
 _TS_SOURCE = ROOT / "frontend" / "lib" / "chartUtils.ts"
-_HOUR_KEYS = ["2026-10-19-00", "2026-10-19-23", "2026-02-28-23", "2024-02-29-12", "2026-1-5-3"]
-_BAD_KEYS = ["", "2026-10-19", "2026-10-19-24", "2026-13-01-00", "garbage", "2026-10-19T05", "2026-10-19-05-00"]
-_DROP_TABLE_FILES = sorted([*(ROOT / "backend" / "repositories").glob("*.py"), ROOT / "backend" / "core" / "duckdb.py"])
+_HOUR_KEYS = ["2026-10-19-00", "2026-10-19-23", "2026-02-28-23", "2024-02-29-12"]
+_BAD_KEYS = [
+    "",
+    "2026-10-19",
+    "2026-10-19-24",
+    "2026-13-01-00",
+    "garbage",
+    "2026-10-19T05",
+    "2026-10-19-05-00",
+    "2026-1-5-3",
+    "2026-01-05-3",
+]
+_DROP_TABLE_FILES = sorted((ROOT / "backend" / "repositories").glob("*.py"))
 
 
 @pytest.fixture(autouse=True)
@@ -1910,19 +1950,14 @@ def test_cache_registry_register_and_clear():
 
 
 def test_storage_caches_are_registered_at_import():
-    import backend.core.duckdb  # noqa: F401
-    import backend.core.storage  # noqa: F401
-    import backend.repositories.dashboard  # noqa: F401
-    import backend.repositories.network  # noqa: F401
+    import backend.config  # noqa: F401
+    import backend.core.fos_client  # noqa: F401
 
     names = set(CacheRegistry.names())
     for required in (
-        "storage._view_cache",
-        "dashboard._dashboard_cache",
-        "network._response_cache",
-        "duckdb._fos_client_cache",
-        "duckdb._initialized_paths",
-        "core._duckdb_status._schema_cache",
+        "config._config_cache",
+        "config._name_cache",
+        "fos_client._fos_client_cache",
     ):
         assert required in names, f"missing registration: {required}"
 
@@ -1994,10 +2029,8 @@ def _unthrottled(path: str, only_funcs: set[str] | None, only_msg: str | None) -
 @pytest.mark.parametrize(
     ("path", "funcs", "msg"),
     [
-        ("backend/core/duckdb_pool.py", None, None),
         ("backend/core/ingest/parser.py", None, "_parse_rum_line"),
         ("backend/core/ingest/parser.py", {"extract_metrics_from_faro_payload"}, None),
-        ("backend/repositories/dashboard.py", None, "analyst"),
         *[(p.relative_to(ROOT).as_posix(), None, "DROP TABLE") for p in _DROP_TABLE_FILES],
     ],
 )
@@ -2283,17 +2316,18 @@ def test_parse_window_valid_and_invalid():
         assert parse_window(start, end) is None
 
 
+@pytest.mark.no_postgres
 def test_hour_and_day_key_parsers_and_ensure_utc():
     for key in _HOUR_KEYS:
         raw = datetime.strptime(key, "%Y-%m-%d-%H").replace(tzinfo=UTC)
         assert parse_hour_key(key) == raw == parse_hour_key_strict(key) and parse_hour_key(key).tzinfo is UTC
     for key in _BAD_KEYS:
-        assert parse_hour_key(key) is None and parse_hour_token(key) is None
+        assert parse_hour_key(key) is None
         with pytest.raises(ValueError):
             parse_hour_key_strict(key)
-    for key in ("2026-10-19", "2024-02-29", "2026-1-5"):
+    for key in ("2026-10-19", "2024-02-29"):
         assert parse_day_key_strict(key) == datetime.strptime(key, "%Y-%m-%d").replace(tzinfo=UTC)
-    for key in ("", "2026-02-30", "2026-10-19-05", "x"):
+    for key in ("", "2026-02-30", "2026-10-19-05", "x", "2026-1-5", "2026-01-5"):
         with pytest.raises(ValueError):
             parse_day_key_strict(key)
 

@@ -478,7 +478,7 @@ def get_ilike_prefilter_literals() -> list[str]:
 def get_bot_regex_pattern(limit: int = 500) -> str | None:
     """Return a case-insensitive regex pattern matching known bot literals.
 
-    Used for high-performance DuckDB filtering via regexp_matches().
+    Used for high-performance SQL regex filtering.
     Alternation in RE2 is significantly faster than long OR chains of ILIKE.
     """
     literals = get_ilike_prefilter_literals()

@@ -1,6 +1,6 @@
 import { act, cleanup, render, screen, waitFor, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { http, HttpResponse } from 'msw'
+import { http, HttpResponse } from 'msw/http'
 import {
   renderWithQuery,
   stubMatchMedia, stubResizeObserver, stubGetAnimations, stubPointerCaptureAndScroll,
@@ -400,7 +400,7 @@ describe('ShareLogin & Sessions Pages', () => {
       expect(inviteError).not.toBeInTheDocument()
       resolveLogin()
       const loginError = await screen.findByText('Invalid email or passcode.')
-      expect(loginError.closest('[role="alert"]')).toHaveFocus()
+      await waitFor(() => expect(loginError.closest('[role="alert"]')).toHaveFocus())
       expect(screen.queryByText(/this invitation link has expired/i)).not.toBeInTheDocument()
     })
 

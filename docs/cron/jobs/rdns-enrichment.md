@@ -3,7 +3,7 @@
 ## 1. Overview & Objectives
 - **Job Identifier:** `rdns_enrichment`
 - **Category:** IP Intelligence & Asynchronous Network Enrichment
-- **Purpose:** Discovers client IP addresses from recent traffic in DuckDB/DuckLake that lack reverse DNS hostname mappings and executes asynchronous PTR queries with Forward-Confirmed reverse DNS (FCrDNS) verification, caching the resolved hostnames in PostgreSQL 16 `rdns` table (`METADATA_DSN` per ADR-22).
+- **Purpose:** Discovers client IP addresses from recent traffic in ClickHouse (`request_facts`) that lack reverse DNS hostname mappings and executes asynchronous PTR queries with Forward-Confirmed reverse DNS (FCrDNS) verification, caching the resolved hostnames in the PostgreSQL 16 `rdns` table (`METADATA_DSN` per ADR-22).
 - **Why It Runs:** Fastly access logs contain client IP addresses, but reverse DNS hostnames (e.g. `*.googlebot.com`, `*.crawl.yahoo.net`) provide vital human-readable context for security audits, bot detection, and traffic classification. Performing synchronous DNS lookups during request serving is prohibitively slow (> 100ms per IP). Running background asynchronous resolution enriches IP records ahead of time with zero serving-path latency penalty.
 
 ---
@@ -20,10 +20,9 @@
 ---
 
 ## 3. Architecture Execution Matrix
-| Architecture / Mode | Execution Engine | Data Path | Concurrency & Locks |
+| Component | Execution Engine | Data Path | Concurrency & Locks |
 |---|---|---|---|
-| **Standard Mode (`DEPLOYMENT_MODE=standard`)** | APScheduler (In-Process Web Pod) | Discovers distinct IPs across active services using `execute_with_stale_view_retry()`, resolves PTR records asynchronously via `aiodns`, and writes to PostgreSQL 16 `rdns` table. | In-process thread-local write lock (`_write_lock`) with PostgreSQL connection pooling (`pg_connection`). Gated by `FLA_DEV_NO_CRONS=1` (network outbound suppressed). |
-| **High-Scale Mode (`DEPLOYMENT_MODE=high_scale`)** | Pod APScheduler (Web Pod Only) | Queries distinct IPs from DuckLake views; populates shared PostgreSQL 16 `rdns` cache. | Process-global singleton; never scheduled to Celery workers. |
+| **Unified ClickHouse Architecture** | APScheduler (Backend Pod) | Discovers distinct IPs across active services from ClickHouse `request_facts`, resolves PTR records asynchronously via `aiodns`, and writes to PostgreSQL 16 `rdns` table. | In-process write lock (`_write_lock`) with PostgreSQL connection pooling (`pg_connection`). Gated by `FLA_DEV_NO_CRONS=1` (network outbound suppressed). |
 
 ---
 
@@ -37,7 +36,7 @@
 
 ## 5. Execution Lifecycle & Step-by-Step Logic
 1. **Dev Mode Gate:**
-   - Evaluates `dev_mode_no_crons()`. If active (`FLA_DEV_NO_CRONS=1`), immediately skips outbound DNS queries and view scans, recording `status="skipped"` and `"skipped (dev_mode_no_crons)"` in `system_jobs`.
+   - Evaluates `dev_mode_no_crons()`. If active (`FLA_DEV_NO_CRONS=1`), immediately skips outbound DNS queries and scans, recording `status="skipped"` and `"skipped (dev_mode_no_crons)"` in `system_jobs`.
 2. **Dynamic Queue-Depth Sizing:**
    - Probes the count of unresolved (`status='pending'`) IPs in PostgreSQL 16 `rdns` table:
      - Empty / minimal backlog (`pending == 0`): Defaults to baseline 200 IPs.
@@ -51,14 +50,7 @@
 4. **Stale Record Refresh:**
    - Re-resolves stale IP records older than 48 hours (proportional to `batch_limit // 4`).
 5. **Unresolved IP Discovery:**
-   - Queries distinct client IPs from the last 30 days across all configured services with an `ip` column using `execute_with_stale_view_retry()`:
-     ```sql
-     SELECT DISTINCT ip FROM logs
-     WHERE timestamp >= CURRENT_TIMESTAMP - INTERVAL '30 days'
-       AND ip IS NOT NULL
-     LIMIT 500;
-     ```
-   - Filters out already-cached IPs and enqueues up to 500 new IPs into PostgreSQL 16 `rdns` table as `status='pending'`.
+   - Queries distinct client IPs from recent traffic across configured services and enqueues up to 500 new IPs into PostgreSQL 16 `rdns` table as `status='pending'`.
 6. **Reaping & Retention Pruning:**
    - Runs daily (`_maybe_reap_stale_rows`):
      - Deletes `nxdomain` and `error` records older than 30 days.
@@ -75,8 +67,7 @@
 
 ## 6. Telemetry, Timing & Query Audit Contract
 - **100% Query & API Call Capture:**
-  - **DuckDB Discovery:** Uses `execute_with_stale_view_retry()` to prevent failures during concurrent Parquet buffer rotation.
-  - **Zero FOS Calls:** Strictly local DuckDB + external DNS calls; zero cloud FOS calls.
+  - **Zero FOS Calls:** Strictly ClickHouse + PostgreSQL 16 + external DNS calls; zero cloud FOS calls.
 - **Timing & Resource Budgets:**
   - Discovery query duration: < 500ms.
   - DNS resolution batch: Typically 1.0–4.0s for 100–500 IPs across 50 concurrent async workers.
@@ -91,10 +82,8 @@
 - **Upstream DNS Resolver Down / Degraded:**
   - Per-address resolver timeouts and network failures are counted in `errors`; other lookups continue and pending addresses remain eligible for a later tick.
   - If `errors > 0` and `resolved == 0`, the job records `status="warning"` with `(DNS lookup failures detected)`. A mixed batch with at least one successful resolution remains `status="success"` and exposes the error count in its summary.
-  - An unhandled batch or storage exception records `status="error"`; this is distinct from ordinary per-address lookup failures.
+  - An unhandled batch or storage exception records `status="error"`.
   - Next scheduled tick automatically retries remaining pending IPs.
-- **Stale DuckDB Buffer View Race:**
-  - Automatically caught and healed via `execute_with_stale_view_retry()`.
 
 ---
 
@@ -111,4 +100,3 @@
 - 3. Unit tests verify `_run_rdns_enrichment` skips when `FLA_DEV_NO_CRONS=1` is active (`status="skipped"`).
 - 4. Unit tests verify dynamic queue-depth batch sizing (100 baseline, 500 medium, 1,000 safety ceiling).
 - 5. Unit tests verify manual `POST /api/admin/rdns/enrich` and `GET /api/admin/rdns/stats` endpoints.
-- 6. Regression suite verifies backward compatibility with existing scheduler tests.

@@ -8,6 +8,7 @@ const nextConfig: NextConfig = {
   },
   output: isStaticExport ? 'export' : 'standalone',
   trailingSlash: false,
+  ...(isStaticExport ? { generateBuildId: async () => 'flp-static-build', images: { unoptimized: true } } : {}),
   // Allow the Playwright suite (R-3a) to point next dev at a separate
   // dist tree so its lockfile doesn't collide with the main `next dev`
   // on port 13002. NEXT_DIST_DIR is only set by the Playwright config;

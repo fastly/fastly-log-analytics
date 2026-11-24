@@ -52,7 +52,7 @@ KEYS_STORE = "KEYS_STORE_ID"
 CFG_STORE = "CFG_STORE_ID"
 SID = "svc"
 _MERGE_SID = "logsvc1"
-_USER_FIELD = {"name": "my_custom", "duckdb_type": "VARCHAR", "enabled": True}
+_USER_FIELD = {"name": "my_custom", "sql_type": "VARCHAR", "enabled": True}
 
 
 @pytest.fixture
@@ -150,6 +150,7 @@ def test_scoring_custom_fields_and_removal_helpers():
 
 
 # ── Enable / Disable / Teardown / Matrix / Wasm ──
+@pytest.mark.no_postgres
 @pytest.mark.usefixtures("_no_local_config_writes")
 def test_enable_scoring_stages_identity_and_overrides():
     a = sso.scorer_vcl_fingerprint(LOG_SVC)
@@ -166,13 +167,18 @@ def test_enable_scoring_stages_identity_and_overrides():
         "log_fields": {"custom_fields": []},
         "provisioning": {"endpoint_name": "Fastly Object Storage Logs"},
     }
+    order: list[str] = []
     fastly_mock = _happy_path_fastly_mock()
     with (
         patch.object(sso.svcconfig, "load_config", return_value=cfg),
         patch.object(sso.svcconfig, "_save_config_unlocked") as save_mock,
         patch.object(sso, "ensure_scoring_service", return_value=_scoring_meta()),
-        patch.object(sso, "_deploy_wasm_package", return_value={"sha": "deadbeef_pkg_sha", "version": 7}) as wasm_mock,
-        patch.object(sso, "_write_matrix_to_kv") as kv_mock,
+        patch.object(
+            sso,
+            "_deploy_wasm_package",
+            side_effect=lambda *_a, **_k: (order.append("deploy"), {"sha": "deadbeef_pkg_sha", "version": 7})[1],
+        ) as wasm_mock,
+        patch.object(sso, "_write_matrix_to_kv", side_effect=lambda *_a, **_k: order.append("matrix")) as kv_mock,
         patch.object(sso, "fastly", fastly_mock),
         patch("backend.core.fastly.client.fastly", fastly_mock),
         patch("backend.provision.declarative.reconciler.reconcile_vcl_state") as reconcile_mock,
@@ -181,6 +187,7 @@ def test_enable_scoring_stages_identity_and_overrides():
         result = sso.enable_scoring(LOG_SVC, TOKEN)
 
     assert (result["scoring_service_id"], result["logging_service_active_version"]) == (SCORE_SVC, 101)
+    assert order == ["matrix", "deploy"]
     wasm_mock.assert_called_once_with(
         SCORE_SVC, "MATRIX_STORE", TOKEN, status_cb=None, prior_package_sha="", prior_files_hash=""
     )
@@ -233,6 +240,7 @@ def test_enable_scoring_stages_identity_and_overrides():
     assert saved_re["scoring"]["enforce_status_code"] == 403
 
 
+@pytest.mark.no_postgres
 @pytest.mark.usefixtures("_no_local_config_writes")
 def test_enable_scoring_secret_healing_status_cb_and_rollback():
     for post_409, exp_method, exp_path in (
@@ -282,6 +290,13 @@ def test_enable_scoring_secret_healing_status_cb_and_rollback():
     # Rollback on validation failure
     save_calls = []
     fm_rb = _happy_path_fastly_mock()
+    created_meta = _scoring_meta()
+    created_meta["created_resources"] = {
+        "scoring_service_id": SCORE_SVC,
+        "scoring_keys_store_id": KEYS_STORE,
+        "scoring_config_store_id": CFG_STORE,
+        "scoring_matrix_store_id": "MATRIX_STORE",
+    }
     with (
         patch.object(
             sso.svcconfig, "load_config", return_value={"service_id": LOG_SVC, "log_fields": {"custom_fields": []}}
@@ -289,9 +304,10 @@ def test_enable_scoring_secret_healing_status_cb_and_rollback():
         patch.object(
             sso.svcconfig, "_save_config_unlocked", side_effect=lambda _s, c, **_k: save_calls.append(dict(c))
         ),
-        patch.object(sso, "ensure_scoring_service", return_value=_scoring_meta()),
+        patch.object(sso, "ensure_scoring_service", return_value=created_meta),
         patch.object(sso, "_deploy_wasm_package"),
         patch.object(sso, "_write_matrix_to_kv"),
+        patch.object(sso, "delete_scoring_service") as delete_mock,
         patch.object(sso, "fastly", fm_rb),
         patch("backend.core.fastly.client.fastly", fm_rb),
         patch(
@@ -302,8 +318,10 @@ def test_enable_scoring_secret_healing_status_cb_and_rollback():
     ):
         sso.enable_scoring(LOG_SVC, TOKEN)
     assert "scoring" not in save_calls[-1]
+    delete_mock.assert_called_once_with(token=TOKEN, **created_meta["created_resources"])
 
 
+@pytest.mark.no_postgres
 @pytest.mark.usefixtures("_no_local_config_writes")
 def test_disable_and_teardown_scoring():
     # No-op when not enabled
@@ -689,6 +707,26 @@ def test_disable_call_order_and_rollback(caplog):
     assert any("rollback activation of version 200 failed" in r.getMessage() for r in caplog.records)
 
 
+class _FastlyNativeFos(_Fastly):
+    def __call__(self, method, path, body=None, **kwargs):
+        if method == "GET" and path.endswith("/logging/s3"):
+            self.calls.append((method, path))
+            self.kwargs.append(kwargs)
+            return []
+        if method == "GET" and path.endswith("/logging/fos"):
+            self.calls.append((method, path))
+            self.kwargs.append(kwargs)
+            return [{"name": "Fastly Object Storage Logs"}]
+        return super().__call__(method, path, body, **kwargs)
+
+
+def test_disable_updates_the_format_on_a_native_fos_endpoint():
+    fake = _FastlyNativeFos()
+    _run_disable(fake)
+    puts = [p for m, p in fake.calls if m == "PUT" and "/logging/" in p]
+    assert puts == [f"/service/{LOG_SVC}/version/201/logging/fos/Fastly%20Object%20Storage%20Logs"]
+
+
 def test_teardown_call_order():
     meta = {"scoring_service_id": SCORE_SVC, "scoring_keys_store_id": "K", "scoring_config_store_id": "C"}
     fake_ok = _Fastly()
@@ -833,7 +871,7 @@ def test_remove_endpoint_call_order(caplog):
     def _run_rm(fake):
         with (
             patch("backend.provision.fastly_api.get_active_version", return_value=10),
-            patch("backend.provision.fastly_api.list_s3_endpoints", return_value=["MyEndpoint"]),
+            patch("backend.provision.fastly_api.list_log_endpoints", return_value={"MyEndpoint": "s3"}),
             patch("backend.provision.fastly_api.fastly", side_effect=fake),
         ):
             return fastly_api.remove_logging_endpoint(SID, "MyEndpoint", "tok")
@@ -872,7 +910,7 @@ def test_ensure_cdn_service_and_redeploy_cdn_vcl():
     ):
         mock_rec.side_effect = lambda **_kw: (
             svcconfig.mutate_config(_MERGE_SID, lambda c: c.setdefault("fos_proxy", {}).update(service_id="cdn123")),
-            SimpleNamespace(activated_version=3),
+            SimpleNamespace(activated_version=3, created=True),
         )[1]
         out = fastly_api.ensure_cdn_service({"service_id": _MERGE_SID, "fos_bucket": "b"}, "AK", "SK", "tok")
         saved = _persisted()
@@ -889,7 +927,7 @@ def test_ensure_cdn_service_and_redeploy_cdn_vcl():
             _MERGE_SID, {"service_id": _MERGE_SID, "keep_me": 1, "rum": {"enabled": True, "cid_salt": salt}}
         )
         mock_rec.side_effect = None
-        mock_rec.return_value = SimpleNamespace(activated_version=3)
+        mock_rec.return_value = SimpleNamespace(activated_version=3, created=False)
         fastly_api.ensure_cdn_service(
             {"service_id": _MERGE_SID, "fos_bucket": "b", "rum": {"enabled": False}}, "AK", "SK", "tok"
         )
@@ -900,7 +938,7 @@ def test_ensure_cdn_service_and_redeploy_cdn_vcl():
             _MERGE_SID,
             {"service_id": _MERGE_SID, "cdn_service_id": "cdn9", "fos_proxy": {"service_id": "cdn9"}, "other": [1, 2]},
         )
-        mock_rec.return_value = SimpleNamespace(activated_version=4)
+        mock_rec.return_value = SimpleNamespace(activated_version=4, created=False)
         assert fastly_api.redeploy_cdn_vcl("cdn9", "tok", rate_limiting=False) == 4
         assert _persisted()["fos_proxy"] == {"service_id": "cdn9", "rate_limiting_enabled": False}
 
@@ -1012,7 +1050,7 @@ def test_write_service_config_merges_and_preserves_state():
             "status": {"state": "ok"},
             "last_activated_version": 7,
             "rum_vcl_sha": "sha",
-            "log_fields": {"groups": ["A"], "custom_fields": [{"name": "mine", "duckdb_type": "VARCHAR"}]},
+            "log_fields": {"groups": ["A"], "custom_fields": [{"name": "mine", "sql_type": "VARCHAR"}]},
         },
     )
     orchestrator.write_service_config(_state())
@@ -1059,15 +1097,15 @@ def test_cmcd_and_system_custom_fields_reconciliation():
     assert _CMCD_FIELD_NAMES <= _names(out_cmcd) and "my_custom" in _names(out_cmcd)
 
     out_off = reconcile_system_custom_fields(
-        [_USER_FIELD, {"name": "cmcd_sid", "duckdb_type": "VARCHAR"}], scoring_enabled=False, cmcd_enabled=False
+        [_USER_FIELD, {"name": "cmcd_sid", "sql_type": "VARCHAR"}], scoring_enabled=False, cmcd_enabled=False
     )
     assert _names(out_off) == {"my_custom"}
 
     out_stale = reconcile_system_custom_fields(
-        [{"name": "cmcd_sid", "duckdb_type": "WRONG", "enabled": False}], scoring_enabled=False, cmcd_enabled=True
+        [{"name": "cmcd_sid", "sql_type": "WRONG", "enabled": False}], scoring_enabled=False, cmcd_enabled=True
     )
     sids = [cf for cf in out_stale if cf["name"] == "cmcd_sid"]
-    assert len(sids) == 1 and (sids[0]["duckdb_type"], sids[0]["enabled"]) == ("VARCHAR", True)
+    assert len(sids) == 1 and (sids[0]["sql_type"], sids[0]["enabled"]) == ("VARCHAR", True)
 
     out_both = reconcile_system_custom_fields([_USER_FIELD], scoring_enabled=True, cmcd_enabled=True)
     assert (_CMCD_FIELD_NAMES | _SCORING_FIELD_NAMES | {"my_custom"}) <= _names(out_both)
@@ -1094,7 +1132,7 @@ def test_cmcd_and_system_custom_fields_reconciliation():
     cfg3 = {
         "log_fields": {
             "schema_version": 2,
-            "custom_fields": [_USER_FIELD, {"name": "cmcd_br", "duckdb_type": "INTEGER"}],
+            "custom_fields": [_USER_FIELD, {"name": "cmcd_br", "sql_type": "INTEGER"}],
         }
     }
     reconcile_cfg_system_custom_fields(cfg3)
@@ -1266,7 +1304,7 @@ def test_session_scoring_config_merge_and_lock_release():
         patch.object(sso, "_remove_scoring_backend"),
         patch.object(sso, "ensure_vcl_snippet"),
         patch.object(sso, "fastly", MagicMock(return_value={})),
-        patch("backend.core.fastly.client.list_s3_endpoints", return_value=[]),
+        patch("backend.core.fastly.client.list_log_endpoints", return_value={}),
         patch("backend.provision.fastly_api.generate_capture_vcl", return_value={"recv": ""}),
         patch.object(
             sso, "delete_scoring_service", side_effect=lambda *_a, **_k: (_concurrent_write(compute_key="kept"), [])[1]
@@ -1390,14 +1428,12 @@ def test_provision_collects_repeated_enable_group_into_list(mock_provision):
 @patch("backend.provision.orchestrator.provision", return_value=[])
 def test_provision_applies_documented_default_values(mock_provision):
     """Defaults match the docker-compose-relied-upon contract:
-    commit_interval_mins=5, log_retention_days=30, disable_*=False."""
+    log_retention_days=30, disable_*=False."""
     with patch("backend.provision.cli.wizard") as mock_wizard:
         runner.invoke(app, ["provision", "--yes", "--service-id", "s"])
     args = mock_wizard.call_args.args[0]
-    assert args.commit_interval_mins == 5
     assert args.log_retention_days == 30
     assert args.disable_cron_sync is False
-    assert args.disable_cron_compact is False
     assert args.disable_delete_after is False
 
 
@@ -1437,7 +1473,7 @@ def test_teardown_propagates_no_remove_flags_to_handler():
 
 def test_teardown_remove_data_default_is_false():
     """``--remove-data`` is opt-in — default True would auto-delete
-    the local DuckDB/cache on every teardown."""
+    the local metadata/cache on every teardown."""
     with patch("backend.provision.cli.handle_teardown") as mock_handler:
         runner.invoke(app, ["teardown", "--yes", "--bucket", "b", "--token", "t"])
     args = mock_handler.call_args.args[0]
@@ -1538,8 +1574,6 @@ def _args(**overrides):
         "delete_after": True,
         "disable_delete_after": False,
         "disable_cron_sync": False,
-        "commit_interval_mins": 5,
-        "disable_cron_compact": False,
         "log_retention_days": 30,
         "preset": None,
         "enable_group": None,
@@ -1825,7 +1859,7 @@ def test_handle_update_logs_preserves_scoring_custom_fields_on_preset_swap():
     def _record_update(cfg, token):
         return iter([{"type": "done", "version": 1}])
 
-    pre_scoring_field = {"name": "edge_score", "duckdb_type": "INTEGER", "enabled": True}
+    pre_scoring_field = {"name": "edge_score", "sql_type": "INTEGER", "enabled": True}
 
     with (
         patch("backend.config.list_service_ids", return_value=["svc"]),
@@ -2103,18 +2137,15 @@ def test_wizard_disable_delete_after_overrides_yes_default():
 
 
 def test_wizard_disable_cron_flags_propagate_to_config():
-    """Cron sync + cron compact default to enabled; the two
-    ``--disable-*`` flags flip them off. Pinned because the cron
-    scheduler reads these flags exactly once at startup."""
+    """Cron sync defaults to enabled; the ``--disable-cron-sync`` flag flips it off."""
     with (
         patch("backend.provision.cli.validate_log_format", return_value=[]),
         patch("backend.provision.cli.fastly", return_value={"name": "x"}),
     ):
         cfg = cli.wizard(
-            _args(token="t", service_id="s", disable_cron_sync=True, disable_cron_compact=True),
+            _args(token="t", service_id="s", disable_cron_sync=True),
         )
     assert cfg["enable_cron_sync"] is False
-    assert cfg["enable_cron_compact"] is False
 
 
 def test_wizard_passes_log_fields_args_through_to_builder():
@@ -2296,3 +2327,156 @@ def test_handle_disable_scoring_aborts_without_confirmation():
     ):
         cli.handle_disable_scoring(_args(service_id="svc-1", yes=False))
     mock_disable.assert_not_called()
+
+
+@pytest.mark.no_postgres
+def test_scoring_matrix_store_names_and_write_only_parity():
+    from pathlib import Path
+
+    from backend.provision.session_scoring import stores, wasm_deploy
+
+    root = Path(__file__).resolve().parents[2]
+    scoring_rs = (root / "compute" / "cloud" / "src" / "admin" / "scoring.rs").read_text()
+
+    assert stores.KEYS_STORE_NAME_TEMPLATE == "scoring_keys_{sid}"
+    assert stores.CONFIG_STORE_NAME_TEMPLATE == "scoring_config_{sid}"
+    assert stores.MATRIX_STORE_NAME_TEMPLATE == "scoring_matrix_{sid}"
+    assert 'format!("scoring_keys_{scorer_sid}")' in scoring_rs
+    assert 'format!("scoring_config_{scorer_sid}")' in scoring_rs
+    assert 'format!("scoring_matrix_{scorer_sid}")' in scoring_rs
+
+    assert stores.KEYS_RESOURCE_LINK_NAME == "scoring_keys"
+    assert stores.CONFIG_RESOURCE_LINK_NAME == "scoring_config"
+    assert stores.MATRIX_RESOURCE_LINK_NAME == "scoring_matrix"
+    assert stores.MATRIX_KEY_NAME == "matrix"
+    assert 'const KEYS_RESOURCE_LINK_NAME: &str = "scoring_keys";' in scoring_rs
+    assert 'const CONFIG_RESOURCE_LINK_NAME: &str = "scoring_config";' in scoring_rs
+    assert 'const MATRIX_RESOURCE_LINK_NAME: &str = "scoring_matrix";' in scoring_rs
+    assert 'const MATRIX_KEY_NAME: &str = "matrix";' in scoring_rs
+
+    assert wasm_deploy.SCORING_SERVICE_NAME_PREFIX == "Session Scoring Service for "
+    assert 'format!("Session Scoring Service for {sid}")' in scoring_rs
+    assert wasm_deploy.SCORING_DOMAIN_TEMPLATE == "fos-{sid_lower}-session-scorer.edgecompute.app"
+    assert '"fos-{}-session-scorer.edgecompute.app"' in scoring_rs
+
+    # Existing scoring service reuse must not read back aes_key_hex (write-only policy).
+    def _reuse_fastly(method, path, *_a, **_kw):
+        if (method, path) == ("GET", "/service"):
+            return [{"id": SCORE_SVC, "name": f"Session Scoring Service for {LOG_SVC}"}]
+        if (method, path) == ("GET", "/resources/stores/config"):
+            return [
+                {"id": KEYS_STORE, "name": f"scoring_keys_{SCORE_SVC}"},
+                {"id": CFG_STORE, "name": f"scoring_config_{SCORE_SVC}"},
+            ]
+        if (method, path) == ("GET", "/resources/stores/kv"):
+            return [{"id": "MTX_STORE", "name": f"scoring_matrix_{SCORE_SVC}"}]
+        if (method, path) == ("GET", f"/resources/stores/config/{CFG_STORE}/item/scoring_enabled_at"):
+            return {"item_value": "1700000000"}
+        if (method, path) == ("GET", f"/resources/stores/config/{KEYS_STORE}/item/request_secret"):
+            return {"item_value": "req-sec"}
+        raise AssertionError(f"Unexpected Fastly call: {method} {path}")
+
+    with patch.object(wasm_deploy, "fastly", side_effect=_reuse_fastly):
+        meta = wasm_deploy.ensure_scoring_service(LOG_SVC, TOKEN)
+    assert meta["aes_key_hex"] == ""
+    assert meta["scoring_matrix_store_id"] == "MTX_STORE"
+
+
+@pytest.mark.no_postgres
+def test_enable_and_disable_scoring_fos_write_ordering_and_draft_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(svcconfig, "CONFIGS_DIR", tmp_path)
+    svcconfig.save_config(
+        LOG_SVC,
+        {
+            "service_id": LOG_SVC,
+            "log_fields": {"custom_fields": []},
+            "provisioning": {"endpoint_name": "Fastly Object Storage Logs"},
+        },
+    )
+
+    events_order: list[str] = []
+    fm = _happy_path_fastly_mock()
+
+    with (
+        patch.object(sso, "ensure_scoring_service", return_value=_scoring_meta()),
+        patch.object(sso, "_write_matrix_to_kv", side_effect=lambda *_a, **_k: events_order.append("kv")),
+        patch.object(
+            sso,
+            "_deploy_wasm_package",
+            side_effect=lambda *_a, **_k: (events_order.append("wasm"), {"sha": "s", "version": 2})[1],
+        ),
+        patch.object(sso, "fastly", fm),
+        patch("backend.core.fastly.client.fastly", fm),
+        patch(
+            "backend.provision.declarative.reconciler.reconcile_vcl_state",
+            side_effect=lambda *_a, **_k: (
+                events_order.append("reconcile"),
+                ReconciliationResult(service_id=LOG_SVC, activated_version=12),
+            )[1],
+        ),
+        patch.object(
+            sso,
+            "_publish_scoring_fos_side_effects",
+            side_effect=lambda *_a, **_k: events_order.append("fos_publish"),
+        ),
+    ):
+        sso.enable_scoring(LOG_SVC, TOKEN)
+
+    assert events_order == ["kv", "wasm", "reconcile", "fos_publish"]
+
+    # Reconciler error result aborts before FOS side-effect publish and reverts local scoring config.
+    svcconfig.save_config(
+        LOG_SVC,
+        {
+            "service_id": LOG_SVC,
+            "log_fields": {"custom_fields": []},
+            "provisioning": {"endpoint_name": "Fastly Object Storage Logs"},
+        },
+    )
+    with (
+        patch.object(sso, "ensure_scoring_service", return_value=_scoring_meta()),
+        patch.object(sso, "_write_matrix_to_kv"),
+        patch.object(sso, "_deploy_wasm_package", return_value={"sha": "s", "version": 2}),
+        patch.object(sso, "fastly", fm),
+        patch("backend.core.fastly.client.fastly", fm),
+        patch(
+            "backend.provision.declarative.reconciler.reconcile_vcl_state",
+            return_value=ReconciliationResult(service_id=LOG_SVC, activated_version=None, error="bad draft"),
+        ),
+        patch.object(sso, "_publish_scoring_fos_side_effects") as fos_pub_mock,
+        pytest.raises(RuntimeError, match="Reconciliation failed: bad draft"),
+    ):
+        sso.enable_scoring(LOG_SVC, TOKEN)
+
+    fos_pub_mock.assert_not_called()
+    assert "scoring" not in (svcconfig.load_config(LOG_SVC) or {})
+
+    # Disable validation failure preserves local scoring config and skips FOS/Compute teardown.
+    svcconfig.save_config(
+        LOG_SVC,
+        {
+            "service_id": LOG_SVC,
+            "log_fields": {"custom_fields": []},
+            "provisioning": {"endpoint_name": "Fastly Object Storage Logs"},
+            "scoring": {
+                "enabled": True,
+                "scoring_service_id": SCORE_SVC,
+                "scoring_keys_store_id": KEYS_STORE,
+                "scoring_config_store_id": CFG_STORE,
+                "scoring_matrix_store_id": "MTX_STORE",
+            },
+        },
+    )
+    fake_fail = _Fastly(validate_ok=False)
+    with (
+        patch.object(sso, "fastly", fake_fail),
+        patch("backend.core.fastly.client.fastly", fake_fail),
+        patch.object(sso, "delete_scoring_service") as del_svc_mock,
+        patch.object(sso, "_delete_scoring_matrix_from_fos") as del_fos_mock,
+        pytest.raises(RuntimeError, match="Validation failed"),
+    ):
+        sso.disable_scoring(LOG_SVC, TOKEN)
+
+    del_svc_mock.assert_not_called()
+    del_fos_mock.assert_not_called()
+    assert (svcconfig.load_config(LOG_SVC) or {}).get("scoring", {}).get("enabled") is True

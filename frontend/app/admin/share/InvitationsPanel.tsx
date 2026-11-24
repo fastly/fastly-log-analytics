@@ -2,7 +2,8 @@
 
 import * as React from "react"
 import { z } from "zod"
-import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from "@tanstack/react-table"
+import { flexRender, useTable } from "@tanstack/react-table"
+import { basicTableFeatures, type BasicColumnDef } from "@/lib/table"
 import { QRCodeCanvas } from "qrcode.react"
 import { Check, Copy, Eye, EyeOff, KeyRound, Loader2, Pencil, Plus, QrCode, Trash2 } from "lucide-react"
 
@@ -13,6 +14,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { useAutoFlash, useCopyToClipboard } from "@/hooks/useSSE"
 import { client, extractApiError, unwrapClient } from "@/lib/api"
+import { IS_CLOUD_MODE } from "@/lib/cloud-engine/mode"
 import { formatDeterministicUTC } from "@/lib/utils"
 import { CreateInviteDialog } from "./CreateInviteDialog"
 import { SortableHead } from "./SharingControlPanel"
@@ -176,7 +178,7 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
     void copy(buildShareCard(invite, status?.public_url ?? null, services))
   }
 
-  const inviteColumns: ColumnDef<Invite>[] = [
+  const inviteColumns: BasicColumnDef<Invite>[] = [
     {
       id: 'name',
       cell: ({ row }) => {
@@ -197,13 +199,21 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
               <Badge
                 variant="outline"
                 className="text-[10px] font-normal"
-                title={invite.auth_method === 'oauth' ? 'Signs in via SSO / OIDC' : 'Signs in with a passcode'}
+                title={
+                  IS_CLOUD_MODE
+                    ? 'Signs in via WebAuthn Passkey'
+                    : invite.auth_method === 'oauth'
+                      ? 'Signs in via SSO / OIDC'
+                      : 'Signs in with a passcode'
+                }
               >
-                {invite.auth_method === 'oauth'
-                  ? `SSO${invite.oauth_provider ? ` · ${invite.oauth_provider}` : ''}`
-                  : 'Passcode'}
+                {IS_CLOUD_MODE
+                  ? 'Passkey'
+                  : invite.auth_method === 'oauth'
+                    ? `SSO${invite.oauth_provider ? ` · ${invite.oauth_provider}` : ''}`
+                    : 'Passcode'}
               </Badge>
-              {invite.allow_concurrent_sessions && (
+              {!IS_CLOUD_MODE && invite.allow_concurrent_sessions && (
                 <Badge variant="outline" className="text-[10px] font-normal" title="Multiple people can use this link at the same time">
                   Shared
                 </Badge>
@@ -338,7 +348,7 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
                 </div>
               </PopoverContent>
             </Popover>
-            {invite.auth_method !== 'oauth' && (
+            {!IS_CLOUD_MODE && invite.auth_method !== 'oauth' && (
               <Popover open={editingPasscodeFor === invite.id} onOpenChange={(o) => (o ? openEditPasscode(invite) : setEditingPasscodeFor(null))}>
                 <PopoverTrigger
                   render={(props: React.ComponentPropsWithRef<'button'>) => (
@@ -392,7 +402,7 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
       },
     },
   ]
-  const inviteTable = useReactTable({ data: sorted, columns: inviteColumns, getCoreRowModel: getCoreRowModel() })
+  const inviteTable = useTable({ features: basicTableFeatures, data: sorted, columns: inviteColumns })
 
   return (
     <section className="rounded-lg border bg-card p-4 space-y-3" data-testid="admin-share-invites-panel">

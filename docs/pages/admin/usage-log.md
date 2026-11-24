@@ -16,6 +16,14 @@ Source: [`frontend/app/admin/usage-log/`](../../../frontend/app/admin/usage-log/
 
 Admin only (`require_admin` on every route; `/api/admin/` is analyst-blocked).
 
+## Cloud
+
+The browser bridge reads native FOS operational records, applies the selected time and operation filters, and computes totals before pagination. CSV export uses the same real rows; purge starts the native history-deletion job. When detailed receipts are absent, measured cron counters provide an explicitly marked estimate using configured rates.
+
+Ingest accounting compares sample-adjusted request counts against processed rows for completed UTC days. Cloud offers daily periods, not hourly precision. Missing measurements produce an unavailable explanation, never a healthy zero-gap result. The sustained-loss alert uses the High-Scale rule over those days: 2 or more consecutive days at or above a 5% gap.
+
+Data Management maps native paginated file trees, ingested files and clock history into the existing tables. Processed Parquet downloads use `/api/file`; raw evidence and ZIP-folder downloads are not offered. Its Metadata Storage tab shows native operational retention instead of PostgreSQL sizes or controls. Quarantine exposes real container records and native purge-all, but not unavailable per-line hashes, evidence downloads or numeric-ID removal.
+
 ## Backend
 
 Routes in [`backend/routers/admin/admin_queries.py`](../../../backend/routers/admin/admin_queries.py) (usage log, usage-logging settings and system jobs) and [`backend/routers/admin/log_accounting.py`](../../../backend/routers/admin/log_accounting.py); models in [`backend/models/admin/health_and_sync.py`](../../../backend/models/admin/health_and_sync.py) and [`operations.py`](../../../backend/models/admin/operations.py).
@@ -23,7 +31,7 @@ Routes in [`backend/routers/admin/admin_queries.py`](../../../backend/routers/ad
 - `GET /api/admin/usage-log` (`UsageLogResponse`): query `service_id`, `start`, `end`, `usage_type`, `process_context`, `operation_type`, `page`, `page_size` (1 to 1000, default 100). Returns `entries[]` (`id`, `timestamp`, `operation_class`, `operation_type`, `url`, `bytes`, `duration_ms`, `function_name`, `process_context`, `status`, estimated cost), `total`, and `aggregate` (`total_class_a`, `total_class_b`, `total_cdn_downloads`, `total_cdn_bytes`, `total_fos_bytes`, estimated costs per class and in total, class A/B breakdowns by operation).
 - `GET /api/admin/usage-log/export`: CSV stream with the same filters and `max_rows` (default 100,000, up to 1,000,000).
 - `DELETE /api/admin/usage-log`: deletes all usage-log rows for the service (the durable hourly summary table is separate).
-- `GET`/`PATCH /api/admin/usage-logging`: global config (`enabled`, `retention_days`, `class_a_rate_per_1k`, `class_b_rate_per_10k`, `cdn_egress_rate_per_gb`, `storage_rate_per_gb_month`, `min_billed_days`, `track_duckdb_httpfs`, `billing_zone`); PATCH validates numeric ranges and the zone.
+- `GET`/`PATCH /api/admin/usage-logging`: global config (`enabled`, `retention_days`, `class_a_rate_per_1k`, `class_b_rate_per_10k`, `cdn_egress_rate_per_gb`, `storage_rate_per_gb_month`, `min_billed_days`, `billing_zone`); PATCH validates numeric ranges and the zone.
 - `GET /api/admin/system-jobs`: schedules and latest status of the process-global jobs (bot data refresh, rDNS enrichment, share audit purge).
 - `GET /api/admin/log-accounting[/{service_id}]`: accounting buckets (see [overview.md](overview.md) for the sustained-loss rule).
 

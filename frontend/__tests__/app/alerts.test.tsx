@@ -1,6 +1,6 @@
-import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { act, render, screen, waitFor, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { http, HttpResponse } from 'msw'
+import { http, HttpResponse } from 'msw/http'
 import {
   createTestQueryClient, renderWithQuery,
   stubMatchMedia, stubResizeObserver, stubGetAnimations, stubPointerCaptureAndScroll,
@@ -657,6 +657,43 @@ describe('Alerts & Insights Pages', () => {
       )
     })
 
+    test('defers the 720h month prefetch until the primary insights request completes', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        apiGet.mockImplementation((url) =>
+          url === '/api/log-extents'
+            ? Promise.resolve({
+                data: {
+                  earliest_log_at: new Date(Date.now() - 40 * 24 * 3600_000).toISOString(),
+                  latest_log_at: new Date().toISOString(),
+                },
+              })
+            : Promise.resolve({ data: { unavailable: [] } }),
+        )
+        const resolvers: Array<(value: ApiResult) => void> = []
+        apiPost.mockImplementation((_url, opts) =>
+          opts?.body?.baseline_hours === 720
+            ? Promise.resolve({ data: { insights: [], computed_at: new Date().toISOString() } })
+            : new Promise<ApiResult>((resolve) => { resolvers.push(resolve) }),
+        )
+        const monthCalls = () => apiPost.mock.calls.filter(([, opts]) => opts?.body?.baseline_hours === 720).length
+
+        renderWithQuery(<InsightsClient />, { queryClient })
+        await waitFor(() => expect(resolvers.length).toBeGreaterThan(0))
+        expect(apiPost.mock.calls[0][1]?.body?.baseline_hours).toBe(168)
+        await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
+        expect(monthCalls()).toBe(0)
+
+        await act(async () => {
+          resolvers.forEach((resolve) => resolve({ data: { insights: [], computed_at: new Date().toISOString() } }))
+          await vi.advanceTimersByTimeAsync(5_000)
+        })
+        await waitFor(() => expect(monthCalls()).toBe(1))
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
     test('uses the SSR service and adaptive seed before the service store hydrates', async () => {
       useServiceStore.setState({ activeServiceId: null, isInitialized: false })
       queryClient.setQueryData(['bootstrap'], { active_service_id: 'test-svc' })
@@ -700,8 +737,8 @@ describe('Alerts & Insights Pages', () => {
       expect(tablist.className).toContain('lg:flex-nowrap')
 
       const grid = screen.getByTestId('insights-grid')
-      expect(grid.className).toContain('min-h-[300px]')
-      expect(grid.className).toContain('[contain-intrinsic-size:300px]')
+      expect(grid.className).toContain('min-h-[calc(100vh-14rem)]')
+      expect(grid.className).toContain('[contain-intrinsic-size:700px]')
       expect(grid.className).toContain('[content-visibility:auto]')
     })
 
@@ -759,8 +796,8 @@ describe('Alerts & Insights Pages', () => {
       })
 
       const emptyPass = screen.getByTestId('insights-empty-pass')
-      expect(emptyPass.className).toContain('min-h-[300px]')
-      expect(emptyPass.className).toContain('[contain-intrinsic-size:300px]')
+      expect(emptyPass.className).toContain('min-h-[calc(100vh-14rem)]')
+      expect(emptyPass.className).toContain('[contain-intrinsic-size:700px]')
       expect(emptyPass.className).toContain('[content-visibility:auto]')
     })
   })

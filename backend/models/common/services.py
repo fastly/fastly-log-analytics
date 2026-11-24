@@ -7,6 +7,10 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 
 from backend.core.catalog import VALID_NAME_RE
+from backend.core.service_defaults import (
+    DEFAULT_SNAPSHOT_INTERVAL_MINUTES,
+    SnapshotIntervalMinutes,
+)
 from backend.models.common.base import BaseResponse, PassthroughModel, WireSafeModel
 
 
@@ -16,7 +20,7 @@ class LogFieldCatalogEntry(WireSafeModel):
     group: str | None
     label: str
     description: str
-    duckdb_type: str
+    sql_type: str
     # Built-in entries only.
     typical_bytes: int | None = None
     required_by: list[str] | None = None
@@ -72,7 +76,7 @@ class LogFieldsCatalogResponse(WireSafeModel):
 
 
 class CronSettingsPartial(BaseModel):
-    """Partial-update slice of a single cron block (sync / compact / ngwaf).
+    """Partial-update slice of a single cron block (sync / ngwaf).
 
     Distinct from ``ServiceCronSync`` etc. below which model the full
     persisted config (``enabled`` required). Here every field is
@@ -90,7 +94,6 @@ class CronSettingsPartial(BaseModel):
     # config (observed 2026-08-13). Pydantic ignores unknown fields, so an
     # absent field on this partial is a silent no-op, not an error.
     interval_seconds: int | None = None
-    commit_interval_mins: int | None = None
     log_enabled: bool | None = None
     log_retention_days: int | None = None
     data_retention_days: int | None = None
@@ -98,25 +101,17 @@ class CronSettingsPartial(BaseModel):
     cache_retention_days: int | None = None
     rollup_retention_months: int | None = None
     # Snapshot-history window + expiry cadence (see run_cloud_maintenance and
-    # the scheduler's expire job). keep_snapshot_days drives metadata.json size
-    # and therefore per-commit cost; expire_interval_mins is how often it's
-    # enforced.
+    # the scheduler's expire job).
     keep_snapshot_days: int | None = None
     expire_interval_mins: int | None = None
     delete_after: bool | None = None
-    high_scale_shared_source: bool | None = None
+    snapshot_interval_minutes: SnapshotIntervalMinutes | None = None
 
 
 class ServiceCronSync(CronSettingsPartial):
     enabled: bool
     polling_mode: Literal["regular", "adaptive"] = "adaptive"
-
-
-class ServiceCronCompact(BaseModel):
-    enabled: bool
-    interval_mins: int | None = None
-    log_enabled: bool | None = None
-    log_retention_days: int | None = None
+    snapshot_interval_minutes: SnapshotIntervalMinutes = DEFAULT_SNAPSHOT_INTERVAL_MINUTES
 
 
 class ServiceCronNgwaf(BaseModel):
@@ -131,7 +126,6 @@ class RumConfigSection(WireSafeModel):
     enabled: bool | None = None
     log_period: int | None = None
     sync_interval_seconds: int | None = None
-    commit_interval_mins: int | None = None
     delete_after: bool | None = None
 
 
@@ -146,19 +140,16 @@ class ServiceConfig(BaseModel):
     fos_bucket: str | None = None
     log_period: int | None = None
     storage_mode: str | None = None
-    duckdb_size_bytes: int | None = None
     cache_file_count: int | None = None
     log_row_count: int | None = None
     is_active: bool | None = None
     cron_sync: ServiceCronSync | None = None
-    cron_compact: ServiceCronCompact | None = None
     cron_ngwaf: ServiceCronNgwaf | None = None
     ngwaf_workspace_id: str | None = None
     logging_enabled: bool | None = None
     rum_enabled: bool | None = None
     rum: RumConfigSection | None = None
     rum_log_period: int | None = None
-    is_high_scale: bool | None = None
 
 
 class ServicesListResponse(BaseResponse):
@@ -238,19 +229,17 @@ class RumSettingsPartial(BaseModel):
     enabled: bool | None = None
     log_period: int | None = None
     sync_interval_seconds: int | None = None
-    commit_interval_mins: int | None = None
     delete_after: bool | None = None
 
 
 class ServiceCronSettingsBody(BaseModel):
     """Body for ``POST /api/services/{service_id}/cron-settings``.
 
-    Every cron block is optional — operators can update one or all
-    three without re-sending the others. Fields inside each block are
+    Every cron block is optional — operators can update one or both
+    without re-sending the others. Fields inside each block are
     also optional (see :class:`CronSettingsPartial`)."""
 
     cron_sync: CronSettingsPartial | None = None
-    cron_compact: CronSettingsPartial | None = None
     cron_ngwaf: CronSettingsPartial | None = None
     rum: RumSettingsPartial | None = None
 
@@ -326,14 +315,17 @@ class CmcdStatusResponse(WireSafeModel):
 # ── Custom Log Fields Models (folded from custom_fields.py) ───────────────────
 
 
+CollectionStage = Literal["edge", "origin", "deliver"]
+
+
 class CustomField(BaseModel):
     name: str
     label: str
     description: str = ""
     vcl_log_expression: str
-    collection_stage: Literal["edge", "origin", "deliver"] = "edge"
+    collection_stage: CollectionStage = "edge"
     origin_log_frequency: Literal["all", "miss_pass"] = "all"
-    duckdb_type: Literal["VARCHAR", "INTEGER", "BIGINT", "DOUBLE", "BOOLEAN"] = "VARCHAR"
+    sql_type: Literal["VARCHAR", "INTEGER", "BIGINT", "DOUBLE", "BOOLEAN"] = "VARCHAR"
     value_type: Literal["string", "numeric", "boolean", "ip", "url"] = "string"
     bytes_estimate: int = 20
     nullable: bool = True
@@ -367,9 +359,9 @@ class CustomFieldUpdate(BaseModel):
     label: str | None = None
     description: str | None = None
     vcl_log_expression: str | None = None
-    collection_stage: Literal["edge", "origin", "deliver"] | None = None
+    collection_stage: CollectionStage | None = None
     origin_log_frequency: Literal["all", "miss_pass"] | None = None
-    duckdb_type: Literal["VARCHAR", "INTEGER", "BIGINT", "DOUBLE", "BOOLEAN"] | None = None
+    sql_type: Literal["VARCHAR", "INTEGER", "BIGINT", "DOUBLE", "BOOLEAN"] | None = None
     value_type: Literal["string", "numeric", "boolean", "ip", "url"] | None = None
     bytes_estimate: int | None = None
     nullable: bool | None = None
@@ -397,7 +389,7 @@ class CustomFieldsListResponse(BaseResponse):
 
 class VclLintRequest(BaseModel):
     vcl_log_expression: str
-    collection_stage: Literal["edge", "origin", "deliver"] = "edge"
+    collection_stage: CollectionStage = "edge"
     log_fields_config: dict | None = None
 
 

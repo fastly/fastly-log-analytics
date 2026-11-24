@@ -13,8 +13,10 @@ import {
 import { useFilterStore } from '@/stores/filterStore'
 import type { FiltersPayload, PlotlyTrace } from '@/types/api'
 import { CHART_COLORS, formatCountMaybe, formatDate, formatDuration, resolveRangeWire } from '@/lib/utils'
+import { analyticsReportQueryKey } from '@/lib/report-query-key'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { ReportLayout } from '@/components/ReportLayout'
+import { RawWindowNote, readRawWindow } from '@/components/network/rollupLabels'
 import { StatCard } from '@/components/ui/confirm-dialog'
 import {
   cmcdLabel,
@@ -58,7 +60,14 @@ function StreamingBody({
   const [topN] = useQueryState('top_n', parseAsInteger.withDefault(30))
 
   const cmcdQuery = useServiceQuery(
-    ['cmcd', 'aggregates', activeServiceId, rangeKey, anchor, filterPayload, ...(bucketSeconds !== 300 || topN !== 30 ? [bucketSeconds, topN] : [])],
+    analyticsReportQueryKey({
+      namespace: ['cmcd', 'aggregates'],
+      serviceId: activeServiceId,
+      rangeToken: rangeKey,
+      anchor,
+      filterPayload,
+      keyParts: bucketSeconds !== 300 || topN !== 30 ? [bucketSeconds, topN] : [],
+    }),
     ({ signal }) =>
       unwrapClient(
         client.POST('/api/cmcd/aggregates', {
@@ -230,6 +239,7 @@ function StreamingBody({
 
   return (
     <>
+      <RawWindowNote window={readRawWindow(data)} />
       {overviewGrid}
       <StreamingChartsGrid
         data={data}

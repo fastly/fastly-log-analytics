@@ -2,8 +2,10 @@
 
 import React, { useEffect, useMemo, useReducer } from 'react'
 import { useRouter } from 'next/navigation'
-import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from '@tanstack/react-table'
+import { flexRender, useTable } from '@tanstack/react-table'
+import { basicTableFeatures, type BasicColumnDef } from '@/lib/table'
 import { cn, buildServiceHref, formatBytes, formatUSD } from "@/lib/utils"
+import { SNAPSHOT_INTERVAL_LABELS, SNAPSHOT_INTERVAL_OPTIONS } from '@/lib/serviceDefaults'
 import { useServiceStore } from '@/stores/filterStore'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -21,9 +23,9 @@ import {
   type BillingZone,
   BILLING_ZONE_RATES,
   BILLING_ZONE_DESCRIPTIONS,
+  billingZoneForFosRegion,
   RAW_LOG_COMPRESSION_RATIO,
   RUM_COMPRESSED_BYTES_PER_BEACON,
-  type DeploymentMode,
   type CalcState,
   type CalcAction,
   DEFAULTS,
@@ -38,9 +40,9 @@ export {
   type BillingZone,
   BILLING_ZONE_RATES,
   BILLING_ZONE_DESCRIPTIONS,
+  billingZoneForFosRegion,
   RAW_LOG_COMPRESSION_RATIO,
   RUM_COMPRESSED_BYTES_PER_BEACON,
-  type DeploymentMode,
   type CalcState,
   type CalcAction,
   DEFAULTS,
@@ -101,16 +103,30 @@ export function ReadOnlyValue({ value, wide }: { value: string | number; wide?: 
   )
 }
 
-export function ResultRow({ label, detail, cost, highlight }: {
+export function ResultRow({ label, detail, cost, highlight, parts }: {
   label: string; detail?: string; cost: string; highlight?: boolean
+  /** Component costs listed under the row's total. */
+  parts?: Array<{ label: string; cost: string }>
 }) {
   return (
-    <div className={cn('flex items-center justify-between py-2 border-b border-border/40 last:border-0', highlight && 'border-t-2 border-border pt-3 mt-2')}>
-      <div>
-        <div className={cn('text-sm font-medium', highlight && 'text-base')}>{label}</div>
-        {detail && <div className='text-xs text-muted-foreground mt-0.5'>{detail}</div>}
+    <div data-estimate-line className={cn('py-2 border-b border-border/40 last:border-0', highlight && 'border-t-2 border-border pt-3 mt-2')}>
+      <div className='flex items-center justify-between'>
+        <div>
+          <div className={cn('text-sm font-medium', highlight && 'text-base')}>{label}</div>
+          {detail && <div className='text-xs text-muted-foreground mt-0.5'>{detail}</div>}
+        </div>
+        <div className={cn('font-bold tabular-nums', highlight ? 'text-xl text-emerald-500' : 'text-sm')}>{cost}</div>
       </div>
-      <div className={cn('font-bold tabular-nums', highlight ? 'text-xl text-emerald-500' : 'text-sm')}>{cost}</div>
+      {parts && parts.length > 0 && (
+        <ul className='mt-1 space-y-0.5 pl-3'>
+          {parts.map((part) => (
+            <li key={part.label} className='flex items-center justify-between text-xs text-muted-foreground'>
+              <span>{part.label}</span>
+              <span className='tabular-nums'>{part.cost}</span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   )
 }
@@ -118,7 +134,7 @@ export function ResultRow({ label, detail, cost, highlight }: {
 interface InputsProps {
   s: CalcState
   r: CalcResults
-  set: (key: keyof CalcState) => (value: number | boolean | DeploymentMode) => void
+  set: (key: keyof CalcState) => (value: number | boolean) => void
 }
 
 export function Inputs({ s, r, set }: InputsProps) {
@@ -147,28 +163,37 @@ export function Inputs({ s, r, set }: InputsProps) {
         <Row label='Log file period (seconds)' tooltip="How often Fastly closes and uploads a log file. Controlled by the Fastly logging configuration.">
           <NumInput value={s.logPeriod} onChange={set('logPeriod')} min={1} />
         </Row>
-        <Row label='Deployment mode' tooltip="High-Scale also writes an archive Parquet artifact per page of raw log objects to FOS: about 33 KB fixed plus 417 bytes per row (measured on a dev High-Scale deployment). The worker deletes archive artifacts a day after the data retention window.">
-          <select aria-label="Deployment mode" value={s.deploymentMode} onChange={(e) => set('deploymentMode')(e.target.value as DeploymentMode)} className="h-8 rounded-md border bg-background px-2 text-xs">
-            <option value="standard">Standard</option>
-            <option value="high_scale">High-Scale</option>
-          </select>
+        <Row
+          label='Cloud snapshot interval'
+          tooltip="How often High-Scale flushes consolidated FOS Parquet archives and meta/dr_state.json DR state snapshots. Raw logs remain in FOS until archived plus a 15-minute grace period for zero data loss."
+        >
+          <div className='inline-flex items-center gap-0.5 p-0.5 bg-muted/80 rounded-md' role='group' aria-label='Cloud snapshot interval'>
+            {SNAPSHOT_INTERVAL_OPTIONS.map((mins) => {
+              const selected = s.snapshotIntervalMinutes === mins
+              return (
+                <button
+                  key={mins}
+                  type='button'
+                  aria-pressed={selected}
+                  onClick={() => set('snapshotIntervalMinutes')(mins)}
+                  className={cn(
+                    'px-2 py-1 text-xs font-medium rounded transition-all',
+                    selected
+                      ? 'bg-background text-foreground shadow-sm font-semibold'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-background/50',
+                  )}
+                >
+                  {SNAPSHOT_INTERVAL_LABELS[mins]}
+                </button>
+              )
+            })}
+          </div>
         </Row>
-        {s.deploymentMode === 'high_scale' && (
-          <Row label='Raw objects per archive batch' tooltip="Upper bound of source objects per archive artifact (HIGH_SCALE_PAGE_SIZE, default 100). Quiet services archive about one object per page. Each page costs 3 writes (artifact, manifest, commit marker) and 3 verification reads.">
-            <NumInput value={s.archiveBatchObjects} onChange={set('archiveBatchObjects')} min={1} max={500} />
-          </Row>
-        )}
-        <Row label='Cloud Commit Interval (minutes)' tooltip="How often the local buffer is committed to DuckLake and the new Parquet files are pushed to FOS (e.g., 5).">
-          <NumInput value={s.commitMins} onChange={set('commitMins')} min={1} />
+        <Row label='Raw objects per archive batch' tooltip="Upper bound of source objects per consolidated archive flush (HIGH_SCALE_SNAPSHOT_MAX_OBJECTS, default 500). Quiet services flush once per snapshot interval. Each flush costs 3 writes (Parquet artifact, manifest, commit marker) and 3 verification reads.">
+          <NumInput value={s.archiveBatchObjects} onChange={set('archiveBatchObjects')} min={1} max={2000} />
         </Row>
-        <Row label='Average bytes per log line' tooltip="The average uncompressed bytes per request based on your selected fields. Compressed ~15× with ZSTD (.zst) in Object Storage and ~4× in Parquet.">
+        <Row label='Average bytes per log line' tooltip="The average uncompressed bytes per request based on your selected fields. Compressed ~5× with ZSTD (.zst) in Object Storage and ~4× in Parquet.">
           <NumInput value={s.bytesPerLine} onChange={set('bytesPerLine')} min={1} />
-        </Row>
-        <Row label='Parquet target size (MB)' tooltip="Target file size for the nightly DuckLake compaction. Larger targets mean fewer rewritten objects (and lower FOS storage cost in High-Scale).">
-          <NumInput value={s.parquetMB} onChange={set('parquetMB')} min={1} />
-        </Row>
-        <Row label='Log nodes / fan-out' tooltip="Estimated number of Fastly aggregators/cache nodes flushing per period. Higher traffic = more nodes.">
-          <NumInput value={s.logNodes} onChange={set('logNodes')} min={1} max={72} />
         </Row>
         <Row label='Manual log checks per day' tooltip="Each click of 'Refresh' on the Ingestion tab performs 1 Class A list operation against FOS.">
           <NumInput value={s.logsChecksPerDay} onChange={set('logsChecksPerDay')} />
@@ -176,17 +201,14 @@ export function Inputs({ s, r, set }: InputsProps) {
         <Row label='CDN fronting FOS reads' tooltip="Use a Fastly CDN service to cache reads from Fastly Object Storage, reducing Class B operations.">
           <Switch aria-label="CDN fronting FOS reads" checked={s.cdnEnabled} onCheckedChange={set('cdnEnabled')} />
         </Row>
-        <Row label='Data retention (days)' tooltip="The service's data retention. Request data, its cloud copy and (High-Scale) its archive artifacts are deleted after this many days (archive a day later). A retention of 0 keeps data forever and is modelled as a year here. Deleted objects are still billed for the 30-day FOS minimum.">
+        <Row label='Data retention (days)' tooltip="The service's data retention. ClickHouse rows and FOS archive Parquet artifacts are deleted after this many days (archive a day later). A retention of 0 keeps data forever and is modelled as a year here. Deleted objects are still billed for the 30-day FOS minimum.">
           <NumInput value={s.retentionDays} onChange={set('retentionDays')} min={1} />
         </Row>
-        <Row label='RUM retention (days)' tooltip="The service's RUM retention, which can differ from the request retention. It sizes RUM storage and, in High-Scale, the RUM archive artifacts.">
+        <Row label='RUM retention (days)' tooltip="The service's RUM retention, which can differ from the request retention. It sizes RUM storage and the RUM archive artifacts.">
           <NumInput value={s.rumRetentionDays} onChange={set('rumRetentionDays')} min={1} />
         </Row>
-        <Row label='Auto-delete raw .zst logs after ingest' tooltip="Delete raw .zst log files once they are committed to DuckLake. They are still billed for the FOS minimum 30 days, but this prevents redundant long-term storage.">
+        <Row label='Auto-delete raw .zst logs after ingest' tooltip="Delete raw .zst log files after their consolidated archive checkpoint commits plus a 15-minute grace window (steady-state window = snapshot interval + 15m). Objects are still billed for the FOS minimum 30 days, but this prevents redundant long-term storage.">
           <Switch aria-label="Auto-delete raw .zst logs after ingest" checked={s.deleteLogs} onCheckedChange={set('deleteLogs')} />
-        </Row>
-        <Row label='DuckLake compaction enabled' tooltip="Periodically rewrite and merge small Parquet files into larger ones. The merged files are pushed to FOS and the replaced ones deleted (30-day minimum billing applies).">
-          <Switch aria-label="DuckLake compaction enabled" checked={s.compactionEnabled} onCheckedChange={set('compactionEnabled')} />
         </Row>
       </div>
 
@@ -220,21 +242,10 @@ const OPS_SECTIONS = [
     valCls: 'text-right',
     rows: [
       ['Fastly writes each log file', '1 op/file'],
-      ['Raw Parquet upload per sync', '1 op/file'],
+      ['Archive batch publish (Parquet + manifest + marker)', '3 ops/batch'],
       ['List during sync (per 1,000 objects)', '1 op/page'],
       ['Manual log checks (LIST)', '1 op/check'],
-      ['Admin sync state to FOS', '1 op/sync'],
-    ],
-  },
-  {
-    title: 'DuckLake Cloud Copy (if compaction enabled)',
-    cls: 'py-1 font-semibold text-blue-500 dark:text-blue-300 italic',
-    rowCls: 'pl-3 py-0.5 text-muted-foreground/70',
-    valCls: 'text-right text-muted-foreground/70',
-    rows: [
-      ['DuckLake commit (append data)', '1 op/sync'],
-      ['Table optimization (rewrite)', '1 op/file'],
-      ['Weekly snapshot expiry', '1 op/week'],
+      ['DR state snapshot (meta/dr_state.json)', '1 op/snapshot'],
     ],
   },
   {
@@ -244,6 +255,7 @@ const OPS_SECTIONS = [
     valCls: 'text-right',
     rows: [
       ['Read each .zst during ingest', '1 op/file'],
+      ['Archive publish verification reads', '5 ops/batch'],
     ],
   },
   {
@@ -272,16 +284,16 @@ function OpsSectionsTable() {
     }
     return out
   }, [])
-  const columns = useMemo<ColumnDef<OpsSectionFlatRow>[]>(
+  const columns = useMemo<BasicColumnDef<OpsSectionFlatRow>[]>(
     () => [
       { id: 'label', cell: ({ row }) => (row.original.kind === 'header' ? row.original.title : row.original.label) },
       { id: 'value', cell: ({ row }) => (row.original.kind === 'row' ? row.original.value : null) },
     ],
     [],
   )
-  const table = useReactTable({ data, columns, getCoreRowModel: getCoreRowModel() })
+  const table = useTable({ features: basicTableFeatures, data, columns })
   return (
-    <Table className='w-full text-xs text-muted-foreground'>
+    <Table scrollFocusable className='w-full text-xs text-muted-foreground'>
       <TableBody>
         {table.getRowModel().rows.map((row) => {
           const item = row.original
@@ -312,7 +324,7 @@ export function Pricing({ s, setZone }: PricingProps) {
     <>
       <section>
         <div className="flex items-center justify-between mb-3">
-          <h3 className='text-xs font-semibold text-muted-foreground uppercase tracking-wider'>Pricing (per 1,000 ops)</h3>
+          <h3 className='text-xs font-semibold text-muted-foreground uppercase tracking-wider'>Pricing</h3>
           <Button
             variant="link"
             size="sm"
@@ -327,6 +339,11 @@ export function Pricing({ s, setZone }: PricingProps) {
           <div className="flex items-center justify-between">
             <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
               Delivery Billing Zone
+              {s.fosRegion && s.billingZone === billingZoneForFosRegion(s.fosRegion) ? (
+                <span className="ml-1.5 font-normal normal-case text-muted-foreground/80">
+                  (auto: {s.fosRegion})
+                </span>
+              ) : null}
             </span>
             <span className="text-xs font-semibold text-primary">
               ${s.rateEgress.toFixed(2)} / GB
@@ -368,10 +385,10 @@ export function Pricing({ s, setZone }: PricingProps) {
         </div>
 
         <div className='space-y-0'>
-          <Row label='Class A rate (writes, lists)'><ReadOnlyValue value={s.rateA} /></Row>
-          <Row label='Class B rate (reads/downloads)'><ReadOnlyValue value={s.rateB} /></Row>
-          <Row label='Storage rate (per GB/month)'><ReadOnlyValue value={s.rateStorage} /></Row>
-          <Row label='CDN egress rate (per GB)'><ReadOnlyValue value={s.rateEgress} /></Row>
+          <Row label='Object Storage Class A ($/1,000 ops)'><ReadOnlyValue value={s.rateA} /></Row>
+          <Row label='Object Storage Class B ($/1,000 ops)'><ReadOnlyValue value={s.rateB} /></Row>
+          <Row label='Object Storage ($/GB/month)'><ReadOnlyValue value={s.rateStorage} /></Row>
+          <Row label='CDN bandwidth ($/GB)'><ReadOnlyValue value={s.rateEgress} /></Row>
         </div>
         <div className='mt-2 text-[11px] text-muted-foreground'>
           Rates are global defaults. Update them on the <a href={buildServiceHref('/admin', activeServiceId)} className='underline font-medium hover:text-foreground'>admin page</a>.
@@ -380,9 +397,7 @@ export function Pricing({ s, setZone }: PricingProps) {
 
       <section>
         <h3 className='text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3'>What generates operations</h3>
-        <div className='overflow-x-auto'>
-          <OpsSectionsTable />
-        </div>
+        <OpsSectionsTable />
       </section>
     </>
   )
@@ -391,37 +406,41 @@ export function Pricing({ s, setZone }: PricingProps) {
 interface ResultsProps {
   s: CalcState
   r: CalcResults
+  localStorageGbHours?: number | null
+  localStoragePeriodHours?: number | null
 }
 
 export function Results({ s, r }: ResultsProps) {
+  const storageTierDetail = r.storageTiers
+    .map((tier) => `${tier.label}: ${Math.max(0.001, tier.gbMonths).toFixed(3)} GB-mo${tier.flagged ? '*' : ''}`)
+    .join(' · ')
+  const objectStorageTotal = r.costStorage + r.costA + r.costB
   return (
     <div className='bg-muted/30 border rounded-lg p-5'>
       <h3 className='text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-4'>Monthly Estimate Breakdown</h3>
       <div className='space-y-0'>
         <ResultRow
-          label='Class A Operations (writes, lists)'
-          detail={`${fmtN(Math.round(r.classAPerMonth))} ops @ $${s.rateA}/1k`}
-          cost={formatUSD(r.costA)}
+          label='Object Storage'
+          detail={`${storageTierDetail} · A ${fmtN(Math.round(r.classAPerMonth))} @ $${s.rateA}/1k · B ${fmtN(Math.round(r.classBPerMonth))} @ $${s.rateB}/1k`}
+          cost={formatUSD(objectStorageTotal)}
+          parts={[
+            { label: 'Storage', cost: formatUSD(r.costStorage) },
+            { label: 'Class A', cost: formatUSD(r.costA) },
+            { label: 'Class B', cost: formatUSD(r.costB) },
+          ]}
         />
         <ResultRow
-          label='Class B Operations (reads)'
-          detail={`${fmtN(Math.round(r.classBPerMonth))} ops @ $${s.rateB}/1k`}
-          cost={formatUSD(r.costB)}
-        />
-        <ResultRow
-          label='Storage (GB-months billed)'
-          detail={r.storageTiers.map(t => `${t.label}: ${Math.max(0.001, t.gbMonths).toFixed(3)} GB-mo${t.flagged ? '*' : ''}`).join(' · ')}
-          cost={formatUSD(r.costStorage)}
-        />
-        <ResultRow
-          label='CDN Egress'
-          detail={`${r.cdnEgressGB.toFixed(3)} GB`}
+          label='CDN delivery'
+          detail={`${r.cdnEgressGB.toFixed(3)} GB egress @ $${s.rateEgress.toFixed(2)}/GB`}
           cost={formatUSD(r.costEgress)}
+          parts={[
+            { label: 'Egress', cost: formatUSD(r.costEgress) },
+          ]}
         />
         {s.rumBeaconsDay > 0 && (
           <ResultRow
             label='Real User Monitoring (RUM) Cost Portion'
-            detail={`${fmtN(Math.round(r.rumBeaconsMonth))} beacons · ${Math.max(0.001, r.rumParquetGBMonths).toFixed(3)} GB RUM storage (included in Class A & Storage above)`}
+            detail={`${fmtN(Math.round(r.rumBeaconsMonth))} beacons · ${Math.max(0.001, r.rumParquetGBMonths).toFixed(3)} GB RUM storage (included in Object Storage above)`}
             cost={formatUSD(r.costRum)}
           />
         )}
@@ -442,7 +461,8 @@ export function Results({ s, r }: ResultsProps) {
             ['Raw volume / month (uncompressed)', formatBytes(r.totalBytesPerMonth)],
             ['Est. volume / month (.zst compressed)', formatBytes(r.totalGzBytesPerMonth)],
             ['Log files written / month', fmtN(Math.round(r.logFilesPerMonth))],
-            ['DuckLake data files pushed to FOS / month', fmtN(Math.round(r.parquetFilesPerMonth))],
+            ['Archive Parquet batches pushed to FOS / month', fmtN(Math.round(r.parquetFilesPerMonth))],
+            ['DR state snapshots / month', fmtN(Math.round(r.drStateSnapshotsPerMonth))],
             ['Billed footprint (30d min)', fmtN(Math.round(r.objectsBilled)) + ' objects'],
             ['Syncs / month', fmtN(Math.round(r.syncsPerMonth))],
             ...(s.rumBeaconsDay > 0 ? [
@@ -464,16 +484,18 @@ export function Results({ s, r }: ResultsProps) {
 interface CostCalculatorProps {
   prefillData?: PrefillResponse
   prefillNote?: string
+  localStorageGbHours?: number | null
+  localStoragePeriodHours?: number | null
 }
 
-export function CostCalculator({ prefillData, prefillNote }: CostCalculatorProps) {
+export function CostCalculator({ prefillData, prefillNote, localStorageGbHours, localStoragePeriodHours }: CostCalculatorProps) {
   const [s, dispatch] = useReducer(reducer, DEFAULTS)
 
   useEffect(() => {
     if (prefillData) dispatch({ type: 'PREFILL', prefill: prefillData })
   }, [prefillData])
 
-  const set = (key: keyof CalcState) => (value: number | boolean | DeploymentMode) => dispatch({ type: 'SET', key, value })
+  const set = (key: keyof CalcState) => (value: number | boolean) => dispatch({ type: 'SET', key, value })
   const setZone = (zone: BillingZone) => dispatch({ type: 'SET_ZONE', zone })
   const r = useMemo(() => calculate(s), [s])
 
@@ -494,13 +516,12 @@ export function CostCalculator({ prefillData, prefillNote }: CostCalculatorProps
         </div>
       </div>
 
-      <Results s={s} r={r} />
+      <Results s={s} r={r} localStorageGbHours={localStorageGbHours} localStoragePeriodHours={localStoragePeriodHours} />
 
       <p className='text-xs text-muted-foreground leading-relaxed'>
-        * Estimates assume ~{RAW_LOG_COMPRESSION_RATIO}× ZSTD compression for raw JSON logs (.zst), ~4× compression of log JSON to Parquet (ZSTD), and client-side RUM beacon batching. Storage is billed in GB-hours;
+        * Estimates assume ~{RAW_LOG_COMPRESSION_RATIO}× ZSTD compression for raw JSON logs (.zst), ~4× compression of log JSON to Parquet (ZSTD), and client-side RUM beacon batching. Consolidated FOS archive flushes and DR state snapshots (meta/dr_state.json) run on the configured snapshot interval, keeping raw logs in FOS for snapshot interval + 15m grace before auto-delete. Storage is billed in GB-hours;
         the calculator converts to GB-months (1 month = 720 hours). Each object is billed for a minimum
-        of {s.minDays} days regardless of when it is deleted. CDN caching eliminates Class B ops for cached
-        parquet reads; local cache eliminates them entirely for query reads. Actual usage may vary.
+        of {s.minDays} days regardless of when it is deleted. Analytical queries execute against ClickHouse, so interactive dashboard reads do not incur FOS Class B operations. Actual usage may vary.
       </p>
     </div>
   )

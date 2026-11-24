@@ -213,7 +213,6 @@ def test_execute_delegates_to_provision_with_query_args(isolated_configs_dir):
                 "edge_only": True,
                 "log_period": "60",
                 "enable_cron_sync": True,
-                "enable_cron_compact": True,
             },
         )
 
@@ -433,16 +432,19 @@ def test_teardown_unknown_service_id_never_provisioned_is_404(isolated_configs_d
     assert r.status_code == 404
 
 
-def test_teardown_preserves_duckdb_when_remove_cache_false(isolated_configs_dir, tmp_path):
-    """``remove_cache=False`` MUST leave the per-service DuckDB file intact."""
-    sid = "svc-idem-keep-cache"
-    _seed_cfg(sid)
+def test_teardown_preserves_cache_when_remove_cache_false(isolated_configs_dir, tmp_path):
+    """``remove_cache=False`` MUST leave the per-service cache directory intact."""
+    from backend.core import fos_client as _db
 
-    db_path = svcconfig.duckdb_path(sid)
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    with open(db_path, "w") as f:
-        f.write("placeholder-duckdb-bytes")
-    assert os.path.exists(db_path)
+    sid = "svc-idem-keep-cache"
+    cfg = _seed_cfg(sid)
+
+    svc_cache_dir = _db._cache_dir({"bucket": cfg["fos_bucket"], "prefix": ""})
+    os.makedirs(svc_cache_dir, exist_ok=True)
+    sentinel = os.path.join(svc_cache_dir, "cached-file.txt")
+    with open(sentinel, "w") as f:
+        f.write("placeholder-cache-bytes")
+    assert os.path.exists(sentinel)
 
     with _teardown_patches(sid, fastly_fn=_auth_fastly_ok(sid, "cust-IDEM")), TestClient(app) as client:
         r = client.post(
@@ -452,7 +454,7 @@ def test_teardown_preserves_duckdb_when_remove_cache_false(isolated_configs_dir,
 
     assert r.status_code == 200
     assert not os.path.exists(svcconfig.config_path(sid))
-    assert os.path.exists(db_path)
+    assert os.path.exists(sentinel)
 
 
 def test_teardown_partial_failure_in_perform_teardown_still_succeeds(isolated_configs_dir):
@@ -497,9 +499,13 @@ def _fake_ensure_fos_access_key(
     return {"id": f"AKIA_TEST_{suffix}", "access_key": f"AKIA_TEST_{suffix}", "secret_key": f"SECRET_TEST_{suffix}"}
 
 
-def _fake_ensure_fos_bucket(bucket, region, access_key, secret_key, *, service_id=None, status_cb=None):
+def _fake_ensure_fos_bucket(
+    bucket, region, access_key, secret_key, *, service_id=None, status_cb=None, on_created=None
+):
     if status_cb:
         status_cb(f"🪣 Bucket {bucket} in {region} (mock)…")
+    if on_created:
+        on_created()
     return True
 
 
@@ -527,8 +533,13 @@ def _wizard_env(tmp_path, monkeypatch, *, service_name="Wizard E2E Service", ext
     monkeypatch.setattr(svcconfig, "DATA_DIR", tmp_path / "data")
     (tmp_path / "data").mkdir(exist_ok=True)
     base_patches = [
+        patch("backend.provision.orchestrator.logging_endpoint_role_error", return_value=None),
         patch("backend.provision.orchestrator.ensure_fos_access_key", side_effect=_fake_ensure_fos_access_key),
-        patch("backend.provision.orchestrator.ensure_fos_bucket", side_effect=_fake_ensure_fos_bucket),
+        patch(
+            "backend.provision.orchestrator.ensure_fos_bucket",
+            side_effect=_fake_ensure_fos_bucket,
+            autospec=True,
+        ),
         patch("backend.provision.orchestrator.ensure_cdn_service", side_effect=_fake_ensure_cdn_service),
         patch(
             "backend.provision.orchestrator.ensure_logging_via_reconciler",
@@ -560,8 +571,6 @@ def _wizard_payload(sid: str, bucket: str, **overrides) -> dict:
         "log_period": "60",
         "enable_cron_sync": True,
         "delete_after": True,
-        "commit_interval_mins": 5,
-        "enable_cron_compact": True,
         "log_retention_days": 30,
         **overrides,
     }
@@ -570,10 +579,7 @@ def _wizard_payload(sid: str, bucket: str, **overrides) -> dict:
 def test_wizard_execute_runs_orchestrator_and_bootstrap_sees_service(isolated_configs_dir, tmp_path, monkeypatch):
     """End-to-end: execute → orchestrator yields done → config persists → bootstrap lists svc."""
     sid = "svc-wizard-e2e-1"
-    extras = [
-        patch("backend.core.storage.init_storage_table", side_effect=RuntimeError("storage init skipped (test)")),
-    ]
-    with _wizard_env(tmp_path, monkeypatch, extra_patches=extras), TestClient(app) as client:
+    with _wizard_env(tmp_path, monkeypatch), TestClient(app) as client:
         r = client.post("/api/provision/execute", json=_wizard_payload(sid, "wizard-e2e-bucket"))
 
     assert r.status_code == 200, r.text[:500]
@@ -722,8 +728,9 @@ def test_wizard_execute_rollback_actually_invokes_resource_deletion(isolated_con
     assert "Step 6/8" in status_msgs
 
     called_names = [name for name, _ in teardown_calls]
-    for expected in ("delete_cdn_service", "remove_logging_endpoint", "delete_fos_bucket", "delete_fos_access_key"):
+    for expected in ("delete_cdn_service", "delete_fos_bucket", "delete_fos_access_key"):
         assert expected in called_names, f"expected {expected} in {called_names}"
+    assert "remove_logging_endpoint" not in called_names
     assert not os.path.exists(svcconfig.config_path(sid))
 
 
@@ -750,7 +757,8 @@ def test_set_ngwaf_workspace_saves_body_and_ignores_query_param():
         patch("backend.core.log_fields.validate_destructive_token") as mock_validate,
     ):
         resp = _client().patch(
-            "/api/provision/services/svc123/ngwaf-workspace?token=test-stored-key",
+            "/api/provision/services/svc123/ngwaf-workspace",
+            headers={"Authorization": "Bearer test-stored-key"},
             json={"ngwaf_workspace_id": "workspace-abc"},
         )
         assert resp.status_code == 200
@@ -760,7 +768,8 @@ def test_set_ngwaf_workspace_saves_body_and_ignores_query_param():
 
         saved.clear()
         resp2 = _client().patch(
-            "/api/provision/services/svc123/ngwaf-workspace?workspace_id=workspace-abc&token=test-stored-key",
+            "/api/provision/services/svc123/ngwaf-workspace?workspace_id=workspace-abc",
+            headers={"Authorization": "Bearer test-stored-key"},
             json={},
         )
         assert resp2.status_code == 200
@@ -791,8 +800,10 @@ def test_set_ngwaf_workspace_auth_rejections(query, cfg_key, fastly_effect, expe
         patch("backend.provision._sync_crontab"),
         patch("backend.core.log_fields.fastly", **fastly_kw),
     ):
+        headers = {"Authorization": f"Bearer {query.removeprefix('?token=')}"} if query else None
         resp = _client().patch(
-            f"/api/provision/services/svc123/ngwaf-workspace{query}",
+            "/api/provision/services/svc123/ngwaf-workspace",
+            headers=headers,
             json={"ngwaf_workspace_id": "workspace-abc"},
         )
     assert resp.status_code == 401
@@ -809,7 +820,8 @@ def test_ngwaf_workspaces_listing_variants():
     ):
         r_ro = _client().get(
             "/api/provision/ngwaf-workspaces",
-            params={"service_id": "svc123", "token": "stored-read-only-token"},
+            params={"service_id": "svc123"},
+            headers={"Authorization": "Bearer stored-read-only-token"},
         )
         assert r_ro.status_code == 401
         assert r_ro.json()["detail"]["error"] == "insufficient_scope"
@@ -835,7 +847,11 @@ def test_ngwaf_workspaces_listing_variants():
         ),
         patch("backend.core.log_fields.validate_destructive_token") as mock_val,
     ):
-        r_data = _client().get("/api/provision/ngwaf-workspaces", params={"service_id": "svc", "token": "tok"})
+        r_data = _client().get(
+            "/api/provision/ngwaf-workspaces",
+            params={"service_id": "svc"},
+            headers={"Authorization": "Bearer tok"},
+        )
         assert r_data.status_code == 200
         assert r_data.json()["workspaces"][0] == {"id": "ws-1", "name": "Prod"}
         mock_val.assert_called_once_with("tok", service_id="svc")
@@ -856,7 +872,11 @@ def test_ngwaf_workspaces_listing_variants():
         ),
         patch("backend.core.log_fields.validate_destructive_token"),
     ):
-        r_old = _client().get("/api/provision/ngwaf-workspaces", params={"service_id": "svc", "token": "tok"})
+        r_old = _client().get(
+            "/api/provision/ngwaf-workspaces",
+            params={"service_id": "svc"},
+            headers={"Authorization": "Bearer tok"},
+        )
         assert r_old.json()["workspaces"][0]["name"] == "OldShape"
 
     with (
@@ -865,7 +885,11 @@ def test_ngwaf_workspaces_listing_variants():
         patch("backend.provision.fastly", return_value={"id": "tok-id", "name": "automation"}),
         patch("backend.core.log_fields.validate_destructive_token"),
     ):
-        r_empty = _client().get("/api/provision/ngwaf-workspaces", params={"service_id": "svc", "token": "tok"})
+        r_empty = _client().get(
+            "/api/provision/ngwaf-workspaces",
+            params={"service_id": "svc"},
+            headers={"Authorization": "Bearer tok"},
+        )
         assert r_empty.json()["workspaces"] == []
         assert "automation" in r_empty.json()["error_hint"].lower()
 
@@ -881,7 +905,11 @@ def test_ngwaf_workspaces_listing_variants():
         patch("urllib.request.urlopen", side_effect=err_401),
         patch("backend.core.log_fields.validate_destructive_token"),
     ):
-        r_401 = _client().get("/api/provision/ngwaf-workspaces", params={"service_id": "svc", "token": "bad-tok"})
+        r_401 = _client().get(
+            "/api/provision/ngwaf-workspaces",
+            params={"service_id": "svc"},
+            headers={"Authorization": "Bearer bad-tok"},
+        )
         assert r_401.status_code == 400
         assert r_401.json()["detail"]["error"] == "ngwaf_token_invalid"
 
@@ -902,18 +930,18 @@ def test_provision_list_services_flows(tmp_path, monkeypatch):
         patch("backend.core.fastly.client.fastly", return_value=fake_services),
         patch("backend.provision.fos_setup.object_storage_enabled", return_value=True),
     ):
-        resp = _client().get("/api/provision/services?token=tok")
+        resp = _client().get("/api/provision/services", headers={"Authorization": "Bearer tok"})
         assert resp.status_code == 200
         assert {s["id"]: s["provisioned"] for s in resp.json()} == {"svc-existing": True, "svc-new": False}
 
-    assert _client().get("/api/provision/services").status_code == 422
+    assert _client().get("/api/provision/services").status_code == 401
 
     with (
         patch("backend.core.fastly.client.fastly", return_value=fake_services[:1]),
         patch("backend.provision.fos_setup.object_storage_enabled", return_value=False),
         patch("backend.config.list_service_ids", return_value=[]),
     ):
-        r_no_os = _client().get("/api/provision/services", params={"token": "tok"})
+        r_no_os = _client().get("/api/provision/services", headers={"Authorization": "Bearer tok"})
         assert r_no_os.status_code == 400
         assert r_no_os.json()["detail"]["error"] == "object_storage_not_enabled"
 
@@ -925,7 +953,7 @@ def test_provision_list_services_flows(tmp_path, monkeypatch):
             side_effect=lambda *a, **k: probe_called.append(True) or False,
         ),
     ):
-        r_bad = _client().get("/api/provision/services", params={"token": "bad"})
+        r_bad = _client().get("/api/provision/services", headers={"Authorization": "Bearer bad"})
         assert r_bad.status_code == 400
         assert r_bad.json()["detail"]["error"] == "list_services_failed"
         assert probe_called == []
@@ -1002,10 +1030,17 @@ def test_check_domain_routes(query, mock_ret, expected_avail, expected_call_arg)
 
 
 def test_check_domain_available_helper_branches():
+    import socket
+
+    public_dns = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("151.101.1.57", 443))]
     fake_resp = MagicMock()
     fake_resp.__enter__ = lambda s: s
     fake_resp.__exit__ = MagicMock(return_value=False)
-    with patch("urllib.request.urlopen", return_value=fake_resp), patch("backend.utils.telemetry.tracked_call"):
+    with (
+        patch("backend.routers.provision.socket.getaddrinfo", return_value=public_dns),
+        patch("urllib.request.OpenerDirector.open", return_value=fake_resp),
+        patch("backend.utils.telemetry.tracked_call"),
+    ):
         ok, reason = _check_domain_available("test.global.ssl.fastly.net")
         assert ok is False and "in use" in (reason or "").lower()
 
@@ -1013,8 +1048,9 @@ def test_check_domain_available_helper_branches():
         return urllib.error.HTTPError(url="https://x", code=404, msg="not found", hdrs={}, fp=BytesIO(body))  # type: ignore[arg-type]
 
     with (
+        patch("backend.routers.provision.socket.getaddrinfo", return_value=public_dns),
         patch(
-            "urllib.request.urlopen",
+            "urllib.request.OpenerDirector.open",
             side_effect=_http_404(b"... Please check that this domain has been added to a service. ..."),
         ),
         patch("backend.utils.telemetry.tracked_call"),
@@ -1022,25 +1058,37 @@ def test_check_domain_available_helper_branches():
         assert _check_domain_available("test.global.ssl.fastly.net") == (True, None)
 
     with (
-        patch("urllib.request.urlopen", side_effect=_http_404(b"some other body")),
+        patch("backend.routers.provision.socket.getaddrinfo", return_value=public_dns),
+        patch("urllib.request.OpenerDirector.open", side_effect=_http_404(b"some other body")),
         patch("backend.utils.telemetry.tracked_call"),
     ):
         ok_o, reason_o = _check_domain_available("test.global.ssl.fastly.net")
         assert ok_o is False and "already registered" in (reason_o or "")
 
     with (
-        patch("urllib.request.urlopen", side_effect=urllib.error.URLError("dns failed")),
+        patch("backend.routers.provision.socket.getaddrinfo", side_effect=socket.gaierror("nxdomain")),
         patch("backend.utils.telemetry.tracked_call"),
     ):
         ok_dns, reason_dns = _check_domain_available("test.global.ssl.fastly.net")
         assert ok_dns is True and "DNS/Connection" in (reason_dns or "")
+        assert "nxdomain" not in (reason_dns or "")
 
     with (
-        patch("urllib.request.urlopen", side_effect=RuntimeError("unexpected")),
+        patch("backend.routers.provision.socket.getaddrinfo", return_value=public_dns),
+        patch("urllib.request.OpenerDirector.open", side_effect=urllib.error.URLError("tls handshake failed")),
+        patch("backend.utils.telemetry.tracked_call"),
+    ):
+        ok_conn, reason_conn = _check_domain_available("test.global.ssl.fastly.net")
+        assert ok_conn is True and "DNS/Connection" in (reason_conn or "")
+        assert "tls handshake failed" not in (reason_conn or "")
+
+    with (
+        patch("backend.routers.provision.socket.getaddrinfo", return_value=public_dns),
+        patch("urllib.request.OpenerDirector.open", side_effect=RuntimeError("unexpected internal detail")),
         patch("backend.utils.telemetry.tracked_call"),
     ):
         ok_ex, reason_ex = _check_domain_available("foo.example")
-        assert ok_ex is False and "unexpected" in (reason_ex or "")
+        assert ok_ex is False and "unexpected internal detail" not in (reason_ex or "")
 
 
 # ─── /api/provision/check-fos & /terraform/* ─────────────────────────────────
@@ -1149,7 +1197,7 @@ def test_ingest_validation_and_key_flows(tmp_path, monkeypatch):
     ):
         r_new = _client().post(
             "/api/provision/ingest",
-            json={"token": "t", "service_id": "svc-1", "fos_bucket_name": "b", "fos_region": "us-east-1"},
+            json={"token": "t", "service_id": "svc-1", "fos_bucket_name": "valid-bucket", "fos_region": "us-east-1"},
         )
         assert r_new.status_code == 200
         mock_ensure.assert_called_once()
@@ -1165,7 +1213,7 @@ def test_ingest_validation_and_key_flows(tmp_path, monkeypatch):
     ):
         r_err = _client().post(
             "/api/provision/ingest",
-            json={"token": "t", "service_id": "svc-1", "fos_bucket_name": "b"},
+            json={"token": "t", "service_id": "svc-1", "fos_bucket_name": "valid-bucket"},
         )
         assert r_err.status_code == 400
         assert r_err.json()["detail"]["error"] == "ensure_access_key_failed"
@@ -1184,7 +1232,7 @@ def test_ingest_validation_and_key_flows(tmp_path, monkeypatch):
             json={
                 "token": "t",
                 "service_id": "svc-1",
-                "fos_bucket_name": "b",
+                "fos_bucket_name": "valid-bucket",
                 "fos_access_key": "EXISTING_AK",
                 "fos_secret_key": "EXISTING_SK",
             },
@@ -1224,7 +1272,7 @@ def test_ingest_rerun_preserves_faro_pin_and_cdn_secret(tmp_path, monkeypatch):
         patch("backend.provision._sync_crontab"),
         patch("backend.core.log_fields.fastly", side_effect=_auth_fastly_ok("svc-1")),
     ):
-        base_req = {"token": "t", "service_id": "svc-1", "fos_bucket_name": "b", "rum_enabled": True}
+        base_req = {"token": "t", "service_id": "svc-1", "fos_bucket_name": "valid-bucket", "rum_enabled": True}
         resp = _client().post("/api/provision/ingest", json=base_req)
         assert resp.status_code == 200
         assert captured["state"]["cdn_secret"] == "persisted-cdn-secret"
@@ -1297,7 +1345,7 @@ def test_provision_execute_dns_fallback_and_faro_version_threading():
         ),
         patch("backend.provision.provision", side_effect=fake_provision),
         patch("backend.provision._sync_crontab"),
-        patch("backend.core.duckdb.reload_default_source"),
+        patch("backend.core.fos_client.reload_default_source"),
         patch("backend.core.metadata.record_audit"),
     ):
         base_req = {"token": "tok", "service_id": "svc-1", "fos_bucket_name": "valid-bucket", "rum_enabled": True}
@@ -1315,7 +1363,8 @@ def test_provision_execute_dns_fallback_and_faro_version_threading():
 
 # ─── /api/provision/check-config ─────────────────────────────────────────────
 
-_CHECK_PARAMS = {"token": "t", "service_id": "log-svc", "cdn_service_id": "cdn-svc", "bucket": "b"}
+_CHECK_PARAMS = {"service_id": "log-svc", "cdn_service_id": "cdn-svc", "bucket": "b"}
+_CHECK_HEADERS = {"Authorization": "Bearer t"}
 _REQUIRED_SNIPPETS = [
     "Fastly Log Analysis Capture",
     "Fastly Log Analysis Miss",
@@ -1333,12 +1382,14 @@ _REQUIRED_CDN_SNIPPETS = [
 ]
 
 
-def _check_config_fastly_router(*, endpoints, snippets, dicts, backends, cdn_snippets):
+def _check_config_fastly_router(*, endpoints, snippets, dicts, backends, cdn_snippets, fos_endpoints=()):
     def fake_fastly(method, path, token=None, **_):
         if path == "/service/log-svc/version/active":
             return {"number": 7}
         if "/version/7/logging/s3" in path:
             return endpoints
+        if "/version/7/logging/fos" in path:
+            return list(fos_endpoints)
         if "/version/7/snippet" in path:
             return snippets
         if "/version/active/dictionary" in path:
@@ -1375,9 +1426,9 @@ def test_check_config_logging_and_cdn_permutations():
         cdn_snippets=full_cdn_snips,
     )
     with patch("backend.core.fastly.client.fastly", side_effect=side_no_ep):
-        body = _client().get("/api/provision/check-config", params=_CHECK_PARAMS).json()
+        body = _client().get("/api/provision/check-config", params=_CHECK_PARAMS, headers=_CHECK_HEADERS).json()
         assert body["logging_service"]["ok"] is False
-        assert "No S3 logging endpoint" in body["logging_service"]["details"]
+        assert "No logging endpoint" in body["logging_service"]["details"]
 
     # 2. Missing core logging snippets + missing CDN perf snippets
     side_missing_snip = _check_config_fastly_router(
@@ -1388,7 +1439,7 @@ def test_check_config_logging_and_cdn_permutations():
         cdn_snippets=[{"name": "cdn-swr-shield-disable"}],
     )
     with patch("backend.core.fastly.client.fastly", side_effect=side_missing_snip):
-        res = _client().get("/api/provision/check-config", params=_CHECK_PARAMS).json()
+        res = _client().get("/api/provision/check-config", params=_CHECK_PARAMS, headers=_CHECK_HEADERS).json()
         assert "missing CORE snippets" in res["logging_service"]["details"]
         assert res["cdn_service"]["ok"] is False
         assert "cdn-no-cache-404" in res["cdn_service"]["details"]
@@ -1402,11 +1453,27 @@ def test_check_config_logging_and_cdn_permutations():
         cdn_snippets=full_cdn_snips,
     )
     with patch("backend.core.fastly.client.fastly", side_effect=side_full):
-        res_full = _client().get("/api/provision/check-config", params=_CHECK_PARAMS).json()
+        res_full = _client().get("/api/provision/check-config", params=_CHECK_PARAMS, headers=_CHECK_HEADERS).json()
         assert res_full["logging_service"]["ok"] is True
         assert "3 origin metric snippets" in res_full["logging_service"]["details"]
         assert res_full["cdn_service"]["ok"] is True
         assert "fully configured" in res_full["cdn_service"]["details"]
+
+    # 3b. A native FOS endpoint pointing at the bucket counts the same as the legacy S3 one
+    side_fos = _check_config_fastly_router(
+        endpoints=[],
+        fos_endpoints=[{"name": "fos-logs", "bucket_name": "b", "response_condition": "fos-sample"}],
+        snippets=[{"name": s} for s in _REQUIRED_SNIPPETS + _OPTIONAL_SNIPPETS],
+        dicts=full_dicts,
+        backends=full_backends,
+        cdn_snippets=full_cdn_snips,
+    )
+    with patch("backend.core.fastly.client.fastly", side_effect=side_fos):
+        assert (
+            _client()
+            .get("/api/provision/check-config", params=_CHECK_PARAMS, headers=_CHECK_HEADERS)
+            .json()["logging_service"]["ok"]
+        )
 
     # 4. No response condition warns + CDN missing dicts/backend
     side_warn = _check_config_fastly_router(
@@ -1417,7 +1484,7 @@ def test_check_config_logging_and_cdn_permutations():
         cdn_snippets=[],
     )
     with patch("backend.core.fastly.client.fastly", side_effect=side_warn):
-        res_warn = _client().get("/api/provision/check-config", params=_CHECK_PARAMS).json()
+        res_warn = _client().get("/api/provision/check-config", params=_CHECK_PARAMS, headers=_CHECK_HEADERS).json()
         assert res_warn["logging_service"]["ok"] is True
         assert "no response condition" in res_warn["logging_service"]["details"].lower()
         assert res_warn["cdn_service"]["ok"] is False
@@ -1425,7 +1492,7 @@ def test_check_config_logging_and_cdn_permutations():
 
     # 5. Logging & CDN exceptions captured in details
     with patch("backend.core.fastly.client.fastly", side_effect=RuntimeError("Fastly 503")):
-        res_err = _client().get("/api/provision/check-config", params=_CHECK_PARAMS).json()
+        res_err = _client().get("/api/provision/check-config", params=_CHECK_PARAMS, headers=_CHECK_HEADERS).json()
         assert "Fastly 503" in res_err["logging_service"]["details"]
         assert "Fastly 503" in res_err["cdn_service"]["details"]
 
@@ -1452,15 +1519,13 @@ def test_teardown_endpoint_flows():
     with (
         patch("backend.config.load_config", return_value=fake_cfg),
         patch("backend.config.config_path", return_value="/tmp/nonexistent-config.json"),
-        patch("backend.config.duckdb_path", return_value="/tmp/nonexistent.duckdb"),
         patch("backend.provision._sync_crontab", side_effect=lambda: sync_calls.append(True)),
         patch("backend.cron.scheduler.get_scheduler", return_value=fake_scheduler),
-        patch("backend.core.storage.clear_source_caches"),
         patch(
             "backend.provision.perform_teardown",
             return_value=iter([{"type": "status", "message": "removed s3 bucket"}]),
         ),
-        patch("backend.core.duckdb.reload_default_source"),
+        patch("backend.core.fos_client.reload_default_source"),
         patch("backend.core.log_fields.fastly", side_effect=_auth_fastly_ok("svc", "cust-X")),
     ):
         resp = _client().post(
@@ -1479,12 +1544,10 @@ def test_teardown_endpoint_flows():
     with (
         patch("backend.config.load_config", return_value=fake_cfg),
         patch("backend.config.config_path", return_value="/tmp/nonexistent.json"),
-        patch("backend.config.duckdb_path", return_value="/tmp/nonexistent.duckdb"),
         patch("backend.provision._sync_crontab"),
         patch("backend.cron.scheduler.get_scheduler", return_value=MagicMock()),
-        patch("backend.core.storage.clear_source_caches"),
         patch("backend.provision.perform_teardown", side_effect=_boom),
-        patch("backend.core.duckdb.reload_default_source"),
+        patch("backend.core.fos_client.reload_default_source"),
         patch("backend.core.log_fields.fastly", side_effect=_auth_fastly_ok("svc", "cust-X")),
     ):
         resp_err = _client().post(
@@ -1539,3 +1602,824 @@ def test_reconcile_route_and_json_content_type():
         with pytest.raises(HTTPException) as exc:
             _require_json_content_type(req)
         assert exc.value.status_code == 415
+
+
+# ─── Milestone M2 Security Regressions (SEC-13 & SEC-15) ────────────────────
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+@pytest.mark.parametrize(
+    "bad_domain",
+    [
+        "127.0.0.1",
+        "169.254.169.254",
+        "10.0.0.1",
+        "[::1]",
+        "[::ffff:127.0.0.1]",
+        "localhost",
+        "metadata",
+        "metadata.google.internal",
+        "svc.cluster.local",
+        "printer.local",
+        "app.localhost",
+        "db.svc",
+        "host.corp",
+        "nas.lan",
+        "https://127.0.0.1:8443/admin",
+        "user@example.com",
+    ],
+)
+def test_sec13_check_domain_rejects_ip_literals_and_internal_suffixes(bad_domain: str):
+    with patch("backend.routers.provision.socket.getaddrinfo") as mock_dns:
+        available, reason = _check_domain_available(bad_domain)
+    assert available is False
+    assert reason is not None and "DNS" not in reason
+    mock_dns.assert_not_called()
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+@pytest.mark.parametrize(
+    "records",
+    [
+        [(2, 1, 6, "", ("127.0.0.1", 443))],
+        [(2, 1, 6, "", ("10.0.0.5", 443))],
+        [(2, 1, 6, "", ("169.254.169.254", 443))],
+        [(10, 1, 6, "", ("::1", 443, 0, 0))],
+        [(10, 1, 6, "", ("::ffff:127.0.0.1", 443, 0, 0))],
+        [(2, 1, 6, "", ("93.184.216.34", 443)), (2, 1, 6, "", ("10.0.0.1", 443))],
+    ],
+)
+def test_sec13_check_domain_blocks_private_and_mapped_dns_answers(records: list[tuple]):
+    with (
+        patch("backend.routers.provision.socket.getaddrinfo", return_value=records),
+        patch("backend.routers.provision.socket.create_connection") as mock_conn,
+        patch("backend.utils.telemetry.tracked_call"),
+    ):
+        available, reason = _check_domain_available("rebind.example.com")
+    assert available is False
+    assert reason == "Domain resolves to a non-public IP address"
+    assert "DNS" not in reason
+    mock_conn.assert_not_called()
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec13_check_domain_pins_resolved_ip_and_disables_redirects():
+    import socket
+    import urllib.request
+
+    from backend.routers.provision import _NoRedirectHandler, _PinnedHTTPSConnection
+
+    fake_raw_sock = MagicMock()
+    fake_tls_sock = MagicMock()
+    fake_ctx = MagicMock()
+    fake_ctx.wrap_socket.return_value = fake_tls_sock
+
+    conn = _PinnedHTTPSConnection(
+        "custom.example.com",
+        pinned_ip="151.101.1.57",
+        server_hostname="custom.example.com",
+        timeout=5,
+        context=fake_ctx,
+    )
+    with patch("backend.routers.provision.socket.create_connection", return_value=fake_raw_sock) as mock_create_conn:
+        conn.connect()
+    mock_create_conn.assert_called_once_with(("151.101.1.57", 443), 5)
+    fake_ctx.wrap_socket.assert_called_once_with(fake_raw_sock, server_hostname="custom.example.com")
+    assert conn.sock is fake_tls_sock
+
+    no_redir = _NoRedirectHandler()
+    dummy_req = urllib.request.Request("https://custom.example.com/")
+    for code in (301, 302, 303, 307, 308):
+        handler_fn = getattr(no_redir, f"http_error_{code}")
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            handler_fn(
+                dummy_req,
+                BytesIO(b""),
+                code,
+                "Redirect",
+                {"Location": "http://169.254.169.254/latest/meta-data/"},
+            )
+        assert exc_info.value.code == code
+
+        public_dns = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("151.101.1.57", 443))]
+        redir_err = urllib.error.HTTPError(
+            url="https://custom.example.com/",
+            code=code,
+            msg="Moved",
+            hdrs={"Location": "http://169.254.169.254/latest/meta-data/"},  # type: ignore[arg-type]
+            fp=BytesIO(b""),
+        )
+        with (
+            patch("backend.routers.provision.socket.getaddrinfo", return_value=public_dns),
+            patch("urllib.request.OpenerDirector.open", side_effect=redir_err),
+            patch("backend.utils.telemetry.tracked_call"),
+        ):
+            available, reason = _check_domain_available("custom.example.com")
+        assert available is False
+        assert reason == "Domain already registered or in use"
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec13_routers_require_admin_blocks_analyst_sessions():
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+
+    from backend.routers.provision import router as prov_router
+    from backend.routers.services.custom_fields import router as cf_router
+    from backend.routers.services.vcl import router as vcl_router
+
+    session_holder: dict[str, object] = {"session": SimpleNamespace(session_id="s1", service_ids=["svc1"])}
+    sub_app = FastAPI()
+
+    @sub_app.middleware("http")
+    async def _attach_session(request: Request, call_next):
+        request.state.analyst_session = session_holder["session"]
+        return await call_next(request)
+
+    sub_app.include_router(prov_router)
+    sub_app.include_router(vcl_router, prefix="/api")
+    sub_app.include_router(cf_router, prefix="/api")
+    tc = TestClient(sub_app)
+
+    blocked_calls = [
+        ("GET", "/api/provision/check-domain?prefix=foo", None),
+        ("POST", "/api/provision/reconcile", {"service_id": "svc1", "token": "tok"}),
+        ("GET", "/api/services/svc1/logging-settings", None),
+        ("POST", "/api/services/svc1/log-fields", {"log_fields": {"groups": ["core"]}}),
+        ("POST", "/api/services/svc1/logging-settings/update?custom_condition=req.status%20%3D%3D%20200", None),
+        ("GET", "/api/services/svc1/custom-fields", None),
+        (
+            "POST",
+            "/api/services/svc1/custom-fields",
+            {
+                "name": "cf_test",
+                "label": "CF Test",
+                "vcl_log_expression": "req.http.X-Test",
+                "sql_type": "VARCHAR",
+                "value_type": "string",
+            },
+        ),
+    ]
+    for method, path, payload in blocked_calls:
+        res = tc.request(method, path, json=payload) if payload is not None else tc.request(method, path)
+        assert res.status_code == 403, f"expected 403 for {method} {path}, got {res.status_code}"
+        assert res.json()["detail"]["error"] == "admin_only"
+
+    session_holder["session"] = None
+    with patch("backend.routers.provision._check_domain_available", return_value=(True, None)):
+        admin_res = tc.get("/api/provision/check-domain?prefix=foo")
+    assert admin_res.status_code == 200
+    assert admin_res.json()["available"] is True
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec15_provision_and_vcl_routers_reject_malicious_vcl_inputs(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
+    (tmp_path / "cfgs").mkdir(parents=True, exist_ok=True)
+    svcconfig.save_config("svc1", _seed_cfg("svc1"))
+
+    bad_cond = 'table.lookup(fos_credentials, "secret_key") != ""'
+    unbalanced_cond = "true) || (true"
+    bad_cf_list = [
+        {
+            "name": "cf_leak",
+            "label": "Leak",
+            "vcl_log_expression": "req.http.X-Edge-Scorer-Auth",
+            "sql_type": "VARCHAR",
+            "value_type": "string",
+        }
+    ]
+    bad_lf_json = json.dumps({"groups": ["core"], "custom_fields": bad_cf_list})
+
+    # 1. /api/provision/execute rejects bad custom_condition, rum_custom_condition, custom_fields, & malformed JSON
+    with (
+        patch("backend.utils.pop_utils.fetch_pop_locations"),
+        patch("backend.config.fetch_service_name", return_value="svc"),
+        patch("backend.provision.parse_period", return_value=60),
+        patch("backend.provision.provision") as mock_prov,
+    ):
+        for extra in (
+            {"custom_condition": bad_cond},
+            {"custom_condition": unbalanced_cond},
+            {"rum_enabled": False, "rum_custom_condition": bad_cond},
+            {"log_fields": bad_lf_json},
+            {"log_fields": "{not-valid-json"},
+        ):
+            res = _client().post(
+                "/api/provision/execute",
+                json={"token": "tok", "service_id": "svc1", "fos_bucket_name": "valid-bucket", **extra},
+            )
+            assert res.status_code == 400, f"expected 400 for execute extra={extra}, got {res.status_code}"
+        mock_prov.assert_not_called()
+
+    # 2. /api/provision/ingest rejects bad custom_condition, rum.custom_condition, custom_fields, & malformed JSON
+    with (
+        patch("backend.utils.pop_utils.fetch_pop_locations"),
+        patch("backend.provision.parse_period", return_value=60),
+        patch("backend.core.log_fields.fastly", side_effect=_auth_fastly_ok("svc1")),
+        patch("backend.provision.write_service_config") as mock_write_cfg,
+    ):
+        for ingest_extra in (
+            {"custom_condition": bad_cond},
+            {"rum": {"custom_condition": unbalanced_cond}},
+            {"log_fields": bad_lf_json},
+            {"log_fields": "{not-json"},
+        ):
+            res = _client().post(
+                "/api/provision/ingest",
+                json={"token": "tok", "service_id": "svc1", "fos_bucket_name": "valid-bucket", **ingest_extra},
+            )
+            assert res.status_code == 400, f"expected 400 for ingest extra={ingest_extra}, got {res.status_code}"
+        mock_write_cfg.assert_not_called()
+
+    # 3. /api/provision/terraform/preview and /export reject malicious VCL conditions & custom_fields
+    with patch("backend.utils.terraform_gen.generate_terraform") as mock_tf:
+        for tf_path in ("/api/provision/terraform/preview", "/api/provision/terraform/export"):
+            for tf_extra in (
+                {"custom_condition": bad_cond},
+                {"rum_custom_condition": unbalanced_cond},
+                {"log_fields": bad_lf_json},
+                {"log_fields": "{not-json"},
+            ):
+                res = _client().post(tf_path, json={"service_id": "svc1", **tf_extra})
+                assert res.status_code == 400, f"expected 400 for {tf_path} extra={tf_extra}, got {res.status_code}"
+        mock_tf.assert_not_called()
+
+    # 4. /api/services/{id}/logging-settings/update rejects bad custom_condition before Fastly mutation
+    with patch("backend.provision.fastly_api.update_logging_endpoint") as mock_upd_ep:
+        res_upd = _client().post(
+            "/api/services/svc1/logging-settings/update",
+            params={"custom_condition": bad_cond},
+            headers={"Authorization": "Bearer tok"},
+        )
+        assert res_upd.status_code == 400
+        mock_upd_ep.assert_not_called()
+
+    # 5. /api/services/{id}/log-fields and /custom-fields reject secret-exfiltrating custom field expressions
+    with patch("backend.routers.services.vcl.mutate_service_config") as mock_mut_vcl:
+        for bad_cfs in (
+            bad_cf_list,
+            [{"name": "rum_cid", "collection_stage": "deliver", "vcl_log_expression": bad_cond}],
+            [{"name": "rum_cid", "collection_stage": "deliver", "vcl_log_expression": "resp.http.Server"}],
+            [{"name": "cf_sneaky", "collection_stage": "deliver"}],
+        ):
+            res_lf = _client().post(
+                "/api/services/svc1/log-fields",
+                json={"log_fields": {"groups": ["core"], "custom_fields": bad_cfs}},
+            )
+            assert res_lf.status_code == 422
+        mock_mut_vcl.assert_not_called()
+
+    # Legitimate RUM system fields (beacon/deliver) pass Terraform preview validation cleanly
+    valid_rum_lf = json.dumps(
+        {
+            "groups": ["core"],
+            "custom_fields": [
+                {
+                    "name": "rum_cid",
+                    "label": "RUM Session ID",
+                    "vcl_log_expression": "req.http.x-fos-edge-data:rum_cid",
+                    "collection_stage": "beacon",
+                    "sql_type": "VARCHAR",
+                    "value_type": "string",
+                    "bytes_estimate": 36,
+                    "enabled": True,
+                }
+            ],
+        }
+    )
+    with patch("backend.utils.terraform_gen.generate_terraform", return_value={"main.tf": "# ok"}):
+        res_tf_ok = _client().post(
+            "/api/provision/terraform/preview",
+            json={"service_id": "svc1", "log_fields": valid_rum_lf},
+        )
+        assert res_tf_ok.status_code == 200
+
+    res_cf = _client().post(
+        "/api/services/svc1/custom-fields",
+        json=bad_cf_list[0],
+    )
+    assert res_cf.status_code == 422
+
+
+@pytest.mark.no_postgres
+@pytest.mark.security_regression
+def test_sec13_execute_normalizes_trailing_slash_cdn_url_and_rejects_malformed_cdn_url(isolated_configs_dir):
+    captured: dict = {}
+
+    def _fake_provision(cfg, _resume_from_state=False):
+        captured["cfg"] = cfg
+        yield {"type": "done", "message": "ok"}
+
+    with (
+        patch("backend.routers.provision._check_domain_available", return_value=(True, None)) as mock_dom,
+        patch("backend.provision.provision", side_effect=_fake_provision),
+        patch("backend.utils.pop_utils.fetch_pop_locations"),
+        patch("backend.config.fetch_service_name", return_value="My Svc"),
+        patch("backend.provision._sync_crontab"),
+        patch("backend.cron.scheduler.get_scheduler"),
+        TestClient(app) as client,
+    ):
+        res_ok = client.post(
+            "/api/provision/execute",
+            json={
+                "token": "tok-test",
+                "service_id": "svc-cdn-norm",
+                "fos_bucket_name": "cdn-norm-bucket",
+                "cdn_url": "https://my-cdn.global.ssl.fastly.net/",
+            },
+        )
+        assert res_ok.status_code == 200, res_ok.text
+        mock_dom.assert_called_once_with("my-cdn.global.ssl.fastly.net", timeout=5)
+        assert captured["cfg"]["cdn_url"] == "https://my-cdn.global.ssl.fastly.net"
+
+        mock_dom.reset_mock()
+        captured.clear()
+        res_space_ok = client.post(
+            "/api/provision/execute",
+            json={
+                "token": "tok-test",
+                "service_id": "svc-cdn-norm",
+                "fos_bucket_name": "cdn-norm-bucket",
+                "cdn_url": " https://my-cdn.global.ssl.fastly.net/ ",
+            },
+        )
+        assert res_space_ok.status_code == 200, res_space_ok.text
+        mock_dom.assert_called_once_with("my-cdn.global.ssl.fastly.net", timeout=5)
+        assert captured["cfg"]["cdn_url"] == "https://my-cdn.global.ssl.fastly.net"
+
+        mock_dom.reset_mock()
+        captured.clear()
+        for bad_cdn_url in (
+            "http://my-cdn.global.ssl.fastly.net",
+            "https://my-cdn.global.ssl.fastly.net:8443",
+            "https://my-cdn.global.ssl.fastly.net:abc",
+            "https://my-cdn.global.ssl.fastly.net:99999",
+            "https://cdn.example.com:",
+            "https://cdn.example.com.:",
+            "https://[::1",
+            "https://[2001:db8::1",
+            "https://[::1]",
+            "https://127.0.0.1",
+            "https://cdn .example.com",
+            "https://cdn\x07.example.com",
+            "\nhttps://my-cdn.global.ssl.fastly.net",
+            "https://my-cdn.global.ssl.fastly.net\r\n",
+            "\thttps://my-cdn.global.ssl.fastly.net\t",
+            "\u00a0https://my-cdn.global.ssl.fastly.net",
+            "https://my-cdn.global.ssl.fastly.net\u00a0",
+            "\x85https://my-cdn.global.ssl.fastly.net",
+            "https://my-cdn.global.ssl.fastly.net\x85",
+            "\u2000https://my-cdn.global.ssl.fastly.net",
+            "https://my-cdn.global.ssl.fastly.net\u2000",
+            "\u3000https://my-cdn.global.ssl.fastly.net",
+            "https://my-cdn.global.ssl.fastly.net\u3000",
+            "\u2028https://my-cdn.global.ssl.fastly.net",
+            "https://my-cdn.global.ssl.fastly.net\u2028",
+            "\u2029https://my-cdn.global.ssl.fastly.net",
+            "https://my-cdn.global.ssl.fastly.net\u2029",
+            "   ",
+            "https://my-cdn.global.ssl.fastly.net/extra",
+            "https://user@my-cdn.global.ssl.fastly.net",
+            "https://@my-cdn.global.ssl.fastly.net",
+            "https://my-cdn.global.ssl.fastly.net?a=1",
+            "https://my-cdn.global.ssl.fastly.net?",
+            "https://my-cdn.global.ssl.fastly.net#frag",
+            "https://my-cdn.global.ssl.fastly.net#",
+        ):
+            res_bad = client.post(
+                "/api/provision/execute",
+                json={
+                    "token": "tok-test",
+                    "service_id": "svc-cdn-norm",
+                    "fos_bucket_name": "cdn-norm-bucket",
+                    "cdn_url": bad_cdn_url,
+                },
+            )
+            assert res_bad.status_code == 400, f"Expected 400 for {bad_cdn_url!r}, got {res_bad.status_code}"
+            assert res_bad.json()["detail"]["error"] == "invalid_cdn_url"
+        mock_dom.assert_not_called()
+        assert "cfg" not in captured
+
+
+@pytest.mark.no_postgres
+@pytest.mark.security_regression
+def test_sec15_provision_routers_reject_exclude_url_regex_and_cdn_shield_breakouts(tmp_path, monkeypatch):
+    """SEC-15 Wave 5: /terraform/{preview,export}, /ingest, /execute, and /reconcile reject scoring & shield breakouts."""
+    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
+    (tmp_path / "cfgs").mkdir(parents=True, exist_ok=True)
+    svcconfig.save_config("svc1", _seed_cfg("svc1"))
+
+    breakout_regex = r'") { set req.http.X-Exfil = table.lookup(fos_credentials, "secret_key"); } if (req.url !~ "'
+    breakout_shield = (
+        'iad_va_us, F_fos_origin); set req.http.X_Exfil = table.lookup(fos_credentials, "secret_key"); '
+        "set req.backend = fastly.try_select_shield(ssl_shield_iad_va_us"
+    )
+
+    bad_payloads = (
+        {
+            "scoring": {
+                "enabled": True,
+                "domain": "scorer.edgecompute.app",
+                "exclude_url_regex": breakout_regex,
+            }
+        },
+        {
+            "scoring_enabled": True,
+            "scoring_domain": "scorer.edgecompute.app",
+            "scoring_exclude_url_regex": breakout_regex,
+        },
+        {
+            "scoring": {
+                "enabled": True,
+                "domain": "scorer.edgecompute.app",
+                "request_secret": 'sec" || true || "',
+            }
+        },
+        {
+            "scoring": {
+                "enabled": True,
+                "domain": "scorer.edgecompute.app/evil",
+            }
+        },
+        {"rum_enabled": True, "cdn_shield": breakout_shield},
+        {"fos_region": "us-east-1; error 999"},
+        {"rum": {"enabled": True, "faro_version": '2.13.0"; error 999; //'}},
+    )
+
+    for tf_path in ("/api/provision/terraform/preview", "/api/provision/terraform/export"):
+        for extra in bad_payloads:
+            r_tf = _client().post(tf_path, json={"service_id": "svc1", "fos_bucket_name": "my-bucket", **extra})
+            assert r_tf.status_code == 400, f"Expected 400 on {tf_path} for {extra}, got {r_tf.status_code}"
+
+    with (
+        patch("backend.utils.pop_utils.fetch_pop_locations"),
+        patch("backend.provision.parse_period", return_value=60),
+        patch("backend.core.log_fields.fastly", side_effect=_auth_fastly_ok("svc1")),
+        patch("backend.provision.write_service_config") as mock_write_cfg,
+    ):
+        for extra in bad_payloads:
+            r_ing = _client().post(
+                "/api/provision/ingest",
+                json={"token": "tok", "service_id": "svc1", "fos_bucket_name": "my-bucket", **extra},
+            )
+            assert r_ing.status_code == 400, f"Expected 400 on /ingest for {extra}, got {r_ing.status_code}"
+        mock_write_cfg.assert_not_called()
+
+    with (
+        patch("backend.utils.pop_utils.fetch_pop_locations"),
+        patch("backend.config.fetch_service_name", return_value="svc"),
+        patch("backend.provision.parse_period", return_value=60),
+        patch("backend.provision.provision") as mock_prov,
+    ):
+        for exec_extra in (
+            {"cdn_shield": breakout_shield},
+            {"fos_region": "us-east-1; error 999"},
+            {"rum_enabled": True, "faro_version": '2.13.0"; error 999; //'},
+        ):
+            r_exec = _client().post(
+                "/api/provision/execute",
+                json={"token": "tok", "service_id": "svc1", "fos_bucket_name": "valid-bucket", **exec_extra},
+            )
+            assert r_exec.status_code == 400, f"Expected 400 on /execute for {exec_extra}, got {r_exec.status_code}"
+        mock_prov.assert_not_called()
+
+    with patch("backend.provision.declarative.reconciler.reconcile_vcl_state") as mock_rec:
+        r_bad_sid = _client().post("/api/provision/reconcile", json={"service_id": 'svc"1', "token": "tok"})
+        assert r_bad_sid.status_code == 400
+        svcconfig.save_config(
+            "svc_tainted",
+            {
+                **_seed_cfg("svc_tainted"),
+                "scoring": {"enabled": True, "domain": "scorer.edgecompute.app", "exclude_url_regex": breakout_regex},
+            },
+        )
+        r_tainted = _client().post("/api/provision/reconcile", json={"service_id": "svc_tainted", "token": "tok"})
+        assert r_tainted.status_code == 400
+        mock_rec.assert_not_called()
+
+    # Valid exclude_url_regex and cdn_shield continue to succeed on /terraform/preview
+    r_valid_tf = _client().post(
+        "/api/provision/terraform/preview",
+        json={
+            "service_id": "svc1",
+            "fos_bucket_name": "my-bucket",
+            "rum_enabled": True,
+            "cdn_shield": "iad-va-us",
+            "scoring": {
+                "enabled": True,
+                "domain": "scorer.edgecompute.app",
+                "request_secret": "secret-hex-0123456789",  # gitleaks:allow
+                "exclude_url_regex": r"^/(?:health|metrics|static/)",
+            },
+        },
+    )
+    assert r_valid_tf.status_code == 200, r_valid_tf.text
+
+
+@pytest.mark.no_postgres
+@pytest.mark.security_regression
+def test_sec15_sec13_wave6_ingest_and_terraform_type_confusion_and_alias_hardening(tmp_path, monkeypatch):
+    """SEC-15 & SEC-13 Wave 6: /terraform/* null-coalescing & type safety + /ingest unmocked defaults, alias shadow & cdn_url."""
+    cfg_dir = tmp_path / "cfgs"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(config, "CONFIGS_DIR", cfg_dir)
+    tc = TestClient(app, raise_server_exceptions=False)
+
+    # 1. Benign null custom_condition in rum must return 200 OK on /terraform/{preview,export}, never 500
+    for ep in ("/api/provision/terraform/preview", "/api/provision/terraform/export"):
+        r_null = tc.post(
+            ep,
+            json={
+                "service_id": "svc1",
+                "fos_bucket_name": "my-bucket",
+                "rum": {"enabled": True, "custom_condition": None},
+            },
+        )
+        assert r_null.status_code == 200, (
+            f"Expected 200 on {ep} for rum.custom_condition=None, got {r_null.status_code}"
+        )
+
+    # 2. JSON type confusion & shield alias breakouts on /terraform/{preview,export} return 400/422, never 500
+    for bad_tf in (
+        {"service_id": "svc1", "provisioning": ["bad"]},
+        {"service_id": "svc1", "rum": ["bad"]},
+        {"service_id": "svc1", "cmcd": ["bad"]},
+        {"service_id": "svc1", "fos_proxy": ["bad"]},
+        {"service_id": "svc1", "cmcd": {"enabled": True, "version": []}},
+        {"service_id": "svc1", "cmcd": {"enabled": True, "version": True}},
+        {"service_id": "svc1", "scoring": {"enabled": True, "domain": "a.example.com", "enforce_status_code": []}},
+        {"service_id": "svc1", "scoring": {"enabled": True, "domain": "a.example.com", "enforce_status_code": True}},
+        {"service_id": "svc1", "provisioning": {"sample_rate": []}},
+        {"service_id": "svc1", "provisioning": {"sample_rate": True}},
+        {"service_id": "svc1", "provisioning": {"cdn_shield": "iad); error 999;"}},
+        {"service_id": "svc1", "fos_proxy": {"shield": "iad); error 999;"}},
+        {
+            "service_id": "svc1",
+            "rum_enabled": True,
+            "rum_custom_condition": "",
+            "rum": {"custom_condition": 'req.http.Host != "x") { error 999; } if (true'},
+        },
+    ):
+        for ep in ("/api/provision/terraform/preview", "/api/provision/terraform/export"):
+            resp = tc.post(ep, json=bad_tf)
+            assert resp.status_code in (400, 422), f"Expected 400/422 on {ep} for {bad_tf}, got {resp.status_code}"
+
+    # 3. /api/provision/ingest with UNMOCKED real write_service_config: minimal valid payload -> 200 OK; hostile -> 400
+    with (
+        patch("backend.core.vcl_generator.validate_destructive_token", return_value={}),
+        patch("backend.utils.pop_utils.fetch_pop_locations", return_value={}),
+        patch("backend.provision._sync_crontab"),
+        patch("backend.cron.scheduler.get_scheduler"),
+    ):
+        r_ok = tc.post(
+            "/api/provision/ingest",
+            json={
+                "token": "tok",
+                "service_id": "svc_min",
+                "fos_bucket_name": "valid-bucket-123",
+                "fos_access_key": "AK",
+                "fos_secret_key": "SK",
+            },
+        )
+        assert r_ok.status_code == 200, f"Expected 200 on minimal valid ingest, got {r_ok.status_code}: {r_ok.text}"
+        persisted_min = svcconfig.load_config("svc_min")
+        assert persisted_min is not None
+        assert persisted_min["fos_region"] == "us-east-1"
+        assert persisted_min["log_retention_days"] == 30
+        assert persisted_min["cdn_url"] == ""
+
+        # Offline valid https:// cdn_url + numeric log_period succeed and normalize trailing slash without DNS lookup
+        with patch("backend.routers.provision._check_domain_available") as mock_dns_probe:
+            r_cdn_ok = tc.post(
+                "/api/provision/ingest",
+                json={
+                    "token": "tok",
+                    "service_id": "svc_cdn_ok",
+                    "fos_bucket_name": "valid-bucket-123",
+                    "fos_access_key": "AK",
+                    "fos_secret_key": "SK",
+                    "log_period": 60,
+                    "cdn_url": "https://cdn.example.com/",
+                },
+            )
+            assert r_cdn_ok.status_code == 200, r_cdn_ok.text
+            mock_dns_probe.assert_not_called()
+        persisted_cdn = svcconfig.load_config("svc_cdn_ok")
+        assert persisted_cdn is not None and persisted_cdn["cdn_url"] == "https://cdn.example.com"
+
+        base = {
+            "token": "tok",
+            "service_id": "svc_bad",
+            "fos_bucket_name": "valid-bucket-123",
+            "fos_region": "us-east-1",
+            "log_period": "1 minute",
+            "log_retention_days": 30,
+            "fos_access_key": "AK",
+            "fos_secret_key": "SK",
+        }
+        for bad_ing in (
+            {
+                **base,
+                "rum_enabled": True,
+                "rum_custom_condition": "",
+                "rum": {"custom_condition": 'req.url != "x") { error 999; } if (req.url != "y"'},
+            },
+            {**base, "cdn_url": "http://169.254.169.254/latest/meta-data/"},
+            {**base, "cdn_url": "https://127.0.0.1:8443"},
+            {**base, "cdn_url": "https://metadata.google.internal"},
+            {**base, "cdn_url": "https://cdn.example.com\u2028"},
+            {**base, "fos_bucket_name": "bad_underscore_bucket"},
+            {**base, "fos_prefix": "../bad;prefix"},
+            {**base, "scoring_enabled": True, "scoring": "not-a-dict"},
+            {**base, "provisioning": ["not-a-dict"]},
+            {**base, "rum": "not-a-dict"},
+            {**base, "cmcd": 123},
+            {**base, "fos_proxy": 123},
+        ):
+            r_b = tc.post("/api/provision/ingest", json=bad_ing)
+            assert r_b.status_code in (400, 422), f"Expected 400/422 on /ingest for {bad_ing}, got {r_b.status_code}"
+        assert svcconfig.load_config("svc_bad") is None
+
+
+@pytest.mark.no_postgres
+@pytest.mark.security_regression
+def test_sec15_wave7_all_seven_routes_null_description_empty_sid_and_log_fields_schema(tmp_path, monkeypatch):
+    """SEC-15 Wave 7: description=None returns 200 OK across all 7 routes, empty logging_service_id never 500s, and bad custom_fields/log_fields return 400/422."""
+    from backend.provision.declarative.models import ReconciliationResult
+
+    cfg_dir = tmp_path / "cfgs_w7"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(config, "CONFIGS_DIR", cfg_dir)
+    tc = TestClient(app, raise_server_exceptions=False)
+
+    valid_cf_null_desc = {
+        "name": "my_cf",
+        "label": "My CF",
+        "description": None,
+        "vcl_log_expression": "req.http.X-My-Hdr",
+        "sql_type": "VARCHAR",
+        "value_type": "string",
+        "bytes_estimate": 24,
+    }
+
+    # 1 & 2. /terraform/preview & /terraform/export: description=None -> 200; empty logging_service_id -> 200
+    for ep in ("/api/provision/terraform/preview", "/api/provision/terraform/export"):
+        r_tf = tc.post(
+            ep,
+            json={
+                "service_id": "svc1",
+                "fos_bucket_name": "my-bucket",
+                "log_fields": {"custom_fields": [valid_cf_null_desc]},
+            },
+        )
+        assert r_tf.status_code == 200, (
+            f"Expected 200 on {ep} for description=None, got {r_tf.status_code}: {r_tf.text}"
+        )
+        for sid_body in ({"logging_service_id": ""}, {"service_id": "svc1", "logging_service_id": ""}):
+            r_sid = tc.post(ep, json=sid_body)
+            assert r_sid.status_code == 200, f"Expected 200 on {ep} for {sid_body}, got {r_sid.status_code}"
+
+    # 3..7. /ingest, /execute, /reconcile (even with raw description:null on disk), /log-fields, /custom-fields/import -> 200
+    with (
+        patch("backend.core.vcl_generator.validate_destructive_token", return_value={}),
+        patch("backend.utils.pop_utils.fetch_pop_locations", return_value={}),
+        patch("backend.provision._sync_crontab"),
+        patch("backend.cron.scheduler.get_scheduler"),
+        patch("backend.core.fos_client.get_source_for_service", return_value=None),
+        patch("backend.core.metadata.base.export_admin_state"),
+        patch("backend.config.fetch_service_name", return_value="W7 Svc"),
+        patch("backend.provision.provision", side_effect=lambda _c: iter([{"type": "done", "message": "ok"}])),
+        patch(
+            "backend.provision.declarative.reconciler.reconcile_vcl_state",
+            return_value=ReconciliationResult("svc_w7", 2, ["updated"], 10),
+        ),
+    ):
+        r_ing = tc.post(
+            "/api/provision/ingest",
+            json={
+                "token": "tok",
+                "service_id": "svc_w7",
+                "fos_bucket_name": "valid-bucket-123",
+                "fos_access_key": "AK",
+                "fos_secret_key": "SK",
+                "log_fields": {
+                    "groups": ["A"],
+                    "field_overrides": {"ua": True},
+                    "field_limits": {"ua": 512},
+                    "custom_fields": [valid_cf_null_desc],
+                },
+            },
+        )
+        assert r_ing.status_code == 200, f"Expected 200 on /ingest, got {r_ing.status_code}: {r_ing.text}"
+
+        r_exec = tc.post(
+            "/api/provision/execute",
+            json={
+                "token": "tok",
+                "service_id": "svc_w7",
+                "fos_bucket_name": "valid-bucket-123",
+                "log_fields": json.dumps({"groups": ["A"], "custom_fields": [valid_cf_null_desc]}),
+            },
+        )
+        assert r_exec.status_code == 200, f"Expected 200 on /execute, got {r_exec.status_code}: {r_exec.text}"
+
+        # Force raw description: null on disk to prove /reconcile + GET /custom-fields never 500
+        raw_disk = json.loads((cfg_dir / "svc_w7.json").read_text())
+        raw_disk["log_fields"] = {"groups": ["A"], "custom_fields": [valid_cf_null_desc]}
+        (cfg_dir / "svc_w7.json").write_text(json.dumps(raw_disk))
+
+        r_rec = tc.post("/api/provision/reconcile", json={"service_id": "svc_w7", "token": "tok"})
+        assert r_rec.status_code == 200, f"Expected 200 on /reconcile, got {r_rec.status_code}: {r_rec.text}"
+        assert '"type": "done"' in r_rec.text and '"success": true' in r_rec.text
+
+        r_list = tc.get("/api/services/svc_w7/custom-fields")
+        assert r_list.status_code == 200, f"Expected 200 on GET /custom-fields, got {r_list.status_code}: {r_list.text}"
+
+        r_lf_ok = tc.post(
+            "/api/services/svc_w7/log-fields",
+            json={
+                "log_fields": {
+                    "groups": ["A", "C"],
+                    "custom_fields": [{**valid_cf_null_desc, "label": "Updated My CF"}],
+                }
+            },
+        )
+        assert r_lf_ok.status_code == 200, f"Expected 200 on /log-fields, got {r_lf_ok.status_code}: {r_lf_ok.text}"
+
+        r_imp_ok = tc.post(
+            "/api/services/svc_w7/custom-fields/import",
+            json={"custom_fields": [valid_cf_null_desc]},
+        )
+        assert r_imp_ok.status_code == 200, (
+            f"Expected 200 on /custom-fields/import, got {r_imp_ok.status_code}: {r_imp_ok.text}"
+        )
+
+        # Mistyped custom_fields & non-str vcl_log_expression -> 400/422, never 500 or 200
+        for bad_cf in (
+            {**valid_cf_null_desc, "label": 123},
+            {**valid_cf_null_desc, "label": ["bad"]},
+            {**valid_cf_null_desc, "description": 123},
+            {**valid_cf_null_desc, "vcl_log_expression": [1, 2]},
+            {**valid_cf_null_desc, "sql_type": ["VARCHAR"]},
+            {**valid_cf_null_desc, "value_type": ["string"]},
+            {**valid_cf_null_desc, "bytes_estimate": True},
+            {**valid_cf_null_desc, "bytes_estimate": 1.5},
+            {"name": "my_cf", "sql_type": ["VARCHAR"]},
+            {"name": "my_cf", "vcl_log_expression": [1, 2]},
+            {"name": "my_cf", "vcl_log_expression": True},
+            {"name": "my_cf", "vcl_log_expression": 123},
+            {"name": "service_id", "vcl_log_expression": 123},
+        ):
+            r_tf_bad = tc.post(
+                "/api/provision/terraform/preview",
+                json={"service_id": "svc1", "fos_bucket_name": "my-bucket", "log_fields": {"custom_fields": [bad_cf]}},
+            )
+            assert r_tf_bad.status_code in (400, 422), f"Expected 400/422 on /terraform/preview for {bad_cf}"
+            r_lf_bad = tc.post(
+                "/api/services/svc_w7/log-fields",
+                json={"log_fields": {"groups": ["A"], "custom_fields": [bad_cf]}},
+            )
+            assert r_lf_bad.status_code in (400, 422), f"Expected 400/422 on /log-fields for {bad_cf}"
+            r_imp_bad = tc.post(
+                "/api/services/svc_w7/custom-fields/import",
+                json={"custom_fields": [bad_cf]},
+            )
+            assert r_imp_bad.status_code in (400, 422), f"Expected 400/422 on /custom-fields/import for {bad_cf}"
+
+        # Challenger 7_1 Challenge 2: log_fields.groups, field_overrides, field_limits schema validation on /ingest & /terraform/preview
+        for bad_lf_shape in (
+            {"groups": 123},
+            {"groups": [123]},
+            {"groups": ["NOT_A_VALID_GROUP"]},
+            {"groups": ["A"], "field_overrides": "not-a-dict"},
+            {"groups": ["A"], "field_overrides": {"ua": "yes"}},
+            {"groups": ["A"], "field_overrides": {"ua": 1}},
+            {"groups": ["A"], "field_limits": "not-a-dict"},
+            {"groups": ["A"], "field_limits": {"ua": "1000); error 999; //"}},
+            {"groups": ["A"], "field_limits": {"ua": True}},
+            {"groups": ["A"], "field_limits": {"ua": 0}},
+        ):
+            r_ing_lf = tc.post(
+                "/api/provision/ingest",
+                json={
+                    "token": "tok",
+                    "service_id": "svc_bad_lf",
+                    "fos_bucket_name": "valid-bucket-123",
+                    "fos_access_key": "AK",
+                    "fos_secret_key": "SK",
+                    "log_fields": bad_lf_shape,
+                },
+            )
+            assert r_ing_lf.status_code in (400, 422), f"Expected 400/422 on /ingest for {bad_lf_shape}"
+            r_tf_lf = tc.post(
+                "/api/provision/terraform/preview",
+                json={"service_id": "svc1", "fos_bucket_name": "my-bucket", "log_fields": bad_lf_shape},
+            )
+            assert r_tf_lf.status_code in (400, 422), f"Expected 400/422 on /terraform/preview for {bad_lf_shape}"

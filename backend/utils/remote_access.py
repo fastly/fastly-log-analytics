@@ -9,9 +9,12 @@ import logging
 import os
 import re
 import secrets
+import sys
 import time
+from collections.abc import MutableMapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import HTTPException, Request, Response
@@ -19,7 +22,14 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
 from backend.core import share_db
-from backend.core.share_db import IP_FAMILY_KEYS, SESSION_ID_KEYS
+from backend.core.share_db import (
+    CMCD_SESSION_ALIAS_KEYS,
+    EXTRA_IP_PII_KEYS,
+    SAVED_VIEW_PII_FILTER_KEYS,
+    _canon_pii_key,
+    _extract_saved_view_filter_keys,
+    is_saved_view_pii_key,
+)
 from backend.utils.auth import (
     ANALYST_PENDING_SESSION_COOKIE,
     ANALYST_SESSION_COOKIE,
@@ -37,12 +47,15 @@ from backend.utils.rate_limit import (
     SlidingWindowLimiter,
     SlidingWindowRateLimiter,
     _StaticAssetLimiter,
+    normalize_rate_limit_ip,
 )
 from backend.utils.tunnel import compute_fingerprint, get_tunnel_manager
 
 logger = logging.getLogger(__name__)
 
 ADMIN_GATEWAY_HEADER = "X-Admin-Gateway-Token"
+ALT_ADMIN_GATEWAY_HEADER = "X-FLA-Admin-Gateway"
+_UNTRUSTED_PROXY_HEADERS = ("x-proxied-by-caddy", "x-fla-public-gateway", "x-fla-frontend-proxy")
 
 
 def admin_gateway_required() -> bool:
@@ -57,14 +70,58 @@ def validate_admin_gateway_config() -> None:
         raise ValueError("ADMIN_GATEWAY_SECRET must contain at least 32 characters for admin gateway access")
 
 
+def _header_values(headers: object, name: str) -> list[str]:
+    if headers is None:
+        return []
+    getlist = getattr(headers, "getlist", None)
+    if callable(getlist):
+        return [str(v) for v in getlist(name)]
+    if isinstance(headers, dict):
+        target = name.lower()
+        return [str(v) for k, v in headers.items() if str(k).lower() == target]
+    get_fn = getattr(headers, "get", None)
+    if callable(get_fn):
+        val = get_fn(name)
+        return [str(val)] if val is not None else []
+    return []
+
+
+def _query_param_values(query_params: object, name: str) -> list[str]:
+    if query_params is None:
+        return []
+    getlist = getattr(query_params, "getlist", None)
+    if callable(getlist):
+        return [str(v) for v in getlist(name)]
+    if isinstance(query_params, dict):
+        val = query_params.get(name)
+        return [str(val)] if val is not None else []
+    get_fn = getattr(query_params, "get", None)
+    if callable(get_fn):
+        val = get_fn(name)
+        return [str(val)] if val is not None else []
+    return []
+
+
+def _has_admin_gateway_header(request: Request) -> bool:
+    headers = getattr(request, "headers", None)
+    return bool(_header_values(headers, ADMIN_GATEWAY_HEADER) or _header_values(headers, ALT_ADMIN_GATEWAY_HEADER))
+
+
 def authenticated_admin_gateway(request: Request) -> bool:
-    if getattr(request.state, "admin_gateway_authenticated", False):
+    state = getattr(request, "state", None)
+    if getattr(state, "admin_gateway_authenticated", False):
         return True
-    if request.headers.get("x-proxied-by-caddy"):
+    headers = getattr(request, "headers", None)
+    if headers is None:
         return False
+    for marker in _UNTRUSTED_PROXY_HEADERS:
+        if _header_values(headers, marker):
+            return False
     secret = os.getenv("ADMIN_GATEWAY_SECRET", "")
-    values = request.headers.getlist(ADMIN_GATEWAY_HEADER)
-    if len(secret) < 32 or len(values) != 1:
+    if len(secret) < 32:
+        return False
+    values = _header_values(headers, ADMIN_GATEWAY_HEADER) + _header_values(headers, ALT_ADMIN_GATEWAY_HEADER)
+    if len(values) != 1:
         return False
     return hmac.compare_digest(values[0].encode("utf-8"), secret.encode("utf-8"))
 
@@ -100,6 +157,8 @@ _ANALYST_BLOCKED_SUBPATHS = (
     "/api/download-folder",
     "/api/cron-schedule",
     "/api/sync-status",
+    "/api/high-scale/restore-from-fos",
+    "/metrics",
     "/openapi.json",
     "/docs",
     "/docs/oauth2-redirect",
@@ -214,20 +273,181 @@ def _is_private_or_loopback(ip_str: str) -> bool:
     return any(ip in net for net in _local_admin_networks())
 
 
+def _is_loopback_ip(ip_str: str) -> bool:
+    try:
+        return ipaddress.ip_address(ip_str.strip()).is_loopback
+    except ValueError:
+        return False
+
+
+def _install_raw_peer_capture() -> None:
+    try:
+        from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+    except ImportError:
+        return
+    orig_call = ProxyHeadersMiddleware.__call__
+    if getattr(orig_call, "_fla_raw_peer_wrapped", False):
+        return
+
+    async def _capturing_call(self, scope, receive, send):
+        if isinstance(scope, dict) and scope.get("type") in ("http", "websocket"):
+            raw_client = scope.get("client")
+            if isinstance(raw_client, (tuple, list)) and raw_client and isinstance(raw_client[0], str):
+                scope.setdefault("_raw_peer_ip", raw_client[0])
+        return await orig_call(self, scope, receive, send)
+
+    _capturing_call._fla_raw_peer_wrapped = True  # type: ignore[attr-defined]
+    ProxyHeadersMiddleware.__call__ = _capturing_call  # type: ignore[method-assign]
+
+
+_install_raw_peer_capture()
+
+
+def _raw_peer_ip(request: Request, *, default: str = "") -> str:
+    scope = getattr(request, "scope", None)
+    if isinstance(scope, dict):
+        raw = scope.get("_raw_peer_ip")
+        if isinstance(raw, str) and raw:
+            return raw
+    return client_ip(request, default=default)
+
+
+def _proxy_trust_allows_non_loopback() -> bool:
+    raw_sources: list[str] = []
+    for env_name in ("TRUSTED_PROXY_IPS", "UVICORN_FORWARDED_ALLOW_IPS", "FORWARDED_ALLOW_IPS"):
+        val = os.environ.get(env_name, "").strip()
+        if val:
+            raw_sources.append(val)
+    argv = sys.argv
+    for idx, arg in enumerate(argv):
+        if arg == "--forwarded-allow-ips" and idx + 1 < len(argv):
+            cli_val = argv[idx + 1].strip()
+            if cli_val:
+                raw_sources.append(cli_val)
+        elif arg.startswith("--forwarded-allow-ips="):
+            cli_val = arg.partition("=")[2].strip()
+            if cli_val:
+                raw_sources.append(cli_val)
+    for raw in raw_sources:
+        for item in raw.split(","):
+            entry = item.strip()
+            if not entry:
+                continue
+            if entry == "*":
+                return True
+            try:
+                if "/" in entry:
+                    net = ipaddress.ip_network(entry, strict=False)
+                    if not net.is_loopback:
+                        return True
+                elif not ipaddress.ip_address(entry).is_loopback:
+                    return True
+            except ValueError:
+                return True
+    return False
+
+
+_METRICS_SCRAPE_CIDRS_ENV = "METRICS_SCRAPE_CIDRS"
+_metrics_scrape_cidrs_cache: tuple[str, tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]] = ("", ())
+
+
+def _metrics_scrape_networks() -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    global _metrics_scrape_cidrs_cache
+    raw = os.environ.get(_METRICS_SCRAPE_CIDRS_ENV, "")
+    if raw == _metrics_scrape_cidrs_cache[0]:
+        return _metrics_scrape_cidrs_cache[1]
+    nets: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for part in raw.split(","):
+        entry = part.strip()
+        if not entry:
+            continue
+        try:
+            net = ipaddress.ip_network(entry, strict=False)
+        except ValueError:
+            continue
+        if net.is_private and not net.is_link_local:
+            nets.append(net)
+    _metrics_scrape_cidrs_cache = (raw, tuple(nets))
+    return _metrics_scrape_cidrs_cache[1]
+
+
+def is_allowed_metrics_scrape(request: Request) -> bool:
+    state = getattr(request, "state", None)
+    if getattr(state, "admin_gateway_authenticated", False) is True or authenticated_admin_gateway(request):
+        return True
+    if getattr(state, "analyst_session", None) is not None or getattr(state, "is_remote", False) is True:
+        return False
+    cookies = getattr(request, "cookies", None) or {}
+    if cookies.get(ANALYST_SESSION_COOKIE) or cookies.get(ANALYST_PENDING_SESSION_COOKIE):
+        return False
+    headers = getattr(request, "headers", None)
+    if _has_admin_gateway_header(request):
+        return False
+    for cookie_hdr in _header_values(headers, "cookie"):
+        if ANALYST_SESSION_COOKIE in cookie_hdr or ANALYST_PENDING_SESSION_COOKIE in cookie_hdr:
+            return False
+    for hdr in (
+        *_UNTRUSTED_PROXY_HEADERS,
+        "x-remote-analyst",
+        "fastly-client-ip",
+        "true-client-ip",
+        "forwarded",
+        "x-real-ip",
+        "x-forwarded-for",
+    ):
+        if _header_values(headers, hdr):
+            return False
+    host = _raw_peer_ip(request, default="")
+    if not host:
+        return False
+    explicit_cidrs = bool(os.environ.get(_METRICS_SCRAPE_CIDRS_ENV, "").strip())
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    if ip.is_loopback:
+        return True
+    if explicit_cidrs:
+        return any(ip in net for net in _metrics_scrape_networks())
+    return ip.is_private and not ip.is_link_local
+
+
 def is_request_remote(request: Request) -> bool:
     if authenticated_admin_gateway(request):
         return False
-    if admin_gateway_required() or ADMIN_GATEWAY_HEADER in request.headers:
-        return True
-    if request.client is None:
-        return True
-    host = client_ip(request, default="127.0.0.1")
-    if not _is_private_or_loopback(host):
-        return True
-    if request.headers.get("x-remote-analyst") == "1":
-        mgr = get_tunnel_manager()
-        if mgr.is_sharing_active():
+    state = getattr(request, "state", None)
+    if not isinstance(request, Request):
+        if getattr(state, "is_remote", False) is True or getattr(state, "analyst_session", None) is not None:
             return True
+        if getattr(request, "client", None) is None and not bool(getattr(request, "headers", None)):
+            return False
+    if admin_gateway_required() or _has_admin_gateway_header(request):
+        return True
+    headers = getattr(request, "headers", None)
+    for marker in (*_UNTRUSTED_PROXY_HEADERS, "fastly-client-ip", "true-client-ip", "forwarded", "x-real-ip"):
+        vals = _header_values(headers, marker)
+        if any(v.strip() for v in vals):
+            return True
+    ra_vals = _header_values(headers, "x-remote-analyst")
+    if any(v.strip().lower() in ("1", "true") for v in ra_vals):
+        return True
+    xff_vals = [v.strip() for v in _header_values(headers, "x-forwarded-for") if v.strip()]
+    if xff_vals:
+        if len(xff_vals) > 1 or "," in xff_vals[0] or not _is_loopback_ip(xff_vals[0]):
+            return True
+        raw_peer = _raw_peer_ip(request, default="")
+        if not _is_loopback_ip(raw_peer):
+            return True
+        host_vals = _header_values(headers, "host")
+        req_host_base = _host_base(host_vals[0]) if host_vals else ""
+        if _proxy_trust_allows_non_loopback() or (req_host_base and req_host_base in _allowed_remote_hosts()):
+            return True
+    if getattr(request, "client", None) is None:
+        return True
+    raw_peer_host = _raw_peer_ip(request, default="127.0.0.1")
+    host = client_ip(request, default="127.0.0.1")
+    if not _is_private_or_loopback(raw_peer_host) or not _is_private_or_loopback(host):
+        return True
     return False
 
 
@@ -236,7 +456,13 @@ def client_ip(request: Request, *, default: str = "0.0.0.0") -> str:
 
 
 def _host_base(host_header: str) -> str:
-    return host_header.split(":")[0].lower() if host_header else ""
+    if not host_header:
+        return ""
+    stripped = host_header.strip().lower()
+    if stripped.startswith("["):
+        end = stripped.find("]")
+        return stripped[: end + 1] if end != -1 else stripped
+    return stripped.split(":")[0]
 
 
 def _in_local_allowlist(base: str) -> bool:
@@ -249,31 +475,72 @@ def _local_host_allowed(host_header: str) -> bool:
 
 
 def _allowed_remote_hosts() -> list[str]:
-    state = get_tunnel_manager().state
+    mgr = get_tunnel_manager()
+    pub_fn = getattr(mgr, "public_url", None)
+    active_ep = pub_fn(sync_db=True) if callable(pub_fn) else None
+    state_ep = getattr(getattr(mgr, "state", None), "public_endpoint", None)
+    known_ep = getattr(mgr, "_known_public_endpoint", None)
     candidates: list[str] = []
-    if state.public_endpoint:
-        hostname = urlparse(state.public_endpoint).hostname
-        if hostname:
-            candidates.append(hostname.lower())
+    for ep in (active_ep, state_ep, known_ep):
+        if isinstance(ep, str) and ep:
+            parsed = urlparse(ep)
+            hostname = parsed.hostname
+            if hostname:
+                formatted = f"[{hostname.lower()}]" if ":" in hostname else hostname.lower()
+                if formatted not in candidates:
+                    candidates.append(formatted)
     try:
         from backend import config
 
         for cfg in config.list_configs():
             rf = cfg.get("remote_frontend")
             if isinstance(rf, dict):
-                candidates.extend(
-                    val.strip().lower()
-                    for k in ("domain_name", "origin_host", "override_host")
-                    if isinstance(val := rf.get(k), str) and val
-                )
+                for k in ("domain_name", "origin_host", "override_host"):
+                    val = rf.get(k)
+                    if isinstance(val, str) and val.strip():
+                        hb = _host_base(val)
+                        if hb and hb not in candidates:
+                            candidates.append(hb)
     except Exception:
         logger.debug("_allowed_remote_hosts: step failed (ignored)", exc_info=True)
     return candidates
 
 
-def _remote_host_allowed(host_header: str) -> bool:
+def _has_external_proxy_evidence(request: Request) -> bool:
+    headers = getattr(request, "headers", None)
+    for hdr in (
+        "x-proxied-by-caddy",
+        "x-fla-public-gateway",
+        "x-fla-frontend-proxy",
+        "fastly-client-ip",
+        "true-client-ip",
+        "forwarded",
+        "x-real-ip",
+        "x-forwarded-for",
+    ):
+        if _header_values(headers, hdr):
+            return True
+    peer = _raw_peer_ip(request, default="")
+    if not peer:
+        return False
+    try:
+        ip = ipaddress.ip_address(peer)
+    except ValueError:
+        return False
+    if _header_values(headers, "x-remote-analyst"):
+        return not ip.is_loopback
+    return not (ip.is_loopback or ip.is_private)
+
+
+def _remote_host_allowed(host_header: str, request: Request | None = None) -> bool:
     base = _host_base(host_header)
-    return bool(base) and (_in_local_allowlist(base) or base in _allowed_remote_hosts())
+    if not base:
+        return False
+    if base in _allowed_remote_hosts():
+        return True
+    if request is None:
+        return False
+    return not _has_external_proxy_evidence(request) and _in_local_allowlist(base)
 
 
 def _origin_allowed(origin: str) -> bool:
@@ -299,24 +566,48 @@ def _is_blocked_path(path: str) -> bool:
 
 _PATH_SERVICE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^/api/services/([^/]+)(?:/|$)"),
+    re.compile(r"^/api/high-scale/services/([^/]+)(?:/|$)"),
+    re.compile(r"^/api/query/schema/([^/]+)(?:/|$)"),
     re.compile(r"^/api/alerts/([^/]+)(?:/|$)"),
     re.compile(r"^/api/views/([^/]+)(?:/|$)"),
 )
 
 
+def _match_route_service_ids(routes: object, scope: MutableMapping[str, Any]) -> list[str]:
+    from starlette.routing import Match
+
+    for route in routes:  # type: ignore[attr-defined]
+        eff_ctxs = getattr(route, "effective_route_contexts", None)
+        if callable(eff_ctxs):
+            for cand in eff_ctxs():
+                match, child_scope = cand.matches(scope)
+                if match == Match.FULL:
+                    path_params = child_scope.get("path_params", {})
+                    out = [path_params[k] for k in ("service_id", "service") if k in path_params]
+                    if out:
+                        return out
+            continue
+        sub_routes = getattr(route, "routes", None)
+        if sub_routes:
+            nested = _match_route_service_ids(sub_routes, scope)
+            if nested:
+                return nested
+        match, child_scope = route.matches(scope)
+        if match == Match.FULL:
+            path_params = child_scope.get("path_params", {})
+            out = [path_params[k] for k in ("service_id", "service") if k in path_params]
+            if out:
+                return out
+            break
+    return []
+
+
 def _path_service_ids(request: Request) -> list[str]:
     routes = getattr(getattr(getattr(request, "app", None), "router", None), "routes", None)
     if routes:
-        from starlette.routing import Match
-
-        for route in routes:
-            match, child_scope = route.matches(request.scope)
-            if match == Match.FULL:
-                path_params = child_scope.get("path_params", {})
-                out = [path_params[k] for k in ("service_id", "service") if k in path_params]
-                if out:
-                    return out
-                break
+        matched = _match_route_service_ids(routes, request.scope)
+        if matched:
+            return matched
     path = request.url.path
     return [m.group(1) for pat in _PATH_SERVICE_PATTERNS if (m := pat.match(path))]
 
@@ -328,27 +619,29 @@ def _is_sse_route(path: str) -> bool:
     return last_segment == "stream" or last_segment.endswith("-stream")
 
 
-def apply_response_hardening(response: Response) -> Response:
+_HTML_CSP_DEFAULT = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline' blob:; "
+    "worker-src 'self' blob:; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob:; "
+    "font-src 'self' data:; "
+    "connect-src 'self'; "
+    "frame-ancestors 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'"
+)
+_API_CSP_DEFAULT = "default-src 'none'; frame-ancestors 'none'"
+
+
+def apply_response_hardening(response: Response, *, path: str | None = None) -> Response:
     response.headers.setdefault("Cache-Control", "private, no-store")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")
-    response.headers.setdefault(
-        "Content-Security-Policy",
-        (
-            "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline' blob:; "
-            "worker-src 'self' blob:; "
-            "style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data: blob:; "
-            "font-src 'self' data:; "
-            "connect-src 'self'; "
-            "frame-ancestors 'none'; "
-            "base-uri 'self'; "
-            "form-action 'self'"
-        ),
-    )
+    is_api_path = bool(path and (path == "/api" or path.startswith("/api/")))
+    response.headers.setdefault("Content-Security-Policy", _API_CSP_DEFAULT if is_api_path else _HTML_CSP_DEFAULT)
     response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
     return response
 
@@ -437,6 +730,82 @@ async def _strip_analyst_envelope(
 
 _BODY_INSPECT_UNSET = object()
 _BODY_INSPECT_ATTR = "_analyst_body_json"
+_BODY_PAIRS_ATTR = "_analyst_body_pairs"
+_RAW_BODY_ATTR = "_raw_body_bytes"
+_BODY_TOO_LARGE_ATTR = "_body_too_large"
+_BODY_INVALID_JSON_ATTR = "_body_invalid_json"
+
+
+def _parse_content_length(request: Request) -> int | None:
+    raw_vals = _header_values(getattr(request, "headers", None), "content-length")
+    if not raw_vals:
+        return 0
+    vals = [v.strip() for v in raw_vals]
+    if any(v == "" for v in vals):
+        return None
+    unique_vals = set(vals)
+    if len(unique_vals) != 1:
+        return None
+    raw = next(iter(unique_vals))
+    if not raw.isascii() or not raw.isdigit():
+        return None
+    try:
+        parsed = int(raw)
+    except ValueError:
+        return None
+    return parsed if parsed >= 0 else None
+
+
+async def _drain_raw_body_bounded(request: Request, *, max_bytes: int = BODY_INSPECT_MAX_BYTES) -> bytes | None:
+    cached_raw = getattr(request.state, _RAW_BODY_ATTR, _BODY_INSPECT_UNSET)
+    if cached_raw is not _BODY_INSPECT_UNSET:
+        return cached_raw  # type: ignore[return-value]
+    receive = request._receive  # type: ignore[attr-defined]
+    chunks: list[bytes] = []
+    bytes_read = 0
+    disconnected = False
+    try:
+        more_body = True
+        while more_body:
+            msg = await receive()
+            msg_type = msg.get("type")
+            if msg_type == "http.disconnect":
+                disconnected = True
+                break
+            if msg_type != "http.request":
+                setattr(request.state, _RAW_BODY_ATTR, None)
+                return None
+            chunk = msg.get("body", b"")
+            chunks.append(chunk)
+            bytes_read += len(chunk)
+            if bytes_read > max_bytes:
+                setattr(request.state, _BODY_TOO_LARGE_ATTR, True)
+                setattr(request.state, _RAW_BODY_ATTR, None)
+                return None
+            more_body = bool(msg.get("more_body", False))
+    except Exception:
+        setattr(request.state, _RAW_BODY_ATTR, None)
+        return None
+    body_bytes = b"".join(chunks)
+    sent = False
+
+    async def _replay():
+        nonlocal sent
+        if sent:
+            if disconnected:
+                return {"type": "http.disconnect"}
+            return await receive()
+        sent = True
+        return {"type": "http.request", "body": body_bytes, "more_body": False}
+
+    request._receive = _replay  # type: ignore[attr-defined]
+    if hasattr(request, "_body"):
+        try:
+            del request._body  # type: ignore[attr-defined]
+        except AttributeError:
+            pass
+    setattr(request.state, _RAW_BODY_ATTR, body_bytes)
+    return body_bytes
 
 
 async def _inspect_request_body(request: Request) -> dict | None:
@@ -448,75 +817,129 @@ async def _inspect_request_body(request: Request) -> dict | None:
     return parsed
 
 
+def _collect_dict_pairs_recursive(value: object, out: list[tuple[str, Any]]) -> None:
+    if isinstance(value, dict):
+        for k, v in value.items():
+            out.append((str(k), v))
+    elif isinstance(value, list):
+        for item in value:
+            _collect_dict_pairs_recursive(item, out)
+
+
 async def _drain_request_body(request: Request) -> dict | None:
     method = request.method.upper()
-    if method != "POST":
+    if method not in ("POST", "PUT", "PATCH", "DELETE"):
         return None
-    ct = request.headers.get("content-type", "")
-    if "application/json" not in ct.lower():
+    ct_vals = _header_values(getattr(request, "headers", None), "content-type")
+    media_types = [v.split(";", 1)[0].strip().lower() for v in ct_vals if v.strip()]
+    if len(set(media_types)) > 1:
+        setattr(request.state, _BODY_INVALID_JSON_ATTR, True)
         return None
-    receive = request._receive  # type: ignore[attr-defined]
-    chunks: list[bytes] = []
-    bytes_read = 0
-    try:
-        more_body = True
-        while more_body:
-            msg = await receive()
-            if msg.get("type") != "http.request":
-                return None
-            chunk = msg.get("body", b"")
-            chunks.append(chunk)
-            bytes_read += len(chunk)
-            if bytes_read > BODY_INSPECT_MAX_BYTES:
-                break
-            more_body = bool(msg.get("more_body", False))
-    except Exception:
+    media_type = media_types[0] if media_types else ""
+    is_explicit_json = media_type == "application/json" or media_type.endswith("+json")
+    is_sniffable_json = media_type in ("", "text/plain")
+    if not is_explicit_json and not is_sniffable_json:
         return None
-    body_bytes = b"".join(chunks)
-    sent = False
-
-    async def _replay():
-        nonlocal sent
-        if sent:
-            return {"type": "http.disconnect"}
-        sent = True
-        return {"type": "http.request", "body": body_bytes, "more_body": False}
-
-    request._receive = _replay  # type: ignore[attr-defined]
-    if hasattr(request, "_body"):
-        try:
-            del request._body  # type: ignore[attr-defined]
-        except AttributeError:
-            pass
+    body_bytes = await _drain_raw_body_bounded(request, max_bytes=BODY_INSPECT_MAX_BYTES)
     if not body_bytes:
         return None
+    stripped = body_bytes.lstrip(b"\xef\xbb\xbf").lstrip()
+    if not stripped:
+        return None
+    if not is_explicit_json and not stripped.startswith((b"{", b"[")):
+        return None
+    root_pairs: list[tuple[str, Any]] = []
+
+    def _pairs_hook(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        nonlocal root_pairs
+        root_pairs = pairs
+        return dict(pairs)
+
     try:
-        body = json.loads(body_bytes)
-    except (json.JSONDecodeError, ValueError):
+        raw_to_parse = body_bytes if is_explicit_json else stripped
+        body = json.loads(raw_to_parse, object_pairs_hook=_pairs_hook)
+    except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+        if is_explicit_json:
+            setattr(request.state, _BODY_INVALID_JSON_ATTR, True)
         return None
-    if not isinstance(body, dict):
-        return None
-    return body
+    if isinstance(body, dict):
+        setattr(request.state, _BODY_PAIRS_ATTR, root_pairs)
+        return body
+    if isinstance(body, list):
+        if is_explicit_json:
+            setattr(request.state, _BODY_INVALID_JSON_ATTR, True)
+            return None
+        nested_pairs: list[tuple[str, Any]] = []
+        _collect_dict_pairs_recursive(body, nested_pairs)
+        setattr(request.state, _BODY_PAIRS_ATTR, nested_pairs)
+        return dict(nested_pairs) if nested_pairs else None
+    if is_explicit_json:
+        setattr(request.state, _BODY_INVALID_JSON_ATTR, True)
+    return None
+
+
+async def _body_pairs_for(request: Request) -> list[tuple[str, Any]]:
+    body = await _inspect_request_body(request)
+    pairs = getattr(request.state, _BODY_PAIRS_ATTR, None)
+    if isinstance(pairs, list):
+        return pairs
+    if isinstance(body, dict):
+        return [(str(k), v) for k, v in body.items()]
+    return []
 
 
 async def _body_service_ids(request: Request) -> list[str]:
-    body = await _inspect_request_body(request) or {}
-    return [str(v) for k in ("service_id", "service") if isinstance(v := body.get(k), (str, int)) and str(v)]
+    pairs = await _body_pairs_for(request)
+    out: list[str] = []
+    for k, v in pairs:
+        if k in ("service_id", "service") and isinstance(v, (str, int)) and not isinstance(v, bool) and str(v):
+            out.append(str(v))
+    return out
 
 
-_PII_FORBIDDEN_FILTER_COLS = IP_FAMILY_KEYS | SESSION_ID_KEYS
+_PII_FORBIDDEN_FILTER_COLS = SAVED_VIEW_PII_FILTER_KEYS | CMCD_SESSION_ALIAS_KEYS | frozenset({"origin_ip"})
+_PII_FORBIDDEN_DIMENSION_COLS = _PII_FORBIDDEN_FILTER_COLS - frozenset({"oip"})
 
 
 async def _body_filter_keys(request: Request) -> list[str]:
-    body = await _inspect_request_body(request) or {}
-    filters = body.get("filters")
-    return [str(k) for k in filters] if isinstance(filters, dict) else []
+    pairs = await _body_pairs_for(request)
+    collected: set[str] = set()
+    for k, filters in pairs:
+        if k != "filters":
+            continue
+        if isinstance(filters, dict):
+            extracted, _ = _extract_saved_view_filter_keys(filters)
+            collected.update(str(fk) for fk in filters)
+            collected.update(extracted)
+        elif isinstance(filters, (list, str)):
+            extracted, _ = _extract_saved_view_filter_keys(filters)
+            collected.update(extracted)
+    return list(collected)
 
 
 async def _body_field_param(request: Request) -> str | None:
     body = await _inspect_request_body(request) or {}
-    field = body.get("field")
-    return field if isinstance(field, str) else None
+    for key in ("field", "dimension"):
+        val = body.get(key)
+        if isinstance(val, str) and val:
+            return val
+    return None
+
+
+async def _body_field_params(request: Request) -> tuple[list[str], list[str]]:
+    pairs = await _body_pairs_for(request)
+    field_keys: list[str] = []
+    dim_keys: list[str] = []
+    for k, val in pairs:
+        if k == "field" and isinstance(val, str) and val:
+            field_keys.append(val)
+        elif k == "fields" and isinstance(val, list):
+            for item in val:
+                if isinstance(item, str) and item:
+                    field_keys.append(item)
+        elif k == "dimension" and isinstance(val, str) and val:
+            dim_keys.append(val)
+    return field_keys, dim_keys
 
 
 _static_limiter = _StaticAssetLimiter()
@@ -538,31 +961,86 @@ def _log_access(logger_name: str, fmt: str, *args: object) -> None:
         logger.debug("dispatch: logging.getLogger failed (ignored)", exc_info=True)
 
 
-def _check_rate_limit(request: Request, path: str) -> JSONResponse | None:
-    content_len = int(request.headers.get("content-length") or "0")
+def _check_rate_limit(request: Request, path: str, content_len: int | None = None) -> JSONResponse | None:
+    if content_len is None:
+        content_len = _parse_content_length(request)
+        if content_len is None:
+            return _error_json(400, "invalid_content_length")
+    ip_key = normalize_rate_limit_ip(client_ip(request))
     if path.startswith(("/_next/", "/static/")):
-        if not _static_limiter.check(client_ip(request), content_len):
+        if not _static_limiter.check(ip_key, content_len):
             return _error_json(429, "rate_limited")
     elif path.startswith("/api/"):
-        ip = client_ip(request)
-        if not _is_private_or_loopback(ip) and not _analyst_api_limiter.check(ip, content_len):
+        if not _analyst_api_limiter.check(ip_key, content_len):
             return _error_json(429, "rate_limited")
     return None
 
 
+def validate_analyst_request_binding(
+    request: Request, session: object, *, mgr: object | None = None
+) -> tuple[int, str] | None:
+    if getattr(session, "tos_pending", False):
+        return (403, "tos_pending")
+    expected_fp = getattr(session, "fingerprint_signature", None)
+    if expected_fp is not None:
+        headers_lc = {k.lower(): v for k, v in request.headers.items()}
+        if compute_fingerprint(headers_lc) != expected_fp:
+            active_mgr = mgr or get_tunnel_manager()
+            sid = getattr(session, "session_id", None)
+            if sid:
+                active_mgr.boot_session(sid, reason="fingerprint mismatch")  # type: ignore[attr-defined]
+            share_db.log_share_audit_event(
+                event_type="FINGERPRINT_MISMATCH",
+                email=getattr(session, "email", None),
+                ip_address=client_ip(request),
+                details=f"path={request.url.path}",
+            )
+            return (401, "fingerprint_mismatch")
+    session_ip = getattr(session, "ip_address", None)
+    invite_id = getattr(session, "invite_id", None)
+    if invite_id is not None:
+        current_ip = client_ip(request)
+        invite = share_db.get_remote_invite(invite_id)
+        if invite is not None and not share_db.ip_in_whitelist(current_ip, invite.get("ip_whitelist")):
+            return (403, "ip_not_whitelisted")
+        if session_ip is not None and current_ip != session_ip:
+            if invite is not None:
+                active_mgr = mgr or get_tunnel_manager()
+                sid = getattr(session, "session_id", None)
+                if sid:
+                    active_mgr.touch_session(sid, new_ip=current_ip, bump_active=False)  # type: ignore[attr-defined]
+            else:
+                return (403, "ip_not_whitelisted")
+    return None
+
+
+_EXTRA_FORBIDDEN_FILTER_COLS = EXTRA_IP_PII_KEYS
+
+
 async def _enforce_service_and_pii_scope(request: Request, session) -> JSONResponse | None:
     from backend import config as svcconfig
+    from backend.core.request_context import _valid_cookie_service_id
 
     raw_candidates: list[str] = list(_path_service_ids(request))
     for src in (
-        request.query_params.get("service"),
-        request.query_params.get("service_id"),
-        request.headers.get("x-fastly-service-id"),
-        request.headers.get("x-service-id"),
+        *_query_param_values(request.query_params, "service"),
+        *_query_param_values(request.query_params, "service_id"),
+        *_header_values(request.headers, "x-fastly-service-id"),
+        *_header_values(request.headers, "x-service-id"),
     ):
         if src:
             raw_candidates.append(src)
-    raw_candidates.extend(await _body_service_ids(request))
+    body_sids = await _body_service_ids(request)
+    if getattr(request.state, _BODY_TOO_LARGE_ATTR, False):
+        return _error_json(413, "payload_too_large", max_bytes=BODY_INSPECT_MAX_BYTES)
+    if request.url.path.startswith("/api/") and getattr(request.state, _BODY_INVALID_JSON_ATTR, False):
+        return _error_json(400, "invalid_json_body")
+    raw_candidates.extend(body_sids)
+    if not raw_candidates:
+        cookie_sid = _valid_cookie_service_id(request)
+        if cookie_sid:
+            raw_candidates.append(cookie_sid)
+    caller_supplied = bool(raw_candidates)
     cdn_map = svcconfig.get_cdn_service_id_map() if raw_candidates else {}
     resolved_candidates = [cand if svcconfig.load_config(cand) else cdn_map.get(cand, cand) for cand in raw_candidates]
     if not resolved_candidates:
@@ -574,17 +1052,70 @@ async def _enforce_service_and_pii_scope(request: Request, session) -> JSONRespo
         return _error_json(403, "service_not_authorized", service="")
     for eff in resolved_candidates:
         if not eff or eff not in allowed_services:
-            return _error_json(403, "service_not_authorized", service=eff or "")
+            return _error_json(403, "service_not_authorized", service=(eff or "") if caller_supplied else "")
     if session.pii_policy.get("mask_ips"):
         from backend.repositories.utils.filters import normalize_filter_key
 
-        dim = await _body_field_param(request)
-        raw_keys = [*(await _body_filter_keys(request)), *((dim,) if dim is not None else ())]
-        for raw_key in raw_keys:
+        field_keys, dim_keys = await _body_field_params(request)
+        if getattr(request.state, _BODY_TOO_LARGE_ATTR, False):
+            return _error_json(413, "payload_too_large", max_bytes=BODY_INSPECT_MAX_BYTES)
+        query_filter_keys: list[str] = []
+        for raw_query_filters in _query_param_values(request.query_params, "filters"):
+            if raw_query_filters:
+                qf_extracted, _ = _extract_saved_view_filter_keys(raw_query_filters)
+                query_filter_keys.extend(qf_extracted)
+        filter_and_field_keys = [*(await _body_filter_keys(request)), *query_filter_keys, *field_keys]
+        for raw_key in filter_and_field_keys:
             col = normalize_filter_key(raw_key)
-            if col in _PII_FORBIDDEN_FILTER_COLS:
+            canon = _canon_pii_key(raw_key)
+            if (
+                col in _PII_FORBIDDEN_FILTER_COLS
+                or col in _EXTRA_FORBIDDEN_FILTER_COLS
+                or canon in _PII_FORBIDDEN_FILTER_COLS
+                or canon in _EXTRA_FORBIDDEN_FILTER_COLS
+                or is_saved_view_pii_key(raw_key)
+            ):
+                return _error_json(403, "pii_policy_violation", field=col)
+        for raw_dim in dim_keys:
+            col = normalize_filter_key(raw_dim)
+            canon = _canon_pii_key(raw_dim)
+            if (
+                col in _PII_FORBIDDEN_DIMENSION_COLS
+                or col in _EXTRA_FORBIDDEN_FILTER_COLS
+                or canon in _PII_FORBIDDEN_DIMENSION_COLS
+                or canon in _EXTRA_FORBIDDEN_FILTER_COLS
+                or (col != "oip" and canon != "oip" and is_saved_view_pii_key(raw_dim))
+            ):
                 return _error_json(403, "pii_policy_violation", field=col)
     return None
+
+
+def _clear_rejected_analyst_cookies(
+    request: Request,
+    response: Response,
+    *,
+    mgr: object | None = None,
+    clear_pending: bool = False,
+) -> Response:
+    active_mgr = mgr or get_tunnel_manager()
+    pub_fn = getattr(active_mgr, "known_public_url", None) or getattr(active_mgr, "public_url", None)
+    pub_url = pub_fn(sync_db=False) if callable(pub_fn) else None
+    sec = analyst_cookie_is_secure(request, pub_url if isinstance(pub_url, str) else None)
+    cookie_names = [ANALYST_SESSION_COOKIE]
+    if clear_pending:
+        cookie_names.append(ANALYST_PENDING_SESSION_COOKIE)
+    for cname in cookie_names:
+        if request.cookies.get(cname):
+            response.set_cookie(
+                key=cname,
+                value="",
+                max_age=0,
+                path="/",
+                httponly=True,
+                secure=sec,
+                samesite="strict",
+            )
+    return response
 
 
 class RemoteAccessMiddleware(BaseHTTPMiddleware):
@@ -592,28 +1123,39 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         method = request.method.upper()
         host_header = request.headers.get("host", "")
+
+        def _harden(resp: Response) -> Response:
+            return apply_response_hardening(resp, path=path)
+
         gateway_authenticated = authenticated_admin_gateway(request)
-        if ADMIN_GATEWAY_HEADER in request.headers and not gateway_authenticated:
+        if _has_admin_gateway_header(request) and not gateway_authenticated:
             logger.warning("[remote_access] rejected invalid admin gateway credential")
-            return _error_json(401, "admin_gateway_invalid")
+            return _harden(_error_json(401, "admin_gateway_invalid"))
         request.state.admin_gateway_authenticated = gateway_authenticated
         if gateway_authenticated:
+            stripped_names = {ADMIN_GATEWAY_HEADER.lower().encode(), ALT_ADMIN_GATEWAY_HEADER.lower().encode()}
             request.scope["headers"] = [
-                (key, value)
-                for key, value in request.scope["headers"]
-                if key.lower() != ADMIN_GATEWAY_HEADER.lower().encode()
+                (key, value) for key, value in request.scope["headers"] if key.lower() not in stripped_names
             ]
             if hasattr(request, "_headers"):
                 del request._headers
+        if (path.rstrip("/") or "/") == "/metrics":
+            if not is_allowed_metrics_scrape(request):
+                return _harden(_error_json(403, "admin_only"))
+            request.state.is_remote = False
+            request.state.analyst_session = None
+            request.state.request_id = _new_request_id()
+            response = await call_next(request)
+            return _harden(response)
         is_remote = is_request_remote(request)
         request.state.is_remote = is_remote
         request.state.analyst_session = None
         request.state.request_id = _new_request_id()
         mgr = get_tunnel_manager()
-        if (is_remote and not _remote_host_allowed(host_header)) or (
+        if (is_remote and not _remote_host_allowed(host_header, request)) or (
             not is_remote and host_header and not _local_host_allowed(host_header)
         ):
-            return _error_json(400, "host_not_allowed", host=host_header)
+            return _harden(_error_json(400, "host_not_allowed", host=host_header))
         if gateway_authenticated:
             origin = request.headers.get("origin")
             cross_site = request.headers.get("sec-fetch-site") == "cross-site"
@@ -624,7 +1166,19 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
             )
             if cross_site or unsafe_origin:
                 logger.warning("[remote_access] rejected cross-origin admin gateway request")
-                return _error_json(403, "admin_origin_not_allowed")
+                return _harden(_error_json(403, "admin_origin_not_allowed"))
+        content_len = _parse_content_length(request)
+        if content_len is None:
+            return _harden(_error_json(400, "invalid_content_length"))
+        enforce_body_cap = is_remote or path != "/api/admin/share/backup/import"
+        if enforce_body_cap and content_len > BODY_INSPECT_MAX_BYTES:
+            return _harden(_error_json(413, "payload_too_large", max_bytes=BODY_INSPECT_MAX_BYTES))
+        if is_remote and (rate_err := _check_rate_limit(request, path, content_len)) is not None:
+            return _harden(rate_err)
+        if enforce_body_cap and method in ("POST", "PUT", "PATCH"):
+            await _drain_raw_body_bounded(request, max_bytes=BODY_INSPECT_MAX_BYTES)
+            if getattr(request.state, _BODY_TOO_LARGE_ATTR, False):
+                return _harden(_error_json(413, "payload_too_large", max_bytes=BODY_INSPECT_MAX_BYTES))
         if not is_remote:
             _t0 = time.perf_counter()
             response = await call_next(request)
@@ -639,25 +1193,48 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
                 response.status_code,
                 _dur_ms,
             )
-            return apply_response_hardening(response)
-        if (rate_err := _check_rate_limit(request, path)) is not None:
-            return rate_err
+            return _harden(response)
         if method not in ("GET", "HEAD") and not path.startswith(_TELEMETRY_IDLE_EXEMPT_PREFIXES):
             origin = request.headers.get("origin", "")
             if not _origin_allowed(origin):
-                return _error_json(403, "origin_not_allowed", origin=origin)
+                return _harden(_error_json(403, "origin_not_allowed", origin=origin))
+        sharing_active = mgr.is_sharing_active()
+        has_analyst_cookie = bool(
+            request.cookies.get(ANALYST_SESSION_COOKIE) or request.cookies.get(ANALYST_PENDING_SESSION_COOKIE)
+        )
+        if not sharing_active and has_analyst_cookie and path not in ("/api/health", "/api/share/logout"):
+            return _harden(
+                _clear_rejected_analyst_cookies(
+                    request,
+                    _error_json(403, "sharing_disabled"),
+                    mgr=mgr,
+                    clear_pending=True,
+                )
+            )
         if path in _UNAUTH_ANALYST_PATHS or path.startswith(("/api/share/claim/", "/api/share/oauth/", "/js/")):
-            response = await call_next(request)
+            boot_session = None
+            sid_boot: str | None = None
             if path == "/api/bootstrap":
                 sid_boot = request.cookies.get(ANALYST_SESSION_COOKIE)
                 boot_session = mgr.validate_session(sid_boot) if sid_boot else None
+                if boot_session is not None:
+                    if (bind_err := validate_analyst_request_binding(request, boot_session, mgr=mgr)) is not None:
+                        err_resp: Response = _error_json(bind_err[0], bind_err[1])
+                        if bind_err[1] != "tos_pending":
+                            err_resp = _clear_rejected_analyst_cookies(request, err_resp, mgr=mgr)
+                        return _harden(err_resp)
+                    request.state.analyst_session = boot_session
+            response = await call_next(request)
+            if path == "/api/bootstrap":
                 response = await _strip_analyst_envelope(response, analyst_session=boot_session, request=request)
-            return apply_response_hardening(response)
+                if sid_boot and (boot_session is None or response.status_code in (401, 403)):
+                    response = _clear_rejected_analyst_cookies(request, response, mgr=mgr)
+            return _harden(response)
         session = mgr.validate_session(request.cookies.get(ANALYST_SESSION_COOKIE))
         if session is None:
-            return _error_json(401, "unauthenticated")
+            return _harden(_clear_rejected_analyst_cookies(request, _error_json(401, "unauthenticated"), mgr=mgr))
         if getattr(session, "tos_pending", False):
-            return _error_json(403, "tos_pending")
+            return _harden(_error_json(403, "tos_pending"))
         from backend.core.request_telemetry import Attribution as _Attr
         from backend.core.request_telemetry import current_attribution as _cur_attr
 
@@ -678,30 +1255,34 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
                 ip_address=client_ip(request),
                 details=f"path={path}",
             )
-            return _error_json(401, "fingerprint_mismatch")
+            return _harden(_clear_rejected_analyst_cookies(request, _error_json(401, "fingerprint_mismatch"), mgr=mgr))
         if _is_blocked_path(path):
-            return _error_json(403, "admin_only")
+            return _harden(_error_json(403, "admin_only"))
         if _is_sse_route(path) and not any(
             path == allowed
             or path.endswith(allowed)
             or (allowed.startswith("/api/") and path.startswith(f"{allowed}/"))
             for allowed in _ANALYST_SSE_ALLOWLIST
         ):
-            return _error_json(403, "sse_blocked")
+            return _harden(_error_json(403, "sse_blocked"))
         if method in ("PUT", "PATCH", "DELETE") or (
             method == "POST" and not path.startswith(_ANALYST_ALLOWED_WRITE_PREFIXES)
         ):
-            return _error_json(403, "read_only")
+            return _harden(_error_json(403, "read_only"))
         if not (path.startswith("/api/share/") or path.startswith(_TELEMETRY_IDLE_EXEMPT_PREFIXES)):
             if (scope_err := await _enforce_service_and_pii_scope(request, session)) is not None:
-                return scope_err
+                return _harden(scope_err)
         current_ip = client_ip(request)
+        invite = share_db.get_remote_invite(session.invite_id) if session.invite_id else None
+        if invite is not None and not share_db.ip_in_whitelist(current_ip, invite.get("ip_whitelist")):
+            return _harden(_clear_rejected_analyst_cookies(request, _error_json(403, "ip_not_whitelisted"), mgr=mgr))
         if current_ip != session.ip_address:
-            invite = share_db.get_remote_invite(session.invite_id)
-            if invite and share_db.ip_in_whitelist(current_ip, invite.get("ip_whitelist")):
+            if invite is not None:
                 mgr.touch_session(session.session_id, new_ip=current_ip, bump_active=False)
             else:
-                return _error_json(403, "ip_not_whitelisted")
+                return _harden(
+                    _clear_rejected_analyst_cookies(request, _error_json(403, "ip_not_whitelisted"), mgr=mgr)
+                )
         request.state.analyst_session = session
         _idle_exempt = path.startswith(_TELEMETRY_IDLE_EXEMPT_PREFIXES) or _is_sse_route(path)
         _active_hdr = request.headers.get("x-user-active")
@@ -726,8 +1307,7 @@ class RemoteAccessMiddleware(BaseHTTPMiddleware):
             int(_touched_idle),
         )
         response = await _strip_analyst_envelope(response, analyst_session=session, request=request)
-        apply_response_hardening(response)
-        return response
+        return _harden(response)
 
 
 MAX_ANALYST_QUERY_SPAN = timedelta(days=366)
@@ -824,6 +1404,7 @@ def clamp_or_400(
 
 __all__ = [
     "ADMIN_GATEWAY_HEADER",
+    "ALT_ADMIN_GATEWAY_HEADER",
     "ANALYST_PENDING_SESSION_COOKIE",
     "ANALYST_SESSION_COOKIE",
     "BODY_INSPECT_MAX_BYTES",
@@ -887,6 +1468,7 @@ __all__ = [
     "clamp_or_400",
     "client_ip",
     "get_analyst_time_bounds",
+    "is_allowed_metrics_scrape",
     "is_request_remote",
     "mask_ips_for",
     "require_owned_row",
@@ -895,4 +1477,5 @@ __all__ = [
     "safe_audit_email",
     "set_analyst_session_cookies",
     "validate_admin_gateway_config",
+    "validate_analyst_request_binding",
 ]

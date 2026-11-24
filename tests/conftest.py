@@ -22,8 +22,8 @@ _os.environ.setdefault("DEBUG_RESPONSES_FORCE_INCLUDE", "1")
 
 
 # Silence the "--- Logging error --- ValueError: I/O operation on closed file"
-# tracebacks that pytest's capture plugin provokes. Background storage/startup
-# daemon threads (backend/core/storage/) may keep running a metadata scan + ``logger.info(...)``
+# tracebacks that pytest's capture plugin provokes. Background startup
+# daemon threads may keep running a metadata scan + ``logger.info(...)``
 # after the test that spawned it has finished; by then pytest has already
 # closed that test item's captured stderr, so the StreamHandler's
 # ``stream.write`` raises and ``logging.Handler.handleError`` prints a
@@ -185,16 +185,12 @@ def pytest_sessionstart(session):  # noqa: ARG001 — pytest hook signature
         )
 
 
-import duckdb
 import pytest
-
-from backend.core.request_context import get_con
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _seed_random():
-    """Seed Python's stdlib RNG so unseeded callers (notably
-    ``tests/_helpers/duckdb_fixtures.py``) are reproducible.
+    """Seed Python's stdlib RNG so unseeded callers are reproducible.
 
     Per-test code that explicitly seeds its own ``random.Random()`` (hypothesis,
     fuzz suites) is unaffected — those create their own Random instances.
@@ -224,19 +220,6 @@ def _mock_disk_usage():
 def _close_telemetry_proxy_at_session_end():
     """Close the local telemetry proxy's aiohttp session once per worker at
     session teardown.
-
-    The proxy is a process-lifetime singleton: ``start_proxy_server`` is lazy
-    and idempotent (FastAPI lifespan, DuckDB httpfs, and the DuckLake extension all call it),
-    so a given xdist worker starts at most one ``aiohttp.ClientSession`` and
-    never stops it — in production that's fine, the process just exits. Under
-    pytest the worker's interpreter shuts down *after* pytest has torn down its
-    log-capture stream, so aiohttp's ``__del__`` "Unclosed client session" /
-    "Unclosed connector" warnings fire into a closed stream and the logging
-    module prints a secondary "--- Logging error --- ValueError: I/O operation
-    on closed file". Closing the session here (loop still running, capture still
-    live) removes both. Same class of test-only teardown hygiene as the
-    sqlite drain in ``isolate_metadata_db`` and the ResourceWarning filters in
-    pyproject.toml.
     """
     yield
     try:
@@ -263,16 +246,10 @@ def _pg_worker_schema():
     """Give this pytest process its own Postgres database for metadata storage.
 
     The process claims an exclusive database slot (see below), resets it,
-    points ``METADATA_DSN`` / ``DUCKLAKE_CATALOG`` at it, then runs the real
-    schema bootstrap
+    points ``METADATA_DSN`` at it, then runs the real schema bootstrap
     (:func:`backend.core.metadata.base.ensure_pg_schema`) against it.
     Two workers — or two concurrent pytest runs — therefore never see each
     other's rows, and share nothing but the underlying server.
-
-    Runs once per worker process, before any test in that worker touches
-    metadata — the pool in ``pg_connection`` is a lazy module-level
-    singleton created on first ``get_pg_pool()`` call, so ``METADATA_DSN``
-    must be set before that first call happens anywhere in this process.
     """
     import psycopg
 
@@ -281,7 +258,7 @@ def _pg_worker_schema():
 
     base_dsn = _os.environ.get(
         "METADATA_DSN",
-        "postgresql://fla:fla_test_password@localhost:5432/ducklake_test",
+        "postgresql://fla:fla_test_password@localhost:5432/fla_test",
     )
     from urllib.parse import urlparse, urlunparse
 
@@ -291,29 +268,21 @@ def _pg_worker_schema():
     import time
 
     admin_conn = psycopg.connect(maint_dsn, autocommit=True)
-    # Claim a database slot with a session-level advisory lock (released when the
-    # connection closes, even if the process dies). Naming the database after the
-    # xdist worker id alone made two concurrent pytest runs (parallel agents,
-    # ``make ci`` beside a quick loop) share ``ducklake_test_gw0`` and wipe each
-    # other's live connections; slots are exclusive per live process instead.
-    # Slots are reset in place, never dropped: DROP DATABASE waits on a forced
-    # checkpoint, which stalls for minutes on a busy server.
     slot = 0
     while not admin_conn.execute("SELECT pg_try_advisory_lock(%s)", (_PG_SLOT_LOCK_BASE + slot,)).fetchone()[0]:
         slot += 1
-    worker_db = f"ducklake_test_slot{slot}"
-    if not admin_conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (worker_db,)).fetchone():
-        # CREATE DATABASE clones template1 and fails with ObjectInUse while another
-        # session is cloning it; wait that out.
-        deadline = time.monotonic() + 60
-        while True:
-            try:
-                admin_conn.execute(f'CREATE DATABASE "{worker_db}"')
-                break
-            except psycopg.errors.ObjectInUse:
-                if time.monotonic() > deadline:
-                    raise
-                time.sleep(0.25)
+    worker_db = f"fla_test_slot{slot}"
+    for db_to_ensure in ("fla_test", worker_db):
+        if not admin_conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (db_to_ensure,)).fetchone():
+            deadline = time.monotonic() + 60
+            while True:
+                try:
+                    admin_conn.execute(f'CREATE DATABASE "{db_to_ensure}"')
+                    break
+                except (psycopg.errors.ObjectInUse, psycopg.errors.DuplicateDatabase):
+                    if time.monotonic() > deadline:
+                        raise
+                    time.sleep(0.25)
 
     worker_dsn = urlunparse(parsed._replace(path=f"/{worker_db}"))
     with psycopg.connect(worker_dsn, autocommit=True) as reset_conn:
@@ -324,7 +293,8 @@ def _pg_worker_schema():
         reset_conn.execute("CREATE SCHEMA public")
 
     _os.environ["METADATA_DSN"] = worker_dsn
-    _os.environ["DUCKLAKE_CATALOG"] = worker_dsn
+    pg_connection.close_all_pg_connections()
+    pg_connection.reset_pg_pool_for_tests()
 
     pg_schema.ensure_pg_schema(force=True)
 
@@ -354,7 +324,6 @@ _PER_TEST_RESET_TABLES = (
     "cloud_copy_deletions",
     "metric_snapshots",
     "slow_queries",
-    "ingest_in_flight",
     "ngwaf_bots",
     "ngwaf_sync_state",
     "rdns",
@@ -369,25 +338,9 @@ _PER_TEST_RESET_TABLES = (
 
 
 @pytest.fixture(autouse=True)
-def isolate_metadata_db(tmp_path, monkeypatch, _pg_worker_schema):
+def isolate_metadata_db(tmp_path, monkeypatch, request):
     """Point metadata storage at this worker's isolated Postgres schema, and
-    service-config/DuckDB data dirs at a per-test sandbox.
-
-    Operational metadata (alerts, views, audit, cron, sources, ingested_files,
-    asn_names, usage_log, share_db) lives in Postgres, scoped to this xdist
-    worker's own schema by :func:`_pg_worker_schema` — replacing the historical
-    per-service SQLite file at ``data/services/{id}.metadata.db`` (see ADR-15,
-    reversed by the SQLite -> Postgres metadata migration this fixture is
-    part of).
-
-    The analytical DuckDB file lives at ``data/services/{id}.duckdb`` and is
-    located via :func:`backend.config.duckdb_path` (which reads
-    ``backend.config.SERVICES_DATA_DIR``). Without redirecting that too,
-    tests that exercise ``svcconfig.duckdb_path`` or any code path that
-    opens a per-service DuckDB connection by service ID will write into the
-    real ``data/services/`` directory and leave behind ``svc1.duckdb``,
-    ``test-service-id.duckdb``, etc. Patch the four config-level DATA paths
-    in parallel so the whole tree is sandboxed.
+    service-config/data dirs at a per-test sandbox.
     """
     import os
     from pathlib import Path
@@ -402,138 +355,79 @@ def isolate_metadata_db(tmp_path, monkeypatch, _pg_worker_schema):
     sandbox_cache = sandbox_data / "cache"
     sandbox_system = sandbox_data / "system"
 
-    # Pre-create the sandbox tree. ``backend.config._ensure_dirs`` calls
-    # ``mkdir(exist_ok=True)`` (no ``parents=True``) so nested dirs trip
-    # FileNotFoundError when only ``tmp_path`` exists. Some call sites
-    # (e.g. routers that touch usage_logging) write into SERVICES_DATA_DIR
-    # without going through _ensure_dirs at all, so we pre-create here.
     for d in (sandbox_data, sandbox_services, sandbox_configs, sandbox_ngwaf, sandbox_cache, sandbox_system):
         d.mkdir(parents=True, exist_ok=True)
 
-    try:
-        import backend.core.metadata.base as pg_connection
-
-        _pg_con = pg_connection.get_pg_thread_connection()
-        # Truncate only the tables that hold rows: a TRUNCATE recreates every listed relation, and
-        # doing all of them per test across N xdist workers made each reset take seconds.
-        _dirty = [
-            r[0]
-            for r in _pg_con.execute(
-                " UNION ALL ".join(f"SELECT '{t}' WHERE EXISTS (SELECT 1 FROM {t})" for t in _PER_TEST_RESET_TABLES)
-            ).fetchall()
-        ]
-        if _dirty:
-            _pg_con.execute(f"TRUNCATE TABLE {', '.join(_dirty)} CASCADE")
-        _pg_con.commit()
-    except Exception:
+    if request.node.get_closest_marker("no_postgres") is None:
+        request.getfixturevalue("_pg_worker_schema")
         try:
-            _pg_con.rollback()
+            import backend.core.metadata.base as pg_connection
+
+            _pg_con = pg_connection.get_pg_thread_connection()
+            _dirty = [
+                r[0]
+                for r in _pg_con.execute(
+                    " UNION ALL ".join(f"SELECT '{t}' WHERE EXISTS (SELECT 1 FROM {t})" for t in _PER_TEST_RESET_TABLES)
+                ).fetchall()
+            ]
+            if _dirty:
+                _pg_con.execute(f"TRUNCATE TABLE {', '.join(_dirty)} CASCADE")
+            _pg_con.commit()
         except Exception:
-            pass
+            try:
+                _pg_con.rollback()
+            except Exception:
+                pass
 
     metadata_db._clear_ingested_filenames_cache()
 
     import backend.core.metadata.usage_log as _usage_log_db
     import backend.core.share_db as _share_db_connection
-    import backend.cron.jobs.metric_snapshots as _metric_snapshots
 
     monkeypatch.setattr(svcconfig, "DATA_DIR", sandbox_data)
     monkeypatch.setattr(svcconfig, "SERVICES_DATA_DIR", sandbox_services)
     monkeypatch.setattr(svcconfig, "CONFIGS_DIR", sandbox_configs)
     monkeypatch.setattr(svcconfig, "NGWAF_DATA_DIR", sandbox_ngwaf)
     monkeypatch.setattr(svcconfig, "CACHE_DATA_DIR", sandbox_cache)
-    monkeypatch.setattr(svcconfig, "DUCKLAKE_CATALOG", os.environ["DUCKLAKE_CATALOG"])
     monkeypatch.setattr(svcconfig, "SYSTEM_DATA_DIR", sandbox_system)
-    # ``_ensured_dirs`` is a per-path memo for the mkdir storm — must be
-    # cleared so _ensure_dirs() actually creates the new sandbox dirs.
     monkeypatch.setattr(svcconfig, "_ensured_dirs", set())
 
-    # ``backend.core.duckdb._cache_dir`` builds a *relative* ``cache/<bucket>``
-    # path (deliberate, for Mac↔Docker portability of DuckDB views). Without
-    # redirection, tests that exercise the cache path drop ``mock-bucket``,
-    # ``my-bucket``, ``test-bucket`` directories into the repo root.
-    # Redirect to the per-test sandbox while preserving the
-    # ``_cache_dir_override`` escape hatch and the ``bucket`` shape.
-    from backend.core import duckdb as _bk_duckdb
+    from backend.core import fos_client as _bk_fos_client
 
     sandbox_cache_root = sandbox_data / "cache"
 
-    def _sandboxed_cache_dir(source: dict) -> str:
-        if "_cache_dir_override" in source:
-            return source["_cache_dir_override"]
-        bucket = (source.get("bucket") or source.get("fos_bucket") or "default").strip()
+    def _sandboxed_cache_dir(source: dict | None = None) -> str:
+        src = source or _bk_fos_client._DEFAULT_SOURCE
+        if "_cache_dir_override" in src:
+            return src["_cache_dir_override"]
+        bucket = (src.get("bucket") or src.get("fos_bucket") or "default").strip()
         return os.path.join(str(sandbox_cache_root), bucket)
 
-    monkeypatch.setattr(_bk_duckdb, "_cache_dir", _sandboxed_cache_dir)
+    monkeypatch.setattr(_bk_fos_client, "_cache_dir", _sandboxed_cache_dir)
 
     yield
-    # Close every connection across every thread — FastAPI's TestClient
-    # spawns worker threads that open their own thread-local connections,
-    # invisible to this fixture's ``_local``. Without this drain, those
-    # connections live until GC and emit ResourceWarning at process exit.
-    # Postgres-aware: ``metadata_db.close_all_connections()`` (and the
-    # share_db one) dispatch to ``pg_connection.close_all_pg_connections()``
-    # under ``METADATA_DSN`` — same call, now returns pool connections
-    # instead of closing SQLite file handles.
     metadata_db.close_all_connections()
-    _metric_snapshots.close_all_connections()
     _usage_log_db.close_all_connections()
     _share_db_connection.close_all_connections()
 
 
 @pytest.fixture(autouse=True)
-def _reset_module_caches():
-    """Reset module-level caches between tests.
-
-    Several modules cache state at import scope (schema metadata, FOS client,
-    storage views/snapshots, source registration). Across tests using the
-    same source name with different in-memory DuckDB connections, that cache
-    leaks and produces order-dependent failures — surfaced by
-    ``pytest-randomly`` (Milestone A, task 0.3).
-
-    Some individual tests (e.g. ``test_integration_custom_fields.py``,
-    ``test_dashboard.py``) used to clear these inline. Clearing once here
-    means they no longer have to.
-    """
-    # A-3: drain every cache registered via
-    # backend.utils.bounded_cache.CacheRegistry. The storage, duckdb,
-    # dashboard, and network modules all register their caches at
-    # module load — this single call replaces the long enumeration
-    # the R-1 work expanded. New module-level caches that ship with a
-    # register() call are picked up automatically.
+def _reset_module_caches(request):
+    """Reset module-level caches between tests."""
     from backend.utils.bounded_cache import CacheRegistry
 
     CacheRegistry.clear_all()
-
-    # All previously hand-cleared module caches (_logging_settings_cache,
-    # _enforce_threshold_cache, active_requests._active_count via the
-    # _ActiveRequestsResetAdapter) now register with CacheRegistry from
-    # their owning modules — see R-1 in the audit. CacheRegistry.clear_all()
-    # above drains them. New module-level caches that ship with a
-    # register() call are picked up automatically.
     yield
+    if request.node.get_closest_marker("no_postgres") is not None:
+        return
     from backend.main import app
 
     app.dependency_overrides.clear()
 
 
-@pytest.fixture
-def in_memory_duckdb():
-    """In-memory DuckDB for tests that exercise the analytical engine.
-
-    No operational tables are created here — those live in per-service SQLite
-    via the ``isolate_metadata_db`` fixture (autouse).
-    """
-    con = duckdb.connect(":memory:")
-    yield con
-    con.close()
-
-
 def override_request_context(*, source, con=None, _con_override=None, session=None, path="/test", time_bounds=None):
-    if _con_override is not None:
-        con = _con_override
     """Return a ``build_request_context`` override that yields a RequestContext
-    wired to ``source``/``con`` (read-only). Mirrors what the ``client`` fixture
+    wired to ``source`` (read-only). Mirrors what the ``client`` fixture
     installs; router tests use it to inject a custom source or an analyst
     session without re-declaring the generator inline.
 
@@ -549,7 +443,6 @@ def override_request_context(*, source, con=None, _con_override=None, session=No
         yield RequestContext(
             service_id=source["service_id"],
             source=source,
-            _con_override=con,
             telemetry=RequestTelemetry(request_method="POST", request_path=path),
             analyst_session=session,
             read_only=True,
@@ -578,8 +471,6 @@ def make_test_request_context(
     return RequestContext(
         service_id=resolved_source.get("service_id", service_id),
         source=resolved_source,
-        _con_override=con,
-        _holder=holder,
         telemetry=RequestTelemetry(request_method="POST", request_path=path),
         analyst_session=session,
         read_only=read_only,
@@ -588,28 +479,16 @@ def make_test_request_context(
 
 
 @pytest.fixture
-def client(in_memory_duckdb, test_service_source):
+def client(test_service_source):
     from fastapi.testclient import TestClient
 
     from backend.core.request_context import build_request_context, get_service_id, get_source
     from backend.main import app
 
-    app.dependency_overrides[get_con] = lambda: in_memory_duckdb
     app.dependency_overrides[get_source] = lambda: test_service_source
-    # ``get_service_id`` resolves from query/header/active-config. Under the
-    # sandbox ``CONFIGS_DIR`` (isolate_metadata_db) there's no active config,
-    # so without this override every ``Depends(get_service_id)`` route returns
-    # ``configured=False`` before the test's patches get a chance to run.
     app.dependency_overrides[get_service_id] = lambda: test_service_source["service_id"]
-
-    # Routers migrated to ``RequestContext`` (Phase 8 v2.0 cut) get their
-    # connection + source via ``build_request_context``, which inlines its
-    # own source resolution + opens its own connection — it does NOT honour
-    # the ``get_source``/``get_con`` overrides above. Provide an equivalent
-    # override that returns a RequestContext wired to the same in-memory
-    # fixtures so dashboard / query / security / etc. tests keep working.
     app.dependency_overrides[build_request_context] = override_request_context(
-        source=test_service_source, con=in_memory_duckdb
+        source=test_service_source,
     )
 
     with TestClient(app) as c:
@@ -622,9 +501,15 @@ def test_service_source():
     """Minimal source dict for tests.
 
     ``name`` is the SQL-safe table identifier; ``service_id`` is the Fastly
-    logging service ID (also keys the per-service metadata SQLite file).
+    logging service ID.
     """
     return {"name": "test_service", "service_id": "test-service-id"}
+
+
+@pytest.fixture
+def service_source(test_service_source):
+    """Alias for ``test_service_source``."""
+    return test_service_source
 
 
 MOCK_SERVICE_ID = "test-service-id"
@@ -649,9 +534,6 @@ def s3_mock(monkeypatch):
     routes boto3 through the proxy (which would forward to the real FOS host
     moto can't intercept here), so we short-circuit at the factory.
     """
-    # Deferred imports — boto3+moto pull ~1.2s of cold start each. With xdist
-    # spawning 10 workers, that's ~12s of CPU paid up front even on test runs
-    # that never touch S3. Most of the suite doesn't use this fixture.
     import boto3
     from moto import mock_aws
 
@@ -664,7 +546,7 @@ def s3_mock(monkeypatch):
             aws_secret_access_key="test-secret",
         )
         client.create_bucket(Bucket="test-bucket")
-        monkeypatch.setattr("backend.core.duckdb._get_fos_client", lambda _src: client)
+        monkeypatch.setattr("backend.core.fos_client._get_fos_client", lambda _src: client)
         yield client
 
 

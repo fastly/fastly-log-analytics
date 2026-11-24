@@ -1,5 +1,6 @@
 import * as os from 'os'
 import { headers } from 'next/headers'
+import { CloudVersionFooter } from './CloudVersionFooter'
 
 async function fetchGceMetadata(path: string): Promise<string | null> {
   try {
@@ -17,6 +18,13 @@ async function fetchGceMetadata(path: string): Promise<string | null> {
 }
 
 export async function ServerFooter() {
+  if (
+    process.env.STATIC_EXPORT === '1' ||
+    process.env.NEXT_PUBLIC_DEPLOYMENT_MODE === 'cloud'
+  ) {
+    // Static export / Cloud mode: client fetches /version (build_sha)
+    return <CloudVersionFooter />
+  }
   // The root layout renders this server-side for EVERY request, so the
   // analyst/public check can't live only in the client AppLayout — the footer
   // would already be in the HTML/RSC payload. Requests through Caddy (the
@@ -28,33 +36,30 @@ export async function ServerFooter() {
   let envName = 'local'
   let machineName = process.env.POD_NAME || os.hostname()
 
-  // Dynamic Google Compute Engine Metadata Detection
-  const gceHostname = await fetchGceMetadata('instance/name')
-  const gceProject = await fetchGceMetadata('project/project-id')
-
-  if (gceHostname) {
-    envName = 'gce'
-    if (gceProject) {
-      envName = `gce (${gceProject})`
-    }
-    machineName = gceHostname
-  } else if (process.env.K8S_CLUSTER_NAME) {
+  if (process.env.K8S_CLUSTER_NAME) {
     envName = `k8s-${process.env.K8S_CLUSTER_NAME}`
   } else if (process.env.KUBERNETES_SERVICE_HOST) {
     envName = 'k8s'
-  } else if (process.env.ENV_NAME) {
-    envName = process.env.ENV_NAME
-  } else if (process.env.NODE_ENV === 'production') {
-    envName = 'production'
+  } else {
+    // Dynamic Google Compute Engine Metadata Detection (only outside Kubernetes,
+    // since GKE/managed Kubernetes pods also respond on 169.254.169.254).
+    const gceHostname = await fetchGceMetadata('instance/name')
+    const gceProject = await fetchGceMetadata('project/project-id')
+
+    if (gceHostname) {
+      envName = 'gce'
+      if (gceProject) {
+        envName = `gce (${gceProject})`
+      }
+      machineName = gceHostname
+    } else if (process.env.ENV_NAME) {
+      envName = process.env.ENV_NAME
+    } else if (process.env.NODE_ENV === 'production') {
+      envName = 'production'
+    }
   }
 
-  const rawMode = (process.env.DEPLOYMENT_MODE || '').trim().toLowerCase()
-  const isHighScale =
-    rawMode === 'standard'
-      ? false
-      : rawMode === 'high_scale' ||
-        ['1', 'true', 'yes', 'on'].includes((process.env.HIGH_SCALE_ENABLED || '').trim().toLowerCase())
-  const architecture = isHighScale ? 'high-scale' : 'standard'
+  const architecture = 'clickhouse'
   const commitHash = process.env.COMMIT_HASH || 'unknown'
 
   return (

@@ -2,6 +2,14 @@
 
 import React from 'react'
 import { useQuery } from '@tanstack/react-query'
+import {
+  allowedLogPeriods,
+  effectiveLogPeriod,
+  normalizeSnapshotInterval,
+  SNAPSHOT_INTERVAL_LABELS,
+  SNAPSHOT_INTERVAL_SELECT_OPTIONS,
+  type SnapshotIntervalMinutes,
+} from '@/lib/serviceDefaults'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -35,23 +43,6 @@ export const RUM_PERIOD_OPTIONS = [
   ["300", "5 minutes (Recommended)"],
   ["600", "10 minutes"],
   ["900", "15 minutes"],
-] as const
-export const COMMIT_INTERVAL_OPTIONS = [
-  ["1", "Every 1 min — most real-time"],
-  ["2", "Every 2 min"],
-  ["3", "Every 3 min"],
-  ["5", "Every 5 min — recommended"],
-  ["15", "Every 15 min"],
-  ["30", "Every 30 min"],
-  ["60", "Every 60 min — fewest snapshots"],
-] as const
-export const ROLLUP_MONTH_OPTIONS = [
-  ["1", "1 month"],
-  ["3", "3 months"],
-  ["6", "6 months"],
-  ["12", "12 months"],
-  ["24", "24 months"],
-  ["0", "Forever"],
 ] as const
 
 export function RumVersionPicker({
@@ -167,6 +158,31 @@ export interface StorageSectionProps {
   config: ProvisionConfig
   selectedServiceId?: string
   update: <K extends keyof StorageStepFormValues>(key: K, val: StorageStepFormValues[K]) => void
+  updateMany?: (patch: Partial<StorageStepFormValues>) => void
+}
+
+export const LOG_CONDITION_PRESETS = [
+  { id: "all", label: "All requests", condition: "" },
+  {
+    id: "sample_plus_errors",
+    label: "Sample plus all errors",
+    condition: "resp.status >= 400 || randombool(10, 100)",
+  },
+  { id: "errors_only", label: "Errors only (4xx & 5xx)", condition: "resp.status >= 400" },
+  { id: "server_errors_only", label: "Server errors only (5xx)", condition: "resp.status >= 500" },
+  {
+    id: "page_loads_only",
+    label: "Page loads only (exclude static assets)",
+    condition: 'req.url.ext !~ "^(?i)(js|css|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|eot|webp|avif|map)$"',
+  },
+] as const
+
+export type LogConditionPresetId = (typeof LOG_CONDITION_PRESETS)[number]["id"] | "custom"
+
+export function matchLogConditionPreset(condition: string): LogConditionPresetId {
+  const trimmed = condition.trim()
+  const match = LOG_CONDITION_PRESETS.find((p) => p.condition === trimmed)
+  return match ? match.id : "custom"
 }
 
 export function renderRumPeriodField(
@@ -178,12 +194,12 @@ export function renderRumPeriodField(
   return (
     <div className="space-y-1.5">
       <LabelWithInfo label="RUM Log Period" info={infoText} />
-      <Select value={String(rumLogPeriod || 300)} onValueChange={(v) => onChange(Number(v) || 300)}>
+      <Select value={String(effectiveLogPeriod(rumLogPeriod || 300))} onValueChange={(v) => onChange(Number(v) || 300)}>
         <SelectTrigger className={compact ? "h-8 text-xs" : "h-9"}>
           <SelectValue>{(val) => PERIOD_LABELS[String(val)] || val}</SelectValue>
         </SelectTrigger>
         <SelectContent>
-          {RUM_PERIOD_OPTIONS.map(([val, label]) => (
+          {RUM_PERIOD_OPTIONS.filter(([val]) => allowedLogPeriods([val]).length > 0).map(([val, label]) => (
             <SelectItem key={val} value={val} className={compact ? "text-xs" : undefined}>
               {label}
             </SelectItem>
@@ -194,8 +210,32 @@ export function renderRumPeriodField(
   )
 }
 
-export function LoggingSetupSection({ config, update }: StorageSectionProps) {
+export function LoggingSetupSection({ config, update, updateMany }: StorageSectionProps) {
   const isLogging = config.logging_enabled !== false
+  const [customConditionMode, setCustomConditionMode] = React.useState(
+    () => matchLogConditionPreset(config.custom_condition) === "custom",
+  )
+  const selectedPreset = customConditionMode ? "custom" : matchLogConditionPreset(config.custom_condition)
+
+  const handlePresetChange = (value: string | null) => {
+    if (!value) return
+    if (value === "custom") {
+      setCustomConditionMode(true)
+      return
+    }
+    const preset = LOG_CONDITION_PRESETS.find((p) => p.id === value)
+    if (!preset) return
+    setCustomConditionMode(false)
+    if (preset.id === "sample_plus_errors") {
+      if (updateMany) {
+        updateMany({ custom_condition: preset.condition, sample_rate: 100 })
+      } else {
+        update("custom_condition", preset.condition)
+      }
+    } else {
+      update("custom_condition", preset.condition)
+    }
+  }
   const fosRegionField = (
     <div className="space-y-1.5">
       <LabelWithInfo
@@ -256,12 +296,12 @@ export function LoggingSetupSection({ config, update }: StorageSectionProps) {
                 label="Log Period"
                 info="How often Fastly will write log files to the bucket. A shorter period means more real-time data but creates more files."
               />
-              <Select value={String(config.log_period)} onValueChange={(v) => update("log_period", Number(v) || 60)}>
+              <Select value={String(effectiveLogPeriod(config.log_period))} onValueChange={(v) => update("log_period", effectiveLogPeriod(Number(v)))}>
                 <SelectTrigger className="h-9">
                   <SelectValue>{(val) => PERIOD_LABELS[String(val)] || val}</SelectValue>
                 </SelectTrigger>
                 <SelectContent>
-                  {["1", "5", "10", "20", "30", "60", "120", "300"].map((val) => (
+                  {allowedLogPeriods(["1", "5", "10", "20", "30", "60", "120", "300"]).map((val) => (
                     <SelectItem key={val} value={val}>
                       {PERIOD_LABELS[val]}
                     </SelectItem>
@@ -300,19 +340,54 @@ export function LoggingSetupSection({ config, update }: StorageSectionProps) {
               />
             </div>
           </div>
-          <div className="space-y-1.5">
-            <LabelWithInfo
-              htmlFor="customCondition"
-              label="Optional Log Condition"
-              info="An additional VCL condition to filter logs (e.g., req.url !~ '\.(jpg|png)$'). The expression will be wrapped in parentheses and added to the logging condition logic."
-            />
-            <Input
-              id="customCondition"
-              placeholder="e.g. std.tolower(req.url) !~ '\.(jpg|png|css|js)$'"
-              value={config.custom_condition}
-              onChange={(e) => update("custom_condition", e.target.value)}
-              className="h-9 font-mono text-xs"
-            />
+          <div className="space-y-2">
+            <div className="space-y-1.5">
+              <LabelWithInfo
+                htmlFor="logConditionPreset"
+                label="Log Condition"
+                info="Filter which requests are logged using a preset or a custom VCL expression. Combined with Sample Rate and Edge Only using && in log_analytics_condition."
+              />
+              <Select value={selectedPreset} onValueChange={handlePresetChange}>
+                <SelectTrigger id="logConditionPreset" aria-label="Log Condition" className="h-9 w-full">
+                  <SelectValue>
+                    {(val) =>
+                      val === "custom"
+                        ? "Custom"
+                        : LOG_CONDITION_PRESETS.find((p) => p.id === val)?.label || String(val)
+                    }
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  {LOG_CONDITION_PRESETS.map((preset) => (
+                    <SelectItem key={preset.id} value={preset.id}>
+                      {preset.label}
+                    </SelectItem>
+                  ))}
+                  <SelectItem value="custom">Custom</SelectItem>
+                </SelectContent>
+              </Select>
+              {selectedPreset !== "custom" && config.custom_condition && (
+                <p className="text-[11px] font-mono text-muted-foreground break-all">
+                  {config.custom_condition}
+                </p>
+              )}
+            </div>
+            {selectedPreset === "custom" && (
+              <div className="space-y-1.5">
+                <LabelWithInfo
+                  htmlFor="customCondition"
+                  label="Custom VCL Condition"
+                  info="An additional VCL condition to filter logs (e.g., req.url !~ '\.(jpg|png)$'). The expression will be wrapped in parentheses and added to the logging condition logic."
+                />
+                <Input
+                  id="customCondition"
+                  placeholder='e.g. req.url.path ~ "^/api/"'
+                  value={config.custom_condition}
+                  onChange={(e) => update("custom_condition", e.target.value)}
+                  className="h-9 font-mono text-xs"
+                />
+              </div>
+            )}
           </div>
         </>
       ) : (
@@ -361,7 +436,7 @@ export function AutomationSection({ config, selectedServiceId, update }: Storage
           <div className="space-y-0.5">
             <LabelWithInfo
               label="Background Sync"
-              info={`Automatically polls FOS for new ${isLogging ? "log" : "RUM telemetry"} files (every ${pollFreqLong}) and writes them into the local buffer. The buffer is then committed to the shared DuckLake table at the Cloud Commit Interval below.`}
+              info={`Automatically polls FOS for new ${isLogging ? "log" : "RUM telemetry"} files (every ${pollFreqLong}), checkpoints canonical Archive Parquet batches to Fastly Object Storage, and publishes verified batches into ClickHouse.`}
             />
             <p className="text-[10px] text-muted-foreground">Polls FOS every {pollFreqShort}</p>
           </div>
@@ -380,7 +455,7 @@ export function AutomationSection({ config, selectedServiceId, update }: Storage
           <div className="space-y-0.5">
             <LabelWithInfo
               label="Auto-Delete Raw Logs"
-              info={`Deletes the raw .zst ${isLogging ? "log" : "RUM beacon"} files from FOS after they are ingested into DuckLake. Recommended — the DuckLake table holds the same data in a more efficient format.`}
+              info={`Deletes the raw .zst ${isLogging ? "log" : "RUM beacon"} files from FOS after they are archived to Parquet and published into ClickHouse. Recommended — the Archive Parquet and ClickHouse tables hold the same data in a more efficient format.`}
             />
             <p className="text-[10px] text-muted-foreground">
               {isLogging ? "Remove .zst files after ingest" : "Remove .zst RUM files after ingest"}
@@ -394,48 +469,34 @@ export function AutomationSection({ config, selectedServiceId, update }: Storage
         </div>
       </div>
 
-      <div className={cn("p-4 border rounded-md bg-muted/5 space-y-3 transition-opacity", syncDisabledClass)}>
-        <div className="flex items-start justify-between gap-4">
-          <div className="space-y-1">
-            <LabelWithInfo
-              label="Cloud Commit Interval"
-              info="How often the local buffer is committed to DuckLake and the new Parquet files are pushed to Fastly Object Storage. The cloud copy is what lets you rebuild your data if the local disk is lost. More frequent commits mean fresher data and a more current backup, but create more small files — the daily DuckLake optimization consolidates them."
-            />
-            <p className="text-[10px] text-muted-foreground leading-relaxed">
-              Controls data freshness and how current the cloud copy is. Every commit creates one DuckLake snapshot.
-            </p>
-          </div>
+      <div className={cn("p-4 border rounded-md bg-muted/5 space-y-4 transition-opacity", syncDisabledClass)}>
+        <div className="space-y-1.5 max-w-sm">
+          <LabelWithInfo
+            label="Cloud Snapshot Interval"
+            info="How often High-Scale flushes consolidated Parquet archives and DR state snapshots to FOS. Raw logs stay in FOS until archived (+15m grace) for zero data loss."
+          />
           <Select
-            value={String(config.commit_interval_mins)}
-            onValueChange={(v) => v && update("commit_interval_mins", Number(v))}
+            value={String(config.snapshot_interval_minutes)}
+            onValueChange={(v) => v && update("snapshot_interval_minutes", normalizeSnapshotInterval(Number(v)))}
           >
-            <SelectTrigger className="h-8 w-[220px] shrink-0 text-xs">
-              <SelectValue />
+            <SelectTrigger aria-label="Cloud Snapshot Interval" className="h-8 text-xs">
+              <SelectValue>
+                {(val) => SNAPSHOT_INTERVAL_LABELS[Number(val) as SnapshotIntervalMinutes] || `${val}m`}
+              </SelectValue>
             </SelectTrigger>
             <SelectContent>
-              {COMMIT_INTERVAL_OPTIONS.map(([val, label]) => (
-                <SelectItem key={val} value={val} className="text-xs">
-                  {label}
+              {SNAPSHOT_INTERVAL_SELECT_OPTIONS.map((o) => (
+                <SelectItem key={o.value} value={o.value} className="text-xs">
+                  {o.label}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
         </div>
-        <div className="text-[10px] text-muted-foreground bg-muted/30 rounded px-3 py-2 leading-relaxed">
-          {isLogging
-            ? `With a ${config.log_period >= 60 ? `${config.log_period / 60}-minute` : `${config.log_period}-second`} log period`
-            : "With a 1-minute RUM poll period"}{" "}
-          and a {config.commit_interval_mins}-minute commit interval, the system will create ~
-          {Math.round(1440 / config.commit_interval_mins)} DuckLake snapshots per day before the daily
-          optimization consolidates them.
-        </div>
-      </div>
-
-      <div className={cn("p-4 border rounded-md bg-muted/5 space-y-4 transition-opacity", syncDisabledClass)}>
         <div>
           <LabelWithInfo
             label="Data Retention Policy"
-            info="Control how long data is stored in your DuckLake table before being deleted to manage storage size and billing. General edge logs are high-volume, while RUM beacons are low-volume."
+            info="Control how long data is stored in ClickHouse and Fastly Object Storage (FOS) Archive Parquet before being pruned to manage storage size and billing. General edge logs are high-volume, while RUM beacons are low-volume."
           />
           <p className="text-[10px] text-muted-foreground leading-relaxed">
             Configure separate retention windows to optimize storage billing and historical trend depth.
@@ -506,75 +567,6 @@ export function AutomationSection({ config, selectedServiceId, update }: Storage
             />
           </div>
         )}
-      </div>
-
-      <div className={cn("p-4 border rounded-md bg-muted/5 space-y-4 transition-opacity", syncDisabledClass)}>
-        <div>
-          <LabelWithInfo
-            label="Local Dashboard Cache Retention"
-            info="Control how long data is stored on this server's local NVMe disk for instantaneous dashboard querying. Data older than this is seamlessly queried directly from S3 (slower, but saves local disk space)."
-          />
-          <p className="text-[10px] text-muted-foreground leading-relaxed">
-            Configure local hot-cache windows. Rollups are tiny and should be kept long-term; raw logs are
-            huge and can be evicted early. If your local disk gets &gt;85% full, the oldest cache is
-            automatically evicted regardless of these settings to prevent disk exhaustion.
-          </p>
-        </div>
-        <div className="grid grid-cols-2 gap-6">
-          <div className="space-y-1.5">
-            <LabelWithInfo
-              label="Local Raw Log Cache"
-              info="How many days of raw logs to keep on the local NVMe disk. Older logs are automatically queried directly from S3 Object Storage."
-            />
-            <RetentionSelect
-              value={String(config.cache_retention_days)}
-              onValueChange={(v) => update("cache_retention_days", Number(v))}
-              triggerClassName="h-8 text-xs"
-              itemClassName="text-xs"
-            />
-          </div>
-          <div className="space-y-1.5">
-            <LabelWithInfo
-              label="Local Rollups & Metrics"
-              info="How many MONTHS of pre-aggregated time-series rollups to keep locally. These are very small and allow instant loading of 90-day dashboard charts."
-            />
-            <Select
-              value={String(config.rollup_retention_months)}
-              onValueChange={(v) => update("rollup_retention_months", Number(v))}
-            >
-              <SelectTrigger className="h-8 text-xs">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {ROLLUP_MONTH_OPTIONS.map(([val, label]) => (
-                  <SelectItem key={val} value={val} className="text-xs">
-                    {label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
-      </div>
-
-      <div
-        className={cn(
-          "flex items-center justify-between p-3 border rounded-md bg-muted/5 transition-opacity",
-          syncDisabledClass,
-        )}
-      >
-        <div className="space-y-0.5">
-          <LabelWithInfo
-            label="Daily DuckLake Optimization"
-            info="Every night at 04:00 UTC, rewrites many small DuckLake snapshot files into larger, optimized Parquet files. This is storage-side housekeeping that keeps cloud storage costs down — dashboard query speed is handled separately by always-on local compaction. Strongly recommended when using frequent commit intervals."
-          />
-          <p className="text-[10px] text-muted-foreground">Runs at 04:00 UTC — consolidates daily snapshots</p>
-        </div>
-        <Switch
-          aria-label="Daily DuckLake Optimization"
-          checked={config.enable_cron_compact}
-          onCheckedChange={(v) => update("enable_cron_compact", v)}
-        />
       </div>
     </div>
   )

@@ -96,10 +96,25 @@ export function NetworkMap({
     if (buckets && buckets.length > 0) {
       let initialIdx = buckets.length - 1
       if (mapBuckets && mapBuckets.length > 0) {
-        for (let i = Math.min(buckets.length, mapBuckets.length) - 1; i >= 0; i--) {
-          if ((mapBuckets[i]?.cities?.length ?? 0) > 0) {
-            initialIdx = i
-            break
+        if (mapBuckets.some((b) => b.bucket_idx != null)) {
+          for (let i = mapBuckets.length - 1; i >= 0; i--) {
+            const b = mapBuckets[i]
+            if (
+              (b?.cities?.length ?? 0) > 0 &&
+              b.bucket_idx != null &&
+              b.bucket_idx >= 0 &&
+              b.bucket_idx < buckets.length
+            ) {
+              initialIdx = b.bucket_idx
+              break
+            }
+          }
+        } else {
+          for (let i = Math.min(buckets.length, mapBuckets.length) - 1; i >= 0; i--) {
+            if ((mapBuckets[i]?.cities?.length ?? 0) > 0) {
+              initialIdx = i
+              break
+            }
           }
         }
       }
@@ -127,16 +142,27 @@ export function NetworkMap({
   const lastBucketLabel = formatBucket(data?.buckets?.[(data?.buckets?.length ?? 0) - 1] || '', timezone)
 
   const currentBucketRows = React.useMemo(() => {
-    const bucket = data?.map_buckets?.[safeBucketIdx]
+    const bucket = MapLayer.findMapBucket(data?.map_buckets, safeBucketIdx)
     if (!bucket) return []
     const cityEntries = data?.cities ?? []
     return bucket.cities
-      .filter((c) => c.metro_code != null)
-      .map((c) => ({
-        code: String(c.metro_code),
-        city: cityEntries[c.city_idx]?.name ?? '',
-        value: (c as Record<string, unknown>)[metric],
-      }))
+      .map((c) => {
+        const city = cityEntries[c.city_idx]?.name ?? ''
+        const validCity = city !== '' && city !== '?'
+        const code =
+          c.metro_code != null
+            ? String(c.metro_code)
+            : validCity
+              ? (c.country ? `${city}, ${c.country}` : city)
+              : ''
+        return {
+          code,
+          city,
+          hasIdentity: c.metro_code != null || validCity,
+          value: (c as Record<string, unknown>)[metric],
+        }
+      })
+      .filter((row) => row.hasIdentity)
       .sort((a, b) => (Number(b.value) || 0) - (Number(a.value) || 0))
       .slice(0, 50)
   }, [data, safeBucketIdx, metric])
@@ -165,7 +191,9 @@ export function NetworkMap({
         )}
         <table className="sr-only">
           <caption>
-            Network map — top {currentBucketRows.length} metros by {metric} for bucket {currentBucketLabel}.
+            {currentBucketLabel
+              ? `Network map — top ${currentBucketRows.length} metros by ${metric} for bucket ${currentBucketLabel}.`
+              : `Network map — top ${currentBucketRows.length} metros by ${metric}.`}
           </caption>
           <thead>
             <tr>

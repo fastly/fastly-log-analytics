@@ -56,7 +56,7 @@ export function resolveDefaultSsrRangeKey(
   return { rangeToken: '24h', anchor: quantizeAnchor(now.toISOString(), now) }
 }
 
-export async function fetchSsrRangePost(options: {
+async function fetchSsrRangePost(options: {
   serviceId: string | undefined
   path: string
   logPrefix: string
@@ -64,6 +64,7 @@ export async function fetchSsrRangePost(options: {
   timeoutMs?: number
   body?: Record<string, unknown>
 }): Promise<SsrRangeSeed | null> {
+  if (process.env.STATIC_EXPORT === '1') return null
   const { rangeToken, anchor } = resolveDefaultSsrRangeKey(options.now)
   if (!options.serviceId) return null
 
@@ -192,7 +193,7 @@ export const ORIGIN_SSR_SECTIONS = [
 ] as const
 
 export const ORIGIN_SSR_DEFAULTS = {
-  bucketMinutes: 60,
+  bucketMinutes: 1,
   metric: 'ttfb' as const,
   percentile: 'p95' as const,
   slowUrlsLimit: 20,
@@ -274,6 +275,7 @@ export async function fetchInsightsServerSide(
   initialWindow?: string | null,
   initialBaseline?: string | null,
 ): Promise<InsightsSsrSeed | null> {
+  if (process.env.STATIC_EXPORT === '1') return null
   const defaults = resolveInsightsDefault(
     earliestFromLogExtents(logExtents),
   )
@@ -323,6 +325,7 @@ function _fetchBootstrapUpstream(serviceId?: string | null): Promise<BootstrapRe
 }
 
 export async function fetchBootstrapServerSide(): Promise<BootstrapResponse | null> {
+  if (process.env.STATIC_EXPORT === '1') return null
   const [hdrs, cookieJar] = await Promise.all([headers(), cookies()])
   const { admin: isAdmin } = classifySsrRequest(hdrs)
   const serviceId = hdrs.get('x-service-id')
@@ -331,7 +334,8 @@ export async function fetchBootstrapServerSide(): Promise<BootstrapResponse | nu
     return _fetchBootstrapUpstream(serviceId)
   }
 
-  const cacheKey = serviceId || '__default__'
+  const requestIdentity = cookieJar.toString() || '__anonymous__'
+  const cacheKey = JSON.stringify([serviceId || null, requestIdentity])
   const now = Date.now()
   const cached = _adminCachedMap.get(cacheKey)
   if (cached && now - cached.at < _ADMIN_SSR_TTL_MS) {
@@ -367,7 +371,9 @@ export function seedDehydratedState(key: QueryKey, data: unknown): DehydratedSta
 export const firstParam = (v: string | string[] | undefined): string | undefined =>
   Array.isArray(v) ? v[0] : v
 
-export function resolveServerServiceId(
+const SERVICE_ID_RE = /^[A-Za-z0-9_-]{1,64}$/
+
+function resolveServerServiceId(
   params: { service?: string | string[] },
   bootstrap:
     | {
@@ -379,7 +385,7 @@ export function resolveServerServiceId(
   options?: { fallbackFirstService?: boolean },
 ): string | undefined {
   const urlServiceId = firstParam(params.service)
-  if (urlServiceId) return urlServiceId
+  if (urlServiceId && SERVICE_ID_RE.test(urlServiceId)) return urlServiceId
   if (bootstrap?.active_service_id) return bootstrap.active_service_id
   if (options?.fallbackFirstService) {
     const first = bootstrap?.services?.[0]
@@ -394,14 +400,50 @@ export async function resolvePageServiceId(
   options?: { fallbackFirstService?: boolean },
 ): Promise<string | undefined> {
   const urlServiceId = firstParam(params.service)
-  if (urlServiceId) return urlServiceId
+  if (urlServiceId && SERVICE_ID_RE.test(urlServiceId)) return urlServiceId
   const bootstrap = await fetchBootstrapServerSide()
   return resolveServerServiceId(params, bootstrap, options)
+}
+
+export type ReportSearchParams = {
+  service?: string | string[]
+  start_time?: string | string[]
+  end_time?: string | string[]
+  range?: string | string[]
+  filters?: string | string[]
+  metric?: string | string[]
+  percentile?: string | string[]
+  sort_by?: string | string[]
+  bucket_seconds?: string | string[]
+  top_n?: string | string[]
+  window?: string | string[]
+  baseline?: string | string[]
+}
+
+export async function resolveReportPageParams(
+  searchParams: Promise<ReportSearchParams>,
+): Promise<{ serviceId: string | undefined; isDefaultView: boolean }> {
+  const params: ReportSearchParams = process.env.STATIC_EXPORT === '1' ? {} : await searchParams
+  const serviceId = await resolvePageServiceId(params)
+  const isDefaultView =
+    !params.start_time &&
+    !params.end_time &&
+    !params.range &&
+    !params.filters &&
+    !params.metric &&
+    !params.percentile &&
+    !params.sort_by &&
+    !params.bucket_seconds &&
+    !params.top_n &&
+    !params.window &&
+    !params.baseline
+  return { serviceId, isDefaultView }
 }
 
 // ── Admin Gateway SSR Fetchers ────────────────────────────────────────────────
 
 export async function fetchMetricHistoryBatchServerSide(): Promise<unknown | null> {
+  if (process.env.STATIC_EXPORT === '1') return null
   return parseSsrJson(
     await ssrUpstreamGet({
       path: '/api/admin/metric-history/batch?since=1h',
@@ -416,6 +458,7 @@ type AlertListResponse = components['schemas']['AlertListResponse']
 export async function fetchAlertsServerSide(
   serviceId: string | undefined,
 ): Promise<AlertListResponse | null> {
+  if (process.env.STATIC_EXPORT === '1') return null
   const path = serviceId
     ? `/api/alerts/${encodeURIComponent(serviceId)}`
     : '/api/alerts/'
@@ -429,6 +472,7 @@ export async function fetchAlertsServerSide(
 export async function fetchCronRunsServerSide(
   serviceId: string | undefined,
 ): Promise<unknown | null> {
+  if (process.env.STATIC_EXPORT === '1') return null
   if (!serviceId) return null
 
   return parseSsrJson(
@@ -444,6 +488,7 @@ export async function fetchCronRunsServerSide(
 export async function fetchCronScheduleServerSide(
   serviceId: string | undefined,
 ): Promise<unknown | null> {
+  if (process.env.STATIC_EXPORT === '1') return null
   if (!serviceId) return null
 
   return parseSsrJson(
@@ -460,6 +505,7 @@ type TosPayload = components['schemas']['TosDocument']
 type TosResult = TosPayload | 'unauthenticated' | null
 
 export async function fetchTosServerSide(): Promise<TosResult> {
+  if (process.env.STATIC_EXPORT === '1') return null
   const resp = await ssrUpstreamGet({ path: '/api/share/tos', logPrefix: 'ssr/tos' })
   if (resp?.statusCode === 401) return 'unauthenticated'
   return parseSsrJson<TosPayload>(resp, 'ssr/tos')
@@ -476,6 +522,7 @@ interface UsageLogSsrArgs {
 }
 
 export async function fetchUsageLogServerSide(args: UsageLogSsrArgs): Promise<unknown | null> {
+  if (process.env.STATIC_EXPORT === '1') return null
   const query = new URLSearchParams({
     service_id: args.serviceId || '',
     start: args.start,

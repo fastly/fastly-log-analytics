@@ -44,6 +44,29 @@ PERSISTED_DEPLOY_ENV_KEYS: frozenset[str] = frozenset(
 )
 
 
+def parse_env_file(env_path: Path) -> dict[str, str]:
+    """Parse a dotenv file without printing or exposing secret values."""
+    result: dict[str, str] = {}
+    if not env_path.is_file():
+        return result
+    for raw_line in env_path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        key, sep, val = line.partition("=")
+        if not sep:
+            continue
+        key = key.strip()
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+            val = val[1:-1]
+        if key:
+            result[key] = val
+    return result
+
+
 def load_dotenv(path: str | Path | None = None) -> None:
     """Load the repo-root ``.env`` into ``os.environ`` without clobbering it."""
     if path is None and ("PYTEST_CURRENT_TEST" in os.environ or "pytest" in sys.modules):
@@ -104,7 +127,6 @@ class EnvironmentSpec:
     backend_url: str
     frontend_url: str
     service_id_env: str
-    is_high_scale: bool
 
 
 ENVIRONMENT_SPECS: dict[str, EnvironmentSpec] = {
@@ -114,7 +136,6 @@ ENVIRONMENT_SPECS: dict[str, EnvironmentSpec] = {
         backend_url="http://127.0.0.1:80",
         frontend_url="http://127.0.0.1:80/dashboard",
         service_id_env="LOCAL_STANDARD_SERVICE_ID",
-        is_high_scale=False,
     ),
     "remote-standard": EnvironmentSpec(
         name="remote-standard",
@@ -122,7 +143,6 @@ ENVIRONMENT_SPECS: dict[str, EnvironmentSpec] = {
         backend_url="http://127.0.0.1:8001",
         frontend_url="http://127.0.0.1:3001/dashboard",
         service_id_env="REMOTE_STANDARD_SERVICE_ID",
-        is_high_scale=False,
     ),
     "remote-high-scale": EnvironmentSpec(
         name="remote-high-scale",
@@ -130,7 +150,6 @@ ENVIRONMENT_SPECS: dict[str, EnvironmentSpec] = {
         backend_url="http://127.0.0.1:8002",
         frontend_url="http://127.0.0.1:3002/dashboard",
         service_id_env="REMOTE_HIGH_SCALE_SERVICE_ID",
-        is_high_scale=True,
     ),
 }
 
@@ -148,7 +167,8 @@ def selected_environment_names() -> list[str]:
         ("remote-standard", "VERIFY_REMOTE_STD", "SKIP_REMOTE_STD"),
         ("remote-high-scale", "VERIFY_REMOTE_HS", "SKIP_REMOTE_HS"),
     ):
-        if os.getenv(verify, "0" if os.getenv(skip) == "1" else "1") == "1":
+        skip_active = os.getenv(skip) == "1" or (name == "remote-standard" and os.getenv("SKIP_GCE") == "1")
+        if os.getenv(verify, "0" if skip_active else "1") == "1":
             selected.append(name)
     return selected
 
@@ -398,6 +418,7 @@ __all__ = [
     "load_dotenv",
     "load_persisted_deploy_env",
     "main",
+    "parse_env_file",
     "parse_forward",
     "parse_iso_utc",
     "percentile",

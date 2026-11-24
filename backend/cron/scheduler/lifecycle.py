@@ -21,7 +21,7 @@ from backend.cron.scheduler.progress import (
     start_progress,
 )
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
-from backend.utils.date_utils import iso_z_now
+from backend.utils.date_utils import iso_z, iso_z_now
 
 logger = logging.getLogger("backend.scheduler")
 
@@ -73,6 +73,8 @@ def dev_mode_no_crons() -> bool:
     return os.environ.get("FLA_DEV_NO_CRONS", "").lower() in ("1", "true", "yes")
 
 
+# Watchdog threshold (seconds): logs an error and waits for worker cleanup before releasing
+# the APScheduler slot (does not forcibly kill the worker thread).
 _CRON_HARD_CAP_S = 300
 _WATCHDOG_MAX_WORKERS = 12
 _watchdog_lock = threading.Lock()
@@ -94,6 +96,7 @@ def cron_task(name: str, job_name: str | None = None):
         @wraps(func)
         def wrapper(service_id: str, *args, **kwargs):
             def _body():
+                from backend.core.request_telemetry import Attribution, current_attribution
                 from backend.utils.telemetry import (
                     flush_usage_log,
                     process_context_scope,
@@ -101,11 +104,15 @@ def cron_task(name: str, job_name: str | None = None):
                 )
 
                 with process_context_scope(name):
+                    # Bare job names don't map to an attribution, so queries (and the worker
+                    # threads that copy this context) would otherwise be tagged "system".
+                    attribution_token = current_attribution.set(Attribution.cron(cron_job=job_name or name))
                     start_call_tracking()
                     try:
                         return func(service_id, *args, **kwargs)
                     finally:
                         flush_usage_log(service_id)
+                        current_attribution.reset(attribution_token)
 
             cap = _CRON_HARD_CAP_S
             with CronHeartbeat(service_id, job_name):
@@ -173,6 +180,36 @@ def get_system_job_status() -> dict[str, dict]:
         return dict(_status)
 
 
+def get_system_jobs_snapshot() -> list[dict[str, Any]]:
+    from backend.cron.scheduler.runner import get_scheduler
+
+    statuses = get_system_job_status()
+    job_labels = {
+        "bot_data_refresh": "Bot Data Refresh",
+        "rdns_enrichment": "rDNS Enrichment",
+        "share_audit_purge": "Share Audit Purge",
+    }
+    sched = get_scheduler()
+    result: list[dict[str, Any]] = []
+    for job_id, label in job_labels.items():
+        entry: dict[str, Any] = {
+            "id": job_id,
+            "name": label,
+            "next_run_at": None,
+            **statuses.get(job_id, {"last_run_at": None, "status": None, "duration_s": None, "detail": ""}),
+        }
+        if sched is not None:
+            try:
+                job = sched.get_job(job_id)
+            except Exception:
+                job = None
+            next_run = getattr(job, "next_run_time", None) if job else None
+            if next_run:
+                entry["next_run_at"] = iso_z(next_run)
+        result.append(entry)
+    return result
+
+
 _CacheRegistry.register("utils.system_jobs._status", _status)
 
 
@@ -232,7 +269,7 @@ class cron_run:  # noqa: N801 — context-manager factory, lowercase by conventi
         return 0.0 if self._start_time is None else time.time() - self._start_time
 
     def __enter__(self) -> cron_run:
-        from backend.core.duckdb import get_source_for_service, start_cron_run
+        from backend.core.fos_client import get_source_for_service, start_cron_run
         from backend.core.metadata.usage_log import CronLeaseHeldError
 
         if self._source is None:
@@ -274,7 +311,7 @@ class cron_run:  # noqa: N801 — context-manager factory, lowercase by conventi
         error_message: str | None = None,
         **log_kwargs: Any,
     ) -> None:
-        from backend.core.duckdb import log_cron_run
+        from backend.core.fos_client import log_cron_run
 
         if self._source is None:
             return
@@ -327,7 +364,7 @@ class cron_run:  # noqa: N801 — context-manager factory, lowercase by conventi
                     self._finalize_duration()
 
         if self.finalize_running_backstop and self._source is not None:
-            from backend.core.duckdb import finalize_cron_run_if_running
+            from backend.core.fos_client import finalize_cron_run_if_running
 
             backstop_kwargs: dict[str, Any] = {}
             if self.backstop_summary is not None or self.backstop_error_message is not None:
@@ -361,21 +398,9 @@ def record_skip_row(
     error_message: str | None = None,
     run_id: int | None = None,
 ) -> None:
-    from backend.core.duckdb import log_cron_run
+    from backend.core.fos_client import log_cron_run
 
     log_cron_run(source, task, duration_s, status, summary=summary, error_message=error_message, run_id=run_id)
-
-
-def partial_hour_merge_enabled() -> bool:
-    return os.environ.get("PARTIAL_HOUR_MERGE_ENABLED", "true").lower() in ("1", "true", "yes")
-
-
-def partial_hour_merge_interval_sec() -> int:
-    try:
-        val = int(os.environ.get("PARTIAL_HOUR_MERGE_INTERVAL_SEC", "30"))
-        return max(10, min(120, val))
-    except (ValueError, TypeError):
-        return 30
 
 
 def dev_local_crons_enabled() -> bool:
@@ -409,7 +434,12 @@ def _display_label(src: dict, service_id: str) -> str:
 
 
 _HEAVY_REFRESH_INTERVAL_SEC = 60.0
+# The heavy refresh scans retained data, so its cost grows with volume while a fixed interval does not: once one run
+# takes about as long as the interval, the throttle stops working and the step runs on every serial ingest tick.
+# Waiting this many times the last run's cost keeps the step to roughly 1/10 of wall time.
+_HEAVY_REFRESH_COST_MULTIPLE = 10.0
 _last_heavy_refresh: dict[str, float] = {}
+_last_heavy_refresh_cost: dict[str, float] = {}
 _last_heavy_refresh_lock = threading.Lock()
 
 
@@ -417,10 +447,18 @@ def _claim_heavy_refresh(service_id: str) -> bool:
     now = time.time()
     with _last_heavy_refresh_lock:
         last = _last_heavy_refresh.get(service_id, 0.0)
-        if (now - last) >= _HEAVY_REFRESH_INTERVAL_SEC:
+        wait = max(
+            _HEAVY_REFRESH_INTERVAL_SEC, _HEAVY_REFRESH_COST_MULTIPLE * _last_heavy_refresh_cost.get(service_id, 0.0)
+        )
+        if (now - last) >= wait:
             _last_heavy_refresh[service_id] = now
             return True
     return False
+
+
+def _record_heavy_refresh_cost(service_id: str, seconds: float) -> None:
+    with _last_heavy_refresh_lock:
+        _last_heavy_refresh_cost[service_id] = seconds
 
 
 def _elapsed_since(start: float) -> str:
@@ -457,11 +495,8 @@ def _extract_log_text(run_id: int | None) -> str:
 
 JOB_COLORS = {
     "sync": "\x1b[94m",  # Bright Blue
-    "commit": "\x1b[95m",  # Bright Magenta
     "metadata_cleanup": "\x1b[35m",  # Magenta
     "alerts": "\x1b[93m",  # Bright Yellow
-    "optimize": "\x1b[92m",  # Bright Green
-    "expire": "\x1b[90m",  # Gray
     "ngwaf_sync": "\x1b[36m",  # Cyan
     "usage_log": "\x1b[32m",  # Green
 }
@@ -473,9 +508,6 @@ TYPE_ICONS = {
     "status": "ℹ️ ",
     "progress": "⏳ ",
     "sync": "⬇️  ",
-    "commit": "💾 ",
-    "optimize": "🔨 ",
-    "expire": "🗑️ ",
     "alerts": "🔔 ",
     "ngwaf_sync": "👾 ",
     "usage_log": "📊 ",
@@ -535,44 +567,8 @@ def _check_disk_space(cache_dir: str, service_id: str, job_name: str) -> tuple[b
     return True, ""
 
 
-_BACKLOG_FILE_COUNT_WARN = 200
-_BACKLOG_AGE_MULTIPLIER = 3
-_BACKLOG_BYTES_WARN = 1 * 1024 * 1024 * 1024
-
-
-def _check_buffer_backlog(src: dict, service_id: str, commit_interval_mins: int) -> str:
-    try:
-        from backend.core import storage as db_storage
-
-        stats = db_storage.buffer_backlog_stats(src)
-    except Exception as e:
-        logger.warning("[scheduler] %s: buffer backlog probe failed: %s", service_id, e)
-        return ""
-    file_count = int(stats.get("file_count", 0) or 0)
-    total_bytes = int(stats.get("total_bytes", 0) or 0)
-    oldest_age_s = int(stats.get("oldest_age_seconds", 0) or 0)
-    if file_count == 0:
-        return ""
-    max_oldest_age_s = max(60, commit_interval_mins * 60 * _BACKLOG_AGE_MULTIPLIER)
-    problems: list[str] = []
-    if file_count > _BACKLOG_FILE_COUNT_WARN:
-        problems.append(f"{file_count} files")
-    if oldest_age_s > max_oldest_age_s:
-        problems.append(f"oldest {oldest_age_s // 60}m old")
-    if total_bytes > _BACKLOG_BYTES_WARN:
-        problems.append(f"{total_bytes // (1024 * 1024)}MB on disk")
-    if not problems:
-        return ""
-    msg = "buffer backlog: " + ", ".join(problems)
-    logger.warning(
-        "🪣 \x1b[33m[backlog]\x1b[0m %s: %s — commits may be failing silently or ingest is outrunning commit",
-        service_id,
-        msg,
-    )
-    return f" ⚠ {msg}"
-
-
 _CacheRegistry.register("cron.scheduler._last_heavy_refresh", _last_heavy_refresh)
+_CacheRegistry.register("cron.scheduler._last_heavy_refresh_cost", _last_heavy_refresh_cost)
 
 __all__ = [
     "CronHeartbeat",
@@ -580,17 +576,14 @@ __all__ = [
     "JOB_COLORS",
     "RESET_COLOR",
     "TYPE_ICONS",
-    "_BACKLOG_AGE_MULTIPLIER",
-    "_BACKLOG_BYTES_WARN",
-    "_BACKLOG_FILE_COUNT_WARN",
     "_CRON_HARD_CAP_S",
     "_DISK_FREE_HARD_FLOOR_BYTES",
     "_DISK_FREE_HARD_FLOOR_PCT",
+    "_HEAVY_REFRESH_COST_MULTIPLE",
     "_HEAVY_REFRESH_INTERVAL_SEC",
     "_JOIN_TIMEOUT_S",
     "_ROOT",
     "_WATCHDOG_MAX_WORKERS",
-    "_check_buffer_backlog",
     "_check_disk_space",
     "_claim_heavy_refresh",
     "_display_label",
@@ -598,8 +591,10 @@ __all__ = [
     "_extract_log_text",
     "_get_watchdog_executor",
     "_last_heavy_refresh",
+    "_last_heavy_refresh_cost",
     "_last_heavy_refresh_lock",
     "_log_and_add_progress",
+    "_record_heavy_refresh_cost",
     "_resolve_rum_sync_interval",
     "_service_has_alerts",
     "_status",
@@ -615,11 +610,10 @@ __all__ = [
     "end_progress",
     "get_progress",
     "get_system_job_status",
+    "get_system_jobs_snapshot",
     "global_job",
     "iso_z_now",
     "logger",
-    "partial_hour_merge_enabled",
-    "partial_hour_merge_interval_sec",
     "record_job_run",
     "record_skip_row",
     "start_progress",

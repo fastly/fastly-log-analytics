@@ -6,12 +6,12 @@ import asyncio
 import logging
 import sys
 import time
-from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 
-from backend.core.request_context import get_con, get_service_id, get_source
+from backend.core.fos_client import _safe_table_name, get_source_for_service
+from backend.core.request_context import get_service_id, get_source, require_admin
 from backend.models.analytics import InsightsAvailabilityResponse, PageTelemetryResponse
 from backend.models.common import (
     DEFAULT_ERROR_RESPONSES,
@@ -22,14 +22,13 @@ from backend.models.common import (
     RecentSqliteResponse,
     SchemaResponse,
 )
-from backend.repositories import assets as service_stats_repo
-from backend.repositories import rum as rum_repo
-from backend.repositories._base import SectionTimer
+from backend.repositories.utils.response_shaping import SectionTimer
 from backend.utils import telemetry as statement_profiler
 from backend.utils.auth import mask_ips_for, require_service_in_scope
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
-from backend.utils.router_utils import query_errors
+from backend.utils.remote_access import is_request_remote, validate_analyst_request_binding
+from backend.utils.router_utils import make_error, query_errors
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +52,7 @@ _BOOTSTRAP_CACHE_TTL_S = 3.0
 _bootstrap_cache: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=_BOOTSTRAP_CACHE_TTL_S)
 _bootstrap_inflight: dict[str, asyncio.Future] = {}
 
-# SRE-X: Service-level cache for the expensive real-time DuckDB/SQLite queries
+# SRE-X: Service-level cache for the expensive real-time ClickHouse/PostgreSQL queries
 # inside header_badge_and_extents. Caps the query overhead on cold page loads
 # and remote analyst requests (which don't hit the short-TTL _bootstrap_cache).
 _HEADER_BADGE_CACHE_TTL_S = 30.0
@@ -76,7 +75,7 @@ def _startup_stub_response(request: Request) -> BootstrapResponse:
     (``backend.main._background_startup``) is still draining.
 
     Fields that depend on that warm-up (the real ``services`` list, per-service
-    ``schema``/``settings``, anything sourced from DuckLake/DuckDB) are withheld
+    ``schema``/``settings``, anything sourced from ClickHouse/PostgreSQL) are withheld
     here — they stay `[]`/`None` until ``startup_complete`` flips.
     """
     from backend.core.request_telemetry import collection_enabled as _web_vitals_enabled
@@ -112,7 +111,7 @@ async def bootstrap(
     # Coalesce + short-TTL cache the loopback admin bootstrap; run the
     # analyst/anonymous path fresh. The heavy work lives in _bootstrap_sync
     # (a sync def run in the threadpool).
-    is_remote = getattr(request.state, "is_remote", False)
+    is_remote = bool(getattr(request.state, "is_remote", False) or is_request_remote(request))
     # Analyst / anonymous: per-session, cheap — never cached.
     if is_remote or bool(request.cookies.get("analyst_session_id")):
         return await run_in_threadpool(_bootstrap_sync, request, service_id)
@@ -142,11 +141,23 @@ async def _bootstrap_compute_and_cache(request: Request, service_id: str | None,
         _bootstrap_inflight.pop(key, None)
 
 
+_ANALYST_BOOTSTRAP_SERVICE_KEYS: frozenset[str] = frozenset(
+    {"service_id", "name", "is_active", "cmcd_enabled", "rum_enabled", "rum_log_period"}
+)
+
+
+def _project_analyst_bootstrap_service(svc: dict) -> dict:
+    out = {k: svc[k] for k in _ANALYST_BOOTSTRAP_SERVICE_KEYS if k in svc}
+    raw_status = svc.get("status")
+    if isinstance(raw_status, dict) and "schema" in raw_status:
+        out["status"] = {"schema": raw_status.get("schema", []) or []}
+    return out
+
+
 def _bootstrap_sync(
     request: Request,
     service_id: str | None,
 ) -> BootstrapResponse:
-    from backend.core import duckdb as _db
     from backend.services.service_manager import get_enriched_services
     from backend.utils.countries import COUNTRY_MAP
     from backend.utils.pop_utils import get_pop_lat_lon_map, get_pop_location_map
@@ -164,17 +175,28 @@ def _bootstrap_sync(
     # this path — we validate the cookie manually here so authenticated
     # analysts still get the full response with their scoped services.
     analyst_session = getattr(request.state, "analyst_session", None)
-    is_remote = getattr(request.state, "is_remote", False)
+    is_remote = bool(getattr(request.state, "is_remote", False) or is_request_remote(request))
     if analyst_session is None:
         sid = request.cookies.get("analyst_session_id")
         if sid:
             from backend.utils.tunnel import get_tunnel_manager
 
+            mgr = get_tunnel_manager()
+            if not mgr.is_sharing_active():
+                raise HTTPException(
+                    status_code=403, detail=make_error("sharing_disabled", "Remote sharing is disabled")
+                )
+
             def _validate():
-                return get_tunnel_manager().validate_session(sid)
+                return mgr.validate_session(sid)
 
             analyst_session = timer.call("validate_analyst_session", _validate)
             if analyst_session is not None:
+                if (bind_err := validate_analyst_request_binding(request, analyst_session, mgr=mgr)) is not None:
+                    raise HTTPException(
+                        status_code=bind_err[0],
+                        detail=make_error(bind_err[1], "Analyst session binding validation failed"),
+                    )
                 request.state.analyst_session = analyst_session
 
     # Anonymous remote visitor: return a minimal stub so the frontend hides
@@ -219,7 +241,7 @@ def _bootstrap_sync(
     # Resolve once and reuse across closures. Previously each closure called
     # get_source_for_service(valid_active_id) independently — 3 redundant
     # stat() + json.loads passes on the cold-load admin bootstrap path.
-    active_src = _db.get_source_for_service(valid_active_id) if valid_active_id else None
+    active_src = get_source_for_service(valid_active_id) if valid_active_id else None
 
     schema: list = []
     table_name: str | None = None
@@ -237,32 +259,15 @@ def _bootstrap_sync(
         active_svc = next((s for s in services if s.get("service_id") == valid_active_id), None)
         if active_svc and active_svc.get("status"):
             schema = active_svc["status"].get("schema", []) or []
-        from backend.core.duckdb import _safe_table_name
 
         if active_src:
             table_name = _safe_table_name(active_src["name"])
 
     timer.call("schema_lookup", _resolve_schema_and_table)
 
-    # NOTE: the previous fallback opened a read-only DuckDB connection here
-    # and ran get_schema() against the source on cold-cache loads. That call
-    # acquired the per-service lock + did a parquet glob, costing 1-3s on
-    # the very first /api/bootstrap after a backend restart and blocking
-    # the whole admin UI from rendering. With the status-refresh cron
-    # populating active_svc["status"]["schema"], the cache is the source
-    # of truth — drop the fallback. If schema is empty here, the dashboard
-    # renders without a hint banner; the user can refresh once the cron
-    # has run (typically <60s after startup).
-
     pops = timer.call("get_pop_lat_lon_map", get_pop_lat_lon_map)
     pop_geo = timer.call("get_pop_location_map", get_pop_location_map)
 
-    # Per the perf audit (F6): bootstrap's custom_fields_catalog was a
-    # ~10-15 KB duplicate of what every chart page already fetches
-    # separately from /api/log-fields/catalog, so the field was dropped
-    # from the response. The dashboard card hook only needs
-    # custom_dashboard_cards and active_log_field_ids — both derived
-    # from the catalog here.
     custom_dashboard_cards: list[dict] = []
     active_log_field_ids: list[str] = []
     ngwaf_configured = False
@@ -283,20 +288,10 @@ def _bootstrap_sync(
         custom_dashboard_cards = [
             {"id": f["id"], "label": f["label"]} for f in catalog_entries if f.get("show_in_dashboard")
         ]
-        active_log_field_ids = sorted(_lf.resolve_enabled_fields(lf_config)) + [
-            cf["name"] for cf in lf_config.get("custom_fields", []) if cf.get("enabled", True)
-        ]
+        active_log_field_ids = svcconfig.active_log_field_ids(active_cfg)
 
     timer.call("custom_fields_catalog", _resolve_custom_fields)
 
-    # Perf audit Phase D: fold the log-fields catalog into the
-    # bootstrap response so the frontend can seed its
-    # ['log-fields-catalog', service_id] React Query cache from the
-    # same payload (mirrors how `views` is already seeded). Saves one
-    # HTTP round-trip + ~35 KB transfer on every cold page load
-    # without changing the dedicated /api/log-fields/catalog endpoint
-    # (other consumers / direct callers still work). Analyst-scope is
-    # already enforced for valid_active_id above.
     log_fields_catalog_payload: dict | None = None
 
     def _resolve_log_fields_catalog():
@@ -305,14 +300,11 @@ def _bootstrap_sync(
             return
         log_fields_catalog_payload = _compute_log_fields_catalog(valid_active_id)
         if not schema and active_src and log_fields_catalog_payload:
-            from backend import config as svcconfig
-
-            if svcconfig.is_durable_serving_mode(active_src):
-                schema = [
-                    {"name": f["id"], "type": f.get("duckdb_type", "VARCHAR")}
-                    for f in log_fields_catalog_payload.get("fields", [])
-                    if f.get("id")
-                ]
+            schema = [
+                {"name": f["id"], "type": f.get("sql_type", "VARCHAR")}
+                for f in log_fields_catalog_payload.get("fields", [])
+                if f.get("id")
+            ]
 
     timer.call("log_fields_catalog", _resolve_log_fields_catalog)
 
@@ -434,7 +426,6 @@ def _bootstrap_sync(
             request_total = request_payload.get("total_rows", 0)
             request_last_sync = request_payload.get("last_sync_at")
         else:
-            # Fallback if the bg cron hasn't populated them yet
             rum_latest = None
             rum_total = 0
             rum_last_sync = None
@@ -444,63 +435,39 @@ def _bootstrap_sync(
 
             try:
                 from backend.core.metadata.usage_log import latest_cron_per_task
+                from backend.high_scale.dashboard import header_metrics as hs_header_metrics
+                from backend.high_scale.ingest_controller import get_high_scale_service_registry
 
-                # RUM metrics from DuckDB RUM views
-                try:
-                    from backend.core.duckdb import rum_source_for
-                    from backend.core.request_context import _ConnectionHolder
-                    from backend.core.storage import execute_with_stale_view_retry
-
-                    rum_source = rum_source_for(active_src)
-                    with _ConnectionHolder(rum_source, read_only=True) as rum_con:
-                        rum_count, rum_last_dt = execute_with_stale_view_retry(
-                            rum_con, rum_source, rum_repo.get_header_stats
-                        )
-
-                    if rum_count > 0:
-                        rum_total = rum_count
-                        if rum_last_dt:
-                            if isinstance(rum_last_dt, datetime):
-                                rum_latest = rum_last_dt.isoformat()
-                            else:
-                                rum_latest = str(rum_last_dt)
-                except Exception:
-                    logger.warning("[bootstrap] RUM header fallback scan failed; reporting zero", exc_info=True)
-
-                # REQUEST metrics from DuckDB main table
-                try:
-                    from backend.core.duckdb import _safe_table_name, get_connection
-
-                    duckdb_con = get_connection(active_src)
+                hs_service = get_high_scale_service_registry().resolve(valid_active_id)
+                if hs_service is not None:
                     try:
-                        req_count, req_latest = service_stats_repo.get_request_row_stats(
-                            duckdb_con, _safe_table_name(active_src["name"])
+                        hm = hs_header_metrics(hs_service)
+                        hm_rum = hm.get("rum") or {}
+                        hm_req = hm.get("request") or {}
+                        rum_latest = hm_rum.get("latest_log_at")
+                        rum_total = int(hm_rum.get("total_rows") or 0)
+                        rum_last_sync = hm_rum.get("last_sync_at")
+                        request_latest = hm_req.get("latest_log_at")
+                        request_total = int(hm_req.get("total_rows") or 0)
+                        request_last_sync = hm_req.get("last_sync_at")
+                    except Exception:
+                        logger.warning(
+                            "[bootstrap] ClickHouse header_metrics fallback failed; reporting zero", exc_info=True
                         )
-                        if req_count > 0:
-                            request_total = req_count
-                            # RUM beacons are in metadata SQLite, so REQUEST is everything in DuckDB
-                            # Get latest log timestamp from DuckDB
-                            if req_latest:
-                                request_latest = (
-                                    req_latest.isoformat() if hasattr(req_latest, "isoformat") else req_latest
-                                )
-                    finally:
-                        duckdb_con.close()
-                except Exception:
-                    logger.warning("[bootstrap] request header fallback scan failed; reporting zero", exc_info=True)
 
-                # Get last sync times for each type.
                 cron_data = latest_cron_per_task(valid_active_id)
-                rum_last_sync = (
-                    cron_data.get("rum_discovery", {}).get("started_at")
-                    or cron_data.get("rum_sync", {}).get("started_at")
-                    or cron_data.get("ledger_rum_sweep", {}).get("started_at")
-                )
-                request_last_sync = (
-                    cron_data.get("log_discovery", {}).get("started_at")
-                    or cron_data.get("commit", {}).get("started_at")
-                    or cron_data.get("ledger_sweep", {}).get("started_at")
-                )
+                if not rum_last_sync:
+                    rum_last_sync = (
+                        cron_data.get("rum_discovery", {}).get("started_at")
+                        or cron_data.get("rum_sync", {}).get("started_at")
+                        or cron_data.get("ledger_rum_sweep", {}).get("started_at")
+                    )
+                if not request_last_sync:
+                    request_last_sync = (
+                        cron_data.get("log_discovery", {}).get("started_at")
+                        or cron_data.get("commit", {}).get("started_at")
+                        or cron_data.get("ledger_sweep", {}).get("started_at")
+                    )
 
             except Exception:
                 logger.warning("[bootstrap] header badge fallback failed; reporting zero", exc_info=True)
@@ -508,7 +475,7 @@ def _bootstrap_sync(
         earliest = cached_status.get("earliest_log_at")
         latest = request_latest if request_payload is not None else request_latest or cached_status.get("latest_log_at")
 
-        # Align request_total with local_rows if DuckDB count is smaller or stale (e.g. on analyst instances or sync lag)
+        # Align request_total with local_rows if ClickHouse count is smaller or stale (e.g. on analyst instances or sync lag)
         local_rows_total = cached_status.get("local_rows")
         if request_payload is None and local_rows_total is not None:
             expected_request_total = max(0, local_rows_total - rum_total)
@@ -607,7 +574,7 @@ def _bootstrap_sync(
                 logger.debug("[bootstrap] slow_queries_count seed unavailable", exc_info=True)
             # ``log_accounting`` is intentionally NOT seeded here. Its
             # ``compute_log_accounting`` helper chains up to 3 Fastly
-            # Stats API calls on cache miss (~800 ms), which would
+            # Platform Metrics calls on cache miss (~800 ms), which would
             # dominate every cold bootstrap. The IngestHealthCard's
             # existing 30 s ``refetchInterval`` + #13's TTL cache mean
             # the card paints with real data inside one tick of mount
@@ -721,15 +688,30 @@ def _bootstrap_sync(
 
     storage_mode = active_src.get("storage_mode", "cloud") if active_src else "cloud"
 
-    # Analysts need the capability flag, not the operator's workspace ID.
+    # Analysts receive only the explicit UI-safe service projection — never
+    # FOS bucket/region, origin CDN URLs, RUM cid_salt, or operator IDs.
     response_services = services
     if analyst_session is not None:
-        response_services = [{k: v for k, v in svc.items() if k != "ngwaf_workspace_id"} for svc in services]
+        response_services = [_project_analyst_bootstrap_service(svc) for svc in services]
         if mask_ips_for(analyst_session):
-            from backend.core.share_db import apply_pii_policy
+            from backend.core.share_db import apply_pii_policy, filter_saved_views_for_pii, is_saved_view_pii_key
 
-            schema = apply_pii_policy(schema, {"mask_ips": True})
+            def _is_non_pii_schema_col(col: object) -> bool:
+                if not isinstance(col, dict):
+                    return True
+                col_name = str(col.get("name") or col.get("column") or "")
+                return not is_saved_view_pii_key(col_name) and col_name.strip().lower() != "origin_ip"
+
+            schema = [col for col in schema if _is_non_pii_schema_col(col)]
+            for svc_proj in response_services:
+                svc_status = svc_proj.get("status")
+                if isinstance(svc_status, dict) and isinstance(svc_status.get("schema"), list):
+                    svc_proj["status"] = {
+                        **svc_status,
+                        "schema": [col for col in svc_status["schema"] if _is_non_pii_schema_col(col)],
+                    }
             response_services = apply_pii_policy(response_services, {"mask_ips": True})
+            views = filter_saved_views_for_pii(views, {"mask_ips": True})
 
     return BootstrapResponse.with_telemetry(
         active_service_id=valid_active_id,
@@ -772,34 +754,15 @@ def _bootstrap_sync(
 
 
 def _resolve_schema_for_source(request: Request, source: dict, *, stats: bool = True) -> list[dict]:
-    """Resolve schema for ``source`` without eagerly opening a DuckDB connection on cache hits."""
+    """Resolve schema for ``source`` from cached status or the log-fields catalog."""
     from backend import config as svcconfig
-    from backend.core.duckdb import _safe_table_name, get_schema
-    from backend.core.duckdb_status import _schema_cache
-    from backend.core.request_context import _ConnectionHolder
 
     cached_status = svcconfig.get_status(source["name"])
     if cached_status and "schema" in cached_status and (stats or cached_status["schema"]):
         return cached_status["schema"]
 
-    table_name = _safe_table_name(source["name"])
-    for key in ((source["name"], table_name, stats), (source["name"], table_name, True)):
-        if (cached := _schema_cache.get(key)) is not None:
-            return cached
-
-    if svcconfig.is_durable_serving_mode(source):
-        catalog_fields = _compute_log_fields_catalog(source.get("service_id") or source["name"]).get("fields", [])
-        schema = [{"name": f["id"], "type": f.get("duckdb_type", "VARCHAR")} for f in catalog_fields if f.get("id")]
-        _schema_cache[(source["name"], table_name, stats)] = schema
-        return schema
-
-    override_get_con = request.app.dependency_overrides.get(get_con)
-    if override_get_con is not None:
-        con = override_get_con()
-        return get_schema(con, source) if stats else get_schema(con, source, stats=False)
-
-    with _ConnectionHolder(source, read_only=True) as con:
-        return get_schema(con, source) if stats else get_schema(con, source, stats=False)
+    catalog_fields = _compute_log_fields_catalog(source.get("service_id") or source["name"]).get("fields", [])
+    return [{"name": f["id"], "type": f.get("sql_type", "VARCHAR")} for f in catalog_fields if f.get("id")]
 
 
 @bootstrap_router.get("/schema", response_model=SchemaResponse, response_model_exclude_unset=True)
@@ -808,8 +771,6 @@ def schema_endpoint(
     request: Request,
     source: dict = Depends(get_source),
 ):
-    from backend.core.duckdb import _safe_table_name
-
     # Cross-tenant guard: an analyst session scoped to ``svc-A`` must not
     # be able to read ``svc-B``'s schema (custom-field names, types, and
     # PII flags). Mirrors the check in ``log_fields_catalog``.
@@ -818,9 +779,14 @@ def schema_endpoint(
     raw_schema = _resolve_schema_for_source(request, source, stats=True)
     analyst_session = getattr(request.state, "analyst_session", None)
     if mask_ips_for(analyst_session):
-        from backend.core.share_db import apply_pii_policy
+        from backend.core.share_db import is_saved_view_pii_key
 
-        raw_schema = apply_pii_policy(raw_schema, {"mask_ips": True})
+        raw_schema = [
+            col
+            for col in raw_schema
+            if not is_saved_view_pii_key(str(col.get("name") or col.get("column") or ""))
+            and str(col.get("name") or col.get("column") or "").strip().lower() != "origin_ip"
+        ]
     return {"schema": raw_schema, "table_name": _safe_table_name(source["name"])}
 
 
@@ -888,25 +854,19 @@ def insight_availability(
     request: Request,
     source: dict = Depends(get_source),
 ):
-    # Cross-tenant guard: insight availability discloses which fields are
-    # populated (presence/absence of optional columns), so it needs the
-    # same scope check as the schema endpoint.
+    # Cross-tenant guard: insight availability discloses which log fields the
+    # service enables, so it needs the same scope check as the schema endpoint.
     require_service_in_scope(request, source.get("name"))
 
-    # Prefer the cached schema snapshot maintained by the status-refresh
-    # cron — same source of truth the /schema endpoint and /bootstrap
-    # already use. Saves ~300 ms per /insight-availability call because
-    # we skip the per-service lock + parquet glob that get_schema would
-    # otherwise pay on cold cache, especially when /insights is in
-    # flight concurrently.
-    actual_cols = {col["name"] for col in _resolve_schema_for_source(request, source, stats=False)}
+    from backend import config as svcconfig
     from backend.core.log_fields import INSIGHT_DEFINITIONS
 
+    enabled = set(svcconfig.active_log_field_ids(svcconfig.load_config(source.get("name")) or {}))
     result = []
     for d in INSIGHT_DEFINITIONS:
         req_cols = d.get("required_fields", [])
-        available = all(c in actual_cols for c in req_cols)
-        missing_fields = [c for c in req_cols if c not in actual_cols]
+        available = all(c in enabled for c in req_cols)
+        missing_fields = [c for c in req_cols if c not in enabled]
         result.append({**d, "available": available, "missing_fields": missing_fields if not available else None})
     unavailable = [i for i in result if not i["available"]]
     return {"insights": result, "unavailable": unavailable, "available": True}
@@ -914,7 +874,18 @@ def insight_availability(
 
 # ── Debug & telemetry endpoints (folded from backend.routers.debug) ─────────
 
-debug_router = APIRouter(prefix="/api", responses=DEFAULT_ERROR_RESPONSES)
+
+def _require_debug_admin(request: Request) -> None:
+    require_admin(request)
+    if getattr(request.state, "is_remote", False):
+        raise HTTPException(status_code=403, detail=make_error("admin_only", "Administrator access required"))
+
+
+debug_router = APIRouter(
+    prefix="/api",
+    responses=DEFAULT_ERROR_RESPONSES,
+    dependencies=[Depends(_require_debug_admin)],
+)
 
 
 @debug_router.get("/debug/recent-postgres", tags=["debug"], response_model=RecentSqliteResponse)
@@ -927,18 +898,7 @@ def recent_sqlite(
     """Return up to ``limit`` most-recent Postgres statements captured since
     ``since_seq``. The Debug Panel polls this every 5s when SQL debug is on.
     """
-    is_remote = getattr(request.state, "is_remote", False)
-    if is_remote:
-        from backend.core.share_db import get_setting
-
-        q_vis = get_setting("query_debug_visibility", "disabled")
-        if q_vis not in ("analysts", "both"):
-            from backend.utils.router_utils import make_error
-
-            raise HTTPException(
-                status_code=403, detail=make_error("sql_debug_disabled", "SQL debug is disabled for analysts")
-            )
-
+    _require_debug_admin(request)
     return statement_profiler.get_recent(limit=limit, since_seq=since_seq)
 
 
@@ -946,14 +906,7 @@ def recent_sqlite(
 @debug_router.post("/debug/clear-sqlite", tags=["debug"], response_model=ClearSqliteResponse)
 def clear_sqlite(request: Request):
     """Drain the Postgres ring buffer. Manual reset for the Debug Panel."""
-    is_remote = getattr(request.state, "is_remote", False)
-    if is_remote:
-        from backend.utils.router_utils import make_error
-
-        raise HTTPException(
-            status_code=403, detail=make_error("admin_only", "Only administrators can clear the Postgres debug buffer")
-        )
-
+    _require_debug_admin(request)
     statement_profiler.clear()
     return {"ok": True, **statement_profiler.buffer_stats()}
 
@@ -981,7 +934,7 @@ def debug_state():
 def get_page_telemetry_endpoint(
     page_load_id: str = Query(..., description="Unique page-load ID generated by the frontend"),
 ):
-    """Retrieve all unified SQLite queries, DuckDB queries, FOS calls, and section timings
+    """Retrieve all unified PostgreSQL queries, ClickHouse queries, FOS calls, and section timings
     matching the page_load_id.
     """
     from backend import config as svcconfig

@@ -1,6 +1,8 @@
 import type { QueryClient } from '@tanstack/react-query'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { client, unwrapClient, queryKeys, adminFetch } from '@/lib/api'
 import { downloadBlob } from '@/lib/utils'
+import { SERVICE_DEFAULTS, effectiveLogPeriod } from '@/lib/serviceDefaults'
 import type { Service } from '@/stores/filterStore'
 import type { components } from '@/types/api.generated'
 import { WizardDraftHeaderSchema } from './wizardSchemas'
@@ -30,8 +32,8 @@ function buildTerraformPayload(token: string, selectedService: ProvisionService,
     sample_rate: String(config.sample_rate),
     edge_only: config.edge_only,
     custom_condition: config.custom_condition,
-    log_period: String(config.log_period),
-    rum_log_period: String(config.rum_log_period || 300),
+    log_period: String(effectiveLogPeriod(config.log_period)),
+    rum_log_period: String(effectiveLogPeriod(config.rum_log_period || SERVICE_DEFAULTS.rumLogPeriodSeconds)),
     cdn_service_name: config.cdn_service_name,
     cdn_prefix: config.cdn_prefix,
     cdn_shield: config.cdn_shield,
@@ -128,8 +130,8 @@ export function buildHandleModalClose(deps: ModalCloseDeps) {
         window.location.reload()
       } else {
         setTimeout(() => {
-          deps.setStep("mode")
-          deps.setMode(null)
+          deps.setStep(isCloudMode() ? "token" : "mode")
+          deps.setMode(isCloudMode() ? "provision" : null)
           deps.setSearch("")
           deps.setSelectedService(null)
           deps.setIsDeploying(false)
@@ -169,14 +171,13 @@ export function runDeploy({ token, selectedService, config, setIsDeploying, star
     sample_rate: String(config.sample_rate),
     edge_only: config.edge_only,
     custom_condition: config.custom_condition,
-    log_period: String(config.log_period),
-    rum_log_period: String(config.rum_log_period || 300),
+    log_period: String(effectiveLogPeriod(config.log_period)),
+    rum_log_period: String(effectiveLogPeriod(config.rum_log_period || SERVICE_DEFAULTS.rumLogPeriodSeconds)),
     cdn_service_name: config.cdn_service_name,
     cdn_shield: config.cdn_shield,
     enable_cron_sync: config.enable_cron_sync,
     delete_after: config.delete_after,
-    commit_interval_mins: Number(config.commit_interval_mins),
-    enable_cron_compact: config.enable_cron_compact,
+    snapshot_interval_minutes: Number(config.snapshot_interval_minutes),
     log_retention_days: Number(config.log_retention_days),
     rum_retention_days: Number(config.rum_retention_days),
     log_fields: config.log_fields ? JSON.stringify(config.log_fields) : null,
@@ -189,6 +190,7 @@ export function runDeploy({ token, selectedService, config, setIsDeploying, star
     faro_version: config.faro_version || null,
   }
   if (config.cdn_prefix) body.cdn_url = `https://${config.cdn_prefix}.global.ssl.fastly.net`
+  if (config.capture === "attached") body.capture = "attached"
   start("/api/provision/execute", body)
 }
 
@@ -253,15 +255,14 @@ export async function runAdminIngest(args: AdminIngestArgs) {
           sample_rate: String(config.sample_rate),
           edge_only: config.edge_only,
           custom_condition: config.custom_condition,
-          log_period: String(config.log_period),
+          log_period: String(effectiveLogPeriod(config.log_period)),
           cdn_service_id: selectedCdnService?.id || config.cdn_service_name,
           cdn_service_name: selectedCdnService?.name || config.cdn_service_name,
           cdn_url: config.cdn_url || (config.cdn_prefix ? `https://${config.cdn_prefix}.global.ssl.fastly.net` : ""),
           cdn_shield: config.cdn_shield,
           enable_cron_sync: config.enable_cron_sync,
           delete_after: config.delete_after,
-          commit_interval_mins: config.commit_interval_mins,
-          enable_cron_compact: config.enable_cron_compact,
+          snapshot_interval_minutes: config.snapshot_interval_minutes,
           log_retention_days: config.log_retention_days,
           rum_retention_days: config.rum_retention_days,
           log_fields: config.log_fields,
@@ -342,9 +343,9 @@ export async function runCheckConfig(args: CheckConfigArgs) {
   try {
     const data = await unwrapClient(
       client.GET("/api/provision/check-config", {
+        headers: { Authorization: `Bearer ${token}` },
         params: {
           query: {
-            token,
             service_id: selectedService.id,
             cdn_service_id: selectedCdnService.id,
             bucket: config.fos_bucket_name,

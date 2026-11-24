@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from fastapi import APIRouter, Depends
 
 from backend.core.metadata.base import list_audit, record_audit
@@ -47,9 +45,7 @@ def log_field_audit(
     from backend.core.log_fields import resolve_enabled_fields
 
     cfg = svcconfig.load_config(service_id)
-    log_fields_cfg: dict[str, Any] | None = cfg.get("log_fields") if cfg else None
-    enabled = resolve_enabled_fields(log_fields_cfg or {})
-    enabled_ids = {f if isinstance(f, str) else f.get("id", f) for f in enabled}
+    enabled_ids = set(svcconfig.active_log_field_ids(cfg)) if cfg else resolve_enabled_fields({})
 
     features: list[LogFieldAuditFeature] = []
     for feature_name, required in FEATURE_REQUIRED_FIELDS.items():

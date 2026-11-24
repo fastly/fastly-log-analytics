@@ -72,7 +72,48 @@ export function tracesToTable(data: unknown, fallbackTitle = 'Chart data'): Tabl
 
   const traces = data as PlotlyTrace[]
 
-  // ── Heatmap / surface / contour / any z-matrix trace ───────────
+  // ── 2D Heatmap ─────────────────────────────────────────────────
+  if (
+    traces.length === 1 &&
+    traces[0].type === 'heatmap' &&
+    Array.isArray(traces[0].x) &&
+    Array.isArray(traces[0].y) &&
+    Array.isArray(traces[0].z)
+  ) {
+    const xCols = (traces[0].x as Array<string | number>).slice(0, 60)
+    const yLabels = traces[0].y as Array<string | number>
+    const zMatrix = traces[0].z as Array<Array<string | number | null | undefined>>
+    const rows: (string | number)[][] = []
+    let hasValue = false
+    const n = Math.min(yLabels.length, zMatrix.length)
+    for (let r = 0; r < n; r++) {
+      const zRow = Array.isArray(zMatrix[r]) ? zMatrix[r] : []
+      const cells: (string | number)[] = [yLabels[r]]
+      for (let c = 0; c < xCols.length; c++) {
+        const v = zRow[c]
+        if (v !== null && v !== undefined && v !== '') {
+          hasValue = true
+          cells.push(v)
+        } else {
+          cells.push('')
+        }
+      }
+      rows.push(cells)
+    }
+    if (!hasValue || xCols.length === 0) {
+      return { title: fallbackTitle, columns: [], rows: [], empty: true }
+    }
+    const capped = capRows(rows)
+    return {
+      title: traces[0].name || fallbackTitle,
+      columns: ['Series', ...xCols.map((c) => String(c))],
+      rows: capped.rows,
+      empty: false,
+      truncatedFrom: capped.truncatedFrom,
+    }
+  }
+
+  // ── Surface / contour / other z-matrix trace ───────────────────
   if (
     traces.some(
       (t) =>

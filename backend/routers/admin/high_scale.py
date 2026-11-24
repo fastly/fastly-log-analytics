@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from datetime import datetime
 from typing import Any
@@ -13,8 +14,18 @@ from fastapi import APIRouter, Depends, HTTPException
 from backend.core import metadata
 from backend.core.request_context import RequestContext, build_request_context, require_admin
 from backend.core.request_telemetry import HighScaleSections
-from backend.core.share_db import mask_ip
-from backend.high_scale._common import KeysetCursor, raw_query_producer
+from backend.core.share_db import (
+    CMCD_SESSION_ALIAS_KEYS,
+    PII_IP_KEYS,
+    SESSION_ID_KEYS,
+    _canon_pii_key,
+    _classify_saved_view_pii_key,
+    apply_pii_policy,
+    mask_ip_or_chain,
+    scrub_ip_text,
+)
+from backend.high_scale import cold_start_restore
+from backend.high_scale._common import raw_query_producer
 from backend.high_scale.aggregate_query import (
     DEFAULT_AGGREGATE_DIMENSIONS,
     AggregateRequest,
@@ -55,6 +66,8 @@ from backend.models.admin import (
     HighScaleQueryResponse,
     HighScaleRequestFactRequest,
     HighScaleRequestFactResponse,
+    HighScaleRestoreFromFosRequest,
+    HighScaleRestoreFromFosResponse,
     HighScaleRumFactResponse,
     QueryResponseMetadataResponse,
     ServingWatermarkResponse,
@@ -64,8 +77,6 @@ from backend.utils.auth import mask_ips_for
 from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
 from backend.utils.date_utils import parse_iso_utc
 from backend.utils.router_utils import make_error, query_errors
-
-from .compaction import fetch_request_facts_emulation
 
 high_scale_router = APIRouter(prefix="/api/high-scale", tags=["high-scale"], responses=DEFAULT_ERROR_RESPONSES)
 
@@ -106,6 +117,14 @@ def _serialize_export_row(row: dict[str, Any]) -> bytes:
     return json.dumps(row, default=str, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+def _require_non_analyst(ctx: RequestContext) -> None:
+    if ctx.analyst_session is not None:
+        raise HTTPException(
+            status_code=403,
+            detail={"error": "admin_only", "message": "This operation requires admin access."},
+        )
+
+
 @high_scale_router.post(
     "/services/{service_id}/exports",
     response_model=HighScaleExportResponse,
@@ -119,6 +138,7 @@ def request_export(
     registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
     manager: ExportManager = Depends(get_export_manager),
 ) -> Any:
+    _require_non_analyst(ctx)
     service = _resolve_scoped_high_scale_service(service_id, ctx, registry, check_binding=True, mismatch_on_scope=True)
     start, end = _clamp_and_parse_window(ctx, req.start_time, req.end_time)
     rows = _fetch_facts_page(service, req.domain, start=start, end=end, limit=req.limit, cursor=req.cursor).rows
@@ -146,6 +166,7 @@ def export_status(
     registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
     manager: ExportManager = Depends(get_export_manager),
 ) -> Any:
+    _require_non_analyst(ctx)
     _resolve_scoped_high_scale_service(service_id, ctx, registry, check_binding=True, mismatch_on_scope=True)
     with _export_owners_lock:
         owner = _export_owners.get(export_id)
@@ -173,6 +194,7 @@ def cancel_export(
     registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
     manager: ExportManager = Depends(get_export_manager),
 ) -> Any:
+    _require_non_analyst(ctx)
     _resolve_scoped_high_scale_service(service_id, ctx, registry, check_binding=True, mismatch_on_scope=True)
     with _export_owners_lock:
         owner = _export_owners.get(export_id)
@@ -194,139 +216,11 @@ def cancel_export(
     return _export_response(service_id, job, cancelled=cancelled)
 
 
-def _normalize_ts_iso(val: object) -> str:
-    if isinstance(val, datetime):
-        from backend.utils.date_utils import iso_z
-
-        return iso_z(val)
-    if val is None:
-        return ""
-    s = str(val)
-    if s.endswith("+00:00"):
-        return s[:-6] + "Z"
-    return s
-
-
-def _emulate_standard_request_facts(
-    ctx: RequestContext,
-    req: HighScaleRequestFactRequest,
-    *,
-    start: datetime,
-    end: datetime,
-) -> HighScaleRequestFactResponse:
-    import os
-    import uuid
-    from datetime import UTC
-
-    from backend.core.duckdb import _safe_table_name
-    from backend.core.storage import execute_with_stale_view_retry
-
-    secret = (os.getenv("HIGH_SCALE_CURSOR_SECRET", "").strip() or "standard-emulation-cursor-secret").encode("utf-8")
-    decoded = KeysetCursor.decode(req.cursor, secret) if req.cursor else None
-    if decoded and (decoded.service_id != ctx.service_id or decoded.domain != "request"):
-        raise ValueError("cursor does not belong to this service and domain")
-
-    candidate_tables = [_safe_table_name(str(ctx.source.get("name") or "default"))]
-    if "logs" not in candidate_tables:
-        candidate_tables.append("logs")
-
-    def _run_emulation(con: Any) -> Any:
-        return fetch_request_facts_emulation(
-            con,
-            candidate_tables,
-            req,
-            start=start,
-            end=end,
-            cursor_ts=decoded.timestamp if decoded is not None else None,
-            service_id=ctx.service_id,
-        )
-
-    raw_rows, cov_start, cov_end = execute_with_stale_view_retry(ctx.con, ctx.source, _run_emulation)
-
-    page_tuples = raw_rows[: req.limit]
-    rows: list[dict[str, object]] = []
-    mask = mask_ips_for(ctx.analyst_session)
-
-    for idx, tup in enumerate(page_tuples):
-        ts_val, country_val, ip_val, url_val, status_val, pop_val, host_val = tup
-        ts_iso = _normalize_ts_iso(ts_val)
-        ev_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{ctx.service_id}|{ts_iso}|{idx}|{url_val or ''}"))
-        ip_str = str(ip_val or "")
-        if mask and ip_str:
-            ip_str = mask_ip(ip_str)
-        status_str = str(status_val or "")
-        status_out: int | str = int(status_str) if status_str.isdigit() else status_str
-        pop_str = str(pop_val or "")
-        host_str = str(host_val or "")
-        rows.append(
-            {
-                "event_id": ev_id,
-                "timestamp": ts_iso,
-                "service_id": ctx.service_id,
-                "source_object_key": "ducklake://local",
-                "source_object_version": "v1",
-                "line_ordinal": idx,
-                "batch_id": "duckdb-emulation",
-                "country": str(country_val or ""),
-                "client_ip": ip_str,
-                "url": str(url_val or ""),
-                "status": status_out,
-                "pop": pop_str,
-                "host": host_str,
-                "custom_fields": {
-                    "status": status_str,
-                    "pop": pop_str,
-                    "host": host_str,
-                },
-                "cmcd": {},
-            }
-        )
-
-    next_cursor: str | None = None
-    if len(raw_rows) > req.limit and rows:
-        last_row = rows[-1]
-        last_ts = parse_iso_utc(str(last_row["timestamp"])) or end
-        next_cursor = KeysetCursor(last_ts, str(last_row["event_id"]), ctx.service_id, "request").encode(secret)
-
-    cov_start_dt = parse_iso_utc(_normalize_ts_iso(cov_start)) if cov_start is not None else start
-    cov_end_dt = parse_iso_utc(_normalize_ts_iso(cov_end)) if cov_end is not None else end
-    now_utc = datetime.now(UTC)
-    lag = max(0.0, (now_utc - cov_end_dt).total_seconds()) if cov_end_dt else 0.0
-    last_ev = str(rows[-1]["event_id"]) if rows else None
-
-    resp: HighScaleRequestFactResponse = HighScaleRequestFactResponse.with_telemetry(
-        rows=rows,
-        next_cursor=next_cursor,
-        metadata=QueryResponseMetadataResponse(
-            status="complete",
-            exact=True,
-            coverage=1.0,
-            freshness_lag_seconds=round(lag, 2),
-            watermark=ServingWatermarkResponse(
-                service_id=ctx.service_id,
-                domain="request",
-                owner_epoch=1,
-                coverage_start=cov_start_dt,
-                coverage_end=cov_end_dt,
-                last_accepted_cursor=next_cursor,
-                last_archived_event_id=last_ev,
-                last_visible_event_id=last_ev,
-                exact=True,
-            ),
-            approximation_error=None,
-            error=None,
-            mode="duckdb_emulation",
-        ),
-    )
-    return resp
-
-
 def _execute_request_facts_query(
     ctx: RequestContext,
     req: HighScaleRequestFactRequest,
     registry: HighScaleServiceRegistryProtocol,
     *,
-    allow_standard_emulation: bool,
     default_window_if_missing: bool,
 ) -> HighScaleRequestFactResponse:
     from datetime import UTC, timedelta
@@ -336,7 +230,7 @@ def _execute_request_facts_query(
     req_start = req.start_time
     req_end = req.end_time
     if default_window_if_missing and (not req_start or not req_end):
-        now_dt = datetime.now(UTC)
+        now_dt = datetime.now(UTC).replace(second=0, microsecond=0)
         if not req_end:
             req_end = iso_z(now_dt)
         if not req_start:
@@ -345,12 +239,12 @@ def _execute_request_facts_query(
     start, end = _clamp_and_parse_window(ctx, req_start, req_end)
 
     service = registry.resolve(ctx.service_id)
-    if service is None and not (allow_standard_emulation or req.emulate_standard):
+    if service is None:
         raise HTTPException(
             status_code=404,
             detail=make_error("high_scale_service_not_configured", "Service is not registered for high-scale queries"),
         )
-    if service is not None and service.service_id != ctx.service_id:
+    if service.service_id != ctx.service_id:
         raise HTTPException(
             status_code=409,
             detail=make_error(
@@ -359,6 +253,8 @@ def _execute_request_facts_query(
         )
 
     import os
+
+    from backend.repositories.utils.response_cache import coalesce
 
     use_cache = "PYTEST_CURRENT_TEST" not in os.environ
     cache_key = (
@@ -373,52 +269,56 @@ def _execute_request_facts_query(
         str(req.country or "").strip(),
         str(req.batch_id or "").strip(),
         bool(mask_ips_for(ctx.analyst_session)),
-        "clickhouse" if service is not None else "duckdb_emulation",
+        "clickhouse",
     )
     if use_cache:
         cached_resp = _REQUEST_FACTS_CACHE.get(cache_key)
         if cached_resp is not None:
             return cached_resp.model_copy(update={"is_cached": True})
 
-    if service is None:
-        emul_resp = _emulate_standard_request_facts(ctx, req, start=start, end=end)
+    def _compute_ch() -> HighScaleRequestFactResponse:
+        if use_cache and (cached_inner := _REQUEST_FACTS_CACHE.get(cache_key)) is not None:
+            return cached_inner.model_copy(update={"is_cached": True})
+        page = query_request_facts(
+            service.client,
+            service_id=ctx.service_id,
+            start=start,
+            end=end,
+            cursor_secret=service.cursor_secret,
+            watermark=service.watermark(),
+            limit=req.limit,
+            cursor=req.cursor,
+            status=req.status,
+            domain_filter=req.domain,
+            pop=req.pop,
+            country=req.country,
+            batch_id=req.batch_id,
+        )
+        rows = [dict(row) for row in page.rows]
+        for row in rows:
+            cf = row.get("custom_fields")
+            if isinstance(cf, dict):
+                for k in ("status", "pop", "host"):
+                    if k not in row and cf.get(k) is not None:
+                        row[k] = cf[k]
+        _mask_client_ip_rows(rows, ctx)
+
+        meta = page.metadata
+        resp_out: HighScaleRequestFactResponse = HighScaleRequestFactResponse.with_telemetry(
+            rows=rows,
+            next_cursor=page.next_cursor,
+            metadata=_build_query_metadata_response(meta, mode="clickhouse"),
+        )
         if use_cache:
-            _REQUEST_FACTS_CACHE[cache_key] = emul_resp
-        return emul_resp
+            _REQUEST_FACTS_CACHE[cache_key] = resp_out
+        return resp_out
 
-    page = query_request_facts(
-        service.client,
-        service_id=ctx.service_id,
-        start=start,
-        end=end,
-        cursor_secret=service.cursor_secret,
-        watermark=service.watermark(),
-        limit=req.limit,
-        cursor=req.cursor,
-        status=req.status,
-        domain_filter=req.domain,
-        pop=req.pop,
-        country=req.country,
-        batch_id=req.batch_id,
-    )
-    rows = [dict(row) for row in page.rows]
-    for row in rows:
-        cf = row.get("custom_fields")
-        if isinstance(cf, dict):
-            for k in ("status", "pop", "host"):
-                if k not in row and cf.get(k) is not None:
-                    row[k] = cf[k]
-    _mask_client_ip_rows(rows, ctx)
-
-    meta = page.metadata
-    resp: HighScaleRequestFactResponse = HighScaleRequestFactResponse.with_telemetry(
-        rows=rows,
-        next_cursor=page.next_cursor,
-        metadata=_build_query_metadata_response(meta, mode="clickhouse"),
-    )
     if use_cache:
-        _REQUEST_FACTS_CACHE[cache_key] = resp
-    return resp
+        resp_final, is_leader = coalesce(f"hs_req_facts:{cache_key}", _compute_ch)
+        if not is_leader:
+            return resp_final.model_copy(update={"is_cached": True})
+        return resp_final
+    return _compute_ch()
 
 
 @high_scale_router.get(
@@ -437,7 +337,6 @@ def get_request_facts_root(
     pop: str | None = None,
     country: str | None = None,
     batch_id: str | None = None,
-    emulate_standard: bool = True,
     ctx: RequestContext = Depends(build_request_context),
     registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
 ) -> HighScaleRequestFactResponse:
@@ -451,13 +350,11 @@ def get_request_facts_root(
         pop=pop,
         country=country,
         batch_id=batch_id,
-        emulate_standard=emulate_standard,
     )
     return _execute_request_facts_query(
         ctx,
         req,
         registry,
-        allow_standard_emulation=emulate_standard,
         default_window_if_missing=True,
     )
 
@@ -477,7 +374,6 @@ def post_request_facts_root(
         ctx,
         req,
         registry,
-        allow_standard_emulation=True,
         default_window_if_missing=True,
     )
 
@@ -500,7 +396,6 @@ def request_facts(
         ctx,
         req,
         registry,
-        allow_standard_emulation=req.emulate_standard,
         default_window_if_missing=False,
     )
 
@@ -687,14 +582,32 @@ def aggregates(
         ) from None
 
     dimension = req.dimension or DEFAULT_AGGREGATE_DIMENSIONS[req.domain]
+    should_mask_ips = mask_ips_for(ctx.analyst_session)
+    dim_kind = _classify_saved_view_pii_key(dimension) if should_mask_ips else None
+    canon_dim = _canon_pii_key(dimension) if should_mask_ips else ""
+    if should_mask_ips and (
+        dim_kind == "session" or canon_dim in SESSION_ID_KEYS or canon_dim in CMCD_SESSION_ALIAS_KEYS
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=make_error(
+                "pii_policy_violation",
+                f"Aggregating by {dimension!r} is disabled when IP masking is active.",
+                field=dimension,
+            ),
+        )
     response = query_clickhouse_aggregate(
         service.client,
         AggregateRequest(service_id=ctx.service_id, domain=req.domain, start=start, end=end, dimension=dimension),
         watermark=watermark,
     )
     top_values = list(response.top_values)
-    if dimension == "client_ip" and mask_ips_for(ctx.analyst_session):
-        top_values = [(mask_ip(value), count) for value, count in top_values]
+    if should_mask_ips and (dim_kind == "ip" or canon_dim in PII_IP_KEYS or canon_dim == "origin_ip"):
+        merged_counts: dict[str, int] = {}
+        for value, count in top_values:
+            masked_val = mask_ip_or_chain(value) if value else value
+            merged_counts[masked_val] = merged_counts.get(masked_val, 0) + count
+        top_values = sorted(merged_counts.items(), key=lambda kv: kv[1], reverse=True)
     return HighScaleAggregateResponse.with_telemetry(
         service_id=response.service_id,
         domain=response.domain,
@@ -753,12 +666,30 @@ def _fetch_facts_page(
     )
 
 
+def _scrub_row_embedded_ips(obj: Any) -> Any:
+    if isinstance(obj, str):
+        return scrub_ip_text(obj) if obj and obj != "[redacted]" else obj
+    if isinstance(obj, dict):
+        return {k: _scrub_row_embedded_ips(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_scrub_row_embedded_ips(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_scrub_row_embedded_ips(v) for v in obj)
+    return obj
+
+
 def _mask_client_ip_rows(rows: list[dict[str, Any]], ctx: RequestContext) -> list[dict[str, Any]]:
-    if mask_ips_for(ctx.analyst_session):
-        for row in rows:
-            value = row.get("client_ip")
-            if isinstance(value, str):
-                row["client_ip"] = mask_ip(value)
+    if not mask_ips_for(ctx.analyst_session):
+        return rows
+    masked_rows = apply_pii_policy(rows, {"mask_ips": True})
+    scrubbed_rows: list[dict[str, Any]] = []
+    for row in masked_rows:
+        row_copy = dict(row)
+        for k, val in list(row_copy.items()):
+            if isinstance(val, str) and val and k.strip().lower() in PII_IP_KEYS:
+                row_copy[k] = mask_ip_or_chain(val)
+        scrubbed_rows.append(_scrub_row_embedded_ips(row_copy))
+    rows[:] = scrubbed_rows
     return rows
 
 
@@ -884,12 +815,82 @@ def cancel_query_job(
     registry: HighScaleServiceRegistryProtocol = Depends(get_high_scale_service_registry),
     jobs: HistoricalJobManager = Depends(get_historical_job_manager),
 ) -> Any:
+    _require_non_analyst(ctx)
     _resolve_scoped_high_scale_service(service_id, ctx, registry, check_binding=False)
     job = jobs.get(job_id)
     if job is None or job.plan.service_id != ctx.service_id:
         raise HTTPException(status_code=404, detail=make_error("historical_job_not_found", "Historical job not found"))
     cancelled = jobs.cancel(job_id)
     return HighScaleHistoricalJobCancelResponse.with_telemetry(job_id=job_id, cancelled=cancelled)
+
+
+_restore_logger = logging.getLogger(__name__)
+
+
+@high_scale_router.post(
+    "/restore-from-fos",
+    response_model=HighScaleRestoreFromFosResponse,
+    dependencies=[Depends(require_admin)],
+)
+def restore_from_fos_endpoint(
+    req: HighScaleRestoreFromFosRequest,
+) -> HighScaleRestoreFromFosResponse:
+    secrets_to_hide = (req.fastly_api_key, req.fos_access_key, req.fos_secret_key)
+    pending_http_exc: HTTPException | None = None
+    result: cold_start_restore.ColdStartRestoreResult | None = None
+    try:
+        result = cold_start_restore.restore_from_fos(
+            service_id=req.service_id,
+            bucket=req.bucket,
+            region=req.region,
+            prefix=req.prefix,
+            archive_prefix=req.archive_prefix,
+            fastly_api_key=req.fastly_api_key,
+            fos_access_key=req.fos_access_key,
+            fos_secret_key=req.fos_secret_key,
+            restore_serving_state=req.restore_serving_state,
+        )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        safe_msg = cold_start_restore.scrub_secrets(str(exc), secrets_to_hide)
+        _restore_logger.warning("Cold-start restore validation error for %s: %s", req.service_id, safe_msg)
+        pending_http_exc = HTTPException(
+            status_code=400,
+            detail=make_error("restore_from_fos_invalid", safe_msg),
+        )
+    except Exception as exc:
+        safe_msg = cold_start_restore.scrub_secrets(str(exc), secrets_to_hide)
+        _restore_logger.error(
+            "Cold-start restore failed for %s (%s): %s",
+            req.service_id,
+            type(exc).__name__,
+            safe_msg,
+        )
+        pending_http_exc = HTTPException(
+            status_code=500,
+            detail=make_error("restore_from_fos_failed", f"Cold-start restore failed: {safe_msg}"),
+        )
+
+    if pending_http_exc is not None:
+        raise pending_http_exc
+    if result is None:
+        raise HTTPException(
+            status_code=500,
+            detail=make_error("restore_from_fos_failed", "Cold-start restore produced no result"),
+        )
+
+    return HighScaleRestoreFromFosResponse(
+        status="ok",
+        service_id=result.service_id,
+        dr_state_restored=result.dr_state_restored,
+        views_restored=result.views_restored,
+        alerts_restored=result.alerts_restored,
+        scoring_labels_restored=result.scoring_labels_restored,
+        audit_logs_restored=result.audit_logs_restored,
+        manifests_registered=result.manifests_registered,
+        domains_rebuilt=result.domains_rebuilt,
+    )
 
 
 router = high_scale_router

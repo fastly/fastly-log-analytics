@@ -6,6 +6,7 @@ import asyncio
 import copy
 import json
 import re
+from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
@@ -219,6 +220,73 @@ def test_analyst_read_only_blocks_writes_and_mutating_verbs(client):
         assert r2.status_code == 403 and r2.json()["error"] == "read_only"
 
 
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_admin_attachment_analyst_scope_and_revocation_lifecycle(client, monkeypatch):
+    class _Manager:
+        state = SimpleNamespace(public_endpoint="https://testserver")
+
+        def __init__(self):
+            self.session = None
+
+        def attach(self, service_ids):
+            self.session = AnalystSession(
+                session_id="session-1",
+                invite_id="invite-1",
+                name="Scoped Analyst",
+                email="scoped@example.com",
+                ip_address="testclient",
+                user_agent="pytest",
+                fingerprint_signature="fixture",
+                pii_policy={},
+                query_window_hours=None,
+                query_start_time=None,
+                query_end_time=None,
+                login_time="2026-01-01T00:00:00Z",
+                last_active_time="2026-01-01T00:00:00Z",
+                service_ids=service_ids,
+            )
+
+        def validate_session(self, session_id):
+            return self.session if session_id == "session-1" else None
+
+        def is_sharing_active(self):
+            return True
+
+        def touch_session(self, *args, **kwargs):
+            pass
+
+        def revoke(self):
+            self.session = None
+
+    manager = _Manager()
+    monkeypatch.setattr("backend.utils.remote_access.get_tunnel_manager", lambda: manager)
+    monkeypatch.setattr("backend.utils.remote_access.compute_fingerprint", lambda headers: "fixture")
+    monkeypatch.setattr("backend.core.share_db.set_setting", lambda *args, **kwargs: None)
+    monkeypatch.setattr("backend.core.share_db.get_remote_invite", lambda *args, **kwargs: None)
+    client.cookies.set("analyst_session_id", "session-1")
+
+    assert client.post("/api/views").status_code == 200
+    unattached = client.get("/api/dashboard?service=svcA", headers=_HEADERS)
+    assert unattached.status_code == 401 and unattached.json()["error"] == "unauthenticated"
+
+    manager.attach(["svcA"])
+    assert client.get("/api/dashboard?service=svcA", headers=_HEADERS).status_code == 200
+    leaked = client.get("/api/dashboard?service=svcB", headers=_HEADERS)
+    assert leaked.status_code == 403 and leaked.json()["error"] == "service_not_authorized"
+    write = client.post("/api/views", headers=_WRITE_HEADERS)
+    assert write.status_code == 403 and write.json()["error"] == "read_only"
+
+    manager.attach(["svcB"])
+    old_scope = client.get("/api/dashboard?service=svcA", headers=_HEADERS)
+    assert old_scope.status_code == 403 and old_scope.json()["error"] == "service_not_authorized"
+    assert client.get("/api/dashboard?service=svcB", headers=_HEADERS).status_code == 200
+
+    manager.revoke()
+    blocked = client.get("/api/dashboard?service=svcB", headers=_HEADERS)
+    assert blocked.status_code == 401 and blocked.json()["error"] == "unauthenticated"
+
+
 def test_analyst_service_scope_enforcement(client):
     _as_analyst(client, service_ids=["svcA"])
     r_unauth = client.get("/api/dashboard?service=svcZ", headers=_HEADERS)
@@ -334,9 +402,10 @@ def test_analyst_masking_allows_non_ip_filter(client):
 
 
 @pytest.mark.security_regression
-def test_analyst_masking_allows_oip_filter(client):
+def test_analyst_masking_blocks_oip_filter(client):
     _as_analyst(client, service_ids=["svcA"], pii_policy=_MASK)
-    assert _post_filter(client, filters={"oip": {"mode": "include", "values": ["151.101.1.51"]}}).status_code == 200
+    r = _post_filter(client, filters={"oip": {"mode": "include", "values": ["151.101.1.51"]}})
+    assert r.status_code == 403 and r.json()["error"] == "pii_policy_violation"
 
 
 @pytest.mark.security_regression
@@ -503,10 +572,10 @@ def test_normalize_filter_key_resolves_junk_pii_keys_into_forbidden_set(key):
 
 
 @pytest.mark.security_regression
-@pytest.mark.parametrize("key", "url status country oip waf_sig_ind _bot_name".split())
+@pytest.mark.parametrize("key", "url status country waf_sig_ind _bot_name".split())
 def test_normalize_filter_key_leaves_non_pii_keys_allowed(key):
     assert normalize_filter_key(key) not in _PII_FORBIDDEN_FILTER_COLS, key
-    assert _PII_FORBIDDEN_FILTER_COLS == IP_FAMILY_KEYS | SESSION_ID_KEYS
+    assert IP_FAMILY_KEYS | SESSION_ID_KEYS | {"oip", "origin_ip"} <= _PII_FORBIDDEN_FILTER_COLS
 
 
 @pytest.mark.security_regression
@@ -828,33 +897,32 @@ def _beacon_health_disabled(client):
 
 
 def _beacon_health_check_failed(client):
-    with (
-        patch("backend.routers.rum.svcconfig.load_config", return_value={"rum": {"enabled": True}}),
-        patch("backend.routers.rum.rum_source_for", side_effect=RuntimeError("boom")),
-    ):
+    with patch("backend.routers.rum.analytics.svcconfig.load_config", return_value={"rum": {"enabled": True}}):
         return client.get(f"/api/services/{_SVC}/rum/beacon-health", headers=_HEADERS)
 
 
 def _analytics_no_data(client):
     with (
-        patch("backend.routers.rum.rum_source_for", return_value={"name": f"{_SVC}_rum"}),
-        patch("backend.routers.rum._ConnectionHolder", _Holder),
-        patch("backend.routers.rum.execute_with_stale_view_retry", return_value={"no_data": True}),
+        patch(
+            "backend.core.request_context.RequestContext.high_scale", new_callable=PropertyMock, return_value=object()
+        ),
+        patch(
+            "backend.high_scale.rum.rum_analytics",
+            return_value={**dict(_HS_ANALYTICS), "no_data": True, "beacon_count": 0},
+        ),
     ):
         return client.get(f"/api/services/{_SVC}/rum/analytics", headers=_HEADERS)
 
 
 def _analytics_success(client):
-    db_res = {
-        "no_data": False, "total_beacons": 7, "pageviews": 5, "interactions": 1, "errors_count": 1,
-        "vitals_rows": [("LCP", 2100.0, 10, 8, 1, 1)], "worst_pages_rows": [("/p", 4, 120.0, 2100.0, 0.05, 0.1)],
-        "errors_rows": [("boom", "app.js", 3, 4, 2)], "trends_rows": [],
-        "browsers": {"Firefox": 7}, "os": {"macOS": 7}, "devices": {"desktop": 7},
-    }  # fmt: skip
     with (
-        patch("backend.routers.rum.rum_source_for", return_value={"name": f"{_SVC}_rum"}),
-        patch("backend.routers.rum._ConnectionHolder", _Holder),
-        patch("backend.routers.rum.execute_with_stale_view_retry", return_value=db_res),
+        patch(
+            "backend.core.request_context.RequestContext.high_scale", new_callable=PropertyMock, return_value=object()
+        ),
+        patch(
+            "backend.high_scale.rum.rum_analytics",
+            return_value={**dict(_HS_ANALYTICS), "beacon_count": 7, "pageview_count": 5},
+        ),
     ):
         return client.get(f"/api/services/{_SVC}/rum/analytics", headers=_HEADERS)
 

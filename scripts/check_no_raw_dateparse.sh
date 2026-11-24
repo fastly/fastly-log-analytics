@@ -12,16 +12,10 @@ PATTERN='strptime\(|fromisoformat\(|replace\(tzinfo=(UTC|timezone\.utc)'
 # 04759853: usage and insight shaping moved owners; transfer 2 + 1 existing sites.
 # 6a474cc4: discovery.py now owns the remaining two request-ingest parse sites.
 BASELINE='
-backend/core/duckdb.py 1
-backend/core/storage/_core.py 2
-backend/core/ingest/discovery.py 2
 backend/core/metadata/fos_usage.py 2
-backend/core/rollups/recompute.py 1
-backend/core/rollups/security_dims.py 1
 backend/core/rum_ingest.py 1
 backend/repositories/assets.py 1
 backend/repositories/insights/shaping.py 1
-backend/repositories/rum.py 1
 '
 
 run_regex_ratchet \

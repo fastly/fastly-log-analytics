@@ -7,12 +7,11 @@ import hashlib
 import json
 import logging
 import os
-import sys
 import threading
 import time as _time
-import types as _types
 from datetime import UTC, datetime, timedelta
 
+from backend.utils.module_shim import install_shim_module
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request
 
 from backend.core import metadata as metadata_db
@@ -25,7 +24,6 @@ from backend.core.request_context import (
     require_admin,
     seal_session_token,
 )
-from backend.core.storage import execute_with_stale_view_retry
 from backend.models.common import DEFAULT_ERROR_RESPONSES
 from backend.models.analytics import SessionDetailRequest, SessionDetailResponse, SessionsRequest, SessionsResponse
 from backend.models.analytics import (
@@ -70,8 +68,6 @@ from backend.models.analytics import (
     ScoringTopFlaggedResponse,
 )
 from backend.provision.session_scoring_orchestrator import SCORING_ENABLED_AT_KEY as _SCORING_ENABLED_AT_KEY
-from backend.repositories import sessions as _scoring_repo
-from backend.repositories import sessions as repo
 from backend.utils.auth import mask_ips_for, require_service_in_scope
 from backend.utils.bounded_cache import BoundedTTLCache as _BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
@@ -189,6 +185,7 @@ from .scoring_vcl import (
     _require_scoring_enabled_and_token,
     _safe_scoring_dict,
     _scoring_pragma_cache,
+    _scoring_pragma_missing_cache,
     _scoring_svc_version_cache,
     _validate_service_exclude_regex,
     scoring_disable,
@@ -259,6 +256,7 @@ for _reg_name, _reg_cache in (
     ("session_scoring._reconstruct_labeled_sessions_cache", _reconstruct_labeled_sessions_cache),
     ("session_scoring._table_columns_cache", _table_columns_cache),
     ("session_scoring._scoring_pragma_cache", _scoring_pragma_cache),
+    ("session_scoring._scoring_pragma_missing_cache", _scoring_pragma_missing_cache),
     ("session_scoring._scoring_svc_version_cache", _scoring_svc_version_cache),
     ("session_scoring_admin._enforce_threshold_cache", _enforce_threshold_cache),
     ("session_scoring_admin._l2_enforce_cache", _l2_enforce_cache),
@@ -268,24 +266,4 @@ for _reg_name, _reg_cache in (
 _SUBMODULES = (scoring_analytics, scoring_admin, scoring_vcl)
 
 
-class _SessionScoringShimModule(_types.ModuleType):
-    """Forwards attribute writes/deletes on backend.routers.session_scoring to all 3 submodules."""
-
-    def __setattr__(self, name: str, value: object) -> None:
-        super().__setattr__(name, value)
-        for _mod in _SUBMODULES:
-            _types.ModuleType.__setattr__(_mod, name, value)
-
-    def __delattr__(self, name: str) -> None:
-        super().__delattr__(name)
-        for _mod in _SUBMODULES:
-            if hasattr(_mod, name):
-                try:
-                    _types.ModuleType.__delattr__(_mod, name)
-                except AttributeError:
-                    pass
-
-
-_self_mod = sys.modules.get(__name__)
-if _self_mod is not None and not isinstance(_self_mod, _SessionScoringShimModule):
-    _self_mod.__class__ = _SessionScoringShimModule
+install_shim_module(__name__, _SUBMODULES, install_on_submodules=False, fallback_getattr=False)

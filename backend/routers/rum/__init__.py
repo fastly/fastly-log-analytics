@@ -5,21 +5,19 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from backend import config as svcconfig
-from backend.core.duckdb import rum_source_for
 from backend.core.faro_versions import (
     DEFAULT_FARO_VERSION,
     fetch_available_faro_versions,
     get_faro_versions_cached,
 )
+from backend.core.fos_client import rum_source_for
 from backend.core.request_context import (
     RequestContext,
-    _ConnectionHolder,
     build_request_context,
     get_service_id,
     require_admin,
     require_service_access,
 )
-from backend.core.storage import execute_with_stale_view_retry
 from backend.models.common import DEFAULT_ERROR_RESPONSES
 from backend.provision.orchestrator import run_with_events
 from backend.provision.rum_orchestrator import (
@@ -28,7 +26,6 @@ from backend.provision.rum_orchestrator import (
     rum_vcl_fingerprint,
     upgrade_faro_version,
 )
-from backend.repositories import rum as rum_repo
 from backend.routers.rum import analytics as _analytics
 from backend.routers.rum import beacon_ingest as _beacon_ingest
 from backend.routers.rum import provisioning as _provisioning
@@ -39,7 +36,6 @@ from backend.routers.rum.analytics import (
     _live_events_cache,
     _parse_rum_filter_specs,
     _rum_beacon_health_sync,
-    repo,
     rum_analytics,
     rum_analytics_router,
     rum_beacon_health,
@@ -96,7 +92,6 @@ __all__ = [
     "DEFAULT_ERROR_RESPONSES",
     "DEFAULT_FARO_VERSION",
     "RequestContext",
-    "_ConnectionHolder",
     "_FARO_BUNDLE_CACHE",
     "_RUM_FILTERS_MESSAGE",
     "_RUM_RAW_WINDOW_MAX_S",
@@ -117,7 +112,6 @@ __all__ = [
     "disable_rum_handler",
     "enable_rum",
     "enable_rum_handler",
-    "execute_with_stale_view_retry",
     "fetch_available_faro_versions",
     "get_faro_sdk",
     "get_faro_versions_cached",
@@ -127,7 +121,6 @@ __all__ = [
     "make_error",
     "raise_internal",
     "receive_rum_beacon_fallback",
-    "repo",
     "require_admin",
     "require_fastly_token",
     "require_service_access",
@@ -137,7 +130,6 @@ __all__ = [
     "rum_beacon_health",
     "rum_live_events",
     "rum_provisioning_router",
-    "rum_repo",
     "rum_router",
     "rum_source_for",
     "rum_status",

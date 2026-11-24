@@ -9,6 +9,8 @@
  * - useShareStatusBanner
  * - useHighScaleRequestFacts
  */
+import React from 'react'
+import { renderToString } from 'react-dom/server'
 import { renderHook, waitFor, act } from '@testing-library/react'
 import { hashKey, QueryClient } from '@tanstack/react-query'
 import {
@@ -18,11 +20,12 @@ import {
   makeStreamResponse,
   postOk,
 } from '../helpers/page-smoke'
-import { http, HttpResponse } from 'msw'
+import { http, HttpResponse } from 'msw/http'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { server } from '@/__tests__/helpers/msw/handlers'
 import { queryKeys, client } from "@/lib/api";
+import { isCloudMode, setCloudModeRuntime } from '@/lib/cloud-engine/mode'
 import { __resetForTests } from '@/lib/utils'
 import {
   useActiveLogFields,
@@ -43,6 +46,7 @@ import {
   useFilterUrlWriteback,
   useInsightsDefaults,
   useReportConfig,
+  useServiceQuery,
   useTimeRange,
 } from '@/hooks/useDashboardCards'
 import {
@@ -66,10 +70,11 @@ import type { FiltersPayload } from '@/types/api'
 const push = vi.fn()
 const replace = vi.fn()
 let currentPathname = '/dashboard'
+let mockSearchParams = new URLSearchParams()
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push, replace }),
   usePathname: () => currentPathname,
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => mockSearchParams,
 }))
 
 let mockUrlService: string | null = null
@@ -177,6 +182,7 @@ describe('useBootstrap (MSW)', () => {
     mockServiceState.activeServiceId = null
     mockServiceState.services = []
     mockServiceState.isInitialized = false
+    setCloudModeRuntime(false)
   })
 
   it('calls setServices with mapped shape, sets active_service_id, and marks initialized', async () => {
@@ -202,6 +208,69 @@ describe('useBootstrap (MSW)', () => {
     expect(mapped[1].service_id).toBeUndefined()
     expect(mockSetActiveServiceId).toHaveBeenCalledWith('svc-1')
     expect(mockSetInitialized).toHaveBeenCalledWith(true)
+  })
+
+  it('sets Cloud runtime mode before bootstrap success is observable', async () => {
+    server.use(
+      http.get(`${API_BASE}/api/bootstrap`, () =>
+        HttpResponse.json({
+          runtime_mode: 'cloud',
+          services: [{ service_id: 'svc-1', name: 'My CDN' }],
+          active_service_id: 'svc-1',
+        }),
+      ),
+    )
+    const queryClient = createTestQueryClient({ queries: { gcTime: 0 } })
+    let modeAtBootstrapSuccess: boolean | undefined
+    const unsubscribe = queryClient.getQueryCache().subscribe((event) => {
+      if (event.query.state.status === 'success') {
+        modeAtBootstrapSuccess = isCloudMode()
+      }
+    })
+
+    try {
+      const { result } = renderHook(() => useBootstrap(), {
+        wrapper: makeQueryWrapper(queryClient),
+      })
+      await waitFor(() => expect(result.current.isSuccess).toBe(true))
+      expect(modeAtBootstrapSuccess).toBe(true)
+      expect(isCloudMode()).toBe(true)
+    } finally {
+      unsubscribe()
+      setCloudModeRuntime(false)
+    }
+  })
+
+  it('hydrates Cloud dashboardCacheIdentity before syncOpsCacheForSession so activeOpsUser stays populated', async () => {
+    const { activeOpsUser, clearOpsCaches } = await import('@/lib/cloud-engine/telemetry/sources')
+    const { clearDashboardData } = await import('@/lib/cloud-engine/dashboard/client')
+    const { dashboardCacheIdentity } = await import('@/lib/cloud-engine/dashboard/sources')
+    await clearDashboardData()
+    await clearOpsCaches()
+
+    server.use(
+      http.get(`${API_BASE}/api/bootstrap`, () =>
+        HttpResponse.json({
+          runtime_mode: 'cloud',
+          user: { id: 'alice', role: 'admin' },
+          settings: { needs_login: false, is_remote_analyst: false },
+          services: [{ service_id: 'svc-1', name: 'My CDN' }],
+          active_service_id: 'svc-1',
+        }),
+      ),
+    )
+
+    try {
+      const { result } = renderHook(() => useBootstrap(), { wrapper: wrapper() })
+      await waitFor(() => expect(result.current.isSuccess).toBe(true))
+      await waitFor(() => expect(dashboardCacheIdentity()).toBe('alice:admin'))
+      await new Promise((r) => setTimeout(r, 30))
+      expect(activeOpsUser()).toBe('alice')
+    } finally {
+      await clearDashboardData()
+      await clearOpsCaches()
+      setCloudModeRuntime(false)
+    }
   })
 
   it('handles empty services array gracefully and surfaces 500 fetch errors', async () => {
@@ -301,7 +370,7 @@ describe('useLogFieldsCatalog & useActiveLogFields', () => {
         observedSid = new URL(request.url).searchParams.get('service_id')
         return HttpResponse.json({
           fields: [{ id: 'status', label: 'HTTP Status' }],
-          custom_fields: [{ name: 'x-edge-ts', duckdb_type: 'VARCHAR' }],
+          custom_fields: [{ name: 'x-edge-ts', sql_type: 'VARCHAR' }],
           groups: [],
           presets: { default: { columns: ['status'] } },
         })
@@ -312,7 +381,7 @@ describe('useLogFieldsCatalog & useActiveLogFields', () => {
     expect(observedSid).toBe('svc-1')
     expect(result.current.data?.fields).toEqual([{ id: 'status', label: 'HTTP Status' }])
     expect((result.current.data as { custom_fields?: unknown } | undefined)?.custom_fields).toEqual([
-      { name: 'x-edge-ts', duckdb_type: 'VARCHAR' },
+      { name: 'x-edge-ts', sql_type: 'VARCHAR' },
     ])
     unmount()
 
@@ -370,6 +439,8 @@ describe('useIsAnalyst, useMaskIps, useEnforceMaskedFilters & useIsDataReady', (
     mockServiceState.activeServiceId = null
     mockServiceState.services = []
     mockServiceState.isInitialized = false
+    mockSearchParams = new URLSearchParams()
+    setCloudModeRuntime(false)
     useFilterStore.getState().clearFilters()
   })
 
@@ -404,15 +475,140 @@ describe('useIsAnalyst, useMaskIps, useEnforceMaskedFilters & useIsDataReady', (
     })
   })
 
-  it('useIsDataReady checks store activeServiceId and falls back to bootstrap.active_service_id', () => {
+  it('useIsDataReady waits for bootstrap after resolving a store service', async () => {
+    mockServiceState.activeServiceId = 'svc-from-store'
+    const qc = createTestQueryClient()
+    const { result } = renderHook(() => useIsDataReady(), {
+      wrapper: makeQueryWrapper(qc),
+    })
+
+    expect(result.current).toBe(false)
+    act(() => qc.setQueryData(queryKeys.bootstrap(), { services: [] }))
+    await waitFor(() => expect(result.current).toBe(true))
+  })
+
+  it('useIsDataReady waits for bootstrap after resolving a URL service', async () => {
+    mockSearchParams = new URLSearchParams('service=svc-from-url')
+    const qc = createTestQueryClient()
+    const { result } = renderHook(() => useIsDataReady(), {
+      wrapper: makeQueryWrapper(qc),
+    })
+
+    expect(result.current).toBe(false)
+    act(() => qc.setQueryData(queryKeys.bootstrap(), { services: [] }))
+    await waitFor(() => expect(result.current).toBe(true))
+  })
+
+  it('useIsDataReady falls back to bootstrap.active_service_id after bootstrap resolves', () => {
     expect(renderHook(() => useIsDataReady(), { wrapper: settingsWrapper() }).result.current).toBe(false)
     expect(
       renderHook(() => useIsDataReady(), {
         wrapper: settingsWrapper({ bootstrapExtra: { active_service_id: 'svc-from-bootstrap' } }),
       }).result.current,
     ).toBe(true)
-    mockServiceState.activeServiceId = 'svc-from-store'
-    expect(renderHook(() => useIsDataReady(), { wrapper: settingsWrapper() }).result.current).toBe(true)
+  })
+
+  it.each([
+    ['URL', 'svc-from-url', false],
+    ['persisted store', 'svc-from-store', true],
+  ])('applies hydrated Cloud mode before a %s service query starts', async (_label, serviceId, persisted) => {
+    if (persisted) {
+      mockServiceState.activeServiceId = serviceId
+    } else {
+      mockSearchParams = new URLSearchParams(`service=${serviceId}`)
+    }
+    const qc = createTestQueryClient()
+    qc.setQueryData(queryKeys.bootstrap(), {
+      runtime_mode: 'cloud',
+      services: [{ service_id: serviceId, name: 'Test' }],
+      active_service_id: serviceId,
+    })
+    let modeAtQueryStart: boolean | undefined
+
+    const { result } = renderHook(
+      () => useServiceQuery(
+        ['hydrated-bootstrap', 'report', serviceId],
+        async () => {
+          modeAtQueryStart = isCloudMode()
+          return 'ready'
+        },
+      ),
+      { wrapper: makeQueryWrapper(qc) },
+    )
+
+    await waitFor(() => expect(result.current.data).toBe('ready'))
+    expect(modeAtQueryStart).toBe(true)
+  })
+
+  it('keeps High-Scale queries ready when hydrated bootstrap resolves', async () => {
+    mockServiceState.activeServiceId = 'svc-high-scale'
+    const qc = createTestQueryClient()
+    qc.setQueryData(queryKeys.bootstrap(), {
+      runtime_mode: 'high_scale',
+      services: [{ service_id: 'svc-high-scale', name: 'High Scale' }],
+      active_service_id: 'svc-high-scale',
+    })
+    let modeAtQueryStart: boolean | undefined
+
+    const { result } = renderHook(
+      () => useServiceQuery(
+        ['hydrated-bootstrap', 'report', 'svc-high-scale'],
+        async () => {
+          modeAtQueryStart = isCloudMode()
+          return 'ready'
+        },
+      ),
+      { wrapper: makeQueryWrapper(qc) },
+    )
+
+    await waitFor(() => expect(result.current.data).toBe('ready'))
+    expect(modeAtQueryStart).toBe(false)
+  })
+
+  it('does not clear an already-enabled Cloud mode when bootstrap cache resolves', async () => {
+    setCloudModeRuntime(true)
+    mockServiceState.activeServiceId = 'svc-cloud'
+    const qc = createTestQueryClient()
+    qc.setQueryData(queryKeys.bootstrap(), {
+      runtime_mode: 'high_scale',
+      services: [{ service_id: 'svc-cloud', name: 'Cloud' }],
+      active_service_id: 'svc-cloud',
+    })
+    let modeAtQueryStart: boolean | undefined
+
+    try {
+      const { result } = renderHook(
+        () => useServiceQuery(
+          ['hydrated-bootstrap', 'report', 'svc-cloud'],
+          async () => {
+            modeAtQueryStart = isCloudMode()
+            return 'ready'
+          },
+        ),
+        { wrapper: makeQueryWrapper(qc) },
+      )
+
+      await waitFor(() => expect(result.current.data).toBe('ready'))
+      expect(modeAtQueryStart).toBe(true)
+    } finally {
+      setCloudModeRuntime(false)
+    }
+  })
+
+  it('useIsDataReady reads SSR-hydrated bootstrap on the server without forcing a skeleton fallback', () => {
+    const Probe = () => React.createElement('span', null, String(useIsDataReady()))
+    const unseeded = createTestQueryClient()
+    const UnseededWrapper = makeQueryWrapper(unseeded)
+    expect(renderToString(React.createElement(UnseededWrapper, null, React.createElement(Probe)))).toContain('false')
+
+    const seeded = createTestQueryClient()
+    seeded.setQueryData(queryKeys.bootstrap(), {
+      runtime_mode: 'high_scale',
+      active_service_id: 'svc-ssr',
+      services: [{ service_id: 'svc-ssr', name: 'SSR Service' }],
+    })
+    const SeededWrapper = makeQueryWrapper(seeded)
+    expect(renderToString(React.createElement(SeededWrapper, null, React.createElement(Probe)))).toContain('true')
   })
 })
 
@@ -476,6 +672,33 @@ describe('useInsightsDefaults & useAnalyticsReportQuery', () => {
     mockServiceState.activeServiceId = 'svc-1'
   })
 
+  it('publishes Cloud readiness only after the actual report query passes its validation', async () => {
+    const { setCloudModeRuntime } = await import('@/lib/cloud-engine/mode')
+    setCloudModeRuntime(true)
+    const events: Array<Record<string, unknown>> = []
+    const listener = (event: Event) => events.push((event as CustomEvent).detail)
+    window.addEventListener('fla:cloud-query', listener)
+    const qc = createTestQueryClient({ queries: { gcTime: 0 } })
+    qc.setQueryData(queryKeys.bootstrap(), { services: [] })
+    try {
+      const { result } = renderHook(() => useAnalyticsReportQuery({
+        namespace: ['dashboard', 'bundle'], serviceId: 'svc-1', filterPayload: {},
+        range: { relativeRange: '1h', isAutoRange: true, startTime: null, endTime: null, anchor: 'now' },
+        queryFn: async () => { throw new Error('stale-view sentinel-private-body') },
+        queryOptions: { retry: false },
+      }), { wrapper: makeQueryWrapper(qc) })
+      await waitFor(() => expect(result.current.isError).toBe(true))
+      expect(events).toMatchObject([
+        { state: 'pending', section: 'dashboard.bundle', search: 'range=1h' },
+        { state: 'error', totalRows: null },
+      ])
+      expect(JSON.stringify(events)).not.toContain('sentinel')
+    } finally {
+      window.removeEventListener('fla:cloud-query', listener)
+      setCloudModeRuntime(false)
+    }
+  })
+
   it('useInsightsDefaults adapts to extents, falls back when null, preserves user override, and resets on service switch', () => {
     const qc = createTestQueryClient({ queries: { gcTime: 0 } })
     const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString()
@@ -498,10 +721,44 @@ describe('useInsightsDefaults & useAnalyticsReportQuery', () => {
     expect(result.current).toMatchObject({ windowHours: '24', baselineHours: '168' })
   })
 
+  it('does not reuse a long-namespace placeholder after the service changes', async () => {
+    let resolveSecond!: (value: { service: string }) => void
+    const second = new Promise<{ service: string }>((resolve) => { resolveSecond = resolve })
+    const qc = createTestQueryClient({ queries: { gcTime: 5_000 } })
+    qc.setQueryData(queryKeys.bootstrap(), { services: [] })
+    const { result, rerender } = renderHook(
+      ({ serviceId }) => useAnalyticsReportQuery<{ service: string }>({
+        namespace: ['network', 'health', 'shielding'],
+        serviceId,
+        filterPayload: {},
+        range: {
+          relativeRange: '24h',
+          isAutoRange: true,
+          startTime: null,
+          endTime: null,
+          anchor: '2026-06-29T12:00:00Z',
+        },
+        queryFn: () => serviceId === 'svc-a'
+          ? Promise.resolve({ service: 'svc-a' })
+          : second,
+      }),
+      {
+        wrapper: makeQueryWrapper(qc),
+        initialProps: { serviceId: 'svc-a' },
+      },
+    )
+    await waitFor(() => expect(result.current.data).toEqual({ service: 'svc-a' }))
+    rerender({ serviceId: 'svc-b' })
+    expect(result.current.data).toBeUndefined()
+    resolveSecond({ service: 'svc-b' })
+    await waitFor(() => expect(result.current.data).toEqual({ service: 'svc-b' }))
+  })
+
   it('useAnalyticsReportQuery matches SSR seed key in token mode, keys on abs: in custom mode, and forwards AbortSignal', async () => {
     const captured: Array<Record<string, unknown>> = []
     let seenSignal: AbortSignal | undefined
     const qc1 = createTestQueryClient({ queries: { gcTime: 5_000, staleTime: 0 } })
+    qc1.setQueryData(queryKeys.bootstrap(), { services: [] })
     const { result: r1 } = renderHook(
       () =>
         useAnalyticsReportQuery<{ ok: true }>({
@@ -524,12 +781,15 @@ describe('useInsightsDefaults & useAnalyticsReportQuery', () => {
     await waitFor(() => expect(r1.current.data).toEqual({ ok: true }))
     expect(captured[0]).toMatchObject({ rangeToken: '24h', rangeBody: { range_token: '24h', anchor: '2026-06-29T12:00:00Z' } })
     expect(seenSignal).toBeInstanceOf(AbortSignal)
-    const key1 = qc1.getQueryCache().getAll()[0].queryKey
+    const key1 = qc1.getQueryCache().getAll().find(
+      query => Array.isArray(query.queryKey) && query.queryKey[0] === 'origin',
+    )!.queryKey
     const ssrSeedKey = ['origin', 'aggregates', 'svc-1', '24h', '2026-06-29T12:00:00Z', {}, 60, 'ttfb', 'p95']
     expect(key1).toEqual(ssrSeedKey)
     expect(hashKey(key1)).toBe(hashKey(ssrSeedKey))
 
     const qc2 = createTestQueryClient({ queries: { gcTime: 5_000, staleTime: 0 } })
+    qc2.setQueryData(queryKeys.bootstrap(), { services: [] })
     const { result: r2 } = renderHook(
       () =>
         useAnalyticsReportQuery<{ ok: true }>({
@@ -553,7 +813,9 @@ describe('useInsightsDefaults & useAnalyticsReportQuery', () => {
       rangeToken: null,
       rangeBody: { start_time: '2026-06-01T00:00:00Z', end_time: '2026-06-02T00:00:00Z' },
     })
-    expect(qc2.getQueryCache().getAll()[0].queryKey).toEqual([
+    expect(qc2.getQueryCache().getAll().find(
+      query => Array.isArray(query.queryKey) && query.queryKey[0] === 'performance',
+    )?.queryKey).toEqual([
       'performance', 'aggregates', 'svc-1', 'abs:2026-06-01T00:00:00Z|2026-06-02T00:00:00Z',
       '2026-06-02T00:00:00Z', {}, 'p99',
     ])
@@ -640,7 +902,7 @@ describe('useSyncStatus, useLastSync & useHeaderBadgeStream', () => {
         })
       }),
     )
-    const { result, unmount } = renderHook(() => useSyncStatus(), { wrapper: syncWrapper({ staleSeed: true }) })
+    const { result, unmount } = renderHook(() => useSyncStatus(), { wrapper: syncWrapper() })
     await waitFor(() => expect(result.current.data?.local_rows).toBe(12345))
     expect(result.current.data?.latest_log_at).toBe('2026-06-14T00:00:00Z')
     expect(observedSkipFos).toBe('true')
@@ -648,7 +910,7 @@ describe('useSyncStatus, useLastSync & useHeaderBadgeStream', () => {
 
     calls = 0
     const { result: analystRes } = renderHook(() => useSyncStatus(), { wrapper: syncWrapper({ staleSeed: true, remoteAnalyst: true }) })
-    await new Promise((r) => setTimeout(r, 30))
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)) })
     expect(calls).toBe(0)
     expect(analystRes.current.data).toBeNull()
   })
@@ -666,7 +928,7 @@ describe('useSyncStatus, useLastSync & useHeaderBadgeStream', () => {
         })
       }),
     )
-    const { result, unmount } = renderHook(() => useLastSync(), { wrapper: syncWrapper({ staleLastSyncSeed: true }) })
+    const { result, unmount } = renderHook(() => useLastSync(), { wrapper: syncWrapper() })
     await waitFor(() => expect(result.current.data?.started_at).toBe('2026-06-15T23:37:41Z'))
     expect(result.current.data).toMatchObject({ started_at: '2026-06-15T23:37:41Z', status: 'success', duration_s: 7.2 })
     expect(params!.get('task')).toBe('log_discovery')
@@ -681,7 +943,7 @@ describe('useSyncStatus, useLastSync & useHeaderBadgeStream', () => {
 
     calls = 0
     const { result: analystRes } = renderHook(() => useLastSync(), { wrapper: syncWrapper({ staleLastSyncSeed: true, remoteAnalyst: true }) })
-    await new Promise((r) => setTimeout(r, 30))
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)) })
     expect(calls).toBe(0)
     expect(analystRes.current.data).toBeNull()
   })
@@ -952,6 +1214,7 @@ describe('useDashboardBundle, useSSE, useUrlServiceSync, useDashboardCards, useF
   }
 
   function wrapperFor(qc: QueryClient) {
+    qc.setQueryData(queryKeys.bootstrap(), { services: [] })
     return makeQueryWrapper(qc)
   }
 
@@ -1388,6 +1651,7 @@ describe('useDashboardBundle, useSSE, useUrlServiceSync, useDashboardCards, useF
           active_log_field_ids: [],
           custom_dashboard_cards: [
             { id: 'cf-1', label: 'Custom 1' },
+            { id: 'lt_request_id', label: 'LT Request' },
             { id: 'status', label: 'dup-of-standard' },
           ],
         },
@@ -1406,6 +1670,7 @@ describe('useDashboardBundle, useSSE, useUrlServiceSync, useDashboardCards, useF
           { id: 'cmcd_version', label: 'CMCD Version', group: 'custom', is_custom: true },
           { id: 'rum_cid', label: 'RUM Session ID', group: 'custom', is_custom: true },
           { id: 'fastly_req_id', label: 'Fastly Req ID', group: 'custom', is_custom: true },
+          { id: 'lt_run_id', label: 'LT Run', group: 'custom', is_custom: true, show_in_dashboard: true },
           { id: 'user_cf_1', label: 'My Custom Field', group: 'custom', is_custom: true, show_in_dashboard: true },
           { id: 'user_cf_2', label: 'Other Custom Field', group: 'custom', is_custom: true, show_in_dashboard: false },
         ],
@@ -1470,6 +1735,37 @@ describe('useDashboardBundle, useSSE, useUrlServiceSync, useDashboardCards, useF
       useBootstrapMock.mockReturnValue({ data: { ngwaf_configured: false, active_log_field_ids: [] } })
       rerender()
       expect(result.current.map(c => c.id)).toEqual(['_bot_name'])
+    })
+
+    it('defaults to the logged cards, and leaves out Fastly Bots only where bot classification is unavailable', () => {
+      useLogFieldsCatalogMock.mockReturnValue({
+        data: {
+          fields: [
+            { id: 'host', label: 'Host', group: 'A' },
+            { id: 'pop', label: 'POP', group: 'C' },
+            { id: 'ja3', label: 'JA3', group: 'H' },
+            { id: 'c_type', label: 'Connection Type', group: 'G' },
+            { id: 'edge_score_reason_ind', label: 'Score Reasons', group: 'VIRTUAL' },
+            { id: '_bot_name', label: 'Fastly Bots', group: 'VIRTUAL' },
+          ],
+        },
+      })
+      const logged = { active_log_field_ids: ['host', 'pop', 'status'], ngwaf_configured: false }
+      useBootstrapMock.mockReturnValue({ data: { ...logged, fastly_bots_available: false } })
+      const { result, rerender } = renderHook(() => useDashboardCards())
+      expect(Object.fromEntries(result.current.map(c => [c.id, c.inActiveFormat]))).toEqual({
+        host: true,
+        pop: true,
+        ja3: false,
+        c_type: false,
+        edge_score_reason_ind: false,
+      })
+
+      for (const highScale of [logged, { ...logged, fastly_bots_available: true }]) {
+        useBootstrapMock.mockReturnValue({ data: highScale })
+        rerender()
+        expect(result.current.find(c => c.id === '_bot_name')).toEqual({ id: '_bot_name', label: 'Fastly Bots', inActiveFormat: true })
+      }
     })
   })
 
@@ -1576,6 +1872,37 @@ describe('useDashboardBundle, useSSE, useUrlServiceSync, useDashboardCards, useF
       })
     })
   })
+
+  describe('AbortSignal propagation in shared hooks', () => {
+    it('propagates AbortSignal from useLogFieldsCatalog, useInsightsDefaults, and useRumStatus', async () => {
+      const getSpy = vi.spyOn(client, 'GET').mockResolvedValue({
+        data: { fields: [], groups: [], earliest_log_at: null } as never,
+        response: new Response(null, { status: 200 }),
+      })
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        Response.json({ enabled: true }),
+      )
+
+      const { useRumStatus } = await import('@/hooks/useDashboardCards')
+      const qc = createTestQueryClient()
+      const wrapper = makeQueryWrapper(qc)
+
+      const { result: catalog } = renderHook(() => useLogFieldsCatalog('svc-sig'), { wrapper })
+      const { result: insights } = renderHook(() => useInsightsDefaults('svc-sig'), { wrapper })
+      const { result: rum } = renderHook(() => useRumStatus('svc-sig'), { wrapper })
+
+      await waitFor(() => {
+        expect(catalog.current.isSuccess).toBe(true)
+        expect(insights.current.windowHours).toBeTruthy()
+        expect(rum.current.data).toEqual({ enabled: true })
+      })
+
+      const getCalls = getSpy.mock.calls as Array<Array<unknown>>
+      expect(getCalls.some(([p, o]) => p === '/api/log-fields/catalog' && (o as { signal?: AbortSignal })?.signal instanceof AbortSignal)).toBe(true)
+      expect(getCalls.some(([p, o]) => p === '/api/log-extents' && (o as { signal?: AbortSignal })?.signal instanceof AbortSignal)).toBe(true)
+      expect(fetchSpy.mock.calls.some(([req]) => req instanceof Request && req.url.includes('/rum/status') && req.signal instanceof AbortSignal)).toBe(true)
+    })
+  })
 })
 
 // ============================================================================
@@ -1655,6 +1982,26 @@ describe('runEventStream, useEventStream, useServiceStream & useAdminEventStream
       expect(new EventStreamHttpError(500).message).toBe('HTTP error! status: 500')
     })
 
+    it('includes API error detail in EventStreamHttpError when present in a non-2xx body', async () => {
+      const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(JSON.stringify({ detail: { error: 'attach_endpoint_name_reserved' } }), {
+          status: 400,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+      await expect(
+        runEventStream({
+          url: 'http://test/stream',
+          signal: new AbortController().signal,
+          onFrame: () => {},
+          fetchImpl: fetchImpl,
+        }),
+      ).rejects.toMatchObject({
+        status: 400,
+        message: 'HTTP error! status: 400: attach_endpoint_name_reserved',
+      })
+    })
+
     it('stops dispatching frames once isActive() goes false', async () => {
       const frames: string[] = []
       let live = true
@@ -1721,6 +2068,41 @@ describe('runEventStream, useEventStream, useServiceStream & useAdminEventStream
       renderHook(() => useEventStream(true, req, () => {}))
       await new Promise((r) => setTimeout(r, 50))
       expect(f).toHaveBeenCalledTimes(1)
+    })
+
+    it('resets to idle after a terminal auth failure', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 401 })))
+      const { result } = renderHook(() => useEventStream(true, req, () => {}))
+      await waitFor(() => expect(result.current.state).toBe('idle'))
+    })
+
+    it('cancels and ignores an older request after the latest request starts', async () => {
+      let resolveFirst!: (response: Response) => void
+      const first = new Promise<Response>((resolve) => { resolveFirst = resolve })
+      vi.stubGlobal('fetch', vi.fn()
+        .mockImplementationOnce(() => first)
+        .mockImplementationOnce(() => Promise.resolve(
+          makeNeverClosingStreamResponse(['data: latest\r\n\r\n']),
+        )))
+      const events: string[] = []
+      const { rerender } = renderHook(
+        ({ url }) => useEventStream(true, { url }, raw => events.push(raw)),
+        { initialProps: { url: 'http://test/first' } },
+      )
+      await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
+      rerender({ url: 'http://test/second' })
+      await waitFor(() => expect(events).toEqual(['latest']))
+
+      const staleCancel = vi.fn()
+      resolveFirst(new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('data: stale\r\n\r\n'))
+        },
+        cancel: staleCancel,
+      })))
+      await act(async () => { await Promise.resolve(); await Promise.resolve() })
+      expect(events).toEqual(['latest'])
+      expect(staleCancel).toHaveBeenCalled()
     })
 
     it('reconnects with exponential backoff after a dropped connection', async () => {
@@ -2058,6 +2440,88 @@ describe('runEventStream, useEventStream, useServiceStream & useAdminEventStream
       expect(adminStreamHooks.applySyncStatus).not.toHaveBeenCalled()
       expect(adminStreamHooks.applySystemMetrics).not.toHaveBeenCalled()
       expect(cronApply).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('useAnalystLogout', () => {
+    it('wipes Cloud dashboard and ops caches both immediately AND after /api/auth/logout settles', async () => {
+      const { useAnalystLogout } = await import('@/hooks/useAnalystAndServiceHooks')
+      const clientMod = await import('@/lib/cloud-engine/dashboard/client')
+      const opsMod = await import('@/lib/cloud-engine/telemetry/sources')
+
+      const events: string[] = []
+      let releaseServerLogout!: () => void
+      const serverLogoutStarted = new Promise<void>((resolve) => {
+        vi.mocked(globalThis.fetch).mockImplementation(async (input, init) => {
+          const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+          expect(url).toBe('/api/auth/logout')
+          expect(init?.method).toBe('POST')
+          events.push('logout:request')
+          resolve()
+          await new Promise<void>((r) => {
+            releaseServerLogout = r
+          })
+          events.push('logout:response')
+          return Response.json({ ok: true })
+        })
+      })
+
+      const clearDashSpy = vi.spyOn(clientMod, 'clearDashboardData').mockImplementation(async () => {
+        events.push('clearDashboardData')
+      })
+      const clearOpsSpy = vi.spyOn(opsMod, 'clearOpsCaches').mockImplementation(async () => {
+        events.push('clearOpsCaches')
+      })
+      const origLocation = window.location
+      Object.defineProperty(window, 'location', {
+        configurable: true,
+        value: { ...origLocation, assign: vi.fn() },
+      })
+
+      setCloudModeRuntime(true)
+      try {
+        const { result } = renderHook(() => useAnalystLogout())
+        let logoutDone = false
+        let logoutPromise!: Promise<void>
+        act(() => {
+          logoutPromise = result.current.logout().then(() => {
+            logoutDone = true
+          })
+        })
+
+        await Promise.race([
+          serverLogoutStarted,
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('Expected /api/auth/logout to start')), 1000),
+          ),
+        ])
+        await new Promise((r) => setTimeout(r, 15))
+        // Immediate wipe ran while server logout is still in flight:
+        expect(clearDashSpy).toHaveBeenCalledTimes(1)
+        expect(clearOpsSpy).toHaveBeenCalledTimes(1)
+        expect(logoutDone).toBe(false)
+
+        releaseServerLogout()
+        await act(async () => {
+          await logoutPromise
+        })
+
+        // Post-logout final wipe MUST run AFTER server session revocation settles!
+        expect(clearDashSpy).toHaveBeenCalledTimes(2)
+        expect(clearOpsSpy).toHaveBeenCalledTimes(2)
+        const respIdx = events.indexOf('logout:response')
+        expect(respIdx).toBeGreaterThanOrEqual(0)
+        expect(events.lastIndexOf('clearDashboardData')).toBeGreaterThan(respIdx)
+        expect(events.lastIndexOf('clearOpsCaches')).toBeGreaterThan(respIdx)
+      } finally {
+        setCloudModeRuntime(false)
+        clearDashSpy.mockRestore()
+        clearOpsSpy.mockRestore()
+        Object.defineProperty(window, 'location', {
+          configurable: true,
+          value: origLocation,
+        })
+      }
     })
   })
 })

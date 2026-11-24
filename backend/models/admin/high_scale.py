@@ -1,14 +1,20 @@
-"""High-Scale topology, ClickHouse status/replay, Celery/ingest ledger, and DuckDB/NGWAF/rDNS status models."""
+"""High-Scale topology, ClickHouse status/replay, admin status/ingest ledger, and NGWAF/rDNS status models."""
 
 from __future__ import annotations
 
 from datetime import datetime
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from backend.models.admin.health_and_sync import MAX_PAGE_SIZE
-from backend.models.common.base import BaseResponse, ErrorDetail, JsonAny, JsonDict, WireSafeModel
+from backend.models.common.base import (
+    BaseResponse,
+    ErrorDetail,
+    JsonDict,
+    WireSafeModel,
+    resolve_legacy_range_shorthand,
+)
 
 # ── High-Scale Models (folded from high_scale.py) ─────────────────────────────
 
@@ -24,6 +30,13 @@ class HighScaleRequestFactRequest(BaseModel):
     country: str | None = None
     batch_id: str | None = None
     emulate_standard: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_legacy_range_shorthand(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        return resolve_legacy_range_shorthand(data)
 
 
 class ServingWatermarkResponse(BaseModel):
@@ -46,7 +59,7 @@ class QueryResponseMetadataResponse(BaseModel):
     watermark: ServingWatermarkResponse
     approximation_error: float | None
     error: str | None
-    mode: Literal["clickhouse", "duckdb_emulation"] = "clickhouse"
+    mode: Literal["clickhouse"] = "clickhouse"
 
 
 class HighScaleRequestFactResponse(BaseResponse):
@@ -232,27 +245,6 @@ class ClickHouseReplayErrorResponse(BaseResponse):
     detail: ErrorDetail
 
 
-class CeleryActiveTask(WireSafeModel):
-    """One entry of Celery ``inspect().active()``; other inspect keys ride as extras."""
-
-    id: str
-    name: str
-    args: list[Any]
-    time_start: int | float
-
-
-class CeleryWorkers(WireSafeModel):
-    """``workers`` block of ``get_celery_status``. ``count`` is ``len(stats)``;
-    ``error`` is present only when the inspect call failed."""
-
-    active_tasks: dict[str, list[CeleryActiveTask]]
-    stats: JsonDict
-    registered: dict[str, list[str]]
-    scheduled: JsonDict
-    count: int
-    error: str | None = None
-
-
 class InProcessScheduleEntry(WireSafeModel):
     name: str
     trigger: str
@@ -266,23 +258,13 @@ class InProcessActiveRun(WireSafeModel):
     started_at: float | None = None
 
 
-class StandardIngestSummary(WireSafeModel):
-    ingested_files: int = 0
-    quarantined_items: int = 0
-
-
 class CeleryStatusResponse(WireSafeModel):
-    """``queues`` is ``{queue: depth}``; ``ledger`` is ``{ingest_ledger.status: count}``
-    summed across services, so both keep open string keys."""
+    """``ledger`` is ``{ingest_ledger.status: count}`` summed across services,
+    so it keeps open string keys."""
 
-    deployment_mode: Literal["standard", "high_scale"] = "standard"
-    broker_reachable: bool | None = None
-    workers: CeleryWorkers | None = None
-    queues: dict[str, int] | None = None
     ledger: dict[str, int] | None = None
     inprocess_schedules: list[InProcessScheduleEntry] | None = None
     inprocess_active_runs: list[InProcessActiveRun] | None = None
-    standard_ingest: StandardIngestSummary | None = None
 
 
 class IngestLedgerEntry(WireSafeModel):
@@ -327,15 +309,6 @@ class IngestLedgerActionRequest(WireSafeModel):
 class IngestLedgerActionResponse(WireSafeModel):
     ok: bool = True
     affected: int = 0
-    dispatched: int = 0
-
-
-class DuckdbStatusResponse(WireSafeModel):
-    ok: bool
-    memory: JsonDict | None = None
-    barrier: JsonDict | None = None
-    pools: JsonAny = None
-    retired_pools: JsonAny = None
 
 
 class NgwafStatusResponse(WireSafeModel):
@@ -353,3 +326,60 @@ class NgwafStatusResponse(WireSafeModel):
 class RdnsStatsResponse(WireSafeModel):
     ok: bool
     stats: JsonDict | None = None
+
+
+class HighScaleRestoreFromFosRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    service_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    bucket: str = Field(min_length=1, max_length=255)
+    region: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9-]+$")
+    prefix: str = Field(default="", max_length=512)
+    archive_prefix: str = Field(default="high-scale/archive", max_length=512)
+    fastly_api_key: str | None = None
+    fos_access_key: str | None = None
+    fos_secret_key: str | None = None
+    restore_serving_state: bool = True
+
+    @field_validator("region", mode="before")
+    @classmethod
+    def _strip_region(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @model_validator(mode="after")
+    def _validate_credentials(self) -> Self:
+        self.bucket = self.bucket.strip()
+        self.region = self.region.strip()
+        self.prefix = self.prefix.strip()
+        self.archive_prefix = self.archive_prefix.strip()
+        if not self.bucket:
+            raise ValueError("bucket must not be blank")
+        if not self.region:
+            raise ValueError("region must not be blank")
+
+        api_key = (self.fastly_api_key or "").strip()
+        ak = (self.fos_access_key or "").strip()
+        sk = (self.fos_secret_key or "").strip()
+        if bool(ak) != bool(sk):
+            raise ValueError("fos_access_key and fos_secret_key must both be provided together")
+        if not api_key and not (ak and sk):
+            raise ValueError("provide fastly_api_key or both fos_access_key and fos_secret_key")
+
+        self.fastly_api_key = api_key or None
+        self.fos_access_key = ak or None
+        self.fos_secret_key = sk or None
+        return self
+
+
+class HighScaleRestoreFromFosResponse(BaseModel):
+    status: Literal["ok"] = "ok"
+    service_id: str
+    dr_state_restored: bool
+    views_restored: int
+    alerts_restored: int
+    scoring_labels_restored: int
+    audit_logs_restored: int
+    manifests_registered: int
+    domains_rebuilt: dict[str, dict[str, Any]]

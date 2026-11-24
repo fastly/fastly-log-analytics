@@ -33,6 +33,7 @@ _ADMIN_EVENT_CHANNELS = frozenset({"sync-status", "cron-runs", "system-metrics",
 _METRICS_SAMPLE_INTERVAL_SECONDS = 10.0
 _SHARE_SAMPLE_INTERVAL_SECONDS = 10.0
 _CELERY_SAMPLE_INTERVAL_SECONDS = 5.0
+_SYNC_STATUS_SAMPLE_INTERVAL_SECONDS = 5.0
 
 _FANIN_MAXSIZE = 16
 
@@ -73,13 +74,40 @@ def _resolve_metrics_sampler() -> Any:
     return sample_system_metrics_cached
 
 
+async def _safe_sample_sync_status(service_id: str) -> dict[str, Any] | None:
+    try:
+        res: dict[str, Any] | None = await asyncio.to_thread(_resolve_sync_status_fn(), service_id)
+        return res
+    except Exception:
+        logger.exception("sync-status sample failed; will retry next tick")
+        return None
+
+
 async def _sync_status_feeder(q: asyncio.Queue[dict[str, Any]], service_id: str) -> None:
     fn = _resolve_sync_status_fn()
     initial = await asyncio.to_thread(fn, service_id)
     if initial is not None:
         _offer(q, {"channel": "sync-status", "data": initial})
-    async for payload in sync_status_publisher.subscribe(service_id):
-        _offer(q, {"channel": "sync-status", "data": payload})
+    last_payload = initial
+
+    async def _poll_loop() -> None:
+        nonlocal last_payload
+        while True:
+            await asyncio.sleep(_SYNC_STATUS_SAMPLE_INTERVAL_SECONDS)
+            payload = await _safe_sample_sync_status(service_id)
+            if payload is not None and payload != last_payload:
+                _offer(q, {"channel": "sync-status", "data": payload})
+                last_payload = payload
+
+    poll_task = asyncio.ensure_future(_poll_loop())
+    try:
+        async for payload in sync_status_publisher.subscribe(service_id):
+            if payload != last_payload:
+                _offer(q, {"channel": "sync-status", "data": payload})
+                last_payload = payload
+    finally:
+        poll_task.cancel()
+        await asyncio.gather(poll_task, return_exceptions=True)
 
 
 async def _cron_runs_feeder(q: asyncio.Queue[dict[str, Any]], service_id: str) -> None:

@@ -8,6 +8,7 @@ import { showToastWithAction, formatCount } from '@/lib/utils'
 import { useSSE, useSyncStatus } from '@/hooks/useSSE'
 import { useEffectiveServiceId, useLogFieldsCatalog } from '@/hooks/useBootstrap'
 import type { components } from '@/types/api.generated'
+import type { CronClock } from './LogsCronTab'
 
 export type CronRun = components['schemas']['CronRunEntry']
 
@@ -228,18 +229,11 @@ export function useLogsPageState(initialTab?: string) {
       rum_sync: 2,
       rum_discovery: 2,
       alerts: 3,
-      commit: 4,
-      rum_commit: 5,
-      optimize: 6,
-      local_compact: 7,
-      metadata_cleanup: 8,
-      expire_snapshots: 9,
-      full_sync: 10,
-      gap_heal: 11,
-      ngwaf_sync: 12,
-      insights_prewarmer: 13,
-      rollup_compact_daily: 14,
-      rollup_hour_heal: 15,
+      metadata_cleanup: 4,
+      full_sync: 5,
+      gap_heal: 6,
+      ngwaf_sync: 7,
+      insights_prewarmer: 8,
     }
     const source = cronSchedule?.schedules ?? []
     const hasNgwaf = !!status?.ngwaf_workspace_id
@@ -281,7 +275,13 @@ export function useLogsPageState(initialTab?: string) {
     staleTime: 60_000,
   })
 
-  const { data: ingestedFiles, isLoading: isLoadingIngested } = useQuery({
+  const {
+    data: ingestedFiles,
+    isLoading: isLoadingIngested,
+    isError: isErrorIngested,
+    error: ingestedError,
+    refetch: refetchIngested,
+  } = useQuery({
     queryKey: queryKeys.admin.ingestedFiles(activeServiceId),
     queryFn: ({ signal }) => unwrapClient(client.GET('/api/admin/ingested-files', { signal })),
     enabled: !!activeServiceId && activeTab === 'ingestion',
@@ -309,7 +309,6 @@ export function useLogsPageState(initialTab?: string) {
     (value: string) => {
       void setActiveTab(value)
       if (value === 'storage') {
-        queryClient.invalidateQueries({ queryKey: queryKeys.admin.storage(activeServiceId) })
         queryClient.invalidateQueries({ queryKey: queryKeys.admin.storageTree(activeServiceId) })
       } else if (value === 'raw') {
         queryClient.invalidateQueries({ queryKey: queryKeys.admin.rawTree(activeServiceId) })
@@ -356,12 +355,17 @@ export function useLogsPageState(initialTab?: string) {
     recentCrons,
     orderedSchedules,
     isLoadingSchedule,
+    // Cloud only: the front clock probe interval and the log periods behind it.
+    cronClock: (cronSchedule as { clock?: CronClock | null } | undefined)?.clock ?? null,
     catalogMaps,
     auditLogs,
     isLoadingAudit,
     isFetchingAudit,
     ingestedFiles,
     isLoadingIngested,
+    isErrorIngested,
+    ingestedError,
+    refetchIngested,
     schemaData,
     isLoadingSchema,
     purgeMutation,

@@ -1,8 +1,6 @@
 .env
 .env.deploy.local
 setup-state.json
-*.duckdb
-*.duckdb.wal
 /configs/*
 # Keep the configs/ directory present on a fresh clone so "drop a JSON
 # config here" works without a manual mkdir; the dir's real contents stay
@@ -31,6 +29,8 @@ local-docs/*
 pending-docs/*
 .superpowers/
 docs/superpowers/
+fastly-lt.toml
+compute/cloud/fastly-lt.toml
 docs/plans/
 node_modules/
 .coverage
@@ -85,9 +85,18 @@ compute/scorer/matrix.json
 compute/scorer/matrix_*.json
 
 # Rust build artifacts.
+compute/target/
 compute/scorer/target/
 compute/scorer/bin/
 compute/scorer/pkg/
+compute/cloud/target/
+compute/cloud/bin/
+compute/cloud/pkg/
+target/release-cache/
+/target/
+frontend/public/duckdb/
+frontend/out/
+/.worktrees/
 
 # Per-deployment secrets: AES cookie keys, deploy-time IDs the service files
 # might reference. NEVER commit.
@@ -142,5 +151,3 @@ configs-hs/
 
 # pytest-benchmark default output dir
 .benchmarks/
-# stray DuckLake test artifact dir
-catalog_test.db.files/

@@ -54,6 +54,11 @@ PY
 }
 
 setup_deploy_gce_ssh() {
+  if [[ "${SKIP_GCE:-0}" == "1" || "${SKIP_REMOTE_STD:-0}" == "1" ]]; then
+    GCE_SSH=(false)
+    GCE_ADMIN_TAG=fla-admin-gateway
+    return 0
+  fi
   if [[ -n "$GCE_VM_NAME" ]] && gcloud compute ssh "$GCE_VM_NAME" --project="$GCE_PROJECT" --zone="$GCE_ZONE" --command "true" >/dev/null 2>&1; then
     GCE_SSH=(gcloud compute ssh "$GCE_VM_NAME" --project="$GCE_PROJECT" --zone="$GCE_ZONE")
   else
@@ -530,7 +535,7 @@ start_log_monitor() {
   echo "=== Remote High-Scale Container Logs (Post-Rollout Watch) ===" > "${REPORT_DIR}/logs/remote_hs_backend.log"
   echo "=== Remote High-Scale Frontend Logs (Post-Rollout Watch) ===" > "${REPORT_DIR}/logs/remote_hs_frontend.log"
   (
-    tail -f -n +1 "${REPORT_DIR}/logs/local_std_backend.log" 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|failed|unauthorized|warn|fatal|critical" | grep --line-buffered -v -E -i "Logging errors to|control-room/error-stream|/rum/errors|overcommit|SSR upstream timeout|ducklake advisory lock timed out.*attempt 1|['\"]errors['\"]:[[:space:]]*0|and [0-9]+ (js_errors|errors) files|metadata pointer unreadable for .*client_errors|enrich_batch complete|REFUSING .*rollback|already running for this service|legacy adoption FAILED|active-request-gate" | sed -u 's/^/[Local Standard\/backend] /' | tee -a "${REPORT_DIR}/logs/monitored_errors.log" >> "$LOG_MONITOR_TEMP" &
+    tail -f -n +1 "${REPORT_DIR}/logs/local_std_backend.log" 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|failed|unauthorized|warn|fatal|critical" | grep --line-buffered -v -E -i "Logging errors to|control-room/error-stream|/rum/errors|overcommit|SSR upstream timeout|['\"]errors['\"]:[[:space:]]*0|and [0-9]+ (js_errors|errors) files|metadata pointer unreadable for .*client_errors|enrich_batch complete|REFUSING .*rollback|already running for this service|legacy adoption FAILED|active-request-gate" | sed -u 's/^/[Local Standard\/backend] /' | tee -a "${REPORT_DIR}/logs/monitored_errors.log" >> "$LOG_MONITOR_TEMP" &
     tail -f -n +1 "${REPORT_DIR}/logs/local_std_frontend.log" 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|failed|unauthorized|warn|fatal|critical" | grep --line-buffered -v -E -i "SSR upstream timeout|fetch failed; falling back to client fetch" | sed -u 's/^/[Local Standard\/frontend] /' | tee -a "${REPORT_DIR}/logs/monitored_errors.log" >> "$LOG_MONITOR_TEMP" &
     docker compose logs -f --tail=0 caddy 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|failed|unauthorized|warn|fatal|critical" | grep --line-buffered -v -E -i "context canceled|incomplete response|use of closed network connection|failed to sufficiently increase receive buffer size" | sed -u 's/^/[Local Standard\/caddy] /' | tee -a "${REPORT_DIR}/logs/monitored_errors.log" >> "$LOG_MONITOR_TEMP" &
     tail -f -n +1 "${REPORT_DIR}/logs/remote_std_backend.log" 2>/dev/null | grep --line-buffered -E -i "error|exception|traceback|failed|unauthorized|warn|fatal|critical" | grep --line-buffered -v -E -i "control-room/error-stream|/rum/errors|SSR upstream timeout|['\"]errors['\"]:[[:space:]]*0|and [0-9]+ (js_errors|errors) files|metadata pointer unreadable for .*client_errors|enrich_batch complete|REFUSING .*rollback|already running for this service|legacy adoption FAILED|active-request-gate" | sed -u 's/^/[Remote Standard\/backend] /' | tee -a "${REPORT_DIR}/logs/monitored_errors.log" >> "$LOG_MONITOR_TEMP" &
@@ -819,26 +824,4 @@ wait_for_remote_image() {
   done
   echo -e "${RED}❌ Timeout after ${max_wait}s waiting for $image to appear in registry (CI build may not have started or finished).${RESET}"
   return 1
-}
-
-run_seeded_traffic() {
-  local label="$1" url="$2" service_id="$3" backend="$4" log_file="$5" started_at finished_at exit_code
-  started_at=$(date +%s)
-  echo -e "\n${CYAN}[${label}] Starting traffic seeding${RESET}\n  Fastly URL: ${url}\n  Service ID: ${service_id}\n  Checkpoint backend: ${backend}\n  Load stages: 500 requests/second for 15 seconds\n  Max in-flight requests: 20\n  RUM ratio: 0.30, CMCD ratio: 0.35 (diversified paths/UAs)\n  Harness log: ${log_file}"
-  set +e
-  python3 -m scripts.dev.scale_harness run --url "${url}" --service-id "${service_id}" --backend "${backend}" --stages "500:15" --max-in-flight 20 --rum-ratio 0.30 --cmcd-ratio 0.35 --diversify >"${log_file}" 2>&1
-  exit_code=$?
-  set -e
-  finished_at=$(date +%s)
-  if [[ "${exit_code}" -eq 0 ]]; then
-    echo -e "${GREEN}[${label}] Traffic seeding completed successfully (exit=${exit_code}, elapsed=$((finished_at - started_at))s)${RESET}"
-  else
-    echo -e "${RED}[${label}] Traffic seeding failed (exit=${exit_code}, elapsed=$((finished_at - started_at))s)${RESET}\n  Review harness log: ${log_file}" >&2
-  fi
-  return "${exit_code}"
-}
-
-start_continuous_seed() {
-  python3 -m scripts.dev.scale_harness run --url "$2" --service-id "$3" --backend "$4" --stages "5:$6" --max-in-flight 10 --rum-ratio 0.30 --cmcd-ratio 0.35 --diversify --settle-seconds 0 >"$5" 2>&1 &
-  echo "$!"
 }

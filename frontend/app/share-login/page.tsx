@@ -15,6 +15,10 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Eye, EyeOff, KeyRound, Loader2, AlertTriangle, Check } from 'lucide-react'
 import type { components } from '@/types/api.generated'
 import { analystFetch } from '@/hooks/useBootstrap'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
+import { authenticateWithPasskey, registerPasskey } from '@/lib/cloud-engine/passkeys'
+
+z.config({ jitless: true })
 
 type LoginResponse = components['schemas']['ShareLoginResponse']
 type AuthConfig = components['schemas']['AuthConfigResponse']
@@ -92,6 +96,7 @@ export function ShareLoginForm() {
   // 'loading' → render contextual zero-CLS skeleton; 'failed' → fail OPEN to the passcode form.
   const authConfigQuery = useQuery<AuthConfig>({
     queryKey: ['share-auth-config'],
+    enabled: !IS_CLOUD_MODE,
     retry: false,
     queryFn: async () => {
       const res = await analystFetch('/api/share/auth-config')
@@ -103,7 +108,7 @@ export function ShareLoginForm() {
   // Validate optional ?token= or ?invite= query parameter via /api/share/claim/{token}
   const claimQuery = useQuery<{ expired: boolean; data: ClaimResponse | null }>({
     queryKey: ['share-invite-claim', inviteToken],
-    enabled: Boolean(inviteToken),
+    enabled: !IS_CLOUD_MODE && Boolean(inviteToken),
     retry: false,
     queryFn: async () => {
       const res = await analystFetch(`/api/share/claim/${encodeURIComponent(inviteToken!)}`, {
@@ -117,12 +122,16 @@ export function ShareLoginForm() {
       return { expired: false, data }
     },
   })
-  const isInitialLoading = authConfigQuery.isLoading || (Boolean(inviteToken) && claimQuery.isLoading)
-  const configState: 'loading' | 'loaded' | 'failed' = isInitialLoading
-    ? 'loading'
-    : authConfigQuery.isError
-      ? 'failed'
-      : 'loaded'
+  const isInitialLoading =
+    !IS_CLOUD_MODE &&
+    (authConfigQuery.isLoading || (Boolean(inviteToken) && claimQuery.isLoading))
+  const configState: 'loading' | 'loaded' | 'failed' = IS_CLOUD_MODE
+    ? 'failed'
+    : isInitialLoading
+      ? 'loading'
+      : authConfigQuery.isError
+        ? 'failed'
+        : 'loaded'
   const claimedInvite = claimQuery.data?.data ?? null
   const error = loginError !== undefined
     ? loginError
@@ -138,12 +147,24 @@ export function ShareLoginForm() {
   }, [claimQuery.data, getValues, setValue])
 
   const providers = config?.providers ?? []
-  // Fail-open: on a config fetch failure, offer the passcode form.
+  // Fail-open: on a config fetch failure, offer the passcode form (never on Cloud Compute, which uses passkeys only).
   const passcodeEnabled = configState === 'failed' ? true : (config?.passcode_enabled ?? true)
-  const showProviders = configState === 'loaded' && providers.length > 0
-  const showPasscode = configState === 'failed' || (configState === 'loaded' && passcodeEnabled)
-  const showLockout = configState === 'loaded' && !passcodeEnabled && providers.length === 0
+  const showProviders = !IS_CLOUD_MODE && configState === 'loaded' && providers.length > 0
+  const showPasscode = !IS_CLOUD_MODE && (configState === 'failed' || (configState === 'loaded' && passcodeEnabled))
+  const showLockout = !IS_CLOUD_MODE && configState === 'loaded' && !passcodeEnabled && providers.length === 0
   const showDivider = showProviders && showPasscode
+
+  const cloudSetupQuery = useQuery<{ complete?: boolean; accepted?: boolean }>({
+    queryKey: ['cloud-setup-status'],
+    enabled: IS_CLOUD_MODE && !inviteToken,
+    retry: false,
+    queryFn: async () => {
+      const res = await fetch('/api/setup', { credentials: 'include' })
+      if (!res.ok) return { complete: false, accepted: false }
+      return (await res.json()) as { complete?: boolean; accepted?: boolean }
+    },
+  })
+  const cloudSetupComplete = cloudSetupQuery.data?.complete === true
 
   // Countdown for rate-limit lockouts.
   React.useEffect(() => {
@@ -155,7 +176,7 @@ export function ShareLoginForm() {
   // Auto-focus the email field once the passcode form is actually shown so
   // keyboard users land on the first input.
   React.useEffect(() => {
-    if (showPasscode) emailInputRef.current?.focus()
+    if (showPasscode && !IS_CLOUD_MODE) emailInputRef.current?.focus()
   }, [showPasscode])
 
   // Move focus to the error alert when one appears so SR users hear it
@@ -240,11 +261,135 @@ export function ShareLoginForm() {
     }
   })
 
+  const [cloudDisplayName, setCloudDisplayName] = React.useState('')
+  const [cloudSetupCode, setCloudSetupCode] = React.useState('')
+  const [cloudSetupAccepted, setCloudSetupAccepted] = React.useState(false)
+  const isCloudSetupStep2 =
+    !cloudSetupComplete && (cloudSetupAccepted || cloudSetupQuery.data?.accepted === true)
+
+  const handleCloudPasskeySignIn = async () => {
+    setError(null)
+    setBusy(true)
+    try {
+      await authenticateWithPasskey()
+      window.location.assign(returnTarget ?? '/dashboard')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Passkey authentication failed.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleCloudSetupAccept = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError(null)
+    setBusy(true)
+    try {
+      const res = await fetch('/api/setup/accept', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ code: cloudSetupCode }),
+      })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body?.detail || 'Invalid setup code')
+      }
+      setCloudSetupAccepted(true)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Setup code verification failed.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleCloudPasskeyRegister = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError(null)
+    setBusy(true)
+    try {
+      await registerPasskey(cloudDisplayName || 'Administrator', inviteToken ?? undefined)
+      window.location.assign(returnTarget ?? (inviteToken ? '/dashboard' : '/admin'))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Passkey registration failed.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <div
       data-testid="share-login-form-container"
       className="space-y-4 min-h-[240px] [contain-intrinsic-size:auto_240px] [content-visibility:auto]"
     >
+      {IS_CLOUD_MODE && (
+        <div data-testid="cloud-passkey-auth" className="space-y-3">
+          {inviteToken ? (
+            <form onSubmit={handleCloudPasskeyRegister} className="space-y-3">
+              <div className="space-y-1">
+                <Label htmlFor="cloud-invite-name" className="text-xs">Display Name</Label>
+                <Input
+                  id="cloud-invite-name"
+                  value={cloudDisplayName}
+                  onChange={(e) => setCloudDisplayName(e.target.value)}
+                  placeholder="Your name"
+                  required
+                  disabled={busy}
+                />
+              </div>
+              <Button type="submit" className="w-full" disabled={busy}>
+                {busy && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                Accept Invite &amp; Register Passkey
+              </Button>
+            </form>
+          ) : (
+            <div className="space-y-2">
+              {!isCloudSetupStep2 && (
+                <Button
+                  type="button"
+                  variant="default"
+                  className="w-full"
+                  disabled={busy}
+                  onClick={() => { void handleCloudPasskeySignIn() }}
+                  data-testid="cloud-passkey-signin-button"
+                >
+                  {busy && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                  Sign in with Passkey
+                </Button>
+              )}
+              {!cloudSetupComplete && (
+                !isCloudSetupStep2 ? (
+                  <form onSubmit={handleCloudSetupAccept} className="space-y-2 pt-2 border-t border-border/60">
+                    <Input
+                      value={cloudSetupCode}
+                      onChange={(e) => setCloudSetupCode(e.target.value)}
+                      placeholder="Initial setup code (first-time admin)"
+                      disabled={busy}
+                    />
+                    <Button type="submit" variant="outline" size="sm" className="w-full" disabled={busy || !cloudSetupCode.trim()}>
+                      Verify Setup Code
+                    </Button>
+                  </form>
+                ) : (
+                  <form onSubmit={handleCloudPasskeyRegister} className="space-y-2">
+                    <Input
+                      value={cloudDisplayName}
+                      onChange={(e) => setCloudDisplayName(e.target.value)}
+                      placeholder="Admin display name"
+                      required
+                      disabled={busy}
+                    />
+                    <Button type="submit" variant="outline" size="sm" className="w-full" disabled={busy}>
+                      Register Admin Passkey
+                    </Button>
+                  </form>
+                )
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {configState === 'loading' && (
         <div
           data-testid="share-login-loading-skeleton"
@@ -546,7 +691,7 @@ export default function ShareLoginPage() {
           this page would otherwise have zero headings. Sr-only <h1> gives
           screen-reader heading nav a landing spot without affecting the
           visual design. */}
-      <h1 className="sr-only">Analyst sign-in</h1>
+      <h1 className="sr-only">{IS_CLOUD_MODE ? 'Sign in' : 'Analyst sign-in'}</h1>
       <Card
         data-testid="share-login-card"
         className="w-full max-w-md self-start min-h-[380px] [contain-intrinsic-size:auto_380px] [content-visibility:auto]"
@@ -554,12 +699,12 @@ export default function ShareLoginPage() {
         <CardHeader className="space-y-2">
           <CardTitle className="flex items-center gap-2 text-xl">
             <KeyRound className="h-5 w-5" />
-            Analyst sign-in
+            {IS_CLOUD_MODE ? 'Sign in' : 'Analyst sign-in'}
           </CardTitle>
           <p className="text-sm text-muted-foreground">
-            Access to this dashboard is invite-only. Enter the email address the
-            invite was sent to, and the passcode from the invitation message. If
-            you don&apos;t have an invite, ask the dashboard owner to send you one.
+            {IS_CLOUD_MODE
+              ? 'Authenticate with your registered passkey to access Fastly Log Analytics. Access is invite-only — new users need a one-time invitation link from an administrator.'
+              : "Access to this dashboard is invite-only. Enter the email address the invite was sent to, and the passcode from the invitation message. If you don't have an invite, ask the dashboard owner to send you one."}
           </p>
         </CardHeader>
         <CardContent

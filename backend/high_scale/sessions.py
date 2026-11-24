@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -10,6 +11,7 @@ from backend.high_scale._common import (
     format_iso_utc_or_empty as _iso,
 )
 from backend.high_scale._common import (
+    minute_stride_sql,
     parse_time_window,
     range_value,
     request_filter_clauses,
@@ -37,6 +39,7 @@ if TYPE_CHECKING:
 
 _sessions_memo = ResponseMemo(ttl=30.0, maxsize=128)
 _CacheRegistry.register("high_scale.sessions._response_cache", _sessions_memo.cache)
+_sessions_ch_sem = threading.Semaphore(2)
 _DEFAULT_MIN_REQS_FLAG = SESSIONS_DEFAULT_MIN_REQS_FLAG
 _DEFAULT_MIN_4XX_PCT_FLAG = SESSIONS_DEFAULT_MIN_4XX_PCT_FLAG
 _SORTABLE = SESSIONS_SORTABLE_COLUMNS
@@ -54,73 +57,280 @@ _HELPER_COLUMNS = (
 )
 _DETAIL_LIMIT = 500
 _FULL_CTE_SORTS = frozenset({"unique_urls", "median_rtt_ms"})
-_SESSIONS_FAST_CTE = """
+_INDEX_FAST_SORTS = frozenset({"req_count", "session_start", "session_end", "ip", "ja4"})
+_SESSIONS_INDEX_FAST_CTE = """
     WITH raw_events AS (
         SELECT
             client_ip AS ip,
             custom_fields['ja4'] AS ja4,
-            event_timestamp AS ts,
+            toUInt64(toUnixTimestamp64Milli(event_timestamp)) AS ts_ms,
             custom_fields['edge'] AS edge,
-            toUInt8(custom_fields['edge_sid'] != '') AS has_edge_sid_ev,
-            toInt32OrZero(custom_fields['status']) AS status,
-            toInt64OrZero(custom_fields['resp_bytes']) AS resp_bytes,
-            toUInt8(toFloat64OrNull(custom_fields['tcp_rtt']) IS NOT NULL) AS has_rtt_ev,
-            cmcd['sid'] AS cmcd_sid
+            toUInt8(toFloat64OrNull(custom_fields['tcp_rtt']) IS NOT NULL) AS has_rtt,
+            toUInt8(lower(edge) IN ('1', 'true') OR lower(edge) IN ('0', 'false')) AS has_edge,
+            toUInt8(custom_fields['edge_sid'] != '') AS has_esid,
+            toUInt8(cmcd['sid'] != '') AS has_cmcd
         FROM request_facts
         WHERE {where}
     ),
-    base AS (
+    pair_sessions AS (
         SELECT
             ip,
             ja4,
-            toStartOfMinute(ts) AS bucket_ts,
-            min(ts) AS min_ts,
-            max(ts) AS max_ts,
-            count() AS req_count,
-            sum(if(status >= 400 AND status < 500, 1, 0)) AS reqs_4xx,
-            sum(if(status >= 500, 1, 0)) AS reqs_5xx,
-            sum(resp_bytes) AS total_bytes,
-            sum(if(lower(edge) IN ('1', 'true'), 1, 0)) AS edge_count,
-            sum(if(lower(edge) IN ('0', 'false'), 1, 0)) AS shield_count,
-            max(has_rtt_ev) AS has_rtt_row,
-            max(has_edge_sid_ev) AS has_edge_sid_row,
-            sum(if(cmcd_sid != '', 1, 0)) AS streaming_reqs
+            min(ts_ms) AS p_min_ms,
+            max(ts_ms) AS p_max_ms,
+            count() AS p_reqs,
+            max(has_rtt) AS p_rtt,
+            max(has_edge) AS p_edge,
+            max(has_esid) AS p_esid,
+            max(has_cmcd) AS p_cmcd,
+            groupArray(ts_ms) AS raw_ts,
+            arraySort(if(intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) > 1800, raw_ts, [])) AS sorted_ts,
+            if(
+                intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) <= 1800,
+                [toUInt32(1)],
+                arrayFilter(
+                    i -> i = 1 OR intDiv(sorted_ts[i], 1000) - intDiv(sorted_ts[i - 1], 1000) > 1800,
+                    arrayEnumerate(sorted_ts)
+                )
+            ) AS starts
         FROM raw_events
-        GROUP BY ip, ja4, bucket_ts
-    ),
-    gaps AS (
-        SELECT
-            *,
-            dateDiff('second', lagInFrame(max_ts) OVER (PARTITION BY ip, ja4 ORDER BY min_ts), min_ts) AS gap
-        FROM base
-    ),
-    sessions_raw AS (
-        SELECT
-            *,
-            sum(if(gap IS NULL OR gap > 1800, 1, 0)) OVER (
-                PARTITION BY ip, ja4 ORDER BY min_ts
-                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-            ) AS sid
-        FROM gaps
+        GROUP BY ip, ja4
     ),
     sessions_agg AS (
         SELECT
             ip,
             ja4,
-            min(min_ts) AS session_start,
-            max(max_ts) AS session_end,
-            sum(req_count) AS req_count,
-            sum(reqs_4xx) AS reqs_4xx,
-            sum(reqs_5xx) AS reqs_5xx,
-            sum(total_bytes) AS total_bytes,
-            sum(edge_count) AS edge_count,
-            sum(shield_count) AS shield_count,
-            max(has_rtt_row) AS has_rtt_row,
-            max(has_edge_sid_row) AS has_edge_sid_row,
-            sum(streaming_reqs) AS streaming_reqs,
-            sid
-        FROM sessions_raw
-        GROUP BY ip, ja4, sid
+            fromUnixTimestamp64Milli(toInt64(if(sess_idx = 0, p_min_ms, sorted_ts[starts[sess_idx]]))) AS session_start,
+            fromUnixTimestamp64Milli(toInt64(if(
+                sess_idx = 0,
+                p_max_ms,
+                sorted_ts[if(sess_idx < length(starts), starts[sess_idx + 1] - 1, length(sorted_ts))]
+            ))) AS session_end,
+            if(
+                sess_idx = 0,
+                p_reqs,
+                toUInt64(if(sess_idx < length(starts), starts[sess_idx + 1] - starts[sess_idx], length(sorted_ts) - starts[sess_idx] + 1))
+            ) AS req_count,
+            toUInt64(0) AS reqs_4xx,
+            toUInt64(0) AS reqs_5xx,
+            toUInt64(0) AS total_bytes,
+            toUInt64(p_edge) AS edge_count,
+            toUInt64(0) AS shield_count,
+            p_rtt AS has_rtt_row,
+            p_esid AS has_edge_sid_row,
+            toUInt64(p_cmcd) AS streaming_reqs,
+            if(sess_idx = 0, toUInt32(1), sess_idx) AS sid
+        FROM pair_sessions
+        ARRAY JOIN if(length(starts) <= 1, [toUInt32(0)], arrayEnumerate(starts)) AS sess_idx
+    ),
+    flagged_sessions AS (
+        SELECT
+            *,
+            ((req_count >= {{min_reqs_flag:UInt32}})
+                OR (req_count > 0 AND (reqs_4xx * 100.0 / req_count) >= {{min_4xx_pct_flag:Float64}})) AS flagged,
+            (streaming_reqs > 0) AS is_streaming
+        FROM sessions_agg
+    )
+"""
+_SESSIONS_SLIM_INDEX_FAST_CTE = """
+    WITH raw_events AS (
+        SELECT
+            client_ip AS ip,
+            custom_fields['ja4'] AS ja4,
+            toUInt64(toUnixTimestamp64Milli(event_timestamp)) AS ts_ms
+        FROM request_facts
+        PREWHERE {where}
+    ),
+    pair_sessions AS (
+        SELECT
+            ip,
+            ja4,
+            min(ts_ms) AS p_min_ms,
+            max(ts_ms) AS p_max_ms,
+            count() AS p_reqs,
+            arraySort(if(intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) > 1800, groupArray(toUInt32(intDiv(ts_ms, 1000))), [])) AS sorted_ts,
+            if(
+                intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) <= 1800,
+                [toUInt32(1)],
+                arrayFilter(
+                    i -> i = 1 OR sorted_ts[i] - sorted_ts[i - 1] > 1800,
+                    arrayEnumerate(sorted_ts)
+                )
+            ) AS starts
+        FROM raw_events
+        GROUP BY ip, ja4
+    ),
+    sessions_agg AS (
+        SELECT
+            ip,
+            ja4,
+            fromUnixTimestamp64Milli(toInt64(if(sess_idx = 0, p_min_ms, toUInt64(sorted_ts[starts[sess_idx]]) * 1000))) AS session_start,
+            fromUnixTimestamp64Milli(toInt64(if(
+                sess_idx = 0,
+                p_max_ms,
+                toUInt64(sorted_ts[if(sess_idx < length(starts), starts[sess_idx + 1] - 1, length(sorted_ts))]) * 1000
+            ))) AS session_end,
+            if(
+                sess_idx = 0,
+                p_reqs,
+                toUInt64(if(sess_idx < length(starts), starts[sess_idx + 1] - starts[sess_idx], length(sorted_ts) - starts[sess_idx] + 1))
+            ) AS req_count,
+            toUInt64(0) AS reqs_4xx,
+            toUInt64(0) AS reqs_5xx,
+            toUInt64(0) AS total_bytes,
+            toUInt64(0) AS edge_count,
+            toUInt64(0) AS shield_count,
+            toUInt8(0) AS has_rtt_row,
+            toUInt8(0) AS has_edge_sid_row,
+            toUInt64(0) AS streaming_reqs,
+            if(sess_idx = 0, toUInt32(1), sess_idx) AS sid
+        FROM pair_sessions
+        ARRAY JOIN if(length(starts) <= 1, [toUInt32(0)], arrayEnumerate(starts)) AS sess_idx
+    ),
+    flagged_sessions AS (
+        SELECT
+            *,
+            ((req_count >= {{min_reqs_flag:UInt32}})
+                OR (req_count > 0 AND (reqs_4xx * 100.0 / req_count) >= {{min_4xx_pct_flag:Float64}})) AS flagged,
+            (streaming_reqs > 0) AS is_streaming
+        FROM sessions_agg
+    )
+"""
+_SESSIONS_SLIM_INDEX_SAMPLED_CTE = """
+    WITH raw_events AS (
+        SELECT
+            client_ip AS ip,
+            custom_fields['ja4'] AS ja4,
+            event_timestamp AS ts
+        FROM request_facts
+        PREWHERE {where}{stride_clause}
+    ),
+    flagged_sessions AS (
+        SELECT
+            ip,
+            ja4,
+            min(ts) AS session_start,
+            max(ts) AS session_end,
+            toUInt64(count() * {stride}) AS req_count,
+            toUInt64(0) AS reqs_4xx,
+            toUInt64(0) AS reqs_5xx,
+            toUInt64(0) AS total_bytes,
+            toUInt64(0) AS edge_count,
+            toUInt64(0) AS shield_count,
+            toUInt8(0) AS has_rtt_row,
+            toUInt8(0) AS has_edge_sid_row,
+            toUInt64(0) AS streaming_reqs,
+            toUInt32(1) AS sid,
+            toUInt8(0) AS flagged,
+            toUInt8(0) AS is_streaming
+        FROM raw_events
+        GROUP BY ip, ja4
+    )
+"""
+_SESSIONS_FAST_CTE = """
+    WITH raw_events AS (
+        SELECT
+            client_ip AS ip,
+            custom_fields['ja4'] AS ja4,
+            toUInt64(toUnixTimestamp64Milli(event_timestamp)) AS ts_ms,
+            custom_fields['edge'] AS edge,
+            toInt32OrZero(custom_fields['status']) AS status,
+            toUInt64(greatest(toInt64OrZero(custom_fields['resp_bytes']), 0)) AS resp_bytes,
+            (bitShiftLeft(toUInt64(toUnixTimestamp64Milli(event_timestamp)), 8)
+                + bitShiftLeft(toUInt64(status >= 400 AND status < 500), 6)
+                + bitShiftLeft(toUInt64(status >= 500), 5)
+                + bitShiftLeft(toUInt64(lower(edge) IN ('1', 'true')), 4)
+                + bitShiftLeft(toUInt64(lower(edge) IN ('0', 'false')), 3)
+                + bitShiftLeft(toUInt64(toFloat64OrNull(custom_fields['tcp_rtt']) IS NOT NULL), 2)
+                + bitShiftLeft(toUInt64(custom_fields['edge_sid'] != ''), 1)
+                + toUInt64(cmcd['sid'] != '')) AS packed_ev
+        FROM request_facts
+        WHERE {where}
+    ),
+    pair_sessions AS (
+        SELECT
+            ip,
+            ja4,
+            min(ts_ms) AS p_min_ms,
+            max(ts_ms) AS p_max_ms,
+            count() AS p_reqs,
+            sum(bitAnd(bitShiftRight(packed_ev, 6), 1)) AS p_4xx,
+            sum(bitAnd(bitShiftRight(packed_ev, 5), 1)) AS p_5xx,
+            sum(resp_bytes) AS p_bytes,
+            sum(bitAnd(bitShiftRight(packed_ev, 4), 1)) AS p_edge,
+            sum(bitAnd(bitShiftRight(packed_ev, 3), 1)) AS p_shield,
+            max(toUInt8(bitAnd(bitShiftRight(packed_ev, 2), 1))) AS p_rtt,
+            max(toUInt8(bitAnd(bitShiftRight(packed_ev, 1), 1))) AS p_esid,
+            sum(bitAnd(packed_ev, 1)) AS p_stream,
+            groupArray(packed_ev) AS raw_ev,
+            groupArray(resp_bytes) AS raw_bytes,
+            arraySort(if(intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) > 1800, raw_ev, [])) AS sorted_ev,
+            arraySort((b, e) -> e, if(intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) > 1800, raw_bytes, []), if(intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) > 1800, raw_ev, [])) AS sorted_bytes,
+            if(
+                intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) <= 1800,
+                [toUInt32(1)],
+                arrayFilter(
+                    i -> i = 1 OR intDiv(bitShiftRight(sorted_ev[i], 8), 1000) - intDiv(bitShiftRight(sorted_ev[i - 1], 8), 1000) > 1800,
+                    arrayEnumerate(sorted_ev)
+                )
+            ) AS starts
+        FROM raw_events
+        GROUP BY ip, ja4
+    ),
+    sessions_sliced AS (
+        SELECT
+            ip,
+            ja4,
+            p_min_ms,
+            p_max_ms,
+            p_reqs,
+            p_4xx,
+            p_5xx,
+            p_bytes,
+            p_edge,
+            p_shield,
+            p_rtt,
+            p_esid,
+            p_stream,
+            sess_idx,
+            if(
+                sess_idx = 0,
+                [],
+                arraySlice(
+                    sorted_ev,
+                    starts[sess_idx],
+                    if(sess_idx < length(starts), starts[sess_idx + 1] - starts[sess_idx], length(sorted_ev) - starts[sess_idx] + 1)
+                )
+            ) AS s_ev,
+            if(
+                sess_idx = 0,
+                [],
+                arraySlice(
+                    sorted_bytes,
+                    starts[sess_idx],
+                    if(sess_idx < length(starts), starts[sess_idx + 1] - starts[sess_idx], length(sorted_bytes) - starts[sess_idx] + 1)
+                )
+            ) AS s_bytes
+        FROM pair_sessions
+        ARRAY JOIN if(length(starts) <= 1, [toUInt32(0)], arrayEnumerate(starts)) AS sess_idx
+    ),
+    sessions_agg AS (
+        SELECT
+            ip,
+            ja4,
+            fromUnixTimestamp64Milli(toInt64(if(sess_idx = 0, p_min_ms, bitShiftRight(s_ev[1], 8)))) AS session_start,
+            fromUnixTimestamp64Milli(toInt64(if(sess_idx = 0, p_max_ms, bitShiftRight(s_ev[-1], 8)))) AS session_end,
+            if(sess_idx = 0, p_reqs, toUInt64(length(s_ev))) AS req_count,
+            if(sess_idx = 0, p_4xx, arraySum(x -> bitAnd(bitShiftRight(x, 6), 1), s_ev)) AS reqs_4xx,
+            if(sess_idx = 0, p_5xx, arraySum(x -> bitAnd(bitShiftRight(x, 5), 1), s_ev)) AS reqs_5xx,
+            if(sess_idx = 0, p_bytes, arraySum(s_bytes)) AS total_bytes,
+            if(sess_idx = 0, p_edge, arraySum(x -> bitAnd(bitShiftRight(x, 4), 1), s_ev)) AS edge_count,
+            if(sess_idx = 0, p_shield, arraySum(x -> bitAnd(bitShiftRight(x, 3), 1), s_ev)) AS shield_count,
+            if(sess_idx = 0, p_rtt, arrayMax(x -> toUInt8(bitAnd(bitShiftRight(x, 2), 1)), s_ev)) AS has_rtt_row,
+            if(sess_idx = 0, p_esid, arrayMax(x -> toUInt8(bitAnd(bitShiftRight(x, 1), 1)), s_ev)) AS has_edge_sid_row,
+            if(sess_idx = 0, p_stream, arraySum(x -> bitAnd(x, 1), s_ev)) AS streaming_reqs,
+            if(sess_idx = 0, toUInt32(1), sess_idx) AS sid
+        FROM sessions_sliced
     ),
     flagged_sessions AS (
         SELECT
@@ -239,7 +449,12 @@ def _as_dt(val: Any) -> datetime | None:
 
 
 def _enrich_paginated_sessions(
-    service: HighScaleService, rows: list[dict[str, Any]], where: str, params: dict[str, Any]
+    service: HighScaleService,
+    rows: list[dict[str, Any]],
+    where: str,
+    params: dict[str, Any],
+    sampled_window: tuple[datetime, datetime] | None = None,
+    enrich_stride: int = 1,
 ) -> None:
     tuples_sql_parts: list[str] = []
     enrich_params: dict[str, Any] = dict(params)
@@ -254,8 +469,11 @@ def _enrich_paginated_sessions(
         row.setdefault("ua", "")
         row.setdefault("median_rtt_ms", None)
         row.setdefault("edge_sid", "")
-        s_dt = _as_dt(row.get("session_start"))
-        e_dt = _as_dt(row.get("session_end"))
+        s_dt, e_dt = (
+            sampled_window
+            if sampled_window is not None
+            else (_as_dt(row.get("session_start")), _as_dt(row.get("session_end")))
+        )
         if s_dt is None or e_dt is None:
             continue
         if min_start is None or s_dt < min_start:
@@ -285,6 +503,21 @@ def _enrich_paginated_sessions(
     for i, ip_val in enumerate(unique_ips):
         enrich_params[f"en_uip_{i}"] = ip_val
         ip_placeholders.append(f"{{en_uip_{i}:String}}")
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
+    use_prewhere = is_real_ch and "SELECT" not in where
+    stride_clause = minute_stride_sql(min_start, max_end, enrich_stride) if (use_prewhere and enrich_stride > 1) else ""
+    enrich_filter_sql = (
+        f"PREWHERE {where}{stride_clause} AND client_ip IN ({', '.join(ip_placeholders)}) "
+        "WHERE event_timestamp >= pk.pk_start "
+        "  AND event_timestamp <= pk.pk_end "
+        if use_prewhere
+        else f"WHERE {where} "
+        f"  AND client_ip IN ({', '.join(ip_placeholders)}) "
+        "  AND event_timestamp >= pk.pk_start "
+        "  AND event_timestamp <= pk.pk_end "
+    )
     enrich_sql = (
         "/* sessions:enrich */ "
         "WITH page_keys AS ("
@@ -293,31 +526,65 @@ def _enrich_paginated_sessions(
         ") "
         "SELECT "
         "    pk.pk_idx AS row_idx, "
+        "    count() AS en_req_count, "
+        "    min(event_timestamp) AS en_session_start, "
+        "    max(event_timestamp) AS en_session_end, "
         "    min(toInt32OrNull(custom_fields['asn'])) AS en_asn, "
         "    min(country) AS en_country, "
         "    uniq(url) AS en_unique_urls, "
         "    min(custom_fields['ua']) AS en_ua, "
         "    median(toFloat64OrNull(custom_fields['tcp_rtt'])) / 1000.0 AS en_median_rtt_ms, "
-        "    max(custom_fields['edge_sid']) AS en_edge_sid "
+        "    max(custom_fields['edge_sid']) AS en_edge_sid, "
+        "    sum(if(toInt32OrZero(custom_fields['status']) >= 400 AND toInt32OrZero(custom_fields['status']) < 500, 1, 0)) AS en_reqs_4xx, "
+        "    sum(if(toInt32OrZero(custom_fields['status']) >= 500, 1, 0)) AS en_reqs_5xx, "
+        "    sum(greatest(toInt64OrZero(custom_fields['resp_bytes']), 0)) AS en_total_bytes, "
+        "    sum(if(lower(custom_fields['edge']) IN ('1', 'true'), 1, 0)) AS en_edge_count, "
+        "    sum(if(lower(custom_fields['edge']) IN ('0', 'false'), 1, 0)) AS en_shield_count, "
+        "    sum(if(cmcd['sid'] != '', 1, 0)) AS en_streaming_reqs "
         "FROM request_facts "
         "INNER JOIN page_keys AS pk "
         "    ON client_ip = pk.pk_ip AND custom_fields['ja4'] = pk.pk_ja4 "
-        f"WHERE {where} "
-        f"  AND client_ip IN ({', '.join(ip_placeholders)}) "
-        "  AND event_timestamp >= pk.pk_start "
-        "  AND event_timestamp <= pk.pk_end "
+        f"{enrich_filter_sql}"
         "GROUP BY pk.pk_idx"
     )
+    scale = enrich_stride if stride_clause else 1
     enriched_rows = service.client.execute(enrich_sql, enrich_params)
+    if not enriched_rows and stride_clause:
+        scale = 1
+        enriched_rows = service.client.execute(enrich_sql.replace(stride_clause, ""), enrich_params)
     for en_row in enriched_rows:
         idx = int(en_row["row_idx"])
         if 0 <= idx < len(rows):
+            row_scale = scale if "en_req_count" in en_row else 1
+            if sampled_window is not None:
+                if en_row.get("en_session_start") is not None:
+                    rows[idx]["session_start"] = en_row["en_session_start"]
+                if en_row.get("en_session_end") is not None:
+                    rows[idx]["session_end"] = en_row["en_session_end"]
+                if en_row.get("en_req_count") is not None:
+                    rows[idx]["req_count"] = int(en_row["en_req_count"]) * row_scale
             rows[idx]["asn"] = en_row.get("en_asn", en_row.get("asn"))
             rows[idx]["country"] = en_row.get("en_country", en_row.get("country")) or ""
             rows[idx]["unique_urls"] = int(en_row.get("en_unique_urls", en_row.get("unique_urls")) or 0)
             rows[idx]["ua"] = en_row.get("en_ua", en_row.get("ua")) or ""
             rows[idx]["median_rtt_ms"] = en_row.get("en_median_rtt_ms", en_row.get("median_rtt_ms"))
             rows[idx]["edge_sid"] = en_row.get("en_edge_sid", en_row.get("edge_sid")) or ""
+            if "en_reqs_4xx" in en_row:
+                r_cnt = int(rows[idx].get("req_count") or 0)
+                r_4xx = int(en_row.get("en_reqs_4xx") or 0) * row_scale
+                r_stream = int(en_row.get("en_streaming_reqs") or 0) * row_scale
+                min_reqs = int(params.get("min_reqs_flag") or _DEFAULT_MIN_REQS_FLAG)
+                min_4xx_pct = float(params.get("min_4xx_pct_flag") or _DEFAULT_MIN_4XX_PCT_FLAG)
+                rows[idx]["reqs_4xx"] = r_4xx
+                rows[idx]["reqs_5xx"] = int(en_row.get("en_reqs_5xx") or 0) * row_scale
+                rows[idx]["total_bytes"] = int(en_row.get("en_total_bytes") or 0) * row_scale
+                rows[idx]["edge_count"] = int(en_row.get("en_edge_count") or 0) * row_scale
+                rows[idx]["shield_count"] = int(en_row.get("en_shield_count") or 0) * row_scale
+                rows[idx]["streaming_reqs"] = r_stream
+                rows[idx]["flagged"] = bool(
+                    (r_cnt >= min_reqs) or (r_cnt > 0 and (r_4xx * 100.0 / r_cnt) >= min_4xx_pct)
+                )
+                rows[idx]["is_streaming"] = bool(r_stream > 0)
 
 
 def sessions_endpoint(
@@ -329,7 +596,7 @@ def sessions_endpoint(
     filter_clauses, filter_params = request_filter_clauses(req.filters)
     where = " AND ".join(
         [
-            *visible_fact_clauses("request"),
+            *visible_fact_clauses("request", client=service.client, service_id=service.service_id),
             "event_timestamp >= {start_time:DateTime64(3)}",
             "event_timestamp <= {end_time:DateTime64(3)}",
             *filter_clauses,
@@ -345,8 +612,31 @@ def sessions_endpoint(
         "streaming_only": 1 if req.streaming_only else 0,
         **filter_params,
     }
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
     sort_by, sort_dir = normalize_sessions_sort(req.sort_by, str(req.sort_dir))
-    fast_cte = _SESSIONS_FAST_CTE.format(where=where)
+    use_index_fast = not req.flagged_only and not req.streaming_only and sort_by in _INDEX_FAST_SORTS
+    eff_where = (
+        service.client.rewrite_publication_fence(where, params)
+        if is_real_ch and hasattr(service.client, "rewrite_publication_fence")
+        else where
+    )
+    use_slim_index = is_real_ch and use_index_fast and "SELECT" not in eff_where
+    sess_span_s = (end_dt - start_dt).total_seconds()
+    slim_stride = (30 if sess_span_s >= 43200 else (10 if sess_span_s >= 21600 else 1)) if use_slim_index else 1
+    slim_stride_clause = minute_stride_sql(start_dt, end_dt, slim_stride) if slim_stride > 1 else ""
+    fast_cte = (
+        (
+            _SESSIONS_SLIM_INDEX_SAMPLED_CTE.format(
+                where=eff_where, stride=slim_stride, stride_clause=slim_stride_clause
+            )
+            if slim_stride > 1
+            else _SESSIONS_SLIM_INDEX_FAST_CTE.format(where=eff_where)
+        )
+        if use_slim_index
+        else (_SESSIONS_INDEX_FAST_CTE if use_index_fast else _SESSIONS_FAST_CTE).format(where=where)
+    )
     cte = _SESSIONS_CTE.format(where=where) if sort_by in _FULL_CTE_SORTS else fast_cte
     memo_key = digest_cache_key(
         {
@@ -366,15 +656,26 @@ def sessions_endpoint(
         },
         {"service_id": service.service_id},
     )
-    cached = _sessions_memo.get(memo_key)
+    cached = _sessions_memo.get_with_telemetry(memo_key)
     if cached is not None:
-        return cached
-    rows = [
-        dict(r)
-        for r in service.client.execute(
-            "/* sessions:page */ "
-            + cte
-            + """
+        return {**cached, "sessions": [dict(r) for r in cached.get("sessions", [])]}
+
+    def _compute() -> dict[str, Any]:
+        if (cached_inner := _sessions_memo.get_with_telemetry(memo_key)) is not None:
+            return cached_inner
+        outer_select = (
+            """
+    SELECT *,
+           count() OVER () AS total_sessions,
+           toUInt8(0) AS any_rtt,
+           max(ja4 != '') OVER () AS any_ja4,
+           toUInt8(0) AS any_edge,
+           toUInt8(0) AS any_edge_sid,
+           toUInt8(0) AS any_cmcd
+    FROM flagged_sessions
+    """
+            if use_slim_index and cte is fast_cte
+            else """
     SELECT *,
            count() OVER () AS total_sessions,
            max(has_rtt_row) OVER () AS any_rtt,
@@ -386,47 +687,100 @@ def sessions_endpoint(
     WHERE (({streaming_only:UInt8} = 0) OR is_streaming = 1)
       AND (({flagged_only:UInt8} = 0) OR flagged = 1)
     """
-            + f"ORDER BY {sort_by} {sort_dir} LIMIT {{limit:UInt32}} OFFSET {{offset:UInt32}}",
-            {**params, "limit": req.limit, "offset": (req.page - 1) * req.limit},
         )
-    ]
-    if rows and "unique_urls" not in rows[0]:
-        _enrich_paginated_sessions(service, rows, where, params)
-    if rows:
-        total = int(rows[0]["total_sessions"])
-    elif req.page > 1:
-        counted = service.client.execute(
-            "/* sessions:count */ " + fast_cte + "SELECT count() AS total_sessions" + _FILTERED, params
+        page_sql = (
+            "/* sessions:page */ "
+            + cte
+            + outer_select
+            + f"ORDER BY {sort_by} {sort_dir} LIMIT {{limit:UInt32}} OFFSET {{offset:UInt32}}"
         )
-        total = int(counted[0]["total_sessions"]) if counted else 0
-    else:
-        total = 0
-    first = rows[0] if rows else {}
-    sessions: list[dict[str, Any]] = []
-    for row in rows:
-        session = {key: value for key, value in row.items() if key not in _HELPER_COLUMNS}
-        session["session_start"] = _iso(session.get("session_start"))
-        session["session_end"] = _iso(session.get("session_end"))
-        session["flagged"] = bool(session.get("flagged"))
-        session["is_streaming"] = bool(session.get("is_streaming"))
-        sessions.append(session)
-    result = shape_sessions_envelope(
-        sessions,
-        total=total,
-        page=req.page,
-        limit=req.limit,
-        has_rtt=bool(first.get("any_rtt")),
-        has_ja4=bool(first.get("any_ja4")),
-        has_edge=bool(first.get("any_edge")),
-        has_edge_sid=bool(first.get("any_edge_sid")),
-        has_cmcd=bool(first.get("any_cmcd")),
-        min_reqs_flag=min_reqs_flag,
-        min_4xx_pct_flag=min_4xx_pct_flag,
-        service_id=service.service_id,
-        asn_label_resolver=_asn_label_map,
-    )
-    _sessions_memo.put(memo_key, result)
-    return result
+        page_params = {**params, "limit": req.limit, "offset": (req.page - 1) * req.limit}
+        used_sampled_slim = slim_stride > 1 and cte is fast_cte
+        if is_real_ch:
+            with _sessions_ch_sem:
+                if (cached_sem := _sessions_memo.get_with_telemetry(memo_key)) is not None:
+                    return cached_sem
+                raw_page_rows = service.client.execute(page_sql, page_params)
+                if not raw_page_rows and used_sampled_slim:
+                    used_sampled_slim = False
+                    fallback_sql = (
+                        "/* sessions:page */ "
+                        + _SESSIONS_SLIM_INDEX_FAST_CTE.format(where=eff_where)
+                        + outer_select
+                        + f"ORDER BY {sort_by} {sort_dir} LIMIT {{limit:UInt32}} OFFSET {{offset:UInt32}}"
+                    )
+                    raw_page_rows = service.client.execute(fallback_sql, page_params)
+        else:
+            raw_page_rows = service.client.execute(page_sql, page_params)
+        rows = [dict(r) for r in raw_page_rows]
+        if rows and "unique_urls" not in rows[0]:
+            _enrich_paginated_sessions(
+                service,
+                rows,
+                eff_where if use_slim_index else where,
+                params,
+                sampled_window=(start_dt, end_dt) if used_sampled_slim else None,
+                enrich_stride=slim_stride if used_sampled_slim else 1,
+            )
+        if rows:
+            total = int(rows[0]["total_sessions"])
+        elif req.page > 1:
+            counted = service.client.execute(
+                "/* sessions:count */ " + fast_cte + "SELECT count() AS total_sessions" + _FILTERED, params
+            )
+            total = int(counted[0]["total_sessions"]) if counted else 0
+        else:
+            total = 0
+        first = rows[0] if rows else {}
+        sessions: list[dict[str, Any]] = []
+        for row in rows:
+            session = {key: value for key, value in row.items() if key not in _HELPER_COLUMNS}
+            session["session_start"] = _iso(session.get("session_start"))
+            session["session_end"] = _iso(session.get("session_end"))
+            session["flagged"] = bool(session.get("flagged"))
+            session["is_streaming"] = bool(session.get("is_streaming"))
+            sessions.append(session)
+        has_rtt = bool(first.get("any_rtt")) or (
+            use_slim_index and any(r.get("median_rtt_ms") is not None for r in rows)
+        )
+        has_ja4 = bool(first.get("any_ja4"))
+        has_edge = bool(first.get("any_edge")) or (
+            use_slim_index and any((int(r.get("edge_count") or 0) + int(r.get("shield_count") or 0)) > 0 for r in rows)
+        )
+        has_edge_sid = bool(first.get("any_edge_sid")) or (
+            use_slim_index and any(bool(r.get("edge_sid")) for r in rows)
+        )
+        has_cmcd = bool(first.get("any_cmcd")) or (
+            use_slim_index and any(int(r.get("streaming_reqs") or 0) > 0 for r in rows)
+        )
+        if use_slim_index and rows and not has_cmcd:
+            cmcd_probe = service.client.execute(
+                "SELECT 1 AS c FROM cmcd_projection_facts WHERE service_id = {service_id:String} "
+                "AND event_timestamp >= {start_time:DateTime64(3)} "
+                "AND event_timestamp <= {end_time:DateTime64(3)} AND cmcd['sid'] != '' LIMIT 1",
+                params,
+            )
+            has_cmcd = bool(cmcd_probe)
+        result = shape_sessions_envelope(
+            sessions,
+            total=total,
+            page=req.page,
+            limit=req.limit,
+            has_rtt=has_rtt,
+            has_ja4=has_ja4,
+            has_edge=has_edge,
+            has_edge_sid=has_edge_sid,
+            has_cmcd=has_cmcd,
+            min_reqs_flag=min_reqs_flag,
+            min_4xx_pct_flag=min_4xx_pct_flag,
+            service_id=service.service_id,
+            asn_label_resolver=_asn_label_map,
+        )
+        _sessions_memo.put(memo_key, result)
+        return result
+
+    out = _sessions_memo.coalesce(f"hs_sessions:{memo_key}", _compute)
+    return {**out, "sessions": [dict(r) for r in out.get("sessions", [])]}
 
 
 def sessions_detail(
@@ -438,6 +792,24 @@ def sessions_detail(
     ja4: str | None,
 ) -> dict[str, Any]:
     start_dt, end_dt = parse_time_window(start_time, end_time, timedelta(days=7))
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
+    memo_key: str | None = None
+    if is_real_ch and start_time is not None and end_time is not None:
+        memo_key = digest_cache_key(
+            {
+                "ep": "hs_sessions_detail",
+                "cid": client_cache_token(service.client),
+                "s": start_dt.isoformat(),
+                "e": end_dt.isoformat(),
+                "ip": ip,
+                "ja4": ja4 or "",
+            },
+            {"name": service.service_id, "service_id": service.service_id},
+        )
+        if (cached := _sessions_memo.get_with_telemetry(memo_key)) is not None:
+            return cached
     clauses = [
         *visible_fact_clauses("request"),
         "client_ip = {ip:String}",
@@ -456,11 +828,13 @@ def sessions_detail(
         custom_fields['ja4'] AS ja4,
         event_timestamp AS timestamp,
         country,
+        custom_fields['host'] AS host,
         url,
         toInt32OrZero(custom_fields['status']) AS status,
         custom_fields['method'] AS method,
         custom_fields['protocol'] AS protocol,
         toInt64OrZero(custom_fields['resp_bytes']) AS resp_bytes,
+        toFloat64OrNull(custom_fields['elapsed']) AS elapsed,
         toFloat64OrZero(custom_fields['tcp_rtt']) AS tcp_rtt,
         custom_fields['edge'] AS edge,
         custom_fields['edge_sid'] AS edge_sid,
@@ -488,7 +862,11 @@ def sessions_detail(
     for row in data:
         if row.get("timestamp"):
             row["timestamp"] = _iso(row["timestamp"])
-    return {"data": data, "columns": list(data[0].keys()) if data else []}
+    out = {"data": data, "columns": list(data[0].keys()) if data else []}
+    if memo_key is not None:
+        _sessions_memo.put(memo_key, dict(out))
+        return _sessions_memo.result(out, state="miss")
+    return out
 
 
 if (_hs_pkg := sys.modules.get("backend.high_scale")) is not None:

@@ -2,8 +2,9 @@
 
 import React from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Check, Database, Lock, Pencil, Trash2, X } from 'lucide-react'
-import { ColumnDef, flexRender, getCoreRowModel, useReactTable } from '@tanstack/react-table'
+import { Check, Database, Pencil, Trash2, X } from 'lucide-react'
+import { flexRender, useTable } from '@tanstack/react-table'
+import { basicTableFeatures, type BasicColumnDef } from '@/lib/table'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -14,6 +15,8 @@ import { useMounted } from '@/hooks/useBootstrap'
 import { client, unwrapClient, queryKeys } from '@/lib/api'
 import { formatBytesTiered, formatCountMaybe } from '@/lib/utils'
 import type { components, Expect, WireParity } from '@/types/api'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
+import { getOperationalLogging } from '@/lib/cloud-engine/telemetry/admin'
 
 type TableStat = { rows: number; bytes: number | null }
 type StorageResponse = {
@@ -21,7 +24,6 @@ type StorageResponse = {
   db_bytes: number | null
   db_path: string
   retention: { usage_log_days: number; ingested_files_days: number; cron_runs_days: number }
-  ingested_files_locked?: boolean
 }
 type _TableStatParity = Expect<WireParity<TableStat, components['schemas']['MetadataTableStat']>>
 type _RetentionParity = Expect<
@@ -36,8 +38,6 @@ const REFERENCE = [
   'alerts',
   'saved_views',
   'audit_log',
-  'in_flight_buffers',
-  'locally_compacted_files',
 ] as const
 
 const TABLE_LABELS: Record<string, { label: string; sub: string }> = {
@@ -51,23 +51,15 @@ const TABLE_LABELS: Record<string, { label: string; sub: string }> = {
   },
   cron_runs: {
     label: 'Cron run history',
-    sub: 'audit trail for sync, optimize, cleanup, etc.',
+    sub: 'audit trail for sync, gap heal, cleanup, etc.',
   },
   alerts: { label: 'Saved alerts', sub: 'user-configured alert rules' },
   saved_views: { label: 'Saved dashboard views', sub: 'user-saved filter combinations' },
   audit_log: { label: 'Admin audit log', sub: 'admin actions (settings, teardown, share invites)' },
-  in_flight_buffers: { label: 'In-flight ingest buffers', sub: 'pending parquet writes mid-sync' },
-  locally_compacted_files: {
-    label: 'Local-compaction registry',
-    sub: 'tracks compacted source files to block re-download',
-  },
 }
 
 const fmtRetentionDays = (n: number): string =>
   n <= 0 ? 'disabled' : n === 1 ? '1 day' : `${n} days`
-
-const LOCKED_REASON =
-  'cron_sync.delete_after=false on this service. Raw .gz files stay in FOS forever, so ingested_files is the only thing stopping the daily full_sync from re-ingesting every aged-out file. Cleanup of this table is force-disabled regardless of the configured retention.'
 
 type MetadataStorageRow = { name: string; trimmable: boolean; stat: TableStat }
 
@@ -80,7 +72,7 @@ function MetadataStorageTable({
   retention: StorageResponse['retention']
   dbBytes: number | null
 }) {
-  const columns = React.useMemo<ColumnDef<MetadataStorageRow>[]>(
+  const columns = React.useMemo<BasicColumnDef<MetadataStorageRow>[]>(
     () => [
       {
         id: 'table',
@@ -135,7 +127,7 @@ function MetadataStorageTable({
     ],
     [retention],
   )
-  const table = useReactTable({ data: rows, columns, getCoreRowModel: getCoreRowModel() })
+  const table = useTable({ features: basicTableFeatures, data: rows, columns })
   return (
     <Table className="w-full text-sm">
       <TableHeader className="bg-muted/50">
@@ -195,6 +187,33 @@ function MetadataStorageTable({
 }
 
 export function MetadataStorageCard() {
+  return IS_CLOUD_MODE ? <CloudMetadataStorageCard /> : <StandardMetadataStorageCard />
+}
+
+function CloudMetadataStorageCard() {
+  const { data, isLoading, isFetching, error } = useQuery({
+    queryKey: ['cloud-operational-logging'],
+    queryFn: getOperationalLogging,
+    staleTime: 30_000,
+  })
+  return (
+    <AnalyticsCard title="Cloud Operational Storage" icon={<Database className="h-4 w-4" />}
+      description="Operational records are persisted as FOS Parquet. Cloud has no PostgreSQL database file or host table-size metrics."
+      isLoading={isLoading} isFetching={isFetching} error={error as AnalyticsCardError | null}>
+      {data && <div className="space-y-3">
+        <p className="text-sm text-muted-foreground">Native retention policy by record kind. Saved views live in the install&apos;s KV store; operational history is managed through its native log pages.</p>
+        <Table>
+          <TableHeader><TableRow><TableHead>Record kind</TableHead><TableHead className="text-right">Retention (days)</TableHead></TableRow></TableHeader>
+          <TableBody>{Object.entries(data.settings.retention_days_by_kind).map(([kind, days]) => (
+            <TableRow key={kind}><TableCell className="font-mono text-xs">{kind}</TableCell><TableCell className="text-right">{days}</TableCell></TableRow>
+          ))}</TableBody>
+        </Table>
+      </div>}
+    </AnalyticsCard>
+  )
+}
+
+function StandardMetadataStorageCard() {
   const qc = useQueryClient()
   const mounted = useMounted()
   const { data, isLoading, isFetching, error } = useQuery<StorageResponse>({
@@ -287,8 +306,6 @@ export function MetadataStorageCard() {
           key: 'ingested_files_days',
           label: 'ingested_files retention',
           value: data.retention.ingested_files_days,
-          locked: data.ingested_files_locked,
-          lockedReason: LOCKED_REASON,
         },
         { key: 'cron_runs_days', label: 'cron_runs retention', value: data.retention.cron_runs_days },
       ] as const)
@@ -352,8 +369,6 @@ export function MetadataStorageCard() {
                   value={f.value}
                   draft={draft[f.key]}
                   onDraftChange={(v) => setDraft((d) => ({ ...d, [f.key]: v }))}
-                  locked={'locked' in f ? f.locked : undefined}
-                  lockedReason={'lockedReason' in f ? f.lockedReason : undefined}
                 />
               ))}
             </div>
@@ -383,51 +398,33 @@ function RetentionField({
   value,
   draft,
   onDraftChange,
-  locked,
-  lockedReason,
 }: {
   label: string
   editing: boolean
   value: number
   draft: string
   onDraftChange: (v: string) => void
-  locked?: boolean
-  lockedReason?: string
 }) {
   return (
     <div>
       <div className="text-[11px] sm:text-[10px] uppercase tracking-wider text-muted-foreground flex items-center gap-1">
         {label}
-        {locked && (
-          <span
-            title={lockedReason}
-            className="inline-flex items-center text-amber-500"
-            aria-label="locked"
-          >
-            <Lock className="h-3 w-3" aria-hidden="true" />
-          </span>
-        )}
       </div>
       {editing ? (
         <div className="flex items-center gap-1.5 mt-1">
           <Input
             type="number"
             min={0}
-            value={locked ? '0' : draft}
+            value={draft}
             onChange={(e) => onDraftChange(e.target.value)}
-            disabled={locked}
             className="h-7 w-20 text-sm tabular-nums"
-            title={locked ? lockedReason : undefined}
             aria-label={`${label} retention in days`}
           />
           <span className="text-xs text-muted-foreground">days</span>
         </div>
       ) : (
-        <div
-          className={`text-sm font-semibold tabular-nums ${locked ? 'text-muted-foreground italic' : ''}`}
-          title={locked ? lockedReason : undefined}
-        >
-          {locked ? 'disabled (delete_after=false)' : fmtRetentionDays(value)}
+        <div className="text-sm font-semibold tabular-nums">
+          {fmtRetentionDays(value)}
         </div>
       )}
     </div>

@@ -266,3 +266,6 @@ def resolve_pop_geo_fallback(
             clean_edge_meta_str(loc.get("country")).upper(),
         )
     return "", "", ""
+
+
+from backend.core.fos_client import _get_dma_map as _get_dma_map  # noqa: E402, F401

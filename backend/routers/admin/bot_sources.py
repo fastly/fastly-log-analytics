@@ -44,7 +44,6 @@ def get_pop_locations() -> PopLocationsResponse:
 @router.post("/admin/pop-locations/refresh", response_model=PopLocationsResponse)
 def refresh_pop_locations(
     req: RefreshPopLocationsRequest | None = None,
-    token: str | None = Query(default=None),
 ) -> PopLocationsResponse:
     """Refresh the POP locations cache from the Fastly API."""
     api_key = ""
@@ -52,11 +51,7 @@ def refresh_pop_locations(
         api_key = req.token.strip()
 
     if not api_key:
-        if token is None:
-            raise HTTPException(status_code=422, detail=validation_failed("token_required", ["token is required"]))
-        api_key = token.strip()
-        if not api_key:
-            raise HTTPException(status_code=400, detail=bad_request("api_key_required"))
+        raise HTTPException(status_code=422, detail=validation_failed("token_required", ["token is required"]))
 
     from backend.utils.pop_utils import fetch_pop_locations, get_pop_locations
 
@@ -77,8 +72,7 @@ def refresh_pop_locations(
 def trigger_ngwaf_sync_endpoint(service_id: str) -> NgwafSyncResponse:
     """Trigger manual NGWAF bot sync for a service."""
     from backend import config as svcconfig
-    from backend.core.rollups.security_dims import get_cache_stats
-    from backend.cron.jobs.metadata import _run_ngwaf_bot_sync
+    from backend.cron.jobs.metadata import _run_ngwaf_bot_sync, get_cache_stats
 
     load_service_config(service_id)
 
@@ -96,7 +90,7 @@ def get_ngwaf_status_endpoint(
 ) -> NgwafStatusResponse:
     """Return NGWAF cache statistics and workspace sync watermarks."""
     from backend import config as svcconfig
-    from backend.core.rollups.security_dims import get_cache_stats
+    from backend.cron.jobs.metadata import get_cache_stats
 
     stats = get_cache_stats()
     if service_id:

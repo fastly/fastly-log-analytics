@@ -3,10 +3,16 @@ import type { paths, components } from "@/types/api.generated";
 import type { StripIndex, WireParity } from "@/types/api";
 import { useDebugStore, useServiceStore, useSessionRoleStore } from "@/stores/filterStore";
 import { parseExtentMs, showReadOnlyToast, showBusyToast, showToast, isUserActive } from "@/lib/utils";
+import { IS_CLOUD_MODE, isCloudMode } from "@/lib/cloud-engine/mode";
+import { parseVcpuMsHeader } from "@/lib/cloud-engine/dashboard/sources";
+import { parseServerTiming } from "@/lib/call-timeline";
 
 export * from "./apiSsrProxy";
 export * from "./apiQueryKeys";
 export * from "./apiLogFields";
+
+let cloudAdapter: Promise<typeof import("@/lib/cloud-engine/adapter")> | undefined;
+const getCloudAdapter = () => cloudAdapter ??= import("@/lib/cloud-engine/adapter");
 
 let pageLoadId: string | null = null;
 const makeUuid = () =>
@@ -88,7 +94,26 @@ export function getApiBase() {
   return process.env.API_PROXY_URL || `http://127.0.0.1:${port}`;
 }
 
-export const client = createClient<paths>({ baseUrl: getApiBase(), fetch: (req) => globalThis.fetch(req) });
+export const client = createClient<paths>({
+  baseUrl: getApiBase(),
+  fetch: async (req) => {
+    if (IS_CLOUD_MODE || isCloudMode()) {
+      const { handleCloudAnalyticalRequest } = await getCloudAdapter();
+      const intercepted = await handleCloudAnalyticalRequest(req);
+      if (intercepted) return intercepted;
+      const { measureCloudQuery } = await import("@/lib/cloud-engine/readiness");
+      const url = new URL(req.url);
+      const serviceId = req.headers.get("x-service-id");
+      return measureCloudQuery(
+        `api.${url.pathname}`,
+        () => globalThis.fetch(req),
+        undefined,
+        serviceId,
+      );
+    }
+    return globalThis.fetch(req);
+  },
+});
 
 function stampClientContextHeaders(headers: Headers): string | null {
   const currentPageLoadId = getPageLoadId();
@@ -114,23 +139,56 @@ function stampClientContextHeaders(headers: Headers): string | null {
 
 const SESSION_DEAD_403_ERRORS = new Set(["fingerprint_mismatch", "ip_not_whitelisted", "unauthenticated"]);
 
-function redirectToShareLoginIfSessionDead(): void {
+let cloudSessionVerification: Promise<boolean> | null = null;
+
+function isCloudSessionDead(): Promise<boolean> {
+  if (!cloudSessionVerification) {
+    cloudSessionVerification = (async () => {
+      try {
+        const response = await globalThis.fetch(`${getApiBase()}/api/auth/session`, {
+          credentials: "include",
+          cache: "no-store",
+        });
+        if (response.status === 401 || response.status === 403) return true;
+        if (!response.ok) return false;
+        const session = await response.json() as { user?: unknown };
+        return session.user === null;
+      } catch {
+        return false;
+      }
+    })().finally(() => {
+      cloudSessionVerification = null;
+    });
+  }
+  return cloudSessionVerification;
+}
+
+async function redirectToShareLoginIfSessionDead(verifyCloudSession: boolean): Promise<void> {
   if (typeof window === "undefined") return;
-  if (window.location.pathname.startsWith("/share-login")) return;
+  const pathname = window.location.pathname;
+  if (
+    pathname.startsWith("/share-login") ||
+    pathname.startsWith("/setup") ||
+    pathname.startsWith("/sign-in") ||
+    pathname.startsWith("/invite")
+  ) {
+    return;
+  }
   try {
-    if (!useSessionRoleStore.getState().isRemoteAnalyst) return;
+    if (!useSessionRoleStore.getState().isRemoteAnalyst && !IS_CLOUD_MODE && !isCloudMode()) return;
   } catch {
     /* store unavailable */
   }
+  if (verifyCloudSession && (IS_CLOUD_MODE || isCloudMode()) && !await isCloudSessionDead()) return;
   const returnTo = `${window.location.pathname}${window.location.search}`;
   window.location.replace(`/share-login?return=${encodeURIComponent(returnTo)}`);
 }
 
-export function handleApiStatusSideEffects(
+async function handleApiStatusSideEffects(
   status: number,
   bodyOrError: unknown,
   method?: string,
-): { msg: string; isBusy503: boolean; isDead403: boolean; alreadyHandled: boolean } {
+): Promise<{ msg: string; isBusy503: boolean; isDead403: boolean; alreadyHandled: boolean }> {
   let error: unknown = bodyOrError;
   if (typeof bodyOrError === "string") {
     const trimmed = bodyOrError.trim();
@@ -153,7 +211,7 @@ export function handleApiStatusSideEffects(
     (error as { error?: string })?.error;
   const isDead403 =
     status === 403 && typeof errorCode === "string" && SESSION_DEAD_403_ERRORS.has(errorCode);
-  if (status === 401 || isDead403) redirectToShareLoginIfSessionDead();
+  if (status === 401 || isDead403) await redirectToShareLoginIfSessionDead(status === 401);
   if (status === 403 && msg === "read_only") showReadOnlyToast();
   const isBusy503 = status === 503 && (error as { detail?: { busy?: boolean } })?.detail?.busy === true;
   if (isBusy503) showBusyToast();
@@ -166,16 +224,26 @@ export function handleApiStatusSideEffects(
 }
 
 async function rawAdminFetch(input: string | URL | Request, init: RequestInit = {}): Promise<Response> {
-  const headers = new Headers(init.headers ?? {});
-  stampClientContextHeaders(headers);
-  return fetch(input, { ...init, headers });
+  const origin = globalThis.window?.location.origin ?? "http://localhost";
+  const target = input instanceof Request ? input : new URL(String(input), origin);
+  const { headers: initHeaders, ...requestInit } = init;
+  const request = new Request(target, requestInit);
+  new Headers(initHeaders).forEach((value, key) => request.headers.set(key, value));
+  stampClientContextHeaders(request.headers);
+  if (IS_CLOUD_MODE || isCloudMode()) {
+    const { handleCloudAnalyticalRequest } = await getCloudAdapter();
+    const intercepted = await handleCloudAnalyticalRequest(request);
+    if (intercepted) return intercepted;
+  }
+  return fetch(request);
 }
 
 export async function adminFetch(input: string | URL | Request, init: RequestInit = {}): Promise<Response> {
   const r = await rawAdminFetch(input, init);
   if (!r.ok) {
     const errorText = typeof r.clone === "function" ? await r.clone().text().catch(() => "") : "";
-    handleApiStatusSideEffects(r.status, errorText, init.method);
+    const method = init.method ?? (input instanceof Request ? input.method : undefined);
+    await handleApiStatusSideEffects(r.status, errorText, method);
   }
   return r;
 }
@@ -213,7 +281,7 @@ export async function adminJsonResult<P extends keyof paths, T = JsonOf<P>, M ex
   const r = await rawAdminFetch(url, init);
   if (!r.ok) {
     const errorText = await r.text().catch(() => "");
-    handleApiStatusSideEffects(r.status, errorText, init.method);
+    await handleApiStatusSideEffects(r.status, errorText, init.method);
     return {
       ok: false,
       status: r.status,
@@ -248,6 +316,7 @@ const SERVICELESS_PATH_PREFIXES = [
   "/api/admin/debug-settings",
   "/api/admin/usage-logging",
   "/api/provision",
+  "/api/high-scale/restore-from-fos",
   "/api/log-fields/catalog",
   "/api/admin/health-snapshot",
   "/api/admin/system-metrics",
@@ -261,11 +330,14 @@ const SERVICELESS_PATH_PREFIXES = [
   "/rum/versions",
 ];
 
+const requestStarts = new WeakMap<Request, number>();
+
 client.use({
   async onRequest({ request }) {
+    requestStarts.set(request, performance.timeOrigin + performance.now());
     const activeServiceId = stampClientContextHeaders(request.headers);
     request.headers.set("X-User-Active", isUserActive() ? "1" : "0");
-    if (activeServiceId) return request;
+    if (activeServiceId || IS_CLOUD_MODE || isCloudMode()) return request;
     const url = String(request.url);
     if (SERVICELESS_PATH_PREFIXES.some((p) => url.includes(p)) || url.split("?")[0].endsWith("/api/services")) {
       return request;
@@ -275,6 +347,30 @@ client.use({
     throw err;
   },
   async onResponse({ request, response }) {
+    try {
+      const debugState = useDebugStore.getState();
+      if (debugState.apiCallsEnabled) {
+        const parsedUrl = new URL(String(request.url), "http://localhost");
+        const path = `${parsedUrl.pathname}${parsedUrl.search}`;
+        const vcpuMs = parseVcpuMsHeader(response.headers.get("x-flp-vcpu-ms"));
+        const startMs = requestStarts.get(request);
+        const endMs = performance.timeOrigin + performance.now();
+        debugState.addApiCall({
+          source: "Compute",
+          method: request.method || "GET",
+          path,
+          endpoint: `${request.method || "GET"} ${parsedUrl.pathname}`,
+          status: response.status,
+          duration_ms: startMs === undefined ? 0 : Math.max(0, Math.round(endMs - startMs)),
+          start_ms: startMs,
+          server_timing: parseServerTiming(response.headers.get("server-timing")),
+          vcpu_ms: vcpuMs,
+          timestamp: new Date().toISOString(),
+        });
+      }
+    } catch {
+      /* ignore debug telemetry errors */
+    }
     if (response.status === 503 && String(request.url).includes("/api/admin/clickhouse/status")) {
       const payload = await response.clone().json().catch(() => null);
       if (payload && typeof payload === "object" && "health" in payload) {
@@ -283,7 +379,7 @@ client.use({
     }
     if (!response.ok) {
       const error = await response.json().catch(() => ({ message: "An unknown error occurred" }));
-      const { msg, isBusy503 } = handleApiStatusSideEffects(response.status, error, request.method);
+      const { msg, isBusy503 } = await handleApiStatusSideEffects(response.status, error, request.method);
       const err = new Error(msg) as Error & { status?: number; response?: { status: number }; busy?: boolean };
       err.status = response.status;
       err.response = { status: response.status };

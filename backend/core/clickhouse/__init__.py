@@ -99,7 +99,7 @@ from backend.core.clickhouse.params import (
     digest_rows,
     utc,
 )
-from backend.core.duckdb import _get_fos_client
+from backend.core.fos_client import _get_fos_client
 from backend.core.metadata import base as pg_connection
 from backend.core.metadata.base import CLICKHOUSE_CONTROL_DDL, get_pg_pool
 from backend.core.request_telemetry import current_clickhouse_scope, get_meter, query_registry

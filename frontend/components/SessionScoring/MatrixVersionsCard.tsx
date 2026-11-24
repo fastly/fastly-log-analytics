@@ -2,7 +2,7 @@
 
 import React from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { ColumnDef } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import { History, Info, RotateCcw } from 'lucide-react'
 import { AnalyticsCard, CardErrorState } from '@/components/AnalyticsCard'
 import { DataTableReadonly } from '@/components/DataTable'

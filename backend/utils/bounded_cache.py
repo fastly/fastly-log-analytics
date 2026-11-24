@@ -12,7 +12,76 @@ import cachetools
 _MISSING = object()
 
 
-class BoundedTTLCache[K, V](MutableMapping[K, V]):
+class _BoundedCacheBase[K, V](MutableMapping[K, V]):
+    _cache: cachetools.Cache[K, V]
+    lock: threading.RLock
+
+    def __contains__(self, key: object) -> bool:
+        with self.lock:
+            return key in self._cache
+
+    def __getitem__(self, key: K) -> V:
+        with self.lock:
+            return self._cache[key]
+
+    def get(self, key: K, default: Any = None) -> Any:
+        with self.lock:
+            return self._cache.get(key, default)
+
+    def __setitem__(self, key: K, value: V) -> None:
+        with self.lock:
+            self._cache[key] = value
+
+    def set(self, key: K, value: V) -> None:
+        self[key] = value
+
+    def put(self, key: K, value: V) -> None:
+        self[key] = value
+
+    def setdefault(self, key: K, default: Any = None) -> Any:
+        with self.lock:
+            return self._cache.setdefault(key, default)
+
+    def __delitem__(self, key: K) -> None:
+        with self.lock:
+            del self._cache[key]
+
+    def delete(self, key: K) -> bool:
+        with self.lock:
+            return self._cache.pop(key, _MISSING) is not _MISSING
+
+    def pop(self, key: K, default: Any = _MISSING) -> Any:
+        with self.lock:
+            if default is _MISSING:
+                return self._cache.pop(key)
+            return self._cache.pop(key, default)
+
+    def clear(self) -> None:
+        with self.lock:
+            self._cache.clear()
+
+    def __len__(self) -> int:
+        with self.lock:
+            return len(self._cache)
+
+    def __iter__(self) -> Iterator[K]:
+        with self.lock:
+            return iter(list(self._cache.keys()))
+
+    def keys(self) -> list[K]:  # type: ignore[override]
+        with self.lock:
+            return list(self._cache.keys())
+
+    def values(self) -> list[V]:  # type: ignore[override]
+        with self.lock:
+            return list(self._cache.values())
+
+    def items(self) -> list[tuple[K, V]]:  # type: ignore[override]
+        with self.lock:
+            return list(self._cache.items())
+
+
+class BoundedTTLCache[K, V](_BoundedCacheBase[K, V]):
     """Thread-safe TTL + LRU bounded cache backed by ``cachetools.TTLCache``."""
 
     def __init__(
@@ -36,7 +105,7 @@ class BoundedTTLCache[K, V](MutableMapping[K, V]):
         self.maxsize = resolved_max
         self.ttl = self.ttl_seconds = float(ttl_seconds)
         self.name = name
-        self._cache: cachetools.TTLCache[K, V] = cachetools.TTLCache(
+        self._cache = cachetools.TTLCache(
             maxsize=resolved_max,
             ttl=self.ttl,
             timer=lambda: time.monotonic(),
@@ -44,76 +113,12 @@ class BoundedTTLCache[K, V](MutableMapping[K, V]):
         self.lock = threading.RLock()
         self._lock = self.lock
 
-    def __contains__(self, key: object) -> bool:
-        with self.lock:
-            return key in self._cache
-
-    def __getitem__(self, key: K) -> V:
-        with self.lock:
-            return self._cache[key]
-
-    def get(self, key: K, default: Any = None) -> Any:
-        with self.lock:
-            return self._cache.get(key, default)
-
-    def __setitem__(self, key: K, value: V) -> None:
-        with self.lock:
-            self._cache[key] = value
-
-    def set(self, key: K, value: V) -> None:
-        self[key] = value
-
-    def put(self, key: K, value: V) -> None:
-        self[key] = value
-
-    def setdefault(self, key: K, default: Any = None) -> Any:
-        with self.lock:
-            return self._cache.setdefault(key, default)
-
-    def __delitem__(self, key: K) -> None:
-        with self.lock:
-            del self._cache[key]
-
-    def delete(self, key: K) -> bool:
-        with self.lock:
-            return self._cache.pop(key, _MISSING) is not _MISSING
-
-    def pop(self, key: K, default: Any = _MISSING) -> Any:
-        with self.lock:
-            if default is _MISSING:
-                return self._cache.pop(key)
-            return self._cache.pop(key, default)
-
-    def clear(self) -> None:
-        with self.lock:
-            self._cache.clear()
-
-    def __len__(self) -> int:
-        with self.lock:
-            return len(self._cache)
-
-    def __iter__(self) -> Iterator[K]:
-        with self.lock:
-            return iter(list(self._cache.keys()))
-
-    def keys(self) -> list[K]:  # type: ignore[override]
-        with self.lock:
-            return list(self._cache.keys())
-
-    def values(self) -> list[V]:  # type: ignore[override]
-        with self.lock:
-            return list(self._cache.values())
-
-    def items(self) -> list[tuple[K, V]]:  # type: ignore[override]
-        with self.lock:
-            return list(self._cache.items())
-
     def __repr__(self) -> str:
         with self.lock:
             return f"BoundedTTLCache(maxsize={self.maxsize}, ttl_seconds={self.ttl_seconds}, size={len(self._cache)})"
 
 
-class BoundedLRUCache[K, V](MutableMapping[K, V]):
+class BoundedLRUCache[K, V](_BoundedCacheBase[K, V]):
     """Thread-safe LRU bounded cache backed by ``cachetools.LRUCache``."""
 
     def __init__(
@@ -133,73 +138,9 @@ class BoundedLRUCache[K, V](MutableMapping[K, V]):
             raise ValueError("maxsize must be positive")
         self.maxsize = resolved_max
         self.name = name
-        self._cache: cachetools.LRUCache[K, V] = cachetools.LRUCache(maxsize=resolved_max)
+        self._cache = cachetools.LRUCache(maxsize=resolved_max)
         self.lock = threading.RLock()
         self._lock = self.lock
-
-    def __contains__(self, key: object) -> bool:
-        with self.lock:
-            return key in self._cache
-
-    def __getitem__(self, key: K) -> V:
-        with self.lock:
-            return self._cache[key]
-
-    def get(self, key: K, default: Any = None) -> Any:
-        with self.lock:
-            return self._cache.get(key, default)
-
-    def __setitem__(self, key: K, value: V) -> None:
-        with self.lock:
-            self._cache[key] = value
-
-    def set(self, key: K, value: V) -> None:
-        self[key] = value
-
-    def put(self, key: K, value: V) -> None:
-        self[key] = value
-
-    def setdefault(self, key: K, default: Any = None) -> Any:
-        with self.lock:
-            return self._cache.setdefault(key, default)
-
-    def __delitem__(self, key: K) -> None:
-        with self.lock:
-            del self._cache[key]
-
-    def delete(self, key: K) -> bool:
-        with self.lock:
-            return self._cache.pop(key, _MISSING) is not _MISSING
-
-    def pop(self, key: K, default: Any = _MISSING) -> Any:
-        with self.lock:
-            if default is _MISSING:
-                return self._cache.pop(key)
-            return self._cache.pop(key, default)
-
-    def clear(self) -> None:
-        with self.lock:
-            self._cache.clear()
-
-    def __len__(self) -> int:
-        with self.lock:
-            return len(self._cache)
-
-    def __iter__(self) -> Iterator[K]:
-        with self.lock:
-            return iter(list(self._cache.keys()))
-
-    def keys(self) -> list[K]:  # type: ignore[override]
-        with self.lock:
-            return list(self._cache.keys())
-
-    def values(self) -> list[V]:  # type: ignore[override]
-        with self.lock:
-            return list(self._cache.values())
-
-    def items(self) -> list[tuple[K, V]]:  # type: ignore[override]
-        with self.lock:
-            return list(self._cache.items())
 
     def __repr__(self) -> str:
         with self.lock:

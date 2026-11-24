@@ -11,7 +11,7 @@ from collections.abc import Iterator
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from backend.core import metadata as metadata_db
-from backend.core.duckdb import ensure_cid_salt
+from backend.core.fos_client import ensure_cid_salt
 from backend.core.request_context import get_service_id, get_source
 from backend.models.common import (
     CredentialsUpdateResponse,
@@ -31,6 +31,7 @@ from backend.utils.router_utils import (
     raise_internal,
     stored_fastly_token,
 )
+from backend.utils.sse import sse_payload as _sse
 from backend.utils.sse import sse_response
 
 logger = logging.getLogger(__name__)
@@ -43,14 +44,6 @@ _CacheRegistry.register("services.core._cron_schedule_cache", _cron_schedule_cac
 
 # Whitelisted fields safe to surface to a remote analyst on GET /api/services.
 _ANALYST_SAFE_SERVICE_FIELDS = frozenset({"service_id", "name", "is_active"})
-
-
-def _sse(type_: str, message: str | None = None, **extra: object) -> str:
-    payload: dict[str, object] = {"type": type_}
-    if message is not None:
-        payload["message"] = message
-    payload.update(extra)
-    return json.dumps(payload)
 
 
 def _trim_for_analyst(services: list[dict], allowed_ids: set[str]) -> list[dict]:
@@ -99,11 +92,11 @@ def api_service_cron_settings(request: Request, service_id: str, body: ServiceCr
             if not svcconfig.load_config(service_id):
                 raise ValueError("Service not found")
             yield _sse("progress", current=1, total=4)
-            yield _sse("status", "Updating sync and compaction schedules...")
+            yield _sse("status", "Updating sync and NGWAF schedules...")
 
             def _apply(cfg: dict) -> None:
                 prov = cfg.setdefault("provisioning", {})
-                for cron_key in ("cron_sync", "cron_compact", "cron_ngwaf"):
+                for cron_key in ("cron_sync", "cron_ngwaf"):
                     incoming = body_payload.get(cron_key)
                     if incoming is None:
                         continue
@@ -266,7 +259,7 @@ def api_service_update_credentials(request: Request, service_id: str, body: Serv
     """Rotate or validate and update FOS credentials for a service."""
     import botocore.exceptions
 
-    from backend.core.duckdb import _get_fos_client
+    from backend.core.fos_client import _get_fos_client
 
     require_service_in_scope(request, service_id)
     cfg = load_service_config(service_id)
@@ -332,8 +325,8 @@ def api_service_update_credentials(request: Request, service_id: str, body: Serv
 def api_ngwaf_sync(service_id: str):
     """Manually trigger an NGWAF bot-sync run for a service, streamed as SSE."""
     from backend import config as svcconfig
-    from backend.core.duckdb import get_source_for_service, log_cron_run, start_cron_run
-    from backend.core.rollups.security_dims import (
+    from backend.core.fos_client import get_source_for_service, log_cron_run, start_cron_run
+    from backend.cron.jobs.metadata import (
         cleanup_old_bots,
         fetch_verified_bots_paged,
         oldest_unenriched_timestamp,

@@ -2,49 +2,81 @@
 
 import * as React from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from '@tanstack/react-table'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { Badge } from '@/components/ui/badge'
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Sparkline } from '@/app/dashboard/_sections/DashboardClient'
-import { ELAPSED_AGE_COMPACT, formatElapsed } from "@/lib/utils"
+import { ELAPSED_AGE_COMPACT, formatCount, formatElapsed } from "@/lib/utils"
 import { useMounted } from '@/hooks/useBootstrap'
 import { client, unwrapClient, queryKeys } from "@/lib/api";
+import { isCloudMode } from '@/lib/cloud-engine/mode'
+import { useServiceStore } from '@/stores/filterStore'
 import type { components } from '@/types/api.generated'
 
-type TrendPoint = components['schemas']['MetricHistoryPoint']
-type TrendBatch = components['schemas']['MetricHistoryBatchResponse']
+export const TICK_BACKEND_CALL_CEILING = 32
+export const TICK_VCPU_BUDGET_MS = 1000
+export const DEFAULT_CLOCK_INTERVAL_S = 120
+const MIN_TICK_HEALTH_WINDOW_S = 180
 
-// pool_wait is the one slot the backend response_model leaves loosely
-// typed (generated as `{[k:string]: unknown}[]`), so we keep a narrow
-// local shape and intersect it onto the generated snapshot. The other
-// six slots come straight from HealthSnapshotResponse.
-type PoolStats = {
-  service: string
-  max_size: number
-  in_use: number
-  idle: number
-  created_total: number
-  reused_total: number
-  discarded_total: number
-  // SRE-12: user-facing saturation rejects (→503) + recycle-drain rejects.
-  saturated_rejects_total?: number
-  drain_rejects_total?: number
-  // SRE-16: wall-clock of the last completed writer-driven view warm.
-  last_warmed_at?: string | null
-  wait?: {
-    count: number
-    p50_ms: number
-    p95_ms: number
-    p99_ms: number
-    max_ms: number
-    mean_ms: number
+export type CloudCronRunSummary = {
+  started_at?: string
+  backend_calls?: number
+  backend_requests_used?: number
+  vcpu_ms?: number
+  duration_ms?: number
+  status?: string
+  outcome?: string
+}
+
+export function summarizeTickHealth(
+  runs: CloudCronRunSummary[],
+  nowMs = Date.now(),
+  clockIntervalS = DEFAULT_CLOCK_INTERVAL_S,
+  nextTickAt?: string | null,
+) {
+  const latest = runs[0]
+  const last_tick_at = latest?.started_at ?? null
+  const clock_interval_s = clockIntervalS
+  const maxBackendCalls = runs.reduce(
+    (m, r) => Math.max(m, r.backend_requests_used ?? r.backend_calls ?? 0),
+    0,
+  )
+  const hasVcpu = runs.some((r) => typeof r.vcpu_ms === 'number')
+  const maxVcpuMs = runs.reduce((m, r) => Math.max(m, r.vcpu_ms ?? 0), 0)
+  const maxDurationMs = runs.reduce((m, r) => Math.max(m, r.duration_ms ?? 0), 0)
+  if (runs.length === 0) {
+    return {
+      tick_health: 'waiting' as const,
+      last_tick_at,
+      clock_interval_s,
+      maxBackendCalls,
+      maxVcpuMs,
+      maxDurationMs,
+      hasVcpu,
+    }
+  }
+  const ageSec = last_tick_at ? Math.max(0, (nowMs - Date.parse(last_tick_at)) / 1000) : null
+  const maxAgeSec = Math.max(clock_interval_s * 3, MIN_TICK_HEALTH_WINDOW_S)
+  const nextTickMs = nextTickAt ? Date.parse(nextTickAt) : Number.NaN
+  const scheduleCurrent = Number.isFinite(nextTickMs) && nowMs <= nextTickMs + 60_000
+  const fresh = (ageSec !== null && ageSec <= maxAgeSec) || scheduleCurrent
+  const healthy =
+    fresh &&
+    maxBackendCalls <= TICK_BACKEND_CALL_CEILING &&
+    (!hasVcpu || maxVcpuMs <= TICK_VCPU_BUDGET_MS)
+  return {
+    tick_health: healthy ? ('healthy' as const) : ('degraded' as const),
+    last_tick_at,
+    clock_interval_s,
+    maxBackendCalls,
+    maxVcpuMs,
+    maxDurationMs,
+    hasVcpu,
   }
 }
 
-type HealthSnapshot = Omit<components['schemas']['HealthSnapshotResponse'], 'pool_wait'> & {
-  pool_wait?: PoolStats[]
-}
+type TrendPoint = components['schemas']['MetricHistoryPoint']
+type TrendBatch = components['schemas']['MetricHistoryBatchResponse']
+type HealthSnapshot = components['schemas']['HealthSnapshotResponse']
 
 // SRE-14: 'unknown' is distinct from 'default'. A collector that errored
 // (load/mem/disk → null on the backend) must NOT render as a healthy zero in
@@ -106,12 +138,15 @@ export function SystemHealthCard() {
   // client render to the server's loading state, then swap to data after mount.
   const mounted = useMounted()
 
+  const cloud = isCloudMode()
+
   // Freshness is driven by useAdminEventStream (mounted globally
   // in SyncStatusBadge, gated to /admin and /logs paths). The 5-min
   // refetchInterval is a pure safety net for silently-dropped streams
   // — same shape as useSyncStatus / useLastSync.
   const { data: snap, isLoading, isFetching, error } = useQuery({
     queryKey: queryKeys.admin.healthSnapshot(),
+    enabled: !cloud,
     queryFn: async () => {
       return (await unwrapClient(
         client.GET('/api/admin/health-snapshot'),
@@ -128,6 +163,7 @@ export function SystemHealthCard() {
   // useAdminEventStream; 5-min poll is the safety net.
   const { data: trends } = useQuery({
     queryKey: queryKeys.admin.metricHistoryBatch('1h'),
+    enabled: !cloud,
     queryFn: async () => {
       return (await unwrapClient(
         client.GET('/api/admin/metric-history/batch', { params: { query: { since: '1h' } } }),
@@ -138,6 +174,107 @@ export function SystemHealthCard() {
     refetchInterval: 5 * 60_000,
     refetchIntervalInBackground: false,
   })
+
+  const activeServiceId = useServiceStore((s) => s.activeServiceId)
+  const { data: cloudSync, dataUpdatedAt: cloudSyncUpdatedAt } = useQuery({
+    queryKey: activeServiceId ? queryKeys.syncStatus(activeServiceId) : ['cloud-system-health-sync'],
+    enabled: cloud,
+    queryFn: async () => {
+      const res = await fetch('/api/sync-status', { credentials: 'include' })
+      if (!res.ok) return null
+      return (await res.json()) as {
+        configured?: boolean
+        last_tick_at?: string | null
+        next_tick_at?: string | null
+        clock_interval_s?: number
+        cron_runs?: CloudCronRunSummary[]
+      }
+    },
+    staleTime: 60_000,
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
+  })
+
+  if (cloud) {
+    const runs = cloudSync?.cron_runs ?? []
+    const clockInterval = cloudSync?.clock_interval_s ?? DEFAULT_CLOCK_INTERVAL_S
+    const nowRef = cloudSyncUpdatedAt > 0 ? cloudSyncUpdatedAt : undefined
+    const tick = summarizeTickHealth(runs, nowRef, clockInterval, cloudSync?.next_tick_at)
+    const tickTs = tick.last_tick_at ? Date.parse(tick.last_tick_at) : Number.NaN
+    const syncTs = cloudSync?.last_tick_at ? Date.parse(cloudSync.last_tick_at) : Number.NaN
+    const lastTickAt =
+      Number.isFinite(tickTs) && (!Number.isFinite(syncTs) || tickTs >= syncTs)
+        ? tick.last_tick_at
+        : (cloudSync?.last_tick_at ?? tick.last_tick_at)
+    const tickAgeSec =
+      lastTickAt && cloudSyncUpdatedAt > 0
+        ? Math.max(0, Math.round((cloudSyncUpdatedAt - Date.parse(lastTickAt)) / 1000))
+        : null
+    const maxHealthyAgeSec = Math.max(clockInterval * 3, MIN_TICK_HEALTH_WINDOW_S)
+    const lastTickFresh = tickAgeSec !== null && tickAgeSec <= maxHealthyAgeSec
+    const edgeClockStatus =
+      runs.length === 0
+        ? (lastTickFresh ? 'HEALTHY' : 'WAITING')
+        : tick.tick_health === 'healthy'
+          ? 'HEALTHY'
+          : 'DEGRADED'
+    const edgeClockTone: Tone =
+      edgeClockStatus === 'HEALTHY' ? 'default' : edgeClockStatus === 'WAITING' ? 'unknown' : 'warn'
+    return (
+      <AnalyticsCard
+        title="Compute & Edge Clock Health"
+        description="Serverless Fastly Compute ingestion clock, resource ceilings, and browser query engine status."
+      >
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+          <Stat
+            label="Edge Clock (/_tick)"
+            value={edgeClockStatus}
+            sub={`Cadence: ${clockInterval}s IAD shield probe`}
+            tone={edgeClockTone}
+          />
+          <Stat
+            label="Last Ingest Tick"
+            value={tickAgeSec == null ? '–' : `${formatElapsed(tickAgeSec, ELAPSED_AGE_COMPACT)} ago`}
+            sub={lastTickAt ?? 'awaiting first tick'}
+            tone={tickAgeSec == null ? 'unknown' : tickAgeSec > maxHealthyAgeSec ? 'warn' : 'default'}
+          />
+          {tick.hasVcpu ? (
+            <Stat
+              label="Peak Tick vCPU"
+              value={`${tick.maxVcpuMs} ms`}
+              sub={`Budget ceiling: ${TICK_VCPU_BUDGET_MS} ms / execution`}
+              tone={tick.maxVcpuMs > TICK_VCPU_BUDGET_MS ? 'crit' : tick.maxVcpuMs > 800 ? 'warn' : 'default'}
+            />
+          ) : (
+            <Stat
+              label="Peak Tick Duration"
+              value={runs.length === 0 ? '–' : `${formatCount(tick.maxDurationMs)} ms`}
+              sub="Wall-clock tick runtime (includes FOS I/O)"
+              tone={runs.length === 0 ? 'unknown' : 'default'}
+            />
+          )}
+          <Stat
+            label="Peak Backend Calls"
+            value={`${tick.maxBackendCalls} / ${TICK_BACKEND_CALL_CEILING}`}
+            sub="Subrequests per tick execution"
+            tone={tick.maxBackendCalls > TICK_BACKEND_CALL_CEILING ? 'crit' : tick.maxBackendCalls > 28 ? 'warn' : 'default'}
+          />
+          <Stat
+            label="Query Engine"
+            value="DuckDB-Wasm"
+            sub="In-browser Parquet + Rollup execution"
+            tone="default"
+          />
+          <Stat
+            label="Object Storage"
+            value="FOS Parquet"
+            sub="Fastly Object Storage + VCL CDN cache"
+            tone="default"
+          />
+        </div>
+      </AnalyticsCard>
+    )
+  }
 
   if (!mounted || !snap) {
     return (
@@ -157,23 +294,6 @@ export function SystemHealthCard() {
   }
 
   const series = trends?.series ?? {}
-  // Aggregate per-service pool_wait into a single max-across-services
-  // line so the card stays single-stat. Per-service breakdown stays in
-  // the expandable table below.
-  const poolKeys = Object.keys(series).filter((k) => k.startsWith('pool_wait_p95_ms|'))
-  const poolTrend: TrendPoint[] = (() => {
-    if (!poolKeys.length) return []
-    const byTs = new Map<string, number>()
-    for (const k of poolKeys) {
-      for (const p of series[k] ?? []) {
-        const prev = byTs.get(p.ts) ?? 0
-        if (p.value > prev) byTs.set(p.ts, p.value)
-      }
-    }
-    return Array.from(byTs.entries())
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([ts, value]) => ({ ts, value }))
-  })()
 
   const vcpus = snap.vcpus ?? 1
   // SRE-14: null = collector errored → 'unknown' (muted, em-dash), NOT a
@@ -221,40 +341,13 @@ export function SystemHealthCard() {
     backupAgeS > 8 * 86400 ? 'warn' :
     'default'
 
-  const totalFiles = Object.values(snap.compaction ?? {}).reduce((acc, v) => acc + (v?.total_files ?? 0), 0)
-  const aboveThreshold = Object.values(snap.compaction ?? {}).reduce((acc, v) => acc + (v?.partitions_above_3 ?? 0), 0)
-  const fileTone: 'default' | 'warn' = aboveThreshold > 20 ? 'warn' : 'default'
-
   const inFlight = snap.in_flight_runs ?? []
 
-  // Phase 6 in-process sampler — aggregate across services so the card
-  // shows ONE p95 / p99 rather than a per-service breakdown. Per-service
-  // detail is in the expandable section below.
-  const pools = snap.pool_wait ?? []
-  const poolMaxP95 = pools.reduce((acc, p) => Math.max(acc, p.wait?.p95_ms ?? 0), 0)
-  const poolMaxP99 = pools.reduce((acc, p) => Math.max(acc, p.wait?.p99_ms ?? 0), 0)
-  const poolSampleCount = pools.reduce((acc, p) => acc + (p.wait?.count ?? 0), 0)
-  // SRE-12: saturation rejects (→ 503). A partial-reject cliff (<5% of
-  // checkouts) can sit below the wait-p95 the tone keyed on, so p95 alone
-  // missed it. Any saturation reject forces at least 'warn'.
-  const poolRejects = pools.reduce((acc, p) => acc + (p.saturated_rejects_total ?? 0), 0)
-  // ADR-03 escalation threshold: >50ms p95 → consider separate-process
-  // cron isolation; <50ms → single-pool is sufficient.
-  const poolTone: Tone =
-    poolMaxP95 > 200 ? 'crit' :
-    poolMaxP95 > 50 || poolRejects > 0 ? 'warn' :
-    'default'
-
-  const celery = snap.celery ?? null
-  const queueDepth = celery?.queue_depth ?? null
-  const activeWorkers = celery?.active_workers ?? null
-  const brokerReachable = celery?.broker_reachable ?? true
-
-  const celeryTone: Tone =
-    celery == null ? 'unknown' :
-    !brokerReachable ? 'crit' :
-    queueDepth != null && queueDepth > 500 ? 'crit' :
-    queueDepth != null && queueDepth > 50 ? 'warn' :
+  const hsDisk = snap.high_scale?.disk ?? null
+  const hsTopology = snap.high_scale?.topology ?? null
+  const chTone: Tone =
+    hsDisk?.mode === 'emergency' || hsDisk?.mode === 'protective' ? 'crit' :
+    hsDisk?.mode === 'warning' ? 'warn' :
     'default'
 
   return (
@@ -302,45 +395,18 @@ export function SystemHealthCard() {
           trendDomain={[0, 100]}
           formatTrendValue={(v) => `${v.toFixed(1)}%`}
         />
-        {celery != null && (
-          <Stat
-            label="Celery Queue"
-            value={!brokerReachable ? 'OFFLINE' : queueDepth == null ? '–' : `${queueDepth}`}
-            sub={!brokerReachable ? 'Broker Unreachable' : `${activeWorkers} Active Worker(s)`}
-            tone={celeryTone}
-          />
-        )}
         <Stat
-          label="Cache files"
-          value={totalFiles}
-          sub={aboveThreshold > 0 ? `${aboveThreshold} partition(s) above threshold` : 'all compacted'}
-          tone={fileTone}
+          label="ClickHouse"
+          value={hsDisk ? hsDisk.mode.toUpperCase() : 'ONLINE'}
+          sub={hsTopology ? `${hsTopology.name} · ${hsTopology.shard_count} shard(s)` : 'analytical store'}
+          tone={chTone}
         />
         <Stat
-          label="Active queries"
+          label="Active ClickHouse queries"
           value={inFlight.length}
           sub={inFlight.length > 0 ? `${inFlight.length} tasks running` : 'idle'}
           trend={series['active_query_count']}
           formatTrendValue={(v) => v.toFixed(0)}
-        />
-        <Stat
-          label="Pool wait p95"
-          value={poolSampleCount > 0 ? `${poolMaxP95.toFixed(1)}ms` : '–'}
-          sub={poolSampleCount > 0
-            ? `p99 ${poolMaxP99.toFixed(1)}ms · n=${poolSampleCount}`
-            : 'no samples yet'}
-          tone={poolTone}
-          trend={poolTrend}
-          formatTrendValue={(v) => `${v.toFixed(1)}ms`}
-        />
-        <Stat
-          label="Pool in-use / idle"
-          value={pools.reduce((acc, p) => acc + p.in_use, 0)}
-          sub={pools.length > 0
-            ? `${pools.reduce((acc, p) => acc + p.idle, 0)} idle · max ${pools.reduce((acc, p) => acc + p.max_size, 0)}`
-            + (poolRejects > 0 ? ` · ${poolRejects} rejected` : '')
-            : 'no pools yet'}
-          tone={poolRejects > 0 ? 'warn' : 'default'}
         />
         <Stat
           label="Scheduler"
@@ -395,22 +461,6 @@ export function SystemHealthCard() {
         </div>
       )}
 
-      {pools.length > 0 && pools.some(p => (p.wait?.count ?? 0) > 0) && (
-        <details className="mt-3 text-xs">
-          <summary className="cursor-pointer text-muted-foreground hover:text-foreground select-none">
-            Per-service pool wait (Phase 6 telemetry)
-          </summary>
-          <div className="mt-2 overflow-x-auto">
-            <PoolWaitTable pools={pools} />
-            <p className="mt-1 text-[11px] sm:text-[10px] text-muted-foreground">
-              Wait-time samples over the last ~1024 checkouts per service. ADR-03 escalation threshold: p95 &gt; 50ms ⇒ consider separate-process cron isolation.
-              503s = pool-saturation rejects (SRE-12); Warmed = last writer-driven view rebuild (SRE-16).
-              Same samples stream to OTel <code>app.thread_wait_ms</code> for off-box analysis.
-            </p>
-          </div>
-        </details>
-      )}
-
       {/* SRE-20: effective logging/telemetry mode — tells an incident
           responder whether a `jq`/`grep` over docker logs will match JSON
           or bracketed console text, and whether OTel trace fields exist. */}
@@ -422,50 +472,5 @@ export function SystemHealthCard() {
         </p>
       )}
     </AnalyticsCard>
-  )
-}
-
-function PoolWaitTable({ pools }: { pools: PoolStats[] }) {
-  const columns = React.useMemo<ColumnDef<PoolStats>[]>(
-    () => [
-      { id: 'service', header: () => <span className="text-left font-medium pr-3 pb-1">Service</span>, cell: ({ row }) => <span className="pr-3 py-1 font-mono">{row.original.service.slice(0, 22)}</span> },
-      { id: 'in_use', header: () => <span className="text-right font-medium px-2 pb-1">In-use</span>, cell: ({ row }) => <span className="text-right px-2 py-1">{row.original.in_use}/{row.original.max_size}</span> },
-      { id: 'idle', header: () => <span className="text-right font-medium px-2 pb-1">Idle</span>, cell: ({ row }) => <span className="text-right px-2 py-1">{row.original.idle}</span> },
-      { id: 'samples', header: () => <span className="text-right font-medium px-2 pb-1">Samples</span>, cell: ({ row }) => <span className="text-right px-2 py-1">{row.original.wait?.count ?? 0}</span> },
-      { id: 'p50', header: () => <span className="text-right font-medium px-2 pb-1">p50</span>, cell: ({ row }) => <span className="text-right px-2 py-1">{row.original.wait?.p50_ms?.toFixed(1) ?? '–'}</span> },
-      { id: 'p95', header: () => <span className="text-right font-medium px-2 pb-1">p95</span>, cell: ({ row }) => <span className="text-right px-2 py-1">{row.original.wait?.p95_ms?.toFixed(1) ?? '–'}</span> },
-      { id: 'p99', header: () => <span className="text-right font-medium px-2 pb-1">p99</span>, cell: ({ row }) => <span className="text-right px-2 py-1">{row.original.wait?.p99_ms?.toFixed(1) ?? '–'}</span> },
-      { id: 'max', header: () => <span className="text-right font-medium px-2 pb-1">max</span>, cell: ({ row }) => <span className="text-right px-2 py-1">{row.original.wait?.max_ms?.toFixed(1) ?? '–'}</span> },
-      { id: '503s', header: () => <span className="text-right font-medium px-2 pb-1">503s</span>, cell: ({ row }) => <span className={`text-right px-2 py-1 ${(row.original.saturated_rejects_total ?? 0) > 0 ? 'text-amber-700 dark:text-amber-500' : ''}`}>{row.original.saturated_rejects_total ?? 0}</span> },
-      { id: 'warmed', header: () => <span className="text-right font-medium px-2 pb-1">Warmed</span>, cell: ({ row }) => <span className="text-right px-2 py-1">{row.original.last_warmed_at ? row.original.last_warmed_at.slice(11, 19) : '–'}</span> },
-    ],
-    [],
-  )
-  const table = useReactTable({ data: pools, columns, getCoreRowModel: getCoreRowModel() })
-  return (
-    <Table className="w-full text-xs sm:text-[11px] tabular-nums">
-      <TableHeader className="text-muted-foreground">
-        {table.getHeaderGroups().map((hg) => (
-          <TableRow key={hg.id}>
-            {hg.headers.map((header) => (
-              <TableHead key={header.id} className={header.column.id === 'service' ? 'text-left font-medium pr-3 pb-1 h-auto' : 'text-right font-medium px-2 pb-1 h-auto'}>
-                {flexRender(header.column.columnDef.header, header.getContext())}
-              </TableHead>
-            ))}
-          </TableRow>
-        ))}
-      </TableHeader>
-      <TableBody>
-        {table.getRowModel().rows.map((row) => (
-          <TableRow key={row.original.service} className="border-t border-muted/40">
-            {row.getVisibleCells().map((cell) => (
-              <TableCell key={cell.id} className={cell.column.id === 'service' ? 'pr-3 py-1 font-mono' : 'text-right px-2 py-1'}>
-                {flexRender(cell.column.columnDef.cell, cell.getContext())}
-              </TableCell>
-            ))}
-          </TableRow>
-        ))}
-      </TableBody>
-    </Table>
   )
 }

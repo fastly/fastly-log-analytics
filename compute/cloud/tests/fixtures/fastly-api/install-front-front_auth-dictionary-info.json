@@ -1,0 +1,16 @@
+{
+  "provenance": "recorded authenticated GET of CLI-created install; redacted readback",
+  "recording_group": "install",
+  "recorded_at": "2026-10-28T23:24:48.558414+00:00",
+  "request": {
+    "method": "GET",
+    "path": "/service/INSTALL_FRONT_ID/version/1/dictionary/DICTIONARY_FRONT_AUTH_ID/info"
+  },
+  "status": 200,
+  "redaction": "IDs consistently pseudonymized; fixed resource aliases preserved; identifying hosts/names/credentials removed; dictionary values never fetched",
+  "response": {
+    "last_updated": "2026-10-28 23:19:53",
+    "item_count": 1,
+    "digest": "REDACTED_DIGEST"
+  }
+}

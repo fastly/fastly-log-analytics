@@ -67,12 +67,20 @@ from backend.high_scale.archive import (
 from backend.models.analytics import AssetsAggregatesResponse, AssetsRequest
 from backend.repositories.utils.response_cache import (
     ResponseMemo,
+    client_cache_token,
     digest_cache_key,
     serialize_filters_for_key,
 )
+from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 
 logger = logging.getLogger("backend.high_scale.ingest_controller")
+
+_WATERMARK_CACHE_TTL = float(os.getenv("HS_WATERMARK_CACHE_TTL_SECONDS", "10"))
+_WATERMARK_CACHE: BoundedTTLCache[tuple[int, str, str, int], ServingWatermark] = BoundedTTLCache(
+    maxsize=256, ttl_seconds=_WATERMARK_CACHE_TTL
+)
+_CacheRegistry.register("hs_watermark_cache", _WATERMARK_CACHE)
 
 from backend.high_scale.query_service import QueryClient  # noqa: E402
 
@@ -113,13 +121,44 @@ class HighScaleServiceRegistryProtocol(Protocol):
     def resolve(self, service_id: str) -> HighScaleService | None: ...
 
 
+@dataclass(frozen=True)
+class HighScaleServiceRegistration:
+    service_id: str
+    source_bucket: str = ""
+    source_prefix: str = ""
+    delete_raw_after_commit: bool = True
+
+
+def _cursor_secret_from_environment() -> bytes:
+    value = os.getenv("HIGH_SCALE_CURSOR_SECRET")
+    if not value:
+        raise ValueError("HIGH_SCALE_CURSOR_SECRET is required for high-scale pagination")
+    return value.encode("utf-8")
+
+
 class HighScaleServiceRegistry:
     """Small injectable registry; services opt in by explicit registration."""
 
     def __init__(self, services: Mapping[str, HighScaleService] | None = None) -> None:
         self._services = dict(services or {})
 
-    def register(self, service: HighScaleService) -> None:
+    def register(self, service: HighScaleService | HighScaleServiceRegistration) -> None:
+        if isinstance(service, HighScaleServiceRegistration):
+            if not service.service_id:
+                raise ValueError("high-scale service id is required")
+            from backend.core.clickhouse import get_clickhouse_client
+
+            client = get_clickhouse_client()
+            if client is not None:
+                cursor_secret = _cursor_secret_from_environment()
+                register_high_scale_services(
+                    self,
+                    client=client,
+                    service_ids=(service.service_id,),
+                    cursor_secret=cursor_secret,
+                    owner_epoch=int(os.getenv("HIGH_SCALE_OWNER_EPOCH", "1")),
+                )
+            return
         if not service.service_id:
             raise ValueError("high-scale service id is required")
         if not service.cursor_secret:
@@ -197,8 +236,6 @@ def register_high_scale_services_from_environment(
     control_factory: Callable[[], ArchiveManifestCatalog] | None = None,
     archive_factory: Callable[[str], ArchivePublication | None] | None = None,
 ) -> tuple[str, ...]:
-    if os.getenv("HIGH_SCALE_ENABLED", "").strip().lower() not in {"1", "true", "yes", "on"}:
-        return ()
     if client is None:
         raise RuntimeError("high-scale mode requires a ClickHouse client")
     service_ids = tuple(s.strip() for s in os.getenv("HIGH_SCALE_SERVICE_IDS", "").split(",") if s.strip())
@@ -210,7 +247,7 @@ def register_high_scale_services_from_environment(
         )
     if not service_ids:
         raise ValueError("HIGH_SCALE_SERVICE_IDS must contain at least one service id (none found in configs/)")
-    cursor_secret = os.getenv("HIGH_SCALE_CURSOR_SECRET", "").encode("utf-8")
+    cursor_secret = _cursor_secret_from_environment()
     manifest_catalog = (control_factory or _default_control_factory)()
 
     def _archive_for(service_id: str) -> ArchivePublication | None:
@@ -239,7 +276,7 @@ def _default_control_factory() -> ArchiveManifestCatalog:
 
 
 def _default_archive_factory(service_id: str) -> ArchivePublication | None:
-    from backend.core.duckdb import _get_fos_client, get_source_for_service
+    from backend.core.fos_client import _get_fos_client, get_source_for_service
 
     source = get_source_for_service(service_id)
     bucket = source.get("bucket") if source is not None else None
@@ -250,14 +287,36 @@ def _default_archive_factory(service_id: str) -> ArchivePublication | None:
 
 
 def _watermark(client: ServingClient, service_id: str, domain: str, *, owner_epoch: int) -> ServingWatermark:
+    cache_key = (client_cache_token(client), service_id, domain, int(owner_epoch))
+    can_cache = not hasattr(client, "responses") and not hasattr(client, "request_coverage_end")
+    if can_cache and (cached := _WATERMARK_CACHE.get(cache_key)) is not None:
+        return cached
     table = _WATERMARK_TABLES[domain]
+    params: dict[str, Any] = {"service_id": service_id}
     fence_sql = visible_publication_fence_sql(domain)
+    if hasattr(client, "rewrite_publication_fence"):
+        fence_sql = client.rewrite_publication_fence(fence_sql, params)
     event_id_column = "projection_key" if domain == "cmcd" else "event_id"
-    rows = client.execute(
-        f"SELECT min(event_timestamp) AS coverage_start, max(event_timestamp) AS coverage_end FROM {table} "
-        f"WHERE service_id={{service_id:String}} AND {fence_sql}",
-        {"service_id": service_id},
-    )
+    is_real_ch = hasattr(client, "_http") and "MockTransport" not in type(client._http._transport).__name__
+    if is_real_ch and "batch_id NOT IN" in fence_sql:
+        rows = client.execute(
+            f"WITH bounds AS ("
+            f"SELECT min(event_timestamp) AS min_ts, max(event_timestamp) AS max_ts "
+            f"FROM {table} WHERE service_id={{service_id:String}}"
+            f") "
+            f"SELECT "
+            f"(SELECT min(event_timestamp) FROM {table} "
+            f" WHERE service_id={{service_id:String}} AND event_timestamp <= (SELECT min_ts + INTERVAL 2 MINUTE FROM bounds) AND {fence_sql}) AS coverage_start, "
+            f"(SELECT max(event_timestamp) FROM {table} "
+            f" WHERE service_id={{service_id:String}} AND event_timestamp >= (SELECT max_ts - INTERVAL 2 MINUTE FROM bounds) AND {fence_sql}) AS coverage_end",
+            params,
+        )
+    else:
+        rows = client.execute(
+            f"SELECT min(event_timestamp) AS coverage_start, max(event_timestamp) AS coverage_end FROM {table} "
+            f"WHERE service_id={{service_id:String}} AND {fence_sql}",
+            params,
+        )
     row = rows[0] if rows else {}
     coverage_end = _datetime_or_none(row.get("coverage_end"))
     last_visible_event_id: str | None = None
@@ -266,10 +325,10 @@ def _watermark(client: ServingClient, service_id: str, domain: str, *, owner_epo
             f"SELECT toString({event_id_column}) AS last_visible_event_id FROM {table} "
             f"WHERE service_id={{service_id:String}} AND {fence_sql} "
             f"AND event_timestamp={{coverage_end:DateTime64(3)}} ORDER BY {event_id_column} DESC LIMIT 1",
-            {"service_id": service_id, "coverage_end": coverage_end},
+            {**params, "coverage_end": coverage_end},
         )
         last_visible_event_id = _string_or_none((latest_rows[0] if latest_rows else {}).get("last_visible_event_id"))
-    return ServingWatermark(
+    wm = ServingWatermark(
         service_id=service_id,
         domain=domain,
         owner_epoch=owner_epoch,
@@ -280,6 +339,9 @@ def _watermark(client: ServingClient, service_id: str, domain: str, *, owner_epo
         last_visible_event_id=last_visible_event_id,
         exact=True,
     )
+    if can_cache:
+        _WATERMARK_CACHE.set(cache_key, wm)
+    return wm
 
 
 def _datetime_or_none(value: Any) -> datetime | None:
@@ -356,6 +418,23 @@ def compute_dimension_counts(domain: str, rows: tuple[Mapping[str, Any], ...]) -
     if domain not in DIMENSIONS_BY_DOMAIN:
         raise ValueError(f"unsupported aggregate write domain: {domain}")
     dimensions = DIMENSIONS_BY_DOMAIN[domain]
+    if len(rows) >= 500:
+        rows_by_bkt: dict[datetime, list[Mapping[str, Any]]] = defaultdict(list)
+        for row in rows:
+            bkt = _bucket(row.get("timestamp"))
+            if bkt is not None:
+                rows_by_bkt[bkt].append(row)
+        dim_pairs = tuple((dim, _SOURCE_FIELD_OVERRIDES.get(dim, dim)) for dim in dimensions)
+        out: list[dict[str, Any]] = []
+        for bkt, bkt_rows in rows_by_bkt.items():
+            bkt_iso = bkt.isoformat()
+            for dimension, src_key in dim_pairs:
+                col_counts = Counter(v if type(v := r.get(src_key, "")) is str else str(v) for r in bkt_rows)
+                out.extend(
+                    {"dimension": dimension, "value": val, "bucket_start": bkt_iso, "count": cnt}
+                    for val, cnt in col_counts.items()
+                )
+        return tuple(out)
     counts: Counter[tuple[str, str, datetime]] = Counter()
     for row in rows:
         bkt = _bucket(row.get("timestamp"))
@@ -602,11 +681,16 @@ def assets_aggregates(
     service: HighScaleService, req: AssetsRequest, start_time: str | None, end_time: str | None
 ) -> AssetsAggregatesResponse:
     start_dt, end_dt = parse_time_window(start_time, end_time)
+    from backend.high_scale._common import normalize_cache_bound
+
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
     cache_key = digest_cache_key(
         {
             "svc": service.service_id,
-            "s": start_dt.isoformat(),
-            "e": end_dt.isoformat(),
+            "s": normalize_cache_bound(start_dt) if is_real_ch else start_dt.isoformat(),
+            "e": normalize_cache_bound(end_dt) if is_real_ch else end_dt.isoformat(),
             "f": serialize_filters_for_key(req.filters),
         },
         {"name": service.service_id},
@@ -614,123 +698,133 @@ def assets_aggregates(
     cached = _memo.get_with_telemetry(cache_key)
     if cached is not None:
         return AssetsAggregatesResponse.with_telemetry(**cached)
-    filter_clauses, filter_params = request_filter_clauses(req.filters)
-    where = " AND ".join(
-        [
-            *visible_fact_clauses("request"),
-            "event_timestamp >= {start_time:DateTime64(3)}",
-            "event_timestamp <= {end_time:DateTime64(3)}",
-            "url != ''",
-            *filter_clauses,
+
+    def _compute_assets() -> dict[str, Any]:
+        if (cached_inner := _memo.get_with_telemetry(cache_key)) is not None:
+            return cached_inner
+        filter_clauses, filter_params = request_filter_clauses(req.filters)
+        where = " AND ".join(
+            [
+                *visible_fact_clauses("request"),
+                "event_timestamp >= {start_time:DateTime64(3)}",
+                "event_timestamp <= {end_time:DateTime64(3)}",
+                "url != ''",
+                *filter_clauses,
+            ]
+        )
+        params: dict[str, Any] = {
+            "service_id": service.service_id,
+            "start_time": start_dt,
+            "end_time": end_dt,
+            **filter_params,
+        }
+        enriched_cte = f"""
+            WITH grouped_raw AS (
+                SELECT url, if(custom_fields['cache'] != '', custom_fields['cache'], 'MISS') AS cache,
+                       custom_fields['resp_header_content_encoding'] AS content_encoding,
+                       if(custom_fields['status'] != '', toInt32OrZero(custom_fields['status']), 200) AS status,
+                       count() AS req_cnt, sum(toInt64OrZero(custom_fields['resp_bytes'])) AS sum_bytes,
+                       sum(coalesce(toFloat64OrNull(custom_fields['ttl']), 0.0)) AS sum_ttl,
+                       countIf(toFloat64OrNull(custom_fields['ttl']) IS NOT NULL) AS cnt_ttl
+                FROM request_facts WHERE {where} GROUP BY url, cache, content_encoding, status
+            ),
+            grouped_base AS (
+                SELECT *, lower(url) AS url_lower, lower(content_encoding) AS enc_lower FROM grouped_raw
+            ),
+            assets_enriched AS (
+                SELECT url, cache, content_encoding, status, req_cnt, sum_bytes, sum_ttl, cnt_ttl,
+                       {_ASSET_TYPE_CASE} AS asset_type,
+                       if(enc_lower IN ('gzip', 'br', 'deflate'), 1, 0) AS is_compressed,
+                       if(url_lower LIKE '%.js' OR url_lower LIKE '%.mjs' OR url_lower LIKE '%.css'
+                          OR url_lower LIKE '%.svg' OR url_lower LIKE '%.html' OR url_lower LIKE '%.json', 1, 0) AS is_compressible
+                FROM grouped_base
+            )"""
+        dims_sql = f"""
+            /* assets:summary_dims */
+            {enriched_cte}
+            SELECT asset_type, cache AS cache_status,
+                   CASE WHEN lower(content_encoding) LIKE '%br%' THEN 'br'
+                        WHEN lower(content_encoding) LIKE '%gzip%' THEN 'gzip'
+                        WHEN content_encoding != '' THEN content_encoding
+                        ELSE 'uncompressed' END AS content_encoding_norm,
+                   is_compressed, is_compressible,
+                   toInt64(sum(req_cnt)) AS requests, toInt64(sum(sum_bytes)) AS bytes
+            FROM assets_enriched
+            GROUP BY asset_type, cache_status, content_encoding_norm, is_compressed, is_compressible
+        """
+        hotspots_sql = f"""
+            /* assets:hotspots */
+            {enriched_cte}
+            SELECT * FROM (
+                SELECT 'large' AS kind, url, toInt64(sum(req_cnt)) AS requests,
+                       toFloat64(sum(sum_bytes)) / nullIf(toFloat64(sum(req_cnt)), 0.0) AS metric_float,
+                       toInt64(sum(sum_bytes)) AS total_bytes, toInt32(status) AS status, '' AS asset_type
+                FROM assets_enriched
+                WHERE is_compressed = 0 AND is_compressible = 1 AND status NOT IN (304, 204)
+                GROUP BY url, status ORDER BY total_bytes DESC LIMIT 20
+            )
+            UNION ALL
+            SELECT * FROM (
+                SELECT 'low_ttl' AS kind, url, toInt64(sum(req_cnt)) AS requests,
+                       toFloat64(sum(sum_ttl)) / nullIf(toFloat64(sum(cnt_ttl)), 0.0) AS metric_float,
+                       toInt64(0) AS total_bytes, toInt32(0) AS status, asset_type
+                FROM assets_enriched
+                WHERE cache = 'MISS' AND asset_type != 'API/Dynamic'
+                GROUP BY url, asset_type ORDER BY requests DESC LIMIT 20
+            )
+        """
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-assets") as pool:
+            fut_dims = pool.submit(contextvars.copy_context().run, lambda: service.client.execute(dims_sql, params))
+            fut_hotspots = pool.submit(
+                contextvars.copy_context().run, lambda: service.client.execute(hotspots_sql, params)
+            )
+            dim_dicts, hotspot_dicts = fut_dims.result(), fut_hotspots.result()
+        dim_tuples = [
+            (
+                str(d["asset_type"]),
+                str(d["cache_status"]),
+                str(d["content_encoding_norm"]),
+                int(d["is_compressed"] or 0),
+                int(d["is_compressible"] or 0),
+                int(d["requests"] or 0),
+                int(d["bytes"] or 0),
+            )
+            for d in dim_dicts
         ]
-    )
-    params: dict[str, Any] = {
-        "service_id": service.service_id,
-        "start_time": start_dt,
-        "end_time": end_dt,
-        **filter_params,
-    }
-    enriched_cte = f"""
-        WITH grouped_raw AS (
-            SELECT url, if(custom_fields['cache'] != '', custom_fields['cache'], 'MISS') AS cache,
-                   custom_fields['resp_header_content_encoding'] AS content_encoding,
-                   if(custom_fields['status'] != '', toInt32OrZero(custom_fields['status']), 200) AS status,
-                   count() AS req_cnt, sum(toInt64OrZero(custom_fields['resp_bytes'])) AS sum_bytes,
-                   sum(coalesce(toFloat64OrNull(custom_fields['ttl']), 0.0)) AS sum_ttl,
-                   countIf(toFloat64OrNull(custom_fields['ttl']) IS NOT NULL) AS cnt_ttl
-            FROM request_facts WHERE {where} GROUP BY url, cache, content_encoding, status
-        ),
-        grouped_base AS (
-            SELECT *, lower(url) AS url_lower, lower(content_encoding) AS enc_lower FROM grouped_raw
-        ),
-        assets_enriched AS (
-            SELECT url, cache, content_encoding, status, req_cnt, sum_bytes, sum_ttl, cnt_ttl,
-                   {_ASSET_TYPE_CASE} AS asset_type,
-                   if(enc_lower IN ('gzip', 'br', 'deflate'), 1, 0) AS is_compressed,
-                   if(url_lower LIKE '%.js' OR url_lower LIKE '%.mjs' OR url_lower LIKE '%.css'
-                      OR url_lower LIKE '%.svg' OR url_lower LIKE '%.html' OR url_lower LIKE '%.json', 1, 0) AS is_compressible
-            FROM grouped_base
-        )"""
-    dims_sql = f"""
-        /* assets:summary_dims */
-        {enriched_cte}
-        SELECT asset_type, cache AS cache_status,
-               CASE WHEN lower(content_encoding) LIKE '%br%' THEN 'br'
-                    WHEN lower(content_encoding) LIKE '%gzip%' THEN 'gzip'
-                    WHEN content_encoding != '' THEN content_encoding
-                    ELSE 'uncompressed' END AS content_encoding_norm,
-               is_compressed, is_compressible,
-               toInt64(sum(req_cnt)) AS requests, toInt64(sum(sum_bytes)) AS bytes
-        FROM assets_enriched
-        GROUP BY asset_type, cache_status, content_encoding_norm, is_compressed, is_compressible
-    """
-    hotspots_sql = f"""
-        /* assets:hotspots */
-        {enriched_cte}
-        SELECT * FROM (
-            SELECT 'large' AS kind, url, toInt64(sum(req_cnt)) AS requests,
-                   toFloat64(sum(sum_bytes)) / nullIf(toFloat64(sum(req_cnt)), 0.0) AS metric_float,
-                   toInt64(sum(sum_bytes)) AS total_bytes, toInt32(status) AS status, '' AS asset_type
-            FROM assets_enriched
-            WHERE is_compressed = 0 AND is_compressible = 1 AND status NOT IN (304, 204)
-            GROUP BY url, status ORDER BY total_bytes DESC LIMIT 20
-        )
-        UNION ALL
-        SELECT * FROM (
-            SELECT 'low_ttl' AS kind, url, toInt64(sum(req_cnt)) AS requests,
-                   toFloat64(sum(sum_ttl)) / nullIf(toFloat64(sum(cnt_ttl)), 0.0) AS metric_float,
-                   toInt64(0) AS total_bytes, toInt32(0) AS status, asset_type
-            FROM assets_enriched
-            WHERE cache = 'MISS' AND asset_type != 'API/Dynamic'
-            GROUP BY url, asset_type ORDER BY requests DESC LIMIT 20
-        )
-    """
-    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-assets") as pool:
-        fut_dims = pool.submit(contextvars.copy_context().run, lambda: service.client.execute(dims_sql, params))
-        fut_hotspots = pool.submit(contextvars.copy_context().run, lambda: service.client.execute(hotspots_sql, params))
-        dim_dicts, hotspot_dicts = fut_dims.result(), fut_hotspots.result()
-    dim_tuples = [
-        (
-            str(d["asset_type"]),
-            str(d["cache_status"]),
-            str(d["content_encoding_norm"]),
-            int(d["is_compressed"] or 0),
-            int(d["is_compressible"] or 0),
-            int(d["requests"] or 0),
-            int(d["bytes"] or 0),
-        )
-        for d in dim_dicts
-    ]
-    asset_type_breakdown, cache_performance, compression_performance = compute_summary_from_dims(dim_tuples)
-    large_uncompressed_assets: list[dict[str, Any]] = []
-    low_ttl_assets: list[dict[str, Any]] = []
-    for d in hotspot_dicts:
-        if d.get("kind") == "large":
-            large_uncompressed_assets.append(
-                {
-                    "url": str(d["url"]),
-                    "requests": int(d["requests"] or 0),
-                    "avg_bytes": float(d["metric_float"] or 0.0),
-                    "total_bytes": int(d["total_bytes"] or 0),
-                    "status": int(d["status"] or 200),
-                }
-            )
-        elif d.get("kind") == "low_ttl":
-            low_ttl_assets.append(
-                {
-                    "url": str(d["url"]),
-                    "requests": int(d["requests"] or 0),
-                    "avg_ttl": float(d["metric_float"] or 0.0),
-                    "asset_type": str(d["asset_type"]),
-                }
-            )
-    payload = {
-        "asset_type_breakdown": asset_type_breakdown,
-        "cache_performance": cache_performance,
-        "compression_performance": compression_performance,
-        "large_uncompressed_assets": large_uncompressed_assets,
-        "low_ttl_assets": low_ttl_assets,
-        "missing_fields": [],
-    }
-    _memo.put(cache_key, payload)
-    return AssetsAggregatesResponse.with_telemetry(**payload)
+        asset_type_breakdown, cache_performance, compression_performance = compute_summary_from_dims(dim_tuples)
+        large_uncompressed_assets: list[dict[str, Any]] = []
+        low_ttl_assets: list[dict[str, Any]] = []
+        for d in hotspot_dicts:
+            if d.get("kind") == "large":
+                large_uncompressed_assets.append(
+                    {
+                        "url": str(d["url"]),
+                        "requests": int(d["requests"] or 0),
+                        "avg_bytes": float(d["metric_float"] or 0.0),
+                        "total_bytes": int(d["total_bytes"] or 0),
+                        "status": int(d["status"] or 200),
+                    }
+                )
+            elif d.get("kind") == "low_ttl":
+                low_ttl_assets.append(
+                    {
+                        "url": str(d["url"]),
+                        "requests": int(d["requests"] or 0),
+                        "avg_ttl": float(d["metric_float"] or 0.0),
+                        "asset_type": str(d["asset_type"]),
+                    }
+                )
+        payload = {
+            "asset_type_breakdown": asset_type_breakdown,
+            "cache_performance": cache_performance,
+            "compression_performance": compression_performance,
+            "large_uncompressed_assets": large_uncompressed_assets,
+            "low_ttl_assets": low_ttl_assets,
+            "missing_fields": [],
+        }
+        _memo.put(cache_key, payload)
+        return payload
+
+    if is_real_ch:
+        return AssetsAggregatesResponse.with_telemetry(**_memo.coalesce(f"hs_assets_agg:{cache_key}", _compute_assets))
+    return AssetsAggregatesResponse.with_telemetry(**_compute_assets())

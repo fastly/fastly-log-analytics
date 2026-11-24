@@ -32,26 +32,21 @@ jobs:
         env:
           POSTGRES_USER: fla
           POSTGRES_PASSWORD: fla_test_password
-          POSTGRES_DB: ducklake_test
+          POSTGRES_DB: fla_test
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U fla -d ducklake_test"
+          --health-cmd "pg_isready -U fla -d fla_test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
 
     env:
-      # Metadata storage (cron/ingest bookkeeping) and DuckLake's commit-path
-      # catalog both point at the postgres service container above — see
-      # docs/adr/15-multi-writer-topology.md. tests/conftest.py's
-      # _pg_worker_schema fixture layers a per-xdist-worker schema on top of
-      # this DSN via `options=-c search_path=...` for parallel-safe isolation.
-      # DUCKLAKE_CATALOG must be the bare DSN (no `postgres:` prefix) —
-      # backend/core/storage/_core.py::_ducklake_attach adds that prefix
-      # itself before the ATTACH statement.
-      METADATA_DSN: postgresql://fla:fla_test_password@localhost:5432/ducklake_test
-      DUCKLAKE_CATALOG: postgresql://fla:fla_test_password@localhost:5432/ducklake_test
+      # Metadata storage (cron/ingest bookkeeping) points at the postgres
+      # service container above. tests/conftest.py's _pg_worker_schema fixture
+      # layers a per-xdist-worker schema on top of this DSN via
+      # `options=-c search_path=...` for parallel-safe isolation.
+      METADATA_DSN: postgresql://fla:fla_test_password@localhost:5432/fla_test
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -59,7 +54,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: 24
+          node-version: 26
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -229,9 +224,9 @@ jobs:
         # raise it as backend coverage clears the next floor. `make ratchet` prints actual.
         #
         # `-n auto` parallelizes via pytest-xdist (TESTING_PLAN_3 item 21).
-        # Verified safe: per-service SQLite (`{id}.metadata.db`) + per-test
-        # tmp_path give file isolation; autouse `_reset_module_caches` resets
-        # the 8 module-level caches between tests; moto fixtures are per-test.
+        # Verified safe: PostgreSQL per-worker test DBs (`fla_test_slot<N>`) + per-test
+        # tmp_path give isolation; autouse `_reset_module_caches` resets
+        # the module-level caches between tests; moto fixtures are per-test.
         # Local run: 2268 passed in 58s under `-n auto` vs ~3min serial.
         #
         # Two runs (mirrors Makefile `test-ci`; the only divergence is `nice`,
@@ -244,8 +239,17 @@ jobs:
         #   Run 2: terraform tests serial, --cov-append so the single
         #          --cov-fail-under=85 gate sees the COMBINED coverage.
         run: |
-          uv run pytest -n auto -m "not terraform_cli and not flaky_quarantine" --cov=backend --cov-report=
+          uv run pytest -n auto -m "not terraform_cli and not flaky_quarantine" --ignore=tests/e2e_security --cov=backend --cov-report=
           uv run pytest -n 0 -m terraform_cli --cov=backend --cov-append --cov-report=term --cov-fail-under=85
+
+      - name: High-Scale disposable database integration proofs
+        env:
+          RUN_DISPOSABLE_POSTGRES_INTEGRATION: "1"
+          RUN_HS_READERS_CLICKHOUSE_INTEGRATION: "1"
+        run: |
+          uv run pytest -n 0 \
+            tests/high_scale/test_postgres_control_integration.py \
+            tests/high_scale/test_insights_rollup.py::test_real_clickhouse_receipt_predicates_fence_serving_and_legacy_hourly_rows
 
       - name: Worker-crash diagnostics (memory and kernel log)
         # pytest-xdist reports a killed worker only as "node down: Not properly terminated";
@@ -302,15 +306,14 @@ jobs:
         # template validate deploy/chart/fastly-log-analytics (ubuntu runners
         # ship both docker and helm).
         run: |
+          docker compose -f docker-compose.yml config -q
           docker compose -f docker-compose.yml -f docker-compose.prod.yml config -q
-          docker compose -f docker-compose.yml -f docker-compose.observability.standard.yml config -q
-          docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.observability.standard.yml -f docker-compose.observability.standard.prod.yml config -q
           docker compose -f docker-compose.multipod.yml config -q
           docker compose -f docker-compose.multipod.yml -f docker-compose.observability.yml config -q
           if command -v helm >/dev/null 2>&1; then
-            helm lint deploy/chart/fastly-log-analytics --set config.ducklakeCatalog=postgresql://fla:pw@postgres:5432/ducklake --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/ducklake
-            helm template ci-validate deploy/chart/fastly-log-analytics --set config.ducklakeCatalog=postgresql://fla:pw@postgres:5432/ducklake --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/ducklake >/dev/null
-            helm template ci-validate deploy/chart/fastly-log-analytics --set global.privateObservability.enabled=true --set config.ducklakeCatalog=postgresql://fla:pw@postgres:5432/ducklake --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/ducklake >/dev/null
+            helm lint deploy/chart/fastly-log-analytics --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/fla --set secrets.cursorSecret=ci-cursor-secret
+            helm template ci-validate deploy/chart/fastly-log-analytics --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/fla --set secrets.cursorSecret=ci-cursor-secret >/dev/null
+            helm template ci-validate deploy/chart/fastly-log-analytics --set global.privateObservability.enabled=true --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/fla --set secrets.cursorSecret=ci-cursor-secret >/dev/null
           else
             echo "helm not installed; skipping chart lint/template"
           fi
@@ -336,8 +339,8 @@ jobs:
         run: bash scripts/check_security_regression_count.sh
 
       - name: Emit perf samples (CI-scale synthetic load)
-        # Produces tests/perf/latest.json from a 100K-row in-memory
-        # DuckDB dataset (~2 s wall). The gate below compares to
+        # Produces tests/perf/latest.json from a 100K-row synthetic dataset.
+        # The gate below compares to
         # tests/perf/baseline.json and fails on >regression_pct_threshold%
         # over baseline (50 % default; tuned for GH Actions runner
         # variance at CI scale).
@@ -364,18 +367,17 @@ jobs:
         env:
           POSTGRES_USER: fla
           POSTGRES_PASSWORD: fla_test_password
-          POSTGRES_DB: ducklake_test
+          POSTGRES_DB: fla_test
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U fla -d ducklake_test"
+          --health-cmd "pg_isready -U fla -d fla_test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
 
     env:
-      METADATA_DSN: postgresql://fla:fla_test_password@localhost:5432/ducklake_test
-      DUCKLAKE_CATALOG: postgresql://fla:fla_test_password@localhost:5432/ducklake_test
+      METADATA_DSN: postgresql://fla:fla_test_password@localhost:5432/fla_test
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -383,7 +385,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
-          node-version: 24
+          node-version: 26
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
@@ -451,27 +453,28 @@ jobs:
     timeout-minutes: 30
     defaults:
       run:
-        working-directory: compute/scorer
+        working-directory: compute
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Rust toolchain
-        # compute/scorer/rust-toolchain.toml pins the channel (1.90). We install
+        # compute/rust-toolchain.toml pins the channel (1.96.0). We install
         # that toolchain explicitly so `rustc`/`cargo` exist for the cache step
         # below; rustup then honours the toml override when cargo runs here.
         # Install rustup itself only if the runner image doesn't ship it.
         run: |
           if ! command -v cargo >/dev/null && [ ! -x "$HOME/.cargo/bin/cargo" ]; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-              | sh -s -- -y --default-toolchain 1.90 --profile minimal
+              | sh -s -- -y --default-toolchain 1.96.0 --profile minimal
           fi
+          rustup toolchain install 1.96.0 --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Cache cargo registry + build
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          workspaces: compute/scorer
+          workspaces: compute
 
       - name: Run scorer unit tests
         # Native (host-target) tests: Python↔Rust normalize/cookie/matrix
@@ -481,7 +484,7 @@ jobs:
         # also fails if Cargo.lock drifted. No Fastly CLI needed: the dev
         # profile builds for the host; Wasm is only built for deploy
         # (`make scorer-package`).
-        run: cargo test --locked
+        run: cargo test -p session-scorer -p compute-common --locked
 
       - name: Audit dependencies for RustSec advisories
         # The scorer verifies AES-GCM cookie integrity at the edge, so a future
@@ -494,3 +497,114 @@ jobs:
           cargo audit --version 2>/dev/null | grep -q ' 0.22.2$' \
             || cargo install cargo-audit --version 0.22.2 --locked --force
           cargo audit
+
+  cloud-ci:
+    name: Cloud Compute & Browser Engine
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    # make vcl-test includes backend VCL semantics tests whose shared fixtures
+    # bootstrap metadata, even though the Cloud runtime itself has no database.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: fla
+          POSTGRES_PASSWORD: fla_test_password
+          POSTGRES_DB: fla_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fla -d fla_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      METADATA_DSN: postgresql://fla:fla_test_password@localhost:5432/fla_test
+      TEST_METADATA_DSN: postgresql://fla:fla_test_password@localhost:5432/fla_test
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install pinned Rust 1.96.0 toolchain
+        run: |
+          rustup toolchain install 1.96.0 --component rustfmt,clippy,llvm-tools --target wasm32-wasip1
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          host=$(rustc +1.96.0 -vV | sed -n 's/^host: //p')
+          echo "AR_wasm32_wasip1=$(rustc +1.96.0 --print sysroot)/lib/rustlib/$host/bin/llvm-ar" >> "$GITHUB_ENV"
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: compute
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          uv sync
+          cd frontend && npm ci
+
+      - name: Install falco
+        run: |
+          FALCO_VERSION=2.3.0
+          case "$(uname -m)" in
+            x86_64)  ARCH=amd64 ;;
+            aarch64) ARCH=arm64 ;;
+            *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;
+          esac
+          sudo curl -sSfL "https://github.com/ysugimoto/falco/releases/download/v${FALCO_VERSION}/falco-linux-${ARCH}.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin
+          sudo chmod +x /usr/local/bin/falco
+
+      - name: Verify catalog & VCL fixture sync
+        run: |
+          make cloud-sync-catalog
+          git diff --exit-code compute/cloud/src/logging/catalog.json compute/cloud/vcl/capture/templates.json
+
+      - name: Detect OpenAPI drift
+        run: make openapi-drift
+
+      - name: Compute workspace lint, tests, and VCL tests
+        run: |
+          make compute-lint
+          make compute-test
+          make compute-wasm-check
+          make vcl-test
+
+      - name: Offline 4-tier E2E security suite
+        run: uv run pytest -n 0 --timeout=300 tests/e2e_security
+
+      - name: Cloud Python infra/tools tests & secret value scan
+        run: make cloud-infra-test
+
+      - name: Cloud browser engine tests & STATIC_EXPORT verification
+        run: make cloud-browser-test
+
+      - name: Install Cloud acceptance browser
+        run: cd frontend && npx playwright install --with-deps chromium
+
+      - name: Cloud native browser acceptance (CSP, engine, runtime)
+        run: make cloud-e2e
+
+      - name: Upload Cloud Playwright diagnostics
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: cloud-playwright-diagnostics
+          path: |
+            frontend/test-results/cloud
+            frontend/playwright-report
+          retention-days: 7

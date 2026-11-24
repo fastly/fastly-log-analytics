@@ -10,25 +10,22 @@ import { SSEActionDialogShell, SSEExecutionSection } from '@/components/SSEModal
 import { Button } from '@/components/ui/button'
 import { useOpenGeneration, useSSE } from '@/hooks/useSSE'
 import { queryKeys } from "@/lib/api"
+import { SERVICE_DEFAULTS, normalizeSnapshotInterval } from '@/lib/serviceDefaults'
 import type { ServiceConfig } from '@/types/api'
 import {
   SYNC_INTERVAL_OPTIONS,
-  COMMIT_INTERVAL_OPTIONS,
   NGWAF_INTERVAL_OPTIONS,
   LogSyncSection,
   Schedule,
   NgwafSection,
-  StorageOptimizationSection,
 } from './CronSettingsSections'
 
 export {
   SYNC_INTERVAL_OPTIONS,
-  COMMIT_INTERVAL_OPTIONS,
   NGWAF_INTERVAL_OPTIONS,
   LogSyncSection,
   Schedule,
   NgwafSection,
-  StorageOptimizationSection,
 }
 
 interface CronSettingsModalProps {
@@ -40,18 +37,13 @@ interface CronSettingsModalProps {
 const cronSettingsSchema = z.object({
   syncIntervalMins: z.string(),
   pollingMode: z.enum(['regular', 'adaptive']),
+  snapshotIntervalMinutes: z.enum(['5', '15', '30', '60', '360', '1440']),
   syncEnabled: z.boolean(),
   deleteAfter: z.boolean(),
-  commitInterval: z.string(),
   syncLogEnabled: z.boolean(),
   syncRetention: z.string(),
   dataRetention: z.string(),
   rumRetention: z.string(),
-  cacheRetention: z.string(),
-  rollupRetention: z.string(),
-  compactEnabled: z.boolean(),
-  compactLogEnabled: z.boolean(),
-  compactRetention: z.string(),
   ngwafInterval: z.string(),
   ngwafLogEnabled: z.boolean(),
   ngwafRetention: z.string(),
@@ -65,27 +57,24 @@ function initialSettings(service: ServiceConfig | null): CronSettingsFormValues 
   const rumCfg = service?.rum as Record<string, unknown> | null | undefined
   const rumSyncVal = typeof rumCfg?.enabled === 'boolean' ? rumCfg.enabled : undefined
   const rumPeriodVal = typeof rumCfg?.log_period === 'number' ? rumCfg.log_period : undefined
-  const initialRumPeriod = rumPeriodVal ?? service?.rum_log_period ?? service?.log_period ?? 300
+  const initialRumPeriod = rumPeriodVal ?? service?.rum_log_period ?? service?.log_period ?? SERVICE_DEFAULTS.rumLogPeriodSeconds
   const rumDeleteVal = typeof rumCfg?.delete_after === 'boolean' ? rumCfg.delete_after : undefined
 
   return {
     syncIntervalMins: String(service?.cron_sync?.interval_mins ?? 2),
     pollingMode: service?.cron_sync?.polling_mode ?? 'adaptive',
+    snapshotIntervalMinutes: String(
+      normalizeSnapshotInterval(service?.cron_sync?.snapshot_interval_minutes),
+    ) as CronSettingsFormValues['snapshotIntervalMinutes'],
     syncEnabled: service?.cron_sync?.enabled ?? false,
     deleteAfter: service?.cron_sync?.delete_after ?? false,
-    commitInterval: String(service?.cron_sync?.commit_interval_mins ?? 5),
     syncLogEnabled: service?.cron_sync?.log_enabled !== false,
-    syncRetention: String(service?.cron_sync?.log_retention_days ?? 7),
-    dataRetention: String(service?.cron_sync?.data_retention_days ?? 30),
-    rumRetention: String(service?.cron_sync?.rum_retention_days ?? 30),
-    cacheRetention: String(service?.cron_sync?.cache_retention_days ?? 90),
-    rollupRetention: String(service?.cron_sync?.rollup_retention_months ?? 12),
-    compactEnabled: service?.cron_compact?.enabled ?? false,
-    compactLogEnabled: service?.cron_compact?.log_enabled !== false,
-    compactRetention: String(service?.cron_compact?.log_retention_days ?? 7),
+    syncRetention: String(service?.cron_sync?.log_retention_days ?? SERVICE_DEFAULTS.logRetentionDays),
+    dataRetention: String(service?.cron_sync?.data_retention_days ?? SERVICE_DEFAULTS.logRetentionDays),
+    rumRetention: String(service?.cron_sync?.rum_retention_days ?? SERVICE_DEFAULTS.rumRetentionDays),
     ngwafInterval: String(service?.cron_ngwaf?.interval_mins ?? 5),
     ngwafLogEnabled: service?.cron_ngwaf?.log_enabled !== false,
-    ngwafRetention: String(service?.cron_ngwaf?.log_retention_days ?? 7),
+    ngwafRetention: String(service?.cron_ngwaf?.log_retention_days ?? SERVICE_DEFAULTS.logRetentionDays),
     rumSyncEnabled: rumSyncVal ?? service?.rum_enabled ?? false,
     rumLogPeriod: String(initialRumPeriod),
     rumDeleteAfter: rumDeleteVal ?? service?.cron_sync?.delete_after ?? false,
@@ -106,35 +95,25 @@ function CronSettingsModalBody({ service, open, onOpenChange }: CronSettingsModa
     defaultValues: initialSettings(service),
   })
   const {
-    syncEnabled, deleteAfter, commitInterval, syncLogEnabled, syncRetention, dataRetention,
-    rumRetention, cacheRetention, rollupRetention, compactEnabled, compactLogEnabled, compactRetention,
-    ngwafInterval, ngwafLogEnabled, ngwafRetention, syncIntervalMins, pollingMode,
-    rumSyncEnabled, rumLogPeriod, rumDeleteAfter,
+    syncEnabled, deleteAfter, syncLogEnabled, syncRetention, dataRetention,
+    rumRetention, ngwafInterval, ngwafLogEnabled, ngwafRetention, pollingMode,
+    snapshotIntervalMinutes, rumSyncEnabled, rumLogPeriod, rumDeleteAfter,
   } = useWatch({ control }) as CronSettingsFormValues
   const bind = <K extends keyof CronSettingsFormValues>(key: K) => (v: CronSettingsFormValues[K]) =>
     setValue(key, v as PathValue<CronSettingsFormValues, K>, { shouldDirty: true })
 
   const handleSave = () => {
     if (!service) return
-    const intervalMins = parseInt(syncIntervalMins)
-    const commitMins = Math.max(intervalMins, parseInt(commitInterval))
     start(`/api/services/${service.service_id}/cron-settings`, {
       cron_sync: {
         enabled: syncEnabled,
         delete_after: deleteAfter,
         polling_mode: pollingMode,
-        commit_interval_mins: commitMins,
+        snapshot_interval_minutes: Number(snapshotIntervalMinutes),
         log_enabled: syncLogEnabled,
         log_retention_days: parseInt(syncRetention),
         data_retention_days: parseInt(dataRetention),
         rum_retention_days: parseInt(rumRetention),
-        cache_retention_days: parseInt(cacheRetention),
-        rollup_retention_months: parseInt(rollupRetention),
-      },
-      cron_compact: {
-        enabled: compactEnabled,
-        log_enabled: compactLogEnabled,
-        log_retention_days: parseInt(compactRetention),
       },
       ...(service.ngwaf_workspace_id ? {
         cron_ngwaf: {
@@ -205,22 +184,17 @@ function CronSettingsModalBody({ service, open, onOpenChange }: CronSettingsModa
             setSyncEnabled={bind('syncEnabled')}
             pollingMode={pollingMode}
             setPollingMode={bind('pollingMode')}
+            snapshotIntervalMinutes={snapshotIntervalMinutes}
+            setSnapshotIntervalMinutes={v => bind('snapshotIntervalMinutes')(v as CronSettingsFormValues['snapshotIntervalMinutes'])}
             deleteAfter={deleteAfter}
             setDeleteAfter={bind('deleteAfter')}
             dataRetention={dataRetention}
             setDataRetention={bind('dataRetention')}
-            cacheRetention={cacheRetention}
-            setCacheRetention={bind('cacheRetention')}
-            rollupRetention={rollupRetention}
-            setRollupRetention={bind('rollupRetention')}
-            commitInterval={commitInterval}
-            setCommitInterval={bind('commitInterval')}
             syncLogEnabled={syncLogEnabled}
             setSyncLogEnabled={bind('syncLogEnabled')}
             syncRetention={syncRetention}
             setSyncRetention={bind('syncRetention')}
             syncFreqLabel={syncFreqLabel}
-            adminSyncSeconds={adminSyncSeconds}
             rumRetention={rumRetention}
             setRumRetention={bind('rumRetention')}
             rumEnabled={service.rum_enabled ?? false}
@@ -243,15 +217,6 @@ function CronSettingsModalBody({ service, open, onOpenChange }: CronSettingsModa
               setNgwafRetention={bind('ngwafRetention')}
             />
           )}
-
-          <StorageOptimizationSection
-            compactEnabled={compactEnabled}
-            setCompactEnabled={bind('compactEnabled')}
-            compactLogEnabled={compactLogEnabled}
-            setCompactLogEnabled={bind('compactLogEnabled')}
-            compactRetention={compactRetention}
-            setCompactRetention={bind('compactRetention')}
-          />
         </div>
     </SSEActionDialogShell>
   )

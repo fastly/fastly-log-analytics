@@ -72,9 +72,10 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
     )
     await gotoHeading(page, '/dashboard', 'Dashboard')
     await expect(page.locator('text=Traffic over Time').or(page.locator('[data-empty-placeholder="true"]')).first()).toBeVisible({ timeout: 10_000 })
-    const placeholders = page.locator('main [data-empty-placeholder="true"]')
-    if ((await placeholders.count()) > 0) {
-      expect((await placeholders.allTextContents()).some((t) => /Crunching logs|Loading|Initializing|Mapping|No data available/i.test(t))).toBeTruthy()
+    // One read: placeholders can vanish between a count and a second read once the bundle lands.
+    const placeholderTexts = await page.locator('main [data-empty-placeholder="true"]').allTextContents()
+    if (placeholderTexts.length > 0) {
+      expect(placeholderTexts.some((t) => /Crunching logs|Loading|Initializing|Mapping|No data available/i.test(t))).toBeTruthy()
     }
     const bundleResponseData = await (await bundleResponsePromise).json()
     expect(bundleCalls).toBe(1)
@@ -206,7 +207,7 @@ test.describe('Dashboard Page Contract (/dashboard)', () => {
       const queries = json._debug_queries ?? []
       expect(queries.length).toBeGreaterThan(0)
       expect(queries.reduce((acc, q) => acc + (q.time_ms || 0), 0)).toBeLessThan(2500)
-      const analyticalQueries = queries.filter((q) => !q.sql?.startsWith('-- DuckDB Storage View Resolution'))
+      const analyticalQueries = queries
       const sqlStatements = analyticalQueries.map((q) => JSON.stringify({ sql: q.sql?.trim?.() ?? '', params: q.params ?? null }))
       expect(new Set(sqlStatements).size).toBe(sqlStatements.length)
     }
@@ -275,7 +276,7 @@ test.describe('Alerts & Notifications Page Contract (/alerts)', () => {
     const statusFilter = page.locator('[data-testid="alerts-status-filter"]:visible')
     await expect(statusFilter).toHaveCount(1, { timeout: 15_000 })
     for (const status of ['all', 'alerting', 'ok', 'muted']) await expect(statusFilter.getByTestId(`alerts-filter-${status}`)).toBeVisible({ timeout: 5_000 })
-    if (/Admin View/i.test(await page.locator('footer').innerText())) await expect(page.locator('[data-testid="alerts-create-btn"]')).toBeVisible({ timeout: 10_000 })
+    if (/Admin View/i.test(await page.locator('footer').innerText())) await expect(page.locator('[data-testid="alerts-create-btn"]:visible')).toBeVisible({ timeout: 10_000 })
   })
 
   test('4. Admin rule lifecycle (Create, Update, Toggle, Test Webhook, Evaluate & Delete) and telemetry attribution', async ({ page }) => {
@@ -340,7 +341,7 @@ test.describe('Usage & Cost Estimator Page Contract (/usage)', () => {
   test('4. Core stat cards, charts, Cost Estimator, and Billing Zone switching', async ({ page }) => {
     await gotoHeading(page, '/usage', 'System Usage')
     for (const label of ['Storage Impact (Period)', 'Class A Ops (period)', 'Class B Ops (period)', 'Estimated Incurred Cost', 'FOS Operations', 'CDN Bandwidth', 'Estimated Cost', 'Log Activity (Processed)', 'Cost Estimator']) {
-      await expect(page.getByRole('main').getByText(label)).toBeVisible({ timeout: 15_000 })
+      await expect(page.getByRole('main').getByText(label, { exact: true })).toBeVisible({ timeout: 15_000 })
     }
     await page.getByText('Cost Estimator').scrollIntoViewIfNeeded()
     for (const [zone, rate] of [['MBZ100', '$0.08 / GB'], ['Global', '$0.18 / GB'], ['MBZ200', '$0.12 / GB']] as const) {
@@ -459,12 +460,12 @@ for (const route of CLEAN_ROUTES) {
         await request.fulfill({ json: {
           last_seq: 2,
           active: [{
-            query_id: 1, db_type: 'DuckDB', sql_preview: 'SELECT 1', sql_len: 8,
+            query_id: 1, db_type: 'ClickHouse', sql_preview: 'SELECT 1', sql_len: 8,
             service_id: null, started_at_utc: now - 1, duration_ms: 24,
             cancellable: true, cancelled_at: now, attribution,
           }],
           completed: [{
-            query_id: 2, db_type: 'DuckDB', sql_preview: 'SELECT 2', sql_len: 8,
+            query_id: 2, db_type: 'ClickHouse', sql_preview: 'SELECT 2', sql_len: 8,
             service_id: null, started_at_utc: now - 1, ended_at_utc: now,
             duration_ms: 24, outcome: 'ok', error_type: null, error_message: null,
             peak_memory_mb: null, attribution,
@@ -706,13 +707,13 @@ test.describe('High-Scale Request Facts Page Contract (/high-scale/request-facts
         const now = new Date(), oneHourAgo = new Date(now.getTime() - 3600 * 1000)
         const [getRes, postRes] = await Promise.all([
           page.request.get(`/api/high-scale/request-facts?service_id=${encodeURIComponent(serviceId!)}&start_time=${encodeURIComponent(oneHourAgo.toISOString())}&end_time=${encodeURIComponent(now.toISOString())}&limit=10`),
-          page.request.post(`/api/high-scale/services/${encodeURIComponent(serviceId!)}/request-facts`, { data: { start_time: oneHourAgo.toISOString(), end_time: now.toISOString(), limit: 10, emulate_standard: true } }),
+          page.request.post(`/api/high-scale/services/${encodeURIComponent(serviceId!)}/request-facts`, { data: { start_time: oneHourAgo.toISOString(), end_time: now.toISOString(), limit: 10 } }),
         ])
         expect(getRes.ok() && postRes.ok()).toBeTruthy()
         const [getData, postData] = (await Promise.all([getRes.json(), postRes.json()])) as [RequestFactsDebugResponse, RequestFactsDebugResponse]
         expect(Array.isArray(getData.rows) && Array.isArray(postData.rows)).toBeTruthy()
         expect(['complete', 'partial', 'unavailable']).toContain(getData.metadata?.status)
-        expect(['clickhouse', 'duckdb_emulation']).toContain(getData.metadata?.mode)
+        expect(getData.metadata?.mode).toBe('clickhouse')
         expect(postData.metadata?.watermark?.service_id).toBe(serviceId)
       },
     },
@@ -724,7 +725,7 @@ test.describe('High-Scale Request Facts Page Contract (/high-scale/request-facts
     await gotoHeading(page, '/high-scale/request-facts', 'High-scale request facts')
     await expect(page.getByTestId('high-scale-facts-card')).toBeVisible({ timeout: 20_000 })
     for (const id of ['high-scale-metadata', 'high-scale-mode-badge', 'high-scale-filters', 'high-scale-table-wrapper']) await expect(page.getByTestId(id)).toBeVisible({ timeout: 15_000 })
-    expect(await page.getByTestId('high-scale-mode-badge').innerText()).toMatch(/DuckDB Standard Mode Emulation|ClickHouse Distributed Cluster/)
+    expect(await page.getByTestId('high-scale-mode-badge').innerText()).toMatch(/ClickHouse Distributed Cluster/)
     await expect(page.locator('[role="alert"].border-destructive')).toHaveCount(0)
     await page.getByTestId('filter-status').fill('200')
     await page.getByTestId('filter-pop').fill('IAD')
@@ -739,6 +740,6 @@ test.describe('High-Scale Request Facts Page Contract (/high-scale/request-facts
     const serviceId = await getFirstServiceId(page)
     expect(serviceId).toBeTruthy()
     const now = new Date(), oneHourAgo = new Date(now.getTime() - 3600 * 1000)
-    await assertPostTelemetry(page, `/api/high-scale/services/${encodeURIComponent(serviceId!)}/request-facts`, { start_time: oneHourAgo.toISOString(), end_time: now.toISOString(), limit: 10, emulate_standard: true }, { 'X-Page-Load-ID': `e2e-hs-facts-${Date.now()}` })
+    await assertPostTelemetry(page, `/api/high-scale/services/${encodeURIComponent(serviceId!)}/request-facts`, { start_time: oneHourAgo.toISOString(), end_time: now.toISOString(), limit: 10 }, { 'X-Page-Load-ID': `e2e-hs-facts-${Date.now()}` })
   })
 })

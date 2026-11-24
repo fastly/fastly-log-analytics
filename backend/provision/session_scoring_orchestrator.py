@@ -91,7 +91,7 @@ from backend.provision.session_scoring import (  # noqa: F401
     generate_scoring_vcl,
     get_active_version,
     info,
-    list_s3_endpoints,
+    list_log_endpoints,
     list_vcl_snippets,
     merge_scoring_custom_fields,
     miss_snippet,

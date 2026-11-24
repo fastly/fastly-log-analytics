@@ -202,8 +202,11 @@ def _delete_scoring_matrix_from_fos(logging_service_id: str) -> None:
     except OSError as exc:
         warn(f"Could not remove local tenant matrix file (non-fatal): {exc}")
     try:
-        from backend.core.duckdb import _get_fos_client, get_source_for_service
-        from backend.core.ingest import _delete_objects_robust
+        from backend.core.fos_client import (
+            _delete_objects_robust,
+            _get_fos_client,
+            get_source_for_service,
+        )
         from backend.core.metadata.base import get_scoring_matrix_key
 
         source = get_source_for_service(logging_service_id)

@@ -1,0 +1,269 @@
+{
+  "description": "Shared cross-language parity fixtures for selected-period storage billing calculation",
+  "cases": [
+    {
+      "name": "partial_overlap_live_object",
+      "from": 43200000,
+      "to": 50400000,
+      "intervals": [
+        {
+          "id": "live-partial",
+          "dataset": "pq_request",
+          "kind": "live",
+          "bytes": 1000000000,
+          "createdAt": 36000000,
+          "deletedAt": null,
+          "billedFrom": 36000000,
+          "billedUntil": 72000000,
+          "complete": true,
+          "provenance": "cloud:inventory"
+        }
+      ],
+      "expected": {
+        "liveGbHours": 2,
+        "deletedGbHours": 0,
+        "minimumBilledGbHours": 0,
+        "totalGbHours": 2,
+        "complete": true,
+        "provenance": ["cloud:inventory"]
+      }
+    },
+    {
+      "name": "mixed_live_and_minimum_billed_overlap",
+      "from": 43200000,
+      "to": 50400000,
+      "intervals": [
+        {
+          "id": "live-a",
+          "dataset": "pq_request",
+          "kind": "live",
+          "bytes": 1000000000,
+          "createdAt": 36000000,
+          "deletedAt": null,
+          "billedFrom": 36000000,
+          "billedUntil": 72000000,
+          "complete": true,
+          "provenance": "cloud:inventory"
+        },
+        {
+          "id": "deleted-a",
+          "dataset": "raw_request",
+          "kind": "minimum_billed",
+          "bytes": 2000000000,
+          "createdAt": 36000000,
+          "deletedAt": 39600000,
+          "billedFrom": 39600000,
+          "billedUntil": 46800000,
+          "complete": true,
+          "provenance": "cloud:ingest_files"
+        }
+      ],
+      "expected": {
+        "liveGbHours": 2,
+        "deletedGbHours": 0,
+        "minimumBilledGbHours": 2,
+        "totalGbHours": 4,
+        "complete": true,
+        "provenance": ["cloud:ingest_files", "cloud:inventory"]
+      }
+    },
+    {
+      "name": "deletion_inside_minimum_billing_term",
+      "from": 0,
+      "to": 14400000,
+      "intervals": [
+        {
+          "id": "obj-early-del:active",
+          "dataset": "raw_request",
+          "kind": "deleted",
+          "bytes": 1000000000,
+          "createdAt": 0,
+          "deletedAt": 3600000,
+          "billedFrom": 0,
+          "billedUntil": 3600000,
+          "complete": true,
+          "provenance": "cloud:ingest_files"
+        },
+        {
+          "id": "obj-early-del:min",
+          "dataset": "raw_request",
+          "kind": "minimum_billed",
+          "bytes": 1000000000,
+          "createdAt": 0,
+          "deletedAt": 3600000,
+          "billedFrom": 3600000,
+          "billedUntil": 2592000000,
+          "complete": true,
+          "provenance": "cloud:ingest_files"
+        }
+      ],
+      "expected": {
+        "liveGbHours": 0,
+        "deletedGbHours": 1,
+        "minimumBilledGbHours": 3,
+        "totalGbHours": 4,
+        "complete": true,
+        "provenance": ["cloud:ingest_files"]
+      }
+    },
+    {
+      "name": "deletion_after_minimum_term",
+      "from": 2872800000,
+      "to": 2894400000,
+      "intervals": [
+        {
+          "id": "obj-late-del",
+          "dataset": "archive_parquet",
+          "kind": "deleted",
+          "bytes": 1000000000,
+          "createdAt": 0,
+          "deletedAt": 2880000000,
+          "billedFrom": 0,
+          "billedUntil": 2880000000,
+          "complete": true,
+          "provenance": "postgres:high_scale_archive_manifests"
+        }
+      ],
+      "expected": {
+        "liveGbHours": 0,
+        "deletedGbHours": 2,
+        "minimumBilledGbHours": 0,
+        "totalGbHours": 2,
+        "complete": true,
+        "provenance": ["postgres:high_scale_archive_manifests"]
+      }
+    },
+    {
+      "name": "empty_intersection_outside_selected_window",
+      "from": 36000000,
+      "to": 43200000,
+      "intervals": [
+        {
+          "id": "before-window",
+          "dataset": "pq_request",
+          "kind": "deleted",
+          "bytes": 1000000000,
+          "createdAt": 0,
+          "deletedAt": 36000000,
+          "billedFrom": 0,
+          "billedUntil": 36000000,
+          "complete": false,
+          "provenance": "cloud:fos_usage"
+        },
+        {
+          "id": "after-window",
+          "dataset": "pq_request",
+          "kind": "live",
+          "bytes": 1000000000,
+          "createdAt": 43200000,
+          "deletedAt": null,
+          "billedFrom": 43200000,
+          "billedUntil": 50400000,
+          "complete": true,
+          "provenance": "cloud:inventory"
+        }
+      ],
+      "expected": {
+        "liveGbHours": 0,
+        "deletedGbHours": 0,
+        "minimumBilledGbHours": 0,
+        "totalGbHours": 0,
+        "complete": true,
+        "provenance": []
+      }
+    },
+    {
+      "name": "incomplete_interval_overlapping_window",
+      "from": 0,
+      "to": 3600000,
+      "intervals": [
+        {
+          "id": "deleted-incomplete",
+          "dataset": "pq_request",
+          "kind": "deleted",
+          "bytes": 1000000000,
+          "createdAt": null,
+          "deletedAt": 3600000,
+          "billedFrom": 0,
+          "billedUntil": 3600000,
+          "complete": false,
+          "provenance": "cloud:fos_usage"
+        }
+      ],
+      "expected": {
+        "liveGbHours": 0,
+        "deletedGbHours": 1,
+        "minimumBilledGbHours": 0,
+        "totalGbHours": 1,
+        "complete": false,
+        "provenance": ["cloud:fos_usage"]
+      }
+    },
+    {
+      "name": "duplicate_interval_id_deduplication",
+      "from": 0,
+      "to": 7200000,
+      "intervals": [
+        {
+          "id": "dup-1",
+          "dataset": "pq_request",
+          "kind": "live",
+          "bytes": 1000000000,
+          "createdAt": 0,
+          "deletedAt": null,
+          "billedFrom": 0,
+          "billedUntil": 7200000,
+          "complete": true,
+          "provenance": "cloud:inventory"
+        },
+        {
+          "id": "dup-1",
+          "dataset": "pq_request",
+          "kind": "live",
+          "bytes": 2000000000,
+          "createdAt": 0,
+          "deletedAt": null,
+          "billedFrom": 0,
+          "billedUntil": 7200000,
+          "complete": false,
+          "provenance": "cloud:duplicate_ignored"
+        }
+      ],
+      "expected": {
+        "liveGbHours": 2,
+        "deletedGbHours": 0,
+        "minimumBilledGbHours": 0,
+        "totalGbHours": 2,
+        "complete": true,
+        "provenance": ["cloud:inventory"]
+      }
+    },
+    {
+      "name": "empty_selected_period",
+      "from": 3600000,
+      "to": 3600000,
+      "intervals": [
+        {
+          "id": "live-during-point",
+          "dataset": "pq_request",
+          "kind": "live",
+          "bytes": 1000000000,
+          "createdAt": 0,
+          "deletedAt": null,
+          "billedFrom": 0,
+          "billedUntil": 7200000,
+          "complete": false,
+          "provenance": "cloud:inventory"
+        }
+      ],
+      "expected": {
+        "liveGbHours": 0,
+        "deletedGbHours": 0,
+        "minimumBilledGbHours": 0,
+        "totalGbHours": 0,
+        "complete": true,
+        "provenance": []
+      }
+    }
+  ]
+}

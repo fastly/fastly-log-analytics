@@ -111,7 +111,7 @@ def send_correlated_probe(url: str, stream: str, probe_value: float | str | None
     return _urlopen_status(req, timeout=5, opener=urllib.request.build_opener(_NoProbeRedirect()))
 
 
-def poll_correlated_stream(backend_url: str, service_id: str, stream: str, probes: list[dict[str, Any]], high_scale: bool = False) -> dict[str, Any]:
+def poll_correlated_stream(backend_url: str, service_id: str, stream: str, probes: list[dict[str, Any]]) -> dict[str, Any]:
     dataset, column = {"request": ("logs", "url"), "vitals": ("client_vitals", "metric_value"), "errors": ("client_errors", "error_message")}[stream]
     keys = ", ".join(str(int(p["key"])) for p in probes) if stream == "vitals" else ", ".join(f"'{escape_sql_literal(p['key'])}'" for p in probes)
     metric = " AND metric_name = 'LCP'" if stream == "vitals" else ""
@@ -154,7 +154,6 @@ def measure_correlated_freshness(env_info: dict[str, str], edge_url: str, num_re
     service = next((s for s in (services if isinstance(services, list) else []) if isinstance(s, dict) and s.get("service_id") == env_info["service_id"]), None)
     if status != 200 or service is None:
         raise ValueError(f"correlated preflight failed (HTTP {status}); no traffic sent")
-    high_scale = bool(service.get("is_high_scale"))
     if (num_rum or num_errors) and not service.get("rum_enabled"):
         raise ValueError("RUM is not enabled; no traffic sent")
     queue = [(stream, idx) for idx in range(max(counts)) for stream, count in zip(("request", "vitals", "errors"), counts, strict=True) if idx < count]
@@ -183,7 +182,7 @@ def measure_correlated_freshness(env_info: dict[str, str], edge_url: str, num_re
             for stream in ("request", "vitals", "errors"):
                 pending = [p for p in probes if p["stream"] == stream and p.get("first_visible") is None]
                 if pending and time.monotonic() + 5 <= deadline:
-                    queries.append(poll_correlated_stream(env_info["backend_url"], env_info["service_id"], stream, pending, high_scale))
+                    queries.append(poll_correlated_stream(env_info["backend_url"], env_info["service_id"], stream, pending))
             next_poll = time.monotonic() + poll_interval_s
         if not queue and all(p.get("first_visible") is not None for p in probes):
             break
@@ -203,7 +202,7 @@ def measure_correlated_freshness(env_info: dict[str, str], edge_url: str, num_re
             "event_clock_point_latency_s": None, "clock_uncertainty_s": None, "poll_interval_s": poll_interval_s,
             "poll_resolution": "minimum interval after sweep; actual per-query start/end bounds recorded",
             "query_window": "server now - 1 hour through server now + 1 minute", "query_timeout_s": 5, "query_row_cap": 100,
-            "high_scale": high_scale, "aggregate_send_rps_cap": 1, "target_p95_s": BUDGETS["peak_freshness_p95_ms"] / 1000,
+            "aggregate_send_rps_cap": 1, "target_p95_s": BUDGETS["peak_freshness_p95_ms"] / 1000,
         },
         "unknowns": ["peak_load_not_verified", "event_clock_point_latency_unknown", "source_clock_window_clipping_unknown", *cache_gaps],
         "unsent": len(queue), "requested": dict(zip(("request", "vitals", "errors"), counts, strict=True)),
@@ -277,7 +276,7 @@ def measure_active_traffic_benchmark(targets: list[str], duration_s: float = 30.
             base_latest_ts, base_rows, _, base_dash_rows = _sample_serving_state(be_url, sid, auth_headers, 0, 5.0, 20.0)
             clock_unc = _measure_clock_uncertainty(be_url, auth_headers)
             marker = f"act-{uuid.uuid4().hex[:6]}"
-            contexts[tgt] = {"env": tgt, "name": env_info["name"], "service_id": sid, "backend_url": be_url, "cdn_domain": cdn, "auth_headers": auth_headers, "is_high_scale": bool(svc_info.get("is_high_scale")), "rum_enabled": bool(svc_info.get("rum_enabled")), "polling": configured_polling(svc_data, sid), "base_latest_ts": base_latest_ts, "base_rows": base_rows, "base_dash_rows": base_dash_rows, "clock_uncertainty_s": clock_unc, "marker": marker, "streamer": ActiveTrafficStreamer(cdn, marker, rps=rps), "samples": []}
+            contexts[tgt] = {"env": tgt, "name": env_info["name"], "service_id": sid, "backend_url": be_url, "cdn_domain": cdn, "auth_headers": auth_headers, "rum_enabled": bool(svc_info.get("rum_enabled")), "polling": configured_polling(svc_data, sid), "base_latest_ts": base_latest_ts, "base_rows": base_rows, "base_dash_rows": base_dash_rows, "clock_uncertainty_s": clock_unc, "marker": marker, "streamer": ActiveTrafficStreamer(cdn, marker, rps=rps), "samples": []}
         except Exception as exc:
             contexts[tgt] = {"env": tgt, "name": ENVIRONMENTS.get(tgt, tgt), "error": str(exc)}
 
@@ -322,7 +321,7 @@ def measure_active_traffic_benchmark(targets: list[str], duration_s: float = 30.
         unknowns = [*([] if req_lat is not None else ["per_event_latency_uncorrelated"]), *([] if (not c["rum_enabled"] or rum_lag is not None) else ["rum_freshness_unmeasured"]), *([] if clock_unc is not None else ["clock_uncertainty_unmeasured"])]
         results.append({
             "env": tgt, "name": c["name"], "service_id": c["service_id"], "cdn_domain": c["cdn_domain"],
-            "mode": "active_continuous_traffic", "deployment_mode": "high_scale" if c["is_high_scale"] else "standard",
+            "mode": "active_continuous_traffic",
             "measurement": "request_watermark_recency", "qualification": "verified" if not unknowns else "incomplete",
             "unknowns": unknowns,
             "configured_polling": c["polling"],
@@ -354,7 +353,7 @@ def measure_environment(env_key: str, env_info: dict[str, str], num_requests: in
         raise ValueError(f"services settings request failed with HTTP {service_status}: {service_data}")
     polling = configured_polling(service_data, sid)
     service_info = next(entry for entry in service_data["services"] if entry.get("service_id") == sid)
-    is_high_scale, rum_enabled = bool(service_info.get("is_high_scale")), bool(service_info.get("rum_enabled"))
+    rum_enabled = bool(service_info.get("rum_enabled"))
 
     le_status, le_data = http_get(f"{be_url}/api/log-extents?service_id={sid}", auth_headers, timeout=5.0)
     sync_status_code, sync_data = http_get(f"{be_url}/api/sync-status?service_id={sid}", auth_headers, timeout=5.0)
@@ -365,7 +364,7 @@ def measure_environment(env_key: str, env_info: dict[str, str], num_requests: in
     base_latest_ts, base_local_rows = parse_iso(le_data.get("latest_log_at")), int(sync_data.get("local_rows") or 0)
 
     cr_req_s, cr_req_data = http_get(f"{be_url}/api/cron-runs?service_id={sid}&task=log_discovery&per_page=1", auth_headers)
-    rum_task = "rum_discovery" if is_high_scale else "rum_sync"
+    rum_task = "rum_discovery"
     cr_rum_s, cr_rum_data = http_get(f"{be_url}/api/cron-runs?service_id={sid}&task={rum_task}&per_page=1", auth_headers)
     if cr_req_s != 200 or not isinstance(cr_req_data, dict):
         raise ValueError(f"request cron baseline failed with HTTP {cr_req_s}: {cr_req_data}")
@@ -436,7 +435,7 @@ def measure_environment(env_key: str, env_info: dict[str, str], num_requests: in
     return {
         "env": env_key, "name": name, "service_id": sid, "cdn_domain": cdn, "sent_at_utc": send_start_utc.isoformat(),
         "measurement_contract": {"source_timestamp": "probe_send_time", "fos_last_modified_measured": False, "serving_detection": "aggregate row count or latest event timestamp advanced", "correlated_to_probe_marker": False},
-        "configured_polling": polling, "deployment_mode": "high_scale" if is_high_scale else "standard", "rum_enabled": rum_enabled,
+        "configured_polling": polling, "rum_enabled": rum_enabled,
         "wall_clock_delays": {
             "header_seconds": round(header_detected_at, 1) if header_detected_at else None,
             "cron_request_seconds": round(cron_req_detected_at, 1) if cron_req_detected_at else None,
@@ -444,7 +443,7 @@ def measure_environment(env_key: str, env_info: dict[str, str], num_requests: in
             "dashboard_bundle_seconds": round(dashboard_detected_at, 1) if dashboard_detected_at else None,
         },
         "observed_discovery_to_serving_seconds": {
-            "request_discovery_status": cron_req_status, "includes_high_scale_queue_and_publication_delay": is_high_scale,
+            "request_discovery_status": cron_req_status, "includes_high_scale_queue_and_publication_delay": True,
             "request_discovery_to_header": seconds_between(header_detected_utc, cron_req_completed_utc),
             "request_discovery_to_dashboard": seconds_between(dashboard_detected_utc, cron_req_completed_utc),
             "rum_discovery_to_serving": seconds_between(rum_serving_detected_utc, cron_rum_completed_utc),

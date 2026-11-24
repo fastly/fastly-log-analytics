@@ -16,6 +16,7 @@ import {
   DialogTitle,
   DialogDescription,
 } from '@/components/ui/dialog'
+import { approxMark, boundMark, readRollupMeta } from '@/components/network/rollupLabels'
 
 const SKELETON_IDS = Array.from({ length: 16 }, (_, i) => `pop-skeleton-${i}`)
 
@@ -54,7 +55,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
   const [selectedPop, setSelectedPop] = React.useState<PopHealthItem | null>(null)
 
   // Query PoP Health data using the service-query hook
-  const popHealthQuery = useServiceQuery<PopHealthItem[]>(
+  const popHealthQuery = useServiceQuery(
     ['network', 'pop-health', serviceId, startTime, endTime],
     async ({ signal }) => {
       const data = await unwrapClient(
@@ -69,11 +70,15 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
         }),
         'Failed to load PoP health data',
       )
-      return data?.data ?? []
+      return { items: data?.data ?? [], rollup: readRollupMeta(data) }
     }
   )
 
-  const items = React.useMemo(() => popHealthQuery.data ?? [], [popHealthQuery.data])
+  const items = React.useMemo(() => popHealthQuery.data?.items ?? [], [popHealthQuery.data])
+  const rollup = popHealthQuery.data?.rollup
+  const hitMark = boundMark(rollup, 'cache_hit_rate')
+  const rttMark = approxMark(rollup, 'p50_rtt_us')
+  const ttfbMark = approxMark(rollup, 'p95_ttfb_ms')
   const isLoading = popHealthQuery.isLoading || (popHealthQuery.isFetching && !popHealthQuery.data)
   const error = popHealthQuery.error
 
@@ -84,7 +89,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
 
   if (isLoading) {
     return (
-      <Card className="shadow-md [contain-intrinsic-size:280px] [content-visibility:auto]">
+      <Card className="shadow-md min-h-[280px]">
         <CardHeader>
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div className="space-y-1">
@@ -108,7 +113,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
 
   if (error) {
     return (
-      <Card className="shadow-md border-destructive/20 bg-destructive/5 [contain-intrinsic-size:280px] [content-visibility:auto]">
+      <Card className="shadow-md border-destructive/20 bg-destructive/5 min-h-[280px]">
         <CardHeader>
           <CardTitle className="text-lg font-bold text-destructive flex items-center gap-2">
             <AlertTriangle className="h-5 w-5" />
@@ -124,7 +129,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
 
   if (items.length === 0) {
     return (
-      <Card className="shadow-md [contain-intrinsic-size:280px] [content-visibility:auto]">
+      <Card className="shadow-md min-h-[280px]">
         <CardHeader>
           <CardTitle className="text-lg font-bold flex items-center gap-2">
             <Globe className="h-5 w-5 text-muted-foreground" />
@@ -140,7 +145,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
   }
 
   return (
-    <Card className="shadow-md transition-all duration-300 [contain-intrinsic-size:280px] [content-visibility:auto]">
+    <Card className="shadow-md transition-all duration-300 min-h-[280px]">
       <CardHeader className="border-b bg-muted/15">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="space-y-1">
@@ -212,7 +217,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
                         {formatCompactCount(pop.requests)} reqs
                       </span>
                       <span className="text-[10px] font-semibold text-foreground/80 font-mono mt-0.5">
-                        {pop.cache_hit_rate.toFixed(1)}% Hit
+                        {hitMark}{pop.cache_hit_rate.toFixed(1)}% Hit
                       </span>
                     </div>
                   </TooltipTrigger>
@@ -241,7 +246,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
                             <Percent className="h-3 w-3" /> Cache Hit Rate
                           </span>
                           <span className="font-bold text-foreground font-mono mt-0.5">
-                            {pop.cache_hit_rate.toFixed(2)}%
+                            {hitMark}{pop.cache_hit_rate.toFixed(2)}%
                           </span>
                         </div>
                         <div className="flex flex-col">
@@ -265,7 +270,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
                             <Wifi className="h-3 w-3" /> P50 TCP RTT
                           </span>
                           <span className="font-bold text-foreground font-mono mt-0.5">
-                            {pop.p50_rtt_us ? `${(pop.p50_rtt_us / 1000).toFixed(1)} ms` : '—'}
+                            {pop.p50_rtt_us ? `${rttMark}${(pop.p50_rtt_us / 1000).toFixed(1)} ms` : '—'}
                           </span>
                         </div>
                         <div className="flex flex-col">
@@ -273,7 +278,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
                             <Zap className="h-3 w-3" /> P95 TTFB
                           </span>
                           <span className="font-bold text-foreground font-mono mt-0.5">
-                            {pop.p95_ttfb_ms ? `${pop.p95_ttfb_ms.toFixed(1)} ms` : '—'}
+                            {pop.p95_ttfb_ms ? `${ttfbMark}${pop.p95_ttfb_ms.toFixed(1)} ms` : '—'}
                           </span>
                         </div>
                       </div>
@@ -352,11 +357,11 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
                     </span>
                     <div className="mt-2.5">
                       <div className="text-xl font-mono font-black tracking-tight text-foreground">
-                        {selectedPop.cache_hit_rate.toFixed(2)}%
+                        {hitMark}{selectedPop.cache_hit_rate.toFixed(2)}%
                       </div>
                       <div className="text-[10px] text-muted-foreground/90 font-medium mt-1 space-y-0.5 font-mono">
-                        <div>Hits: {formatCount(Math.round(selectedPop.requests * selectedPop.cache_hit_rate / 100))}</div>
-                        <div>Misses: {formatCount(Math.round(selectedPop.requests * (100 - selectedPop.cache_hit_rate) / 100))}</div>
+                        <div>Hits: {hitMark}{formatCount(Math.round(selectedPop.requests * selectedPop.cache_hit_rate / 100))}</div>
+                        <div>Misses: {hitMark && '≤'}{formatCount(Math.round(selectedPop.requests * (100 - selectedPop.cache_hit_rate) / 100))}</div>
                       </div>
                     </div>
                   </div>
@@ -403,7 +408,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
                     </span>
                     <div className="mt-2.5">
                       <div className="text-xl font-mono font-black tracking-tight text-foreground">
-                        {selectedPop.p50_rtt_us ? `${(selectedPop.p50_rtt_us / 1000).toFixed(1)} ms` : '—'}
+                        {selectedPop.p50_rtt_us ? `${rttMark}${(selectedPop.p50_rtt_us / 1000).toFixed(1)} ms` : '—'}
                       </div>
                       <span className="text-[10px] text-muted-foreground/90 font-medium block mt-1">
                         {selectedPop.p50_rtt_us && selectedPop.p50_rtt_us < 50000
@@ -424,7 +429,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
                     </span>
                     <div className="mt-2.5">
                       <div className="text-xl font-mono font-black tracking-tight text-foreground">
-                        {selectedPop.p95_ttfb_ms ? `${selectedPop.p95_ttfb_ms.toFixed(1)} ms` : '—'}
+                        {selectedPop.p95_ttfb_ms ? `${ttfbMark}${selectedPop.p95_ttfb_ms.toFixed(1)} ms` : '—'}
                       </div>
                       <span className="text-[10px] text-muted-foreground/90 font-medium block mt-1">
                         {selectedPop.p95_ttfb_ms && selectedPop.p95_ttfb_ms < 200

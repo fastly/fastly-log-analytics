@@ -12,6 +12,7 @@ import { useScoringLabels } from '@/components/SessionScoring/ScoringAdminPanels
 import { useServiceStore } from '@/stores/filterStore'
 import { ReportLayout } from '@/components/ReportLayout'
 import { UpdatingBadge } from '@/components/AnalyticsCard'
+import { RawWindowNote, readRawWindow } from '@/components/network/rollupLabels'
 import {
   SessionDetail,
   SessionDetailModal,
@@ -108,14 +109,9 @@ function SessionsBody({
 
   if (rangeExceedsSevenDays) {
     return (
-      <>
-        <div className="flex flex-col sm:flex-row items-start sm:items-center gap-2 sm:gap-4 shrink-0 mb-4 justify-end">
-          <UpdatingBadge />
-        </div>
-        <div className="rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100">
-          Sessions view is limited to a 7-day window. Narrow the date range above to see results.
-        </div>
-      </>
+      <div className="rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100">
+        Sessions view is limited to a 7-day window. Narrow the date range above to see results.
+      </div>
     )
   }
 
@@ -123,9 +119,11 @@ function SessionsBody({
 
   return (
     <div data-testid="user-sessions-explorer" className="space-y-4">
-      <div className="flex flex-col sm:flex-row items-start sm:items-center gap-2 sm:gap-4 shrink-0 mb-4 justify-end">
-        <UpdatingBadge />
-      </div>
+      {isFetching && !isLoadingInitial ? (
+        <div className="flex flex-col sm:flex-row items-start sm:items-center gap-2 sm:gap-4 shrink-0 mb-4 justify-end">
+          <UpdatingBadge />
+        </div>
+      ) : null}
 
       {isError ? (
         <div role="alert" className="mb-4 flex flex-col items-start gap-2 rounded-md border border-red-300 bg-red-50 p-4 text-sm text-red-900 dark:border-red-700 dark:bg-red-950 dark:text-red-100">
@@ -139,6 +137,8 @@ function SessionsBody({
           </button>
         </div>
       ) : null}
+
+      <RawWindowNote window={readRawWindow(data)} />
 
       <ScoringControls
         cmcdEnabled={cmcdEnabled} flaggedOnly={flaggedOnly} setFlaggedOnly={(v) => void setFlaggedOnly(v)}

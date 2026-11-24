@@ -2,7 +2,8 @@
 
 import React from 'react'
 import { Globe, MapPin, Server } from 'lucide-react'
-import type { ColumnDef, VisibilityState } from '@tanstack/react-table'
+import type { ColumnVisibilityState, RowData } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import { useActiveLogFields } from '@/hooks/useBootstrap'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import {
@@ -13,6 +14,7 @@ import {
   msCell,
   PopLabel,
 } from '@/components/DataTable'
+import { approxMark, boundMark, type NetworkRollupMeta } from '@/components/network/rollupLabels'
 import { cn, formatBytes, formatCount } from '@/lib/utils'
 import {
   ApproxBadge,
@@ -28,17 +30,19 @@ import {
 
 type LatencyRow = { p50_ms?: number | null; p95_ms?: number | null; requests: number }
 
-const requestsCol = <TRow extends LatencyRow>(): ColumnDef<TRow> => ({
+const markedMs = (mark: string, value: number | null | undefined) => mark ? <span>{`${mark}${value?.toFixed(1) ?? ''}ms`}</span> : msCell(value)
+
+const requestsCol = <TRow extends LatencyRow>(mark = ''): ColumnDef<TRow> => ({
   accessorKey: 'requests', id: 'requests', meta: { label: 'Requests' }, header: columnHeader('Reqs'),
-  cell: ({ row }) => formatCount(row.original.requests),
+  cell: ({ row }) => `${mark}${formatCount(row.original.requests)}`,
 })
-const p50Col = <TRow extends LatencyRow>(): ColumnDef<TRow> => ({
+const p50Col = <TRow extends LatencyRow>(mark = ''): ColumnDef<TRow> => ({
   accessorKey: 'p50_ms', id: 'p50_ms', meta: { label: 'Median (P50)' }, header: columnHeader('P50'),
-  cell: ({ row }) => msCell(row.original.p50_ms),
+  cell: ({ row }) => markedMs(mark, row.original.p50_ms),
 })
-const p95Col = <TRow extends LatencyRow>(): ColumnDef<TRow> => ({
+const p95Col = <TRow extends LatencyRow>(mark = ''): ColumnDef<TRow> => ({
   accessorKey: 'p95_ms', id: 'p95_ms', meta: { label: 'P95 Latency' }, header: columnHeader('P95'),
-  cell: ({ row }) => msCell(row.original.p95_ms),
+  cell: ({ row }) => markedMs(mark, row.original.p95_ms),
 })
 
 const URL_COLUMNS: ColumnDef<OriginSlowUrlRow>[] = [
@@ -65,17 +69,21 @@ const POP_COLUMNS: ColumnDef<OriginPopLatencyRow>[] = [
   },
 ]
 
-const IP_COLUMNS: ColumnDef<OriginIpHealthRow>[] = [
+const ipColumns = (rollup?: NetworkRollupMeta): ColumnDef<OriginIpHealthRow>[] => [
   {
     accessorKey: 'oip', id: 'oip', meta: { label: 'Origin IP' }, header: columnHeader('Origin IP'),
     cell: ({ row }) => <FilterValueCell filters={[{ column: 'oip', value: row.original.oip }]} className="font-mono text-xs" />,
   },
-  requestsCol(),
-  p50Col(),
-  p95Col(),
+  requestsCol(boundMark(rollup, 'ip_health.requests')),
+  p50Col(approxMark(rollup, 'ip_health.p50_ms')),
+  p95Col(approxMark(rollup, 'ip_health.p95_ms')),
   {
     accessorKey: 'error_pct', id: 'error_pct', meta: { label: '5xx Errors %' }, header: columnHeader('5xx %'),
-    cell: ({ row }) => <span className={cn((row.original.error_pct ?? 0) > 1 ? 'text-destructive font-bold' : '')}>{row.original.error_pct}%</span>,
+    cell: ({ row }) => (
+      <span className={cn((row.original.error_pct ?? 0) > 1 ? 'text-destructive font-bold' : '')}>
+        {`${approxMark(rollup, 'ip_health.error_pct')}${row.original.error_pct}%`}
+      </span>
+    ),
   },
 ]
 
@@ -89,27 +97,30 @@ export interface LatencyHeatmapProps {
   slowUrls: SectionQuery<OriginSlowUrls>
   popLatency: SectionQuery<OriginPopLatency>
   ipHealth: SectionQuery<OriginIpHealth>
+  /** Present when Cloud answered IP health from summaries; drives the ≈ and ≥ marks. */
+  ipRollup?: NetworkRollupMeta
   summary: SectionQuery<OriginSummary>
-  urlVisibility: VisibilityState
-  setUrlVisibility: (visibility: VisibilityState) => void
+  urlVisibility: ColumnVisibilityState
+  setUrlVisibility: (visibility: ColumnVisibilityState) => void
   onUrlVisChange: (id: string, visible: boolean) => void
-  popVisibility: VisibilityState
-  setPopVisibility: (visibility: VisibilityState) => void
+  popVisibility: ColumnVisibilityState
+  setPopVisibility: (visibility: ColumnVisibilityState) => void
   onPopVisChange: (id: string, visible: boolean) => void
-  ipVisibility: VisibilityState
-  setIpVisibility: (visibility: VisibilityState) => void
+  ipVisibility: ColumnVisibilityState
+  setIpVisibility: (visibility: ColumnVisibilityState) => void
   onIpVisChange: (id: string, visible: boolean) => void
 }
 
 export function LatencyHeatmap({
-  slowUrls, popLatency, ipHealth, summary,
+  slowUrls, popLatency, ipHealth, ipRollup, summary,
   urlVisibility, setUrlVisibility, onUrlVisChange,
   popVisibility, setPopVisibility, onPopVisChange,
   ipVisibility, setIpVisibility, onIpVisChange,
 }: LatencyHeatmapProps) {
   const { isFieldActive } = useActiveLogFields()
+  const ipCols = React.useMemo(() => ipColumns(ipRollup), [ipRollup])
 
-  const renderTableCard = <TRow,>(cfg: {
+  const renderTableCard = <TRow extends RowData>(cfg: {
     title: string
     icon: React.ReactNode
     query: {
@@ -122,8 +133,8 @@ export function LatencyHeatmap({
     help: string
     defaultApproxNote: string
     columnIds: string[]
-    visibility: VisibilityState
-    setVisibility: (v: VisibilityState) => void
+    visibility: ColumnVisibilityState
+    setVisibility: (v: ColumnVisibilityState) => void
     onVisChange: (id: string, visible: boolean) => void
     columns: ColumnDef<TRow>[]
     emptyMessage: string
@@ -205,7 +216,7 @@ export function LatencyHeatmap({
           visibility: ipVisibility,
           setVisibility: setIpVisibility,
           onVisChange: onIpVisChange,
-          columns: IP_COLUMNS,
+          columns: ipCols,
           emptyMessage: isFieldActive('oip') ? 'No origin IP data in this time range.' : 'Requires Origin Metrics (Group L) fields to be enabled.',
         })}
 

@@ -1,13 +1,18 @@
 'use client'
 import React, { useMemo, useState } from 'react'
+import { Controller, useForm, useWatch } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
+import { z } from 'zod'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useRouter } from 'next/navigation'
-import { AlertCircle, CheckCircle2, DollarSign, Loader2, MapPin, Pencil, RefreshCw, Save } from 'lucide-react'
+import { AlertCircle, CheckCircle2, DollarSign, ExternalLink, Loader2, MapPin, Pencil, RefreshCw, Save } from 'lucide-react'
 import type { components } from '@/types/api.generated'
 import { client, extractApiError, unwrapClient, queryKeys } from '@/lib/api'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
+import { LIST_RATES } from '@/lib/cloud-engine/usage/rates'
+import { SERVICE_DEFAULTS } from '@/lib/serviceDefaults'
 import { buildServiceHref, cn, panelDialogContent, panelDialogFooter, panelDialogHeaderMuted } from '@/lib/utils'
 import { useBootstrap, useMounted } from '@/hooks/useBootstrap'
-import { useDerivedState } from '@/hooks/useSSE'
 import { useServiceStore } from '@/stores/filterStore'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { BotSourcesPanel } from '@/app/control-room/_sections/ControlRoomClient'
@@ -27,12 +32,16 @@ function popCoord(pop: PopLocation, axis: 'latitude' | 'longitude'): number | nu
 }
 
 function PopLocationsModal({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
-  const [apiKey, setApiKey] = useState('')
+  const popForm = useForm<{ apiKey: string }>({
+    defaultValues: { apiKey: '' },
+    mode: 'onChange',
+  })
+  const apiKey = useWatch({ control: popForm.control, name: 'apiKey' }) ?? ''
   const queryClient = useQueryClient()
   const { data, isLoading } = useQuery({ queryKey: ['pop-locations'], queryFn: async () => unwrapClient(client.GET('/api/admin/pop-locations')), enabled: open })
   const mutation = useMutation({
-    mutationFn: async () => unwrapClient(client.POST('/api/admin/pop-locations/refresh', { body: { token: apiKey } })),
-    onSuccess: (result) => { queryClient.setQueryData(['pop-locations'], { pops: result?.pops || [] }); setApiKey('') },
+    mutationFn: async (token: string) => unwrapClient(client.POST('/api/admin/pop-locations/refresh', { body: { token } })),
+    onSuccess: (result) => { queryClient.setQueryData(['pop-locations'], { pops: result?.pops || [] }); popForm.reset({ apiKey: '' }) },
   })
   const pops = data?.pops || []
   const withCoords = pops.filter(p => popCoord(p, 'latitude') != null)
@@ -80,8 +89,10 @@ function PopLocationsModal({ open, onOpenChange }: { open: boolean; onOpenChange
             <Label htmlFor="pop-api-key" className="text-sm font-medium">Update from Fastly API</Label>
             <p className="text-xs text-muted-foreground">A read-only Fastly API token is sufficient. The key is used once to call <code className="font-mono">/datacenters</code> and is not stored.</p>
             <div className="flex gap-2">
-              <input id="pop-api-key" type="password" placeholder="Fastly API key..." value={apiKey} onChange={e => setApiKey(e.target.value)} onKeyDown={e => e.key === 'Enter' && apiKey.trim() && !mutation.isPending && mutation.mutate()} className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 font-mono" />
-              <Button onClick={() => mutation.mutate()} disabled={!apiKey.trim() || mutation.isPending} className="shrink-0">
+              <Controller control={popForm.control} name="apiKey" rules={{ validate: (value) => !!value.trim() }} render={({ field }) => (
+                <input id="pop-api-key" type="password" placeholder="Fastly API key..." {...field} onKeyDown={event => event.key === 'Enter' && popForm.formState.isValid && !mutation.isPending && mutation.mutate(field.value)} className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 font-mono" />
+              )} />
+              <Button onClick={() => mutation.mutate(apiKey)} disabled={!popForm.formState.isValid || !apiKey.trim() || mutation.isPending} className="shrink-0">
                 <RefreshCw className={`h-4 w-4 mr-2 ${mutation.isPending ? 'animate-spin' : ''}`} />{mutation.isPending ? 'Fetching...' : 'Update'}
               </Button>
             </div>
@@ -114,14 +125,10 @@ export function DiagnosticsPanel() {
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: queryKeys.admin.debugSettings() }); queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap() }) },
   })
   const { data: bootstrapData } = useBootstrap()
-  const activeServiceId = useServiceStore((s) => s.activeServiceId)
-  const services = useServiceStore((s) => s.services)
-  const activeService = services.find((s) => s.id === activeServiceId) ?? services[0]
-  const queryEngineLabel = activeService?.is_high_scale ? 'ClickHouse' : 'DuckDB'
   const debugBackendOn = (bootstrapData as { debug_state?: { debug_responses_enabled?: boolean } } | undefined)?.debug_state?.debug_responses_enabled !== false
   const debugDisabledTooltip = !debugBackendOn ? 'Backend debug responses are disabled — set DEBUG_RESPONSES=true in the server env (or .env file) and restart to see data here.' : undefined
   const panels = [
-    { id: 'diag-query-debug-label', title: 'Query debugging panel', desc: `Bottom-of-screen panel with ${queryEngineLabel} SQL queries and execution times.`, value: settings?.query_debug_visibility ?? 'disabled', onChange: (val: string | null) => val && updateSettingsMutation.mutate({ query_debug_visibility: val }) },
+    { id: 'diag-query-debug-label', title: 'Query debugging panel', desc: IS_CLOUD_MODE ? 'Bottom-of-screen panel with DuckDB-Wasm SQL queries and execution times.' : 'Bottom-of-screen panel with ClickHouse SQL queries and execution times.', value: settings?.query_debug_visibility ?? 'disabled', onChange: (val: string | null) => val && updateSettingsMutation.mutate({ query_debug_visibility: val }) },
     { id: 'diag-api-panel-label', title: 'API call panel', desc: 'Bottom-of-screen panel with all Fastly API calls and FOS operations per request.', value: settings?.api_call_debug_visibility ?? 'disabled', onChange: (val: string | null) => val && updateSettingsMutation.mutate({ api_call_debug_visibility: val }) },
   ]
   return (
@@ -151,42 +158,125 @@ export function DiagnosticsPanel() {
 }
 
 function UsageLogRetentionInput({ initial, onSave }: { initial: number; onSave: (days: number) => void }) {
-  const [value, setValue] = useDerivedState(String(initial))
+  const form = useForm<{ days: string }>({
+    defaultValues: { days: String(initial) },
+    mode: 'onChange',
+    resolver: zodResolver(z.object({
+      days: z.string().refine((value) => Number.isInteger(Number(value)) && Number(value) >= 1),
+    })),
+  })
+  React.useEffect(() => form.reset({ days: String(initial) }), [form, initial])
+  const submit = form.handleSubmit(({ days }) => onSave(Number(days)))
   return (
     <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
       <span>Keep for</span>
-      <Input type="number" min={1} aria-label="Usage-log retention in days" className="h-7 w-14 text-xs text-right" value={value} onChange={(e) => setValue(e.target.value)}
-        onBlur={() => { const n = parseInt(value); if (Number.isFinite(n) && n >= 1) onSave(n); else setValue(String(initial)) }}
-        onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
-      />
+      <Controller control={form.control} name="days" render={({ field }) => (
+        <Input type="number" min={1} step={1} aria-label="Usage-log retention in days" className="h-7 w-14 text-xs text-right" {...field}
+          onBlur={() => { if (form.formState.isValid) void submit(); else form.reset({ days: String(initial) }) }}
+          onKeyDown={(event) => { if (event.key === 'Enter') (event.target as HTMLInputElement).blur() }}
+        />
+      )} />
       <span>days</span>
     </div>
   )
 }
 
-const _PRICING_DEFAULTS = { class_a_rate_per_1k: 0.005, class_b_rate_per_10k: 0.01, cdn_egress_rate_per_gb: 0.12, storage_rate_per_gb_month: 0.02, min_billed_days: 30 }
+type PricingKey = keyof typeof LIST_RATES
+
+interface PricingFieldDef {
+  key: PricingKey
+  label: string
+  integer?: boolean
+  cloudOnly?: boolean
+  /** Converts stored rate into Fastly's published display unit (e.g. $/10k → $/1k, $/1M → $/100k). */
+  displayScale?: number
+}
+
+const PRICING_FIELDS: PricingFieldDef[] = [
+  { key: 'class_a_rate_per_1k', label: 'Object Storage Class A ($/1,000 ops)' },
+  { key: 'class_b_rate_per_10k', label: 'Object Storage Class B ($/1,000 ops)', displayScale: 0.1 },
+  { key: 'cdn_egress_rate_per_gb', label: 'CDN Bandwidth ($/GB)' },
+  { key: 'storage_rate_per_gb_month', label: 'Object Storage ($/GB/mo)' },
+  { key: 'min_billed_days', label: 'Min. Days Billed/Object', integer: true },
+  { key: 'cdn_request_rate_per_10k', label: 'CDN Requests ($/10,000 reqs)', cloudOnly: true },
+  { key: 'compute_request_rate_per_million', label: 'Compute Requests ($/1M reqs)', cloudOnly: true },
+  { key: 'compute_vcpu_rate_per_million_ms', label: 'Compute vCPU ($/1M vCPU ms)', cloudOnly: true },
+  { key: 'compute_vcpu_free_ms_per_request', label: 'Included vCPU (ms/req)', cloudOnly: true },
+  { key: 'compute_vcpu_excess_rate_per_second', label: 'Excess vCPU ($/s)', cloudOnly: true },
+  { key: 'compute_vcpu_rounding_ms', label: 'vCPU Rounding (ms)', cloudOnly: true },
+  { key: 'kv_class_a_rate_per_million', label: 'KV Store Class A ($/100,000 ops)', cloudOnly: true, displayScale: 0.1 },
+  { key: 'kv_class_b_rate_per_million', label: 'KV Store Class B ($/1M ops)', cloudOnly: true },
+  { key: 'secret_rate_per_month', label: 'Secret Store ($/secret/mo)', cloudOnly: true },
+]
+
+function toDisplayRate(val: number, scale?: number): string {
+  return String(scale && scale !== 1 ? Number((val * scale).toPrecision(12)) : val)
+}
+
+function fromDisplayRate(val: number, scale?: number): number {
+  return scale && scale !== 1 ? Number((val / scale).toPrecision(12)) : val
+}
+
+function isDefaultRate(value: unknown, fallback: number): boolean {
+  if (value == null || typeof value !== 'number' || !Number.isFinite(value)) return true
+  return Math.abs(value - fallback) < 1e-9
+}
+
+function optionalRateField(integer?: boolean) {
+  return z.string().refine((value) => {
+    const trimmed = value.trim()
+    if (trimmed === '') return true
+    const num = Number(trimmed)
+    if (!Number.isFinite(num)) return false
+    return integer ? Number.isInteger(num) && num >= 1 : num >= 0
+  })
+}
+
+const pricingSchema = z.object(
+  Object.fromEntries(PRICING_FIELDS.map((f) => [f.key, optionalRateField(f.integer)])) as Record<
+    PricingKey,
+    ReturnType<typeof optionalRateField>
+  >,
+)
+
+type PricingFormValues = z.infer<typeof pricingSchema>
 
 export const PricingSettings = () => {
   const queryClient = useQueryClient()
   const mounted = useMounted()
   const [editing, setEditing] = useState(false)
+  const visibleFields = useMemo(
+    () => PRICING_FIELDS.filter((f) => !f.cloudOnly || IS_CLOUD_MODE),
+    [],
+  )
   const { data: settings, isLoading } = useQuery({ queryKey: ['usage-logging-settings'], queryFn: async () => (await unwrapClient(client.GET('/api/admin/usage-logging'))) ?? null })
-  const serverForm = useMemo(() => ({
-    rateA: String(settings?.class_a_rate_per_1k ?? _PRICING_DEFAULTS.class_a_rate_per_1k),
-    rateB: String(settings?.class_b_rate_per_10k ?? _PRICING_DEFAULTS.class_b_rate_per_10k),
-    rateCdn: String(settings?.cdn_egress_rate_per_gb ?? _PRICING_DEFAULTS.cdn_egress_rate_per_gb),
-    rateStorage: String(settings?.storage_rate_per_gb_month ?? _PRICING_DEFAULTS.storage_rate_per_gb_month),
-    minBilledDays: String(settings?.min_billed_days ?? _PRICING_DEFAULTS.min_billed_days),
-  }), [settings])
-  const [form, setForm] = useDerivedState(serverForm)
-  const { rateA, rateB, rateCdn, rateStorage, minBilledDays } = form
-  const fieldSetter = (field: keyof typeof form) => (value: string) => setForm((f) => ({ ...f, [field]: value }))
+  const serverForm = useMemo<PricingFormValues>(() => {
+    const raw = (settings ?? {}) as Record<string, unknown>
+    return Object.fromEntries(
+      PRICING_FIELDS.map((f) => {
+        const val = raw[f.key]
+        return [
+          f.key,
+          isDefaultRate(val, LIST_RATES[f.key]) ? '' : toDisplayRate(val as number, f.displayScale),
+        ]
+      }),
+    ) as PricingFormValues
+  }, [settings])
+  const form = useForm<PricingFormValues>({
+    resolver: zodResolver(pricingSchema),
+    defaultValues: serverForm,
+    mode: 'onChange',
+  })
+  React.useEffect(() => form.reset(serverForm), [form, serverForm])
+  const values = useWatch({ control: form.control }) as PricingFormValues
   const saveMutation = useMutation({
-    mutationFn: async () => {
-      await unwrapClient(client.PATCH('/api/admin/usage-logging', { body: {
-        class_a_rate_per_1k: parseFloat(rateA), class_b_rate_per_10k: parseFloat(rateB), cdn_egress_rate_per_gb: parseFloat(rateCdn),
-        storage_rate_per_gb_month: parseFloat(rateStorage), min_billed_days: parseInt(minBilledDays),
-      } }))
+    mutationFn: async (next: PricingFormValues) => {
+      const body: Record<string, number> = {}
+      for (const f of visibleFields) {
+        const trimmed = (next[f.key] ?? '').trim()
+        body[f.key] = trimmed === '' ? LIST_RATES[f.key] : fromDisplayRate(Number(trimmed), f.displayScale)
+      }
+      await unwrapClient(client.PATCH('/api/admin/usage-logging', { body: body as components['schemas']['UsageLoggingUpdateBody'] }))
     },
     onSuccess: () => {
       for (const k of [['usage-logging-settings'], ['usage'], ['usage-log']]) queryClient.invalidateQueries({ queryKey: k })
@@ -194,37 +284,62 @@ export const PricingSettings = () => {
     },
   })
   const saving = saveMutation.isPending
-  if (!mounted || isLoading) return <AnalyticsCard title="FOS Pricing Defaults" isLoading>{null}</AnalyticsCard>
-  const fields = [
-    { label: 'Class A Ops ($/1k)', value: rateA, setValue: fieldSetter('rateA') },
-    { label: 'Class B Ops ($/10k)', value: rateB, setValue: fieldSetter('rateB') },
-    { label: 'CDN Egress ($/GB)', value: rateCdn, setValue: fieldSetter('rateCdn') },
-    { label: 'Storage ($/GB/mo)', value: rateStorage, setValue: fieldSetter('rateStorage') },
-    { label: 'Min. Days Billed/Object', value: minBilledDays, setValue: fieldSetter('minBilledDays') },
-  ]
+  if (!mounted || isLoading) return <AnalyticsCard title="Pricing & Retention Defaults" isLoading>{null}</AnalyticsCard>
   return (
     <AnalyticsCard
-      title="Pricing & Retention Defaults" description="Global rates used for cost estimation across all services. Changes apply to all historical views." icon={<DollarSign className="h-4 w-4" />}
+      title="Pricing & Retention Defaults" description="Global rate overrides used for cost estimation across all services. Changes apply to all historical views." icon={<DollarSign className="h-4 w-4" />}
       headerAction={!editing ? <Button size="sm" variant="outline" onClick={() => setEditing(true)} className="h-8 font-bold uppercase tracking-tight"><Pencil className="h-3 w-3 mr-1.5" />Edit</Button> : null}
     >
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-4 text-xs text-muted-foreground">
+        <span>Leave fields blank to use Fastly&apos;s published default pricing. Enter a value to override with negotiated rates.</span>
+        <a
+          href="https://www.fastly.com/pricing"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1 font-medium text-primary hover:underline shrink-0"
+        >
+          Fastly default pricing
+          <ExternalLink className="h-3 w-3" />
+        </a>
+      </div>
       <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-4">
-        {fields.map((f) => {
+        {visibleFields.map((f) => {
           const inputId = `gs-${f.label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
+          const currentVal = values?.[f.key] ?? ''
           return (
-            <div key={f.label} className="space-y-1.5">
+            <div key={f.key} className="space-y-1.5">
               <Label htmlFor={inputId} className="text-[10px] uppercase font-bold text-muted-foreground">{f.label}</Label>
-              {editing ? <Input id={inputId} className="h-8 font-mono text-xs" value={f.value} onChange={(e) => f.setValue(e.target.value)} /> : <div className="h-8 flex items-center font-mono text-xs px-3 rounded-md bg-muted/40 border border-transparent">{f.value}</div>}
+              {editing ? (
+                <Controller control={form.control} name={f.key} render={({ field }) => (
+                  <Input
+                    id={inputId}
+                    inputMode={f.integer ? 'numeric' : 'decimal'}
+                    placeholder="Default"
+                    className="h-8 font-mono text-xs"
+                    {...field}
+                  />
+                )} />
+              ) : (
+                <output id={inputId} className={cn('h-8 flex items-center font-mono text-xs px-3 rounded-md bg-muted/40 border border-transparent', !currentVal && 'text-muted-foreground/60')}>
+                  {currentVal}
+                </output>
+              )}
             </div>
           )
         })}
       </div>
       {editing && (
         <div className="flex justify-end gap-2 mt-4">
-          <Button size="sm" variant="outline" onClick={() => { if (settings) setForm(serverForm); setEditing(false) }} disabled={saving} className="h-8 font-bold uppercase tracking-tight">Cancel</Button>
-          <Button size="sm" onClick={() => saveMutation.mutate()} disabled={saving} className="h-8 font-bold uppercase tracking-tight">
+          <Button size="sm" variant="outline" onClick={() => { if (settings) form.reset(serverForm); setEditing(false) }} disabled={saving} className="h-8 font-bold uppercase tracking-tight">Cancel</Button>
+          <Button size="sm" onClick={() => void form.handleSubmit((next) => saveMutation.mutate(next))()} disabled={saving || !form.formState.isValid} className="h-8 font-bold uppercase tracking-tight">
             {saving ? <Loader2 className="h-3 w-3 mr-1.5 animate-spin" /> : <Save className="h-3 w-3 mr-1.5" />}Save Changes
           </Button>
         </div>
+      )}
+      {saveMutation.isError && (
+        <p role="alert" className="mt-3 text-sm text-destructive">
+          {saveMutation.error instanceof Error ? saveMutation.error.message : 'Failed to save pricing settings'}
+        </p>
       )}
     </AnalyticsCard>
   )
@@ -240,7 +355,7 @@ export function GlobalSettings() {
   const { data: queryUsageLoggingSettings } = useQuery({ queryKey: ['usage-logging-settings'], queryFn: async () => unwrapClient(client.GET('/api/admin/usage-logging')), staleTime: 60_000 })
   const usageLoggingSettings = mounted ? queryUsageLoggingSettings : undefined
   const usageLoggingEnabled = usageLoggingSettings?.enabled ?? false
-  const usageLogRetention = usageLoggingSettings?.retention_days ?? 30
+  const usageLogRetention = usageLoggingSettings?.retention_days ?? SERVICE_DEFAULTS.usageLogRetentionDays
   const retentionMutation = useMutation({
     mutationFn: async (days: number) => { await unwrapClient(client.PATCH('/api/admin/usage-logging', { body: { retention_days: days } })) },
     onMutate: (days) => queryClient.setQueryData(['usage-logging-settings'], (old: typeof usageLoggingSettings) => ({ ...old, retention_days: days })),
@@ -272,20 +387,22 @@ export function GlobalSettings() {
                 <Switch aria-labelledby="gs-usage-log-label" checked={usageLoggingEnabled} onCheckedChange={(enabled) => toggleMutation.mutate(enabled)} disabled={toggleMutation.isPending} />
               </div>
             </div>
-            <div className="flex flex-col p-3 border rounded-lg gap-3">
-              <div className="min-w-0 space-y-0.5">
-                <Label className="text-sm font-medium">POP location data</Label>
-                <p className="text-xs text-muted-foreground">Fastly PoP coordinates used by the Impossible Distance insight for geo/RTT spoofing detection.</p>
+            {!IS_CLOUD_MODE && (
+              <div className="flex flex-col p-3 border rounded-lg gap-3">
+                <div className="min-w-0 space-y-0.5">
+                  <Label className="text-sm font-medium">POP location data</Label>
+                  <p className="text-xs text-muted-foreground">Fastly PoP coordinates used by the Impossible Distance insight for geo/RTT spoofing detection.</p>
+                </div>
+                <div className="flex items-center justify-end mt-auto">
+                  <Button variant="outline" size="sm" onClick={() => setPopLocationsOpen(true)}><MapPin className="h-3.5 w-3.5 mr-1.5" /> Update POP Info</Button>
+                </div>
               </div>
-              <div className="flex items-center justify-end mt-auto">
-                <Button variant="outline" size="sm" onClick={() => setPopLocationsOpen(true)}><MapPin className="h-3.5 w-3.5 mr-1.5" /> Update POP Info</Button>
-              </div>
-            </div>
+            )}
           </div>
-          <BotSourcesPanel />
+          {!IS_CLOUD_MODE && <BotSourcesPanel />}
         </div>
       </AnalyticsCard>
-      <PopLocationsModal open={popLocationsOpen} onOpenChange={setPopLocationsOpen} />
+      {!IS_CLOUD_MODE && <PopLocationsModal open={popLocationsOpen} onOpenChange={setPopLocationsOpen} />}
     </>
   )
 }

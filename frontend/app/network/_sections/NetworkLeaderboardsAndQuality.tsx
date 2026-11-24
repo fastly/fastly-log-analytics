@@ -2,7 +2,7 @@
 
 import React from 'react'
 import dynamic from 'next/dynamic'
-import type { ColumnDef } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import {
   DataTableReadonly,
   FilterValueCell,
@@ -10,7 +10,7 @@ import {
 } from '@/components/DataTable'
 import { Badge } from '@/components/ui/badge'
 import type { components, PlotlyLayout, PlotlyTrace } from '@/types/api'
-import { cn, formatCount } from '@/lib/utils'
+import { cn, formatCount, resolveCountryName } from '@/lib/utils'
 import { Skeleton, SkeletonGrid } from '@/components/ui/skeleton'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { StatCard } from '@/components/ui/confirm-dialog'
@@ -30,6 +30,7 @@ import {
   WorstAsnHelp,
   WorstRegionHelp,
 } from './NetworkHelp'
+import { approxMark, boundMark, readRollupMeta, type NetworkRollupMeta } from '@/components/network/rollupLabels'
 
 const PlotlyChart = dynamic(() => import('@/components/PlotlyChart').then((mod) => mod.PlotlyChart), {
   ssr: false, loading: () => <Skeleton className="w-full h-[300px]" />,
@@ -43,9 +44,16 @@ export type AsnRow = components['schemas']['NetworkLeaderboardRow']
 export type MetroRow = components['schemas']['NetworkMetroRow']
 
 const rttMs = (us: number | null | undefined) => (us != null ? `${(us / 1000).toFixed(1)}ms` : '—')
-const healthDelta = (a: AsnRow) => (a.health_score_now ?? 0) - (a.health_score_1h_ago ?? 0)
+const healthDelta = (a: AsnRow): number | null =>
+  a.health_score_now != null && a.health_score_1h_ago != null
+    ? a.health_score_now - a.health_score_1h_ago
+    : null
 
-export const ASN_COLUMNS: ColumnDef<AsnRow>[] = [
+const ApproxHealth = ({ mark, score }: { mark: string; score: number | null }) => (
+  <span className="block text-right">{mark && <span className="mr-1 text-xs text-muted-foreground">{mark}</span>}<HealthBadge score={score} /></span>
+)
+
+export const asnColumns = (meta?: NetworkRollupMeta): ColumnDef<AsnRow>[] => [
   {
     id: 'asn', header: 'ASN', accessorFn: (a) => a.label, size: 240,
     cell: ({ row }) => (
@@ -56,11 +64,11 @@ export const ASN_COLUMNS: ColumnDef<AsnRow>[] = [
   },
   {
     id: 'requests', header: 'Requests', accessorFn: (a) => a.total_reqs ?? 0, size: 110,
-    cell: ({ row }) => <span className="block text-right font-mono text-xs">{formatCount(row.original.total_reqs ?? 0)}</span>,
+    cell: ({ row }) => <span className="block text-right font-mono text-xs">{boundMark(meta, 'leaderboard')}{formatCount(row.original.total_reqs ?? 0)}</span>,
   },
   {
     id: 'health', header: 'Health Score', accessorFn: (a) => a.health_score_now ?? -1, size: 120,
-    cell: ({ row }) => <span className="block text-right"><HealthBadge score={row.original.health_score_now ?? null} /></span>,
+    cell: ({ row }) => <ApproxHealth mark={approxMark(meta, 'health_score_now')} score={row.original.health_score_now ?? null} />,
   },
   {
     id: 'p95', header: 'P95 RTT', accessorFn: (a) => a.p95_rtt_us ?? -1, size: 100,
@@ -71,9 +79,12 @@ export const ASN_COLUMNS: ColumnDef<AsnRow>[] = [
     cell: ({ row }) => <span className="block text-right font-mono text-xs">{rttMs(row.original.p99_rtt_us)}</span>,
   },
   {
-    id: 'delta', header: '1h Change', accessorFn: healthDelta, size: 110,
+    id: 'delta', header: '1h Change', accessorFn: (a) => healthDelta(a) ?? Number.NEGATIVE_INFINITY, size: 110,
     cell: ({ row }) => {
       const delta = healthDelta(row.original)
+      if (delta == null) {
+        return <span className="block text-right font-mono text-xs text-muted-foreground">—</span>
+      }
       return (
         <span className="block text-right font-mono text-xs">
           <span className={delta > 0 ? 'text-green-500' : delta < 0 ? 'text-red-500' : 'text-muted-foreground'}>
@@ -98,7 +109,7 @@ export const ASN_COLUMNS: ColumnDef<AsnRow>[] = [
   },
 ]
 
-export const METRO_COLUMNS: ColumnDef<MetroRow>[] = [
+export const metroColumns = (meta?: NetworkRollupMeta): ColumnDef<MetroRow>[] => [
   {
     id: 'city', header: 'Metro / City', accessorFn: (m) => m.city, size: 260,
     cell: ({ row }) => {
@@ -121,11 +132,11 @@ export const METRO_COLUMNS: ColumnDef<MetroRow>[] = [
   },
   {
     id: 'requests', header: 'Requests', accessorFn: (m) => m.total_reqs ?? 0, size: 110,
-    cell: ({ row }) => <span className="block text-right font-mono text-xs">{formatCount(row.original.total_reqs ?? 0)}</span>,
+    cell: ({ row }) => <span className="block text-right font-mono text-xs">{boundMark(meta, 'metro_leaderboard')}{formatCount(row.original.total_reqs ?? 0)}</span>,
   },
   {
     id: 'health', header: 'Health Score', accessorFn: (m) => m.health_score ?? -1, size: 120,
-    cell: ({ row }) => <span className="block text-right"><HealthBadge score={row.original.health_score ?? null} /></span>,
+    cell: ({ row }) => <ApproxHealth mark={approxMark(meta, 'health_score')} score={row.original.health_score ?? null} />,
   },
 ]
 
@@ -136,10 +147,17 @@ export function RttBarList({ rows, filterColumn }: { rows: readonly QualityBarRo
     <div className="space-y-1.5 p-3">
       {rows.map((r) => {
         const filterVal = r.value ?? r.label
-        const display = filterColumn === 'pop' ? <PopLabel code={filterVal} /> : r.label
+        const display =
+          filterColumn === 'pop' ? (
+            <PopLabel code={filterVal} />
+          ) : filterColumn === 'country' ? (
+            resolveCountryName(r.label)
+          ) : (
+            r.label
+          )
         return (
           <div key={filterVal} className="flex items-center gap-2 text-xs">
-            <div className="w-48 truncate shrink-0" title={r.label}>
+            <div className="w-48 truncate shrink-0" title={typeof display === 'string' ? display : r.label}>
               {filterColumn ? <FilterValueCell filters={[{ column: filterColumn, value: filterVal }]} display={display} /> : <span>{display}</span>}
             </div>
             <div className="flex-1 h-4 bg-muted/40 rounded-sm overflow-hidden">
@@ -175,33 +193,35 @@ export function LeaderboardStatusBody<T>({
 export function NetworkKpiGrid({
   summary,
   isCoreLoadingInitial,
+  rollup,
 }: {
   summary: components['schemas']['NetworkHealthResponse']['summary'] | undefined
   isCoreLoadingInitial: boolean
+  rollup?: NetworkRollupMeta
 }) {
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 [contain-intrinsic-size:120px] [content-visibility:auto]">
+    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
       {[
         {
           title: 'Global Health', icon: Activity, loadingMessage: 'Compiling ASN health matrix...',
-          value: <>{summary?.global_health_score ?? '--'}/100</>, sub: 'Average across top ASNs',
+          value: <>{summary?.global_health_score != null && approxMark(rollup, 'global_health_score')}{summary?.global_health_score ?? '--'}/100</>, sub: 'Average across top ASNs',
           helpTitle: 'Global Health Score', helpContent: <GlobalHealthHelp />,
         },
         {
           title: 'Avg RTT', icon: Zap, loadingMessage: 'Analyzing TCP round-trip times...',
-          value: <>{summary?.avg_rtt_ms ?? '--'}ms</>, sub: 'Across all regions',
+          value: <>{summary?.avg_rtt_ms != null && (summary.avg_rtt_ms > 0 || summary.global_health_score != null) ? `${summary.avg_rtt_ms}ms` : '--'}</>, sub: 'Across all regions',
           helpTitle: 'Average RTT', helpContent: <AvgRttHelp />,
         },
         {
           title: 'Worst ASN', icon: AlertCircle, iconClassName: 'text-red-500', loadingMessage: 'Scanning ASN degradation...',
           value: <span className="text-sm truncate block">{summary?.worst_asn?.label ?? '--'}</span>,
-          sub: <span className="text-red-500 font-medium">Score: {summary?.worst_asn?.score ?? '--'}</span>,
+          sub: <span className="text-red-500 font-medium">Score: {summary?.worst_asn?.score != null && approxMark(rollup, 'worst_asn')}{summary?.worst_asn?.score ?? '--'}</span>,
           helpTitle: 'Worst-Performing ASN', helpContent: <WorstAsnHelp />,
         },
         {
           title: 'Worst Region', icon: Globe, loadingMessage: 'Evaluating regional latency...',
           value: <span className="text-sm truncate block">{summary?.worst_country?.label ?? '--'}</span>,
-          sub: <span className="text-red-500 font-medium">Score: {summary?.worst_country?.score ?? '--'}</span>,
+          sub: <span className="text-red-500 font-medium">Score: {summary?.worst_country?.score != null && approxMark(rollup, 'worst_country')}{summary?.worst_country?.score ?? '--'}</span>,
           helpTitle: 'Worst-Performing Region', helpContent: <WorstRegionHelp />,
         },
       ].map((card) => (
@@ -224,10 +244,13 @@ export function NetworkLeaderboardsSection({
   error: unknown
   isFieldActive: (field: string) => boolean
 }) {
+  const rollup = readRollupMeta(data)
+  const asnCols = React.useMemo(() => asnColumns(rollup), [rollup])
+  const metroCols = React.useMemo(() => metroColumns(rollup), [rollup])
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 [contain-intrinsic-size:420px] [content-visibility:auto]">
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 [contain-intrinsic-size:420px]">
       <AnalyticsCard
-        title="ASN Performance Leaderboard" className="flex flex-col [contain-intrinsic-size:420px] [content-visibility:auto]"
+        title="ASN Performance Leaderboard" className="flex flex-col min-h-[420px] [contain-intrinsic-size:420px]"
         contentClassName="p-0 flex-1" helpTitle="ASN Performance Leaderboard" helpContent={<AsnLeaderboardHelp />}
         isFetching={isFetching} error={error as AnalyticsCardError | null} loadingMessage="Compiling ASN leaderboard..."
       >
@@ -236,13 +259,13 @@ export function NetworkLeaderboardsSection({
           emptyActiveMsg="No ASN data in this time range."
           emptyInactiveMsg="Requires Network Quality (Group F) fields to be enabled in Fastly logging."
         >
-          {(rows) => <DataTableReadonly columns={ASN_COLUMNS} data={[...rows]} hideToolbar showPagination={false} tableCaption="ASN performance leaderboard" />}
+          {(rows) => <DataTableReadonly columns={asnCols} data={[...rows]} hideToolbar showPagination={false} tableCaption="ASN performance leaderboard" />}
         </LeaderboardStatusBody>
       </AnalyticsCard>
 
       {data?.has_metro && (
         <AnalyticsCard
-          title="Metro / Region Leaderboard" className="flex flex-col [contain-intrinsic-size:420px] [content-visibility:auto]"
+          title="Metro / Region Leaderboard" className="flex flex-col min-h-[420px] [contain-intrinsic-size:420px]"
           contentClassName="p-0 flex-1" helpTitle="Metro / Region Leaderboard" helpContent={<MetroLeaderboardHelp />}
           isFetching={isFetching} error={error as AnalyticsCardError | null} loadingMessage="Compiling Metro leaderboard..."
         >
@@ -251,7 +274,7 @@ export function NetworkLeaderboardsSection({
             emptyActiveMsg="No metro data in this time range."
             emptyInactiveMsg="Requires Geolocation (Group D/E) fields to be enabled in Fastly logging."
           >
-            {(rows) => <DataTableReadonly columns={METRO_COLUMNS} data={[...rows]} hideToolbar showPagination={false} tableCaption="Metro and region leaderboard" />}
+            {(rows) => <DataTableReadonly columns={metroCols} data={[...rows]} hideToolbar showPagination={false} tableCaption="Metro and region leaderboard" />}
           </LeaderboardStatusBody>
         </AnalyticsCard>
       )}
@@ -288,8 +311,8 @@ export function NetworkQualitySection({
           aria-label="Region breakdown country" value={regionCountry}
           onChange={(e) => setRegionCountry(e.target.value)} className="h-7 rounded-md border bg-background px-2 text-xs"
         >
-          {(qualityData?.countries ?? []).length === 0 && <option value={regionCountry}>{regionCountry}</option>}
-          {(qualityData?.countries ?? []).map((c) => <option key={c} value={c}>{c}</option>)}
+          {(qualityData?.countries ?? []).length === 0 && <option value={regionCountry}>{resolveCountryName(regionCountry)}</option>}
+          {(qualityData?.countries ?? []).map((c) => <option key={c} value={c}>{resolveCountryName(c)}</option>)}
         </select>
       ),
     },
@@ -297,7 +320,7 @@ export function NetworkQualitySection({
   ]
 
   return (
-    <div className="space-y-4 [contain-intrinsic-size:400px] [content-visibility:auto]">
+    <div className="space-y-4 min-h-[400px] [contain-intrinsic-size:400px]">
       <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">Network Quality</h2>
       {isQualityLoadingInitial ? (
         <SkeletonGrid count={4} height="180px" className="rounded-xl" />
@@ -308,7 +331,7 @@ export function NetworkQualitySection({
               <AnalyticsCard
                 key={b.title} title={b.title} contentClassName="p-0" helpTitle="Network Quality" helpContent={<NetworkQualityHelp />}
                 isFetching={isFetching} error={error as AnalyticsCardError | null}
-                loadingMessage={b.loadingMessage} className="[contain-intrinsic-size:240px] [content-visibility:auto]" headerAction={b.headerAction}
+                loadingMessage={b.loadingMessage} className="min-h-[240px]" headerAction={b.headerAction}
               >
                 <RttBarList rows={b.rows} filterColumn={b.filterColumn} />
               </AnalyticsCard>
@@ -318,7 +341,7 @@ export function NetworkQualitySection({
             <AnalyticsCard
               title="RTT vs TTFB" helpTitle="Network Quality" helpContent={<NetworkQualityHelp />}
               isFetching={isFetching} error={error as AnalyticsCardError | null}
-              loadingMessage="Plotting RTT vs TTFB correlation..." className="[contain-intrinsic-size:380px] [content-visibility:auto]"
+              loadingMessage="Plotting RTT vs TTFB correlation..." className="min-h-[380px]"
             >
               <PlotlyChart data={qualityScatterTrace} layout={QUALITY_SCATTER_LAYOUT} height={360} />
             </AnalyticsCard>

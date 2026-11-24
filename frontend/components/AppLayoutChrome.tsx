@@ -6,12 +6,12 @@ import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { Dialog as DialogPrimitive } from '@base-ui/react/dialog'
 import {
   LayoutDashboard, Network, Users, Settings, Database, Search, Activity, Sparkles,
-  Timer, Shield, Bell, Server, Loader2, Radio, Play, TrendingUp, X, Eye, Moon, Sun, Monitor,
+  Timer, Shield, Bell, Server, Loader2, Radio, Play, TrendingUp, X, Eye, Moon, Sun, Monitor, BookOpen, HardDrive,
 } from 'lucide-react'
 import { useTheme } from 'next-themes'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { cn, buildServiceHref, getTimezoneAbbr } from '@/lib/utils'
+import { cn, buildServiceHref, buildFilterNavigationHref, getTimezoneAbbr } from '@/lib/utils'
 import { client, unwrapClient, queryKeys } from '@/lib/api'
 import { buttonVariants } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
@@ -19,7 +19,8 @@ import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, Sele
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { useTimezoneStore, useSessionRoleStore, useServiceStore } from '@/stores/filterStore'
-import { useMounted, useUrlServiceSync, useIsAnalyst } from '@/hooks/useBootstrap'
+import { useMounted, useUrlServiceToStore, useServiceUrlWriteback, useIsAnalyst } from '@/hooks/useBootstrap'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
 import type { BootstrapResponse, ShareBanner } from '@/types/api'
 
 export function SrLiveRegion({ children }: { children: React.ReactNode }) {
@@ -184,25 +185,60 @@ export const SERVICE_NAVIGATION: ServiceNavItem[] = [
   { name: 'Streaming', href: '/streaming', icon: Play, analystVisible: true, requiresCmcd: true },
   { name: 'RUM', href: '/rum', icon: Eye, analystVisible: true, requiresRum: true },
   { name: 'Sessions', href: '/sessions', icon: Users, analystVisible: true },
-  { name: 'Usage & Cost', href: '/usage', icon: Activity, analystVisible: false },
+  { name: 'Usage & Cost', href: '/usage', icon: Activity, analystVisible: false, shareAnalystVisible: IS_CLOUD_MODE },
   { name: 'Query', href: '/query', icon: Search, analystVisible: true },
   { name: 'Alerts', href: '/alerts', icon: Bell, analystVisible: false },
-  { name: 'Data Management', href: '/logs', icon: Database, analystVisible: true, shareAnalystVisible: false },
+  { name: 'Data Management', href: '/logs', icon: Database, analystVisible: true, shareAnalystVisible: IS_CLOUD_MODE },
 ]
 
-export const SYSTEM_NAVIGATION = [{ name: 'Admin', href: '/admin', icon: Settings }]
+export const SYSTEM_NAVIGATION = [
+  ...(IS_CLOUD_MODE ? [{ name: 'Browser Cache', href: '/cache', icon: HardDrive }] : []),
+  { name: 'Admin', href: '/admin', icon: Settings },
+  { name: 'How it works', href: '/how-it-works', icon: BookOpen },
+]
+export const IS_CLOUD_RUNTIME = IS_CLOUD_MODE
+
+export const CLOUD_PRUNED_NAV_HREFS = new Set<string>([
+  '/high-scale/request-facts',
+  '/control-room',
+  '/alerts',
+])
+
+export const ADMIN_SUBPAGES = [
+  '/admin/share',
+  '/admin/session-scoring',
+  '/admin/queries',
+  '/admin/trends',
+  '/admin/queue',
+  '/admin/rum',
+  '/admin/clickhouse',
+] as const
+
+export const CLOUD_PRUNED_ADMIN_HREFS = new Set<string>([
+  '/admin/clickhouse',
+  '/admin/queue',
+  '/admin/queries',
+  '/admin/trends',
+])
 
 export function UrlServiceSync() {
-  useUrlServiceSync()
+  useUrlServiceToStore()
+  return null
+}
+
+export function ServiceUrlWriteback() {
+  useServiceUrlWriteback()
   return null
 }
 
 const ROUTE_FRIENDLY_NAMES: Record<string, string> = {
   '/dashboard': 'Dashboard', '/control-room': 'Control Room', '/fastly-value': 'Service Summary',
-  '/security': 'Security', '/network': 'Network', '/streaming': 'Streaming', '/origin': 'Origin',
-  '/performance': 'Performance', '/sessions': 'Sessions', '/insights': 'Insights', '/query': 'Query',
-  '/charts': 'Charts', '/alerts': 'Alerts', '/logs': 'Data Management', '/usage': 'Usage and Cost',
-  '/admin': 'Admin', '/share-login': 'Sign in',
+  '/assets-shield': 'Assets & Shield', '/security': 'Security', '/network': 'Network',
+  '/streaming': 'Streaming', '/origin': 'Origin', '/performance': 'Performance', '/rum': 'RUM',
+  '/sessions': 'Sessions', '/sessions/detail': 'Session Details', '/sessions/stream': 'Stream Details',
+  '/insights': 'Insights', '/query': 'Query', '/charts': 'Charts', '/alerts': 'Alerts',
+  '/logs': 'Data Management', '/usage': 'Usage and Cost', '/cache': 'Browser Cache', '/admin': 'Admin',
+  '/share-login': 'Sign in', '/how-it-works': 'How it works',
 }
 
 function friendlyPageName(pathname: string): string {
@@ -244,8 +280,23 @@ interface NavLinkProps {
   activeServiceId?: string | null; router: ReturnType<typeof useRouter>
 }
 
-function NavLink({ href, icon: Icon, name, isActive, disabled, collapsed, onClick, className, activeServiceId, router }: NavLinkProps) {
-  const finalHref = activeServiceId ? `${href}?service=${activeServiceId}` : href
+function NavLink(props: NavLinkProps) {
+  return (
+    <React.Suspense fallback={<NavLinkWithParams {...props} />}>
+      <NavLinkFromUrl {...props} />
+    </React.Suspense>
+  )
+}
+
+function NavLinkFromUrl(props: NavLinkProps) {
+  const searchParams = useSearchParams()
+  return <NavLinkWithParams {...props} searchParams={searchParams} />
+}
+
+function NavLinkWithParams({
+  href, icon: Icon, name, isActive, disabled, collapsed, onClick, className, activeServiceId, router, searchParams,
+}: NavLinkProps & { searchParams?: Pick<URLSearchParams, 'get'> | null }) {
+  const finalHref = buildFilterNavigationHref(href, activeServiceId, searchParams ?? new URLSearchParams())
   const handlePointerHint = React.useCallback(() => {
     if (!disabled) router.prefetch(finalHref)
   }, [disabled, finalHref, router])

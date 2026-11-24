@@ -1,13 +1,14 @@
 'use client'
 
 import React, { useState, useMemo } from 'react'
+import { SERVICE_DEFAULTS, effectiveLogPeriod } from '@/lib/serviceDefaults'
 import { useForm, useWatch, type PathValue } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useOpenGeneration, useSSE } from '@/hooks/useSSE'
 import {
-  client, unwrapClient, queryKeys, estimateLogFieldBytesPerLine,
+  client, unwrapClient, invalidateLogFieldQueries, estimateLogFieldBytesPerLine,
   isLogFieldPresetActive, toggleLogFieldGroup, toggleLogFieldOverride,
   toggleLogFieldPreset, updateLogFieldLimit,
 } from '@/lib/api'
@@ -60,7 +61,8 @@ function LogSettingsModalBody({ service, open, onOpenChange }: LogSettingsModalP
     resolver: zodResolver(logSettingsSchema),
     defaultValues: {
       config: { groups: [], field_overrides: {} },
-      period: '60', sampleRate: 100, edgeOnly: true, customCondition: '',
+      period: String(effectiveLogPeriod(undefined)), sampleRate: SERVICE_DEFAULTS.sampleRatePercent,
+      edgeOnly: true, customCondition: '',
       cmcdEnabled: false, cmcdMode: 'query_string', cmcdVersion: 1,
     },
   })
@@ -91,7 +93,7 @@ function LogSettingsModalBody({ service, open, onOpenChange }: LogSettingsModalP
     mutationFn: async (cfg: LogFieldsConfig) =>
       unwrapClient(client.POST('/api/services/{service_id}/log-fields', { params: { path: { service_id: service!.service_id } }, body: { log_fields: cfg } })),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.services() })
+      invalidateLogFieldQueries(queryClient, service!.service_id)
       const encodedCond = encodeURIComponent(customCondition)
       start(`/api/services/${service!.service_id}/logging-settings/update?update_format=true&period=${period}&sample_rate=${sampleRate}&edge_only=${edgeOnly}&custom_condition=${encodedCond}&cmcd_enabled=${cmcdEnabled}&cmcd_mode=${cmcdMode}&cmcd_version=${cmcdVersion}`, {})
     },
@@ -107,8 +109,8 @@ function LogSettingsModalBody({ service, open, onOpenChange }: LogSettingsModalP
       })
     }
     if (ls) {
-      setValue('period', String(ls.period || 60))
-      setValue('sampleRate', ls.sample_rate ?? 100)
+      setValue('period', String(effectiveLogPeriod(ls.period)))
+      setValue('sampleRate', ls.sample_rate ?? SERVICE_DEFAULTS.sampleRatePercent)
       setValue('edgeOnly', ls.edge_only ?? true)
       setValue('customCondition', ls.custom_condition || '')
       setValue('cmcdEnabled', ls.cmcd?.enabled ?? false)

@@ -1,27 +1,25 @@
 import { Suspense } from 'react'
 import { HydrationBoundary } from '@tanstack/react-query'
 
-import { fetchStreamingServerSide, resolvePageServiceId, seedDehydratedState } from '@/lib/ssr/upstream'
+import {
+  fetchStreamingServerSide,
+  resolveReportPageParams,
+  seedDehydratedState,
+  type ReportSearchParams,
+} from '@/lib/ssr/upstream'
 import StreamingLoading from './loading'
 import StreamingClient from './_sections/StreamingClient'
+import { analyticsReportQueryKey } from '@/lib/report-query-key'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 
 export const dynamic = 'force-dynamic'
 
 export default async function StreamingPage({
   searchParams,
 }: {
-  searchParams: Promise<{
-    service?: string | string[]
-    start_time?: string | string[]
-    end_time?: string | string[]
-    range?: string | string[]
-    filters?: string | string[]
-  }>
+  searchParams: Promise<ReportSearchParams>
 }) {
-  const params = await searchParams
-  const serviceId = await resolvePageServiceId(params)
-  const isDefaultView =
-    !params.start_time && !params.end_time && !params.range && !params.filters
+  const { serviceId, isDefaultView } = await resolveReportPageParams(searchParams)
 
   return (
     <Suspense fallback={<StreamingLoading />}>
@@ -38,12 +36,21 @@ async function StreamingPageContent({
   isDefaultView: boolean
 }) {
   const now = new Date()
-  const seed = isDefaultView ? await fetchStreamingServerSide(serviceId, now) : null
+  const seed =
+    isDefaultView && !isCloudMode()
+      ? await fetchStreamingServerSide(serviceId, now)
+      : null
   const seedData = seed?.data as { available?: boolean; has_data?: boolean } | null | undefined
   const dehydratedState =
     seed && seedData?.available && seedData?.has_data
       ? seedDehydratedState(
-          ['cmcd', 'aggregates', serviceId, seed.rangeToken, seed.anchor, {}],
+          analyticsReportQueryKey({
+            namespace: ['cmcd', 'aggregates'],
+            serviceId,
+            rangeToken: seed.rangeToken,
+            anchor: seed.anchor,
+            filterPayload: {},
+          }),
           seed.data,
         )
       : null

@@ -416,6 +416,7 @@ function StreamDetailClient() {
     queryKey: ['stream-detail', activeServiceId, token],
     queryFn: async ({ signal }) => unwrapClient(client.POST('/api/sessions/detail', { signal, body: { session_token: token! } })),
     enabled: !!activeServiceId && !!token,
+    retry: false,
   })
 
   const aggregates = useStreamAggregates(detailData?.data)
@@ -428,7 +429,7 @@ function StreamDetailClient() {
     return (
       <div className="space-y-6">
         <PageHeader title="Stream Details" icon={Film} />
-        <Alert>
+        <Alert role="status" data-testid="stream-detail-parameter-required">
           <AlertTriangle className="h-4 w-4" />
           <AlertTitle>No session token</AlertTitle>
           <AlertDescription>
@@ -474,6 +475,12 @@ function StreamDetailClient() {
         </>
       ) : aggregates ? (
         <SummaryCards aggregates={aggregates} />
+      ) : !isError && detailData ? (
+        <Alert role="status">
+          <Film className="h-4 w-4" />
+          <AlertTitle>No requests found</AlertTitle>
+          <AlertDescription>No streaming records are available for this session in your accessible time window.</AlertDescription>
+        </Alert>
       ) : null}
 
       {isError && (
@@ -496,7 +503,7 @@ function StreamDetailClient() {
       )}
 
       {aggregates && aggregates.summary.videoRequests === 0 && (
-        <Alert>
+        <Alert role="status">
           <Film className="h-4 w-4" />
           <AlertTitle>No video segment requests</AlertTitle>
           <AlertDescription>

@@ -22,6 +22,15 @@ from backend.core.catalog import (
     LOG_FIELD_CATALOG,
     resolve_enabled_fields,
 )
+from backend.core.catalog import (
+    check_vcl_quotes_and_parens as check_vcl_quotes_and_parens,
+)
+from backend.core.catalog import (
+    validate_vcl_custom_condition as validate_vcl_custom_condition,
+)
+from backend.core.catalog import (
+    validate_vcl_log_expression as validate_vcl_log_expression,
+)
 from backend.core.fastly.client import fastly
 
 logger = structlog.get_logger(__name__)
@@ -58,17 +67,30 @@ def generate_log_format(log_fields_config: dict) -> str:
             )
         parts.append(vcl)
 
-    for cf in sorted(custom_fields, key=lambda x: x["name"]):
+    sorted_cfs = sorted(custom_fields, key=lambda x: x["name"])
+    custom_reqs: list[tuple[int, int, str]] = []
+    for idx, cf in enumerate(sorted_cfs):
+        name = cf["name"]
+        value_type = cf.get("value_type", "string")
+        raw_est = cf.get("bytes_estimate")
+        estimate = int(raw_est) if raw_est not in (None, "") else 0
+        default_limit = min(max(estimate * 4, 40), 2000) if estimate else 2000
+        req_limit = int(cf.get("byte_limit") or limits.get(name) or default_limit)
+        if value_type in ("numeric", "boolean"):
+            req_limit = min(req_limit, _NUMERIC_FIELD_MAX_LEN)
+        custom_reqs.append((idx, req_limit, name))
+
+    allocated_limits: dict[int, int] = {}
+    for idx, req_limit, _ in sorted(custom_reqs, key=lambda item: (item[1], item[2], item[0])):
+        cf_limit = max(0, min(req_limit, budget))
+        budget -= cf_limit
+        allocated_limits[idx] = cf_limit
+
+    for idx, cf in enumerate(sorted_cfs):
         name = cf["name"]
         stage = cf.get("collection_stage", "edge")
         value_type = cf.get("value_type", "string")
-        estimate = cf.get("bytes_estimate")
-        default_limit = min(max((estimate or 0) * 4, 40), 2000) if estimate else 2000
-        cf_limit = int(cf.get("byte_limit") or limits.get(name) or default_limit)
-        if value_type in ("numeric", "boolean"):
-            cf_limit = min(cf_limit, _NUMERIC_FIELD_MAX_LEN)
-        cf_limit = max(0, min(cf_limit, budget))
-        budget -= cf_limit
+        cf_limit = allocated_limits[idx]
 
         if stage == "deliver":
             raw_expr = cf.get("vcl_log_expression") or f"req.http.x-fos-edge-data:{name}"
@@ -110,12 +132,15 @@ class VclSafetyError(ValueError):
     """
 
 
-_FORBIDDEN_STRICT = re.compile(r'["\\\x00-\x1f\x7f]')
-_FORBIDDEN_ALLOW_BACKSLASH = re.compile(r'["\x00-\x1f\x7f]')
+_FORBIDDEN_STRICT = re.compile(r'["\\\x00-\x1f\x7f-\x9f\u2028\u2029]')
+_FORBIDDEN_ALLOW_BACKSLASH = re.compile(r'["\x00-\x1f\x7f-\x9f\u2028\u2029]')
+_FORBIDDEN_QUOTED_SEQ = re.compile(r"\$\{|%\{|%00|%u0000|%u\{0+\}", re.IGNORECASE)
 
 
 def validate_quoted_literal(value: str, *, allow_backslash: bool = False, field: str = "value") -> str:
     """Validate a value destined for a VCL double-quoted string literal."""
+    if not isinstance(value, str):
+        raise VclSafetyError(f"{field} must be a string, got {type(value).__name__}")
     pattern = _FORBIDDEN_ALLOW_BACKSLASH if allow_backslash else _FORBIDDEN_STRICT
     m = pattern.search(value)
     if m is not None:
@@ -124,6 +149,12 @@ def validate_quoted_literal(value: str, *, allow_backslash: bool = False, field:
             f"{m.start()} ({value[m.start()]!r}); refusing to generate VCL "
             "(values are validated upstream + Fastly /validate-gated, so this "
             "indicates a caller that bypassed those checks)."
+        )
+    seq_m = _FORBIDDEN_QUOTED_SEQ.search(value)
+    if seq_m is not None:
+        raise VclSafetyError(
+            f"{field} contains a sequence unsafe to embed in a VCL/Terraform string literal at offset "
+            f"{seq_m.start()} ({seq_m.group(0)!r}); refusing to generate VCL."
         )
     return value
 
@@ -357,6 +388,15 @@ def validate_url_exclusion_regex(value: str) -> str:
     """Cheap input policing on a user-typed regex before VCL interpolation."""
     if not isinstance(value, str):
         raise RegexValidationError("type", f"regex must be a string, got {type(value).__name__}")
+    for ch in value:
+        cp = ord(ch)
+        if ch in ("\n", "\r", "\u2028", "\u2029") or cp < 32 or 0x7F <= cp <= 0x9F:
+            raise RegexValidationError(
+                "disallowed_char",
+                f"regex contains disallowed character (codepoint U+{cp:04X}): "
+                "double-quotes and control characters are not permitted because they "
+                "would break the surrounding VCL string literal",
+            )
     cleaned = value.strip()
     if not cleaned:
         return ""
@@ -367,15 +407,20 @@ def validate_url_exclusion_regex(value: str) -> str:
         )
     try:
         validate_quoted_literal(cleaned, allow_backslash=True, field="regex")
-    except VclSafetyError:
+    except VclSafetyError as exc:
         m = _FORBIDDEN_ALLOW_BACKSLASH.search(cleaned)
-        ch = m.group(0) if m else "?"
+        if m is not None:
+            ch = m.group(0)
+            raise RegexValidationError(
+                "disallowed_char",
+                f"regex contains disallowed character (codepoint U+{ord(ch):04X}): "
+                "double-quotes and control characters are not permitted because they "
+                "would break the surrounding VCL string literal",
+            ) from exc
         raise RegexValidationError(
             "disallowed_char",
-            f"regex contains disallowed character (codepoint U+{ord(ch):04X}): "
-            "double-quotes and control characters are not permitted because they "
-            "would break the surrounding VCL string literal",
-        )
+            f"regex contains disallowed VCL/template sequence: {exc}",
+        ) from exc
     try:
         re.compile(cleaned)
     except re.error as exc:

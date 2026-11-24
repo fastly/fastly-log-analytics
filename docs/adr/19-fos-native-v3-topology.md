@@ -1,8 +1,12 @@
 # ADR-19: Fastly Object Storage-native v3 topology
 
-- **Status:** Accepted for v3.0 design
+- **Status:** Superseded by [ADR-21](21-high-scale-serving-architecture.md) (historical)
 - **Date:** 2026-09-04
 - **Decision owners:** Platform and analytics maintainers
+
+> [!NOTE]
+> **Superseded in v3.0.0-rc3 ([ADR-21](21-high-scale-serving-architecture.md)):**
+> Fastly Log Analytics now uses ClickHouse 24.8 + PostgreSQL 16 + FOS batch archive (`high-scale/archive/`) as the single, unified architecture across all deployments. This ADR is retained as historical record only.
 
 ## Context
 

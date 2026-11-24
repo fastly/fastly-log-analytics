@@ -14,6 +14,15 @@ Source: [`frontend/app/rum/`](../../frontend/app/rum/) (`page.tsx` re-exports `_
 
 Standard filters apply; supported filter columns are `browser`, `os`, `device`, `country`, `pathname`, `city`, `region`, `pop`, `tls`. An unsupported column or malformed JSON is a `400 rum_filters_unsupported`; a filter is never silently dropped.
 
+Cloud accepts fields present in its RUM tables, including `browser_name`,
+`metric_name`, `metric_value` and `error_type`, plus the `browser`, `os`, `device`
+and `pathname` aliases. Request-only custom fields are unsupported even after
+visiting request analytics. A field absent from one RUM dataset has NULL semantics:
+an include filter excludes those rows; an exclude filter keeps them.
+Cloud keeps vitals and errors in separate typed Parquet views over cached
+compressed files. Request-schema changes do not change their SQL types, and
+stale range reads fail rather than returning success against a replacement dataset.
+
 ## Roles
 
 | Capability | Admin | Analyst (remote share) |
@@ -32,9 +41,7 @@ Routes under `/api/services/{service_id}/rum/...` in [`backend/routers/rum/`](..
 - `GET .../rum/status`, `GET .../rum/versions`, `POST .../rum/enable`, `.../disable`, `.../upgrade`, `.../settings` (admin provisioning; see [admin/rum.md](admin/rum.md)).
 - Asset routes `/js/rum.js` and `/js/faro-sdk.js` (and the beacon ingest route) in `beacon_ingest.py`.
 
-Standard mode reads DuckLake `client_vitals` and `client_errors`, fed by the `rum_sync` / `rum_commit` crons ([rum-sync](../cron/jobs/rum-sync.md), [rum-commit](../cron/jobs/rum-commit.md)).
-
-High-scale mode (`backend/high_scale/rum.py::rum_analytics`) reads the service's visible `rum_vitals_facts` and `rum_error_facts` through the instrumented ClickHouse client:
+The RUM analytics reader (`backend/high_scale/rum.py::rum_analytics`) reads the service's visible `rum_vitals_facts` and `rum_error_facts` in ClickHouse through the instrumented ClickHouse client (ingested from `raw/rum/` via the [`rum_discovery`](../cron/jobs/rum-discovery.md) cron and the stateless ingest worker):
 
 - Percentiles are continuous p75 over facts (counts and sums cannot supply them). Query failures propagate; they are never turned into zero-count responses.
 - Bounds are inclusive UTC event times; missing bounds default to the last 24 hours. Windows up to 48 hours use hourly buckets, longer windows daily buckets including both endpoint buckets. Empty buckets have null measurements and zero counts.

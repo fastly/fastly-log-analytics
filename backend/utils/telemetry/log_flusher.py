@@ -269,3 +269,23 @@ def _flush_log_writes_for_tests(timeout: float = 15.0) -> None:
         barrier = _FlushBarrier()
         _LOG_QUEUE.put(barrier)
         barrier.event.wait(timeout=timeout)
+
+
+def stop_log_flusher(timeout: float = 5.0) -> None:
+    """Drain queued usage rows and stop the background flusher."""
+    global _LOG_FLUSHER_THREAD
+    thread = _LOG_FLUSHER_THREAD
+    if thread is None or not thread.is_alive():
+        _LOG_FLUSHER_THREAD = None
+        return
+    _LOG_FLUSHER_STOP.set()
+    barrier = _FlushBarrier()
+    _LOG_QUEUE.put(barrier)
+    if not barrier.event.wait(timeout=timeout):
+        logger.warning("telemetry log flusher did not drain within %.1fs", timeout)
+    thread.join(timeout=timeout)
+    if thread.is_alive():
+        logger.warning("telemetry log flusher did not stop within %.1fs", timeout)
+        return
+    _LOG_FLUSHER_THREAD = None
+    _LOG_FLUSHER_STOP.clear()

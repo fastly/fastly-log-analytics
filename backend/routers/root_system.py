@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import sys
 from datetime import UTC, datetime
 
@@ -23,6 +24,9 @@ from backend.utils.remote_access import RemoteAccessMiddleware
 from backend.utils.telemetry import TelemetryResponseBodyMiddleware
 
 logger = logging.getLogger("backend.main")
+
+HARNESS_HEADER = "X-FLA-Harness"
+_HARNESS_TAG_RE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 router = APIRouter()
 
 
@@ -122,7 +126,7 @@ async def telemetry_middleware(request: Request, call_next):
 
     # Active-request gate (perf #84): cron ticks check this counter at
     # their entry point and defer up to 30 s if non-zero, so a cold-cache
-    # API request doesn't lose its DuckDB pool slot + Fastly bandwidth to
+    # API request doesn't lose its database pool slot + Fastly bandwidth to
     # a sync tick that fired the same second.
     _inc_active_requests()
     start_call_tracking()
@@ -140,10 +144,13 @@ async def telemetry_middleware(request: Request, call_next):
     set_page_load_id(page_load_id)
 
     # Modify process context to include the page_load_id suffix so proxy reads match
+    ctx_name = f"api:{request.method} {request.url.path}"
+    # Load-test harness traffic tags its usage so cost measurements can subtract it.
+    harness_tag = request.headers.get(HARNESS_HEADER) or ""
+    if harness_tag and _HARNESS_TAG_RE.fullmatch(harness_tag):
+        ctx_name += f" @harness={harness_tag}"
     if page_load_id:
-        ctx_name = f"api:{request.method} {request.url.path}#{page_load_id}"
-    else:
-        ctx_name = f"api:{request.method} {request.url.path}"
+        ctx_name += f"#{page_load_id}"
 
     # Best-effort attribution: analyst_session is set by RemoteAccessMiddleware
     # (which now sits OUTSIDE this middleware). Falls back to admin when
@@ -223,7 +230,7 @@ async def telemetry_middleware(request: Request, call_next):
         try:
             response = await call_next(request)
         except asyncio.CancelledError:
-            # The client went away (a reload aborts its fetches) and Starlette cancelled the handler. The DuckDB
+            # The client went away (a reload aborts its fetches) and Starlette cancelled the handler. The database
             # statements it already started keep running in worker threads, each holding a scarce pool slot; every
             # further reload would add another orphan until the pool saturates ("pool for <svc> saturated at 4").
             # Interrupt this request's queries (and only this request's) so the slots free immediately.
@@ -375,7 +382,7 @@ try:
 
     _APP_VERSION = _pkg_version("fastly-log-analytics")
 except Exception:
-    _APP_VERSION = "3.0.0-rc1"
+    _APP_VERSION = "3.0.0-beta1"
 
 
 # Documents the canonical error codes this probe can surface — notably the
@@ -399,16 +406,21 @@ _STUCK_SYNC_RUNNING_MINS = 15
 
 
 @router.get("/metrics", include_in_schema=False)
-def prometheus_metrics():
+def prometheus_metrics(request: Request):
+    from fastapi import HTTPException
+
+    from backend.utils.remote_access import is_allowed_metrics_scrape
+    from backend.utils.router_utils import make_error
+
+    if not is_allowed_metrics_scrape(request):
+        raise HTTPException(status_code=403, detail=make_error("admin_only", "Administrator access required"))
     try:
         from fastapi.responses import Response
         from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
     except ImportError:
-        from fastapi import HTTPException
-
-        raise HTTPException(status_code=501, detail="Prometheus client not installed")
+        raise HTTPException(status_code=501, detail=make_error("not_implemented", "Prometheus client not installed"))
 
 
 @router.get(
@@ -426,27 +438,25 @@ def health_check(
     """Liveness/readiness probe.
 
     Default (``?deep=0``) is a cheap liveness response — 200 as soon as the
-    HTTP server is answering. Pass ``?deep=1`` to also verify ingest
-    freshness per configured service. A service is reported ``degraded``
-    when ANY of:
-      - its newest ``ingested_files.ingested_at`` is older than
-        ``stale_minutes`` (default 30) — SRE-22: before degrading on this
-        check, the cutoff is widened to the service's own historical p95
-        gap between non-empty ingests (never narrower than
-        ``stale_minutes``), so a low-traffic service's organic quiet
-        periods don't false-positive;
-      - the last terminal ``sync`` cron run ended in ``error``;
-      - a ``sync`` row is stuck in ``running`` past ``_STUCK_SYNC_RUNNING_MINS``
-        (SRE-04 — the orphan-stall / OOM-leak the success-only filter hides);
-      - the latest terminal run of a critical non-sync ingest task
-        (``commit``) ended in ``error`` (SRE-05).
-    The endpoint returns HTTP 503 when ANY service is degraded; otherwise 200.
+    HTTP server is answering. Pass ``?deep=1`` to also verify ClickHouse
+    connectivity (``get_clickhouse_client().health()``) and per-service ingest
+    freshness in PostgreSQL. A service is reported ``degraded`` when ANY of:
+      - the last terminal ``log_discovery`` cron run ended in ``error``;
+      - a ``log_discovery`` row is stuck in ``running`` past
+        ``_STUCK_SYNC_RUNNING_MINS`` (SRE-04);
+      - the latest terminal run of the critical ingest task ``ledger_sweep``
+        in the last 24h ended in ``error`` (SRE-05).
+    A service is reported ``stale`` when its newest
+    ``ingested_files.ingested_at`` is older than ``stale_minutes`` (default 30),
+    widened to the service's historical p95 gap between non-empty ingests
+    (SRE-22). The endpoint returns HTTP 503 when ClickHouse is unhealthy or ANY
+    service is ``degraded``; otherwise 200.
 
-    Cost: hits PostgreSQL metadata only — no FOS, no CDN, no Fastly API. Safe to wire
-    into a load-balancer health check.
+    Cost: hits PostgreSQL metadata and ClickHouse health only — no FOS, no CDN,
+    no Fastly API. Safe to wire into a load-balancer health check.
 
     Security (finding 003): the deep variant enumerates every configured
-    service_id and reports per-service sync errors / staleness, which is
+    service_id and reports per-service discovery errors / staleness, which is
     operational metadata an analyst should not see. Force ``deep`` to
     False for remote (live-share) callers so analysts only ever get the
     shallow ok/degraded liveness signal.
@@ -551,23 +561,13 @@ def health_check(
                 except Exception:
                     logger.debug("deep health stuck-sync probe failed", exc_info=True)
 
-            # SRE-05: the probe is otherwise task='sync'-blind. A commit cron
-            # erroring every run (buffer growing, nothing reaching DuckLake)
-            # stays ok. Degrade if the latest terminal run of any critical
-            # ingest task errored. Maintenance tasks (optimize /
-            # expire / *_cleanup / rollup_compact) are intentionally excluded
-            # — their failure doesn't freeze ingestion. Additive + fail-safe
-            # for the same reason as SRE-04 above.
+            # SRE-05: degrade if the latest terminal run of any critical
+            # ingest task errored. Maintenance tasks are intentionally excluded
+            # — their failure doesn't freeze ingestion.
             if svc_state["status"] == "ok":
                 try:
-                    # Recency window: only degrade on errors from the last 24h.
-                    # A per-task-latest scan with no window pins 'degraded'
-                    # FOREVER on a task that never runs again, so nothing ever
-                    # supersedes its last error. A live failing cron keeps
-                    # re-erroring inside the window, so real incidents still
-                    # degrade.
                     crit_cutoff = iso_z(datetime.now(UTC) - timedelta(hours=24))
-                    critical_tasks = ["commit"]
+                    critical_tasks = ["ledger_sweep"]
                     placeholders = ", ".join("?" for _ in critical_tasks)
                     crit_row = con.execute(
                         "SELECT task, error_message FROM ("
@@ -575,10 +575,6 @@ def health_check(
                         f"         ROW_NUMBER() OVER (PARTITION BY task ORDER BY started_at DESC{order_suffix}) AS rn "
                         f"  FROM cron_runs WHERE {where_service}task IN ({placeholders}) AND status != 'running'"
                         "  AND started_at >= ?"
-                        # Boot-reap rows are lifecycle artifacts (the process
-                        # stopped mid-run), not failing crons — a task that is
-                        # never scheduled again would otherwise hold 'degraded'
-                        # for the whole window on every restart.
                         "  AND COALESCE(error_message, '') != 'Process interrupted by server restart'"
                         ") WHERE rn = 1 AND status = 'error' LIMIT 1",
                         (*service_args, *critical_tasks, crit_cutoff),
@@ -598,13 +594,6 @@ def health_check(
                 norm_last = str(last_ingest).replace(" ", "T").rstrip("Z")
                 norm_cutoff = str(cutoff).replace(" ", "T").rstrip("Z")
                 if norm_last < norm_cutoff:
-                    # SRE-22: a fixed stale_minutes cutoff false-positives on a
-                    # low-traffic service's organic quiet periods. Before
-                    # degrading, widen the cutoff to this service's own
-                    # historical p95 inter-ingest gap (never narrower than
-                    # stale_minutes) and re-check against that. Only reached
-                    # once the naive check already looks stale, so the
-                    # common healthy path pays zero extra query cost.
                     effective_minutes = metadata_db.adaptive_stale_minutes(
                         con, default_minutes=stale_minutes, service_id=sid if has_service_id else None
                     )
@@ -623,6 +612,17 @@ def health_check(
         if svc_state["status"] not in ("ok", "stale"):
             overall_ok = False
         services_report.append(svc_state)
+
+    try:
+        from backend.core.clickhouse import get_clickhouse_client
+
+        ch_client = get_clickhouse_client()
+        if ch_client is not None and hasattr(ch_client, "health"):
+            ch_health = ch_client.health()
+            if isinstance(ch_health, dict) and ch_health.get("ok") is False:
+                overall_ok = False
+    except Exception:
+        logger.debug("deep health ClickHouse probe skipped/failed", exc_info=True)
 
     payload["services"] = services_report
     payload["status"] = "ok" if overall_ok else "degraded"

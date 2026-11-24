@@ -2,11 +2,21 @@
 
 import React from 'react'
 import { AlertTriangle, Layers } from 'lucide-react'
+import { useInViewOnce } from '@/components/AnalyticsCard'
 import { ReportLayout } from '@/components/ReportLayout'
+import { RawWindowNote, readRawWindow, readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
+import { useActiveLogFields } from '@/hooks/useBootstrap'
 import { useAnalyticsReportQuery, useReportRangeAnchor } from '@/hooks/useReportPageState'
 import { client, unwrapClient } from '@/lib/api'
-import { cn, type RangeWireArgs } from '@/lib/utils'
-import type { FiltersPayload } from '@/types/api'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
+import {
+  ASSETS_RAW_SECTIONS,
+  ASSETS_ROLLUP_SECTIONS,
+  assetsRollupCacheFilter,
+  type AssetsSection,
+} from '@/lib/cloud-engine/rollup-sections'
+import { cn, type RangeWire, type RangeWireArgs } from '@/lib/utils'
+import type { components, FiltersPayload } from '@/types/api'
 import {
   AssetsHotspotsSection,
   LargeUncompressedTable,
@@ -55,6 +65,9 @@ export {
   type CompressionPerformanceRow,
 }
 
+/** Optional log fields the asset panels read; the service's log field settings decide which are on. */
+const ASSET_LOG_FIELDS = ['ttl', 'resp_header_content_encoding'] as const
+
 export interface AssetsReportContentProps extends Pick<RangeWireArgs, 'relativeRange' | 'isAutoRange' | 'anchor'> {
   startTime: string | null
   endTime: string | null
@@ -71,26 +84,49 @@ export function AssetsReportContent({
   isAutoRange,
   anchor,
 }: AssetsReportContentProps) {
+  // Cloud answers the summary cards and breakdowns from summaries when unfiltered or filtered on cache
+  // status alone; read them apart so they paint without waiting on the URL-level raw scan.
+  const rollupFirst = isCloudMode() && assetsRollupCacheFilter(filterPayload) !== false
+  const range = { relativeRange, isAutoRange, startTime, endTime, anchor }
+  const postAssets = (sections: readonly AssetsSection[] | undefined, rangeBody: RangeWire['rangeBody'], signal: AbortSignal | undefined) => {
+    // `sections` is a Cloud-only request field.
+    const body: components['schemas']['AssetsRequest'] & { sections?: readonly AssetsSection[] } = {
+      filters: filterPayload,
+      ...sections ? { sections } : {},
+      ...rangeBody,
+    }
+    return unwrapClient(client.POST('/api/assets/aggregates', { signal, body }))
+  }
+
+  const rollupQuery = useAnalyticsReportQuery<AssetsAggregates | undefined>({
+    namespace: ['assets', 'aggregates', 'rollup'],
+    serviceId: activeServiceId,
+    filterPayload,
+    range,
+    queryOptions: { enabled: rollupFirst },
+    queryFn: ({ rangeBody, signal }) => postAssets(ASSETS_ROLLUP_SECTIONS, rangeBody, signal),
+  })
+
+  // The URL tables always read raw rows, so in Cloud they wait until summaries paint and their panel enters the viewport.
+  const hotspotsRef = React.useRef<HTMLDivElement>(null)
+  const hotspotsNear = useInViewOnce(hotspotsRef, { rootMargin: '0px', enabled: !rollupFirst || rollupQuery.isSuccess })
   const bundle = useAnalyticsReportQuery<AssetsAggregates | undefined>({
     namespace: ['assets', 'aggregates'],
     serviceId: activeServiceId,
     filterPayload,
-    range: { relativeRange, isAutoRange, startTime, endTime, anchor },
-    queryFn: async ({ rangeBody, signal }) => {
-      return unwrapClient(client.POST('/api/assets/aggregates', {
-        signal,
-        body: {
-          filters: filterPayload,
-          ...rangeBody,
-        },
-      }))
-    },
+    range,
+    keyParts: rollupFirst ? [ASSETS_RAW_SECTIONS] : [],
+    queryOptions: { enabled: !rollupFirst || (rollupQuery.isSuccess && hotspotsNear) },
+    queryFn: ({ rangeBody, signal }) => postAssets(rollupFirst ? ASSETS_RAW_SECTIONS : undefined, rangeBody, signal),
   })
 
-  const isLoading = bundle.isLoading
-  const isFetching = bundle.isFetching
-  const error = bundle.error
-  const data = bundle.data
+  const summaryQuery = rollupFirst ? rollupQuery : bundle
+  const isLoading = summaryQuery.isLoading
+  // The URL tables show their own loading block, so only a refetch over shown rows dims the page.
+  const isFetching = summaryQuery.isFetching || (bundle.isFetching && bundle.data !== undefined)
+  const error = summaryQuery.error ?? bundle.error
+  const data = rollupFirst ? { ...bundle.data, ...rollupQuery.data } as AssetsAggregates : bundle.data
+  const rollup = rollupFirst ? readRollupMeta(rollupQuery.data) : undefined
 
   const getTimeQueryString = React.useCallback(() => {
     if (relativeRange) {
@@ -105,6 +141,7 @@ export function AssetsReportContent({
   const getFilterQueryString = React.useCallback((assetType: string) => buildAssetFilterQueryString(assetType), [])
 
   const [activeHelp, setActiveHelp] = React.useState<AssetHelpContent | null>(null)
+  const logFields = useActiveLogFields()
 
   if (error) {
     return (
@@ -122,10 +159,13 @@ export function AssetsReportContent({
   const largeUncompressed = data?.large_uncompressed_assets || []
   const lowTtl = data?.low_ttl_assets || []
   const urlFilterHrefPrefix = `/dashboard?service=${activeServiceId}${getTimeQueryString()}&filter_url=`
-  const missingFields = data?.missing_fields || []
+  const missingFields = ASSET_LOG_FIELDS.filter((field) => logFields.ready && !logFields.isFieldActive(field))
 
   return (
     <div className={cn('space-y-8 py-6 transition-opacity duration-150', isFetching && !isLoading && 'opacity-60 pointer-events-none')}>
+      <RollupDataThroughSlot reserve={rollupFirst} meta={rollup} />
+      <RawWindowNote window={readRawWindow(bundle.data) ?? readRawWindow(rollupQuery.data)} />
+
       <AssetsOverviewGrid
         breakdown={breakdown}
         isLoading={isLoading}
@@ -146,13 +186,15 @@ export function AssetsReportContent({
         onSelectHelp={setActiveHelp}
       />
 
-      <AssetsHotspotsSection
-        largeUncompressed={largeUncompressed}
-        lowTtl={lowTtl}
-        isLoading={isLoading}
-        urlFilterHrefPrefix={urlFilterHrefPrefix}
-        onSelectHelp={setActiveHelp}
-      />
+      <div ref={hotspotsRef}>
+        <AssetsHotspotsSection
+          largeUncompressed={largeUncompressed}
+          lowTtl={lowTtl}
+          isLoading={!bundle.data}
+          urlFilterHrefPrefix={urlFilterHrefPrefix}
+          onSelectHelp={setActiveHelp}
+        />
+      </div>
 
       <MissingAssetFieldsBanner missingFields={missingFields} activeServiceId={activeServiceId} />
 

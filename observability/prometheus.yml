@@ -9,5 +9,3 @@ scrape_configs:
     static_configs: [{ targets: ["redis-exporter:9121"] }]
   - job_name: postgres
     static_configs: [{ targets: ["postgres-exporter:9187"] }]
-  - job_name: celery
-    static_configs: [{ targets: ["celery-exporter:9808"] }]

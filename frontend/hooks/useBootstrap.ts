@@ -13,9 +13,19 @@ import { useServiceStore } from '@/stores/filterStore'
 import { useSessionRoleStore } from '@/stores/filterStore'
 import { toService } from '@/types/api'
 import { buildFiltersPayload, type FiltersPayload } from '@/types/api'
+import {
+  IS_CLOUD_MODE,
+  isCloudMode,
+  setCloudModeRuntime,
+} from '@/lib/cloud-engine/mode'
+import { syncOpsCacheForSession } from '@/lib/cloud-engine/telemetry/sources'
+import { cloudCacheIdentity } from '@/lib/cloud-engine/cache-identity'
+import { subscribeCloudMetadataInvalidation } from '@/lib/cloud-engine/metadata-cache'
 
 export {
   useUrlServiceSync,
+  useUrlServiceToStore,
+  useServiceUrlWriteback,
   useServiceSwitchReset,
   useIsAnalyst,
   useMaskIps,
@@ -64,6 +74,12 @@ export function useDebouncedFilterPayload(includeEdgeOnly = false): FiltersPaylo
 
 const subscribeNever = () => () => {}
 
+function applyBootstrapRuntimeMode(data: unknown): void {
+  if ((data as { runtime_mode?: string } | undefined)?.runtime_mode === 'cloud') {
+    setCloudModeRuntime(true)
+  }
+}
+
 /**
  * Returns false on the server and on the client's FIRST (hydration) render,
  * then true after mount.
@@ -87,7 +103,11 @@ export function useBootstrapCacheSelector<T>(
   const queryClient = useQueryClient()
   return useSyncExternalStore(
     (onChange) => queryClient.getQueryCache().subscribe(onChange),
-    () => selector(queryClient.getQueryData<Record<string, unknown>>(queryKeys.bootstrap())),
+    () => {
+      const data = queryClient.getQueryData<Record<string, unknown>>(queryKeys.bootstrap())
+      applyBootstrapRuntimeMode(data)
+      return selector(data)
+    },
     () => serverFallback,
   )
 }
@@ -111,7 +131,9 @@ export function useEffectiveServiceId(): string | null | undefined {
 }
 
 export function useIsDataReady(): boolean {
-  return !!useEffectiveServiceId()
+  const serviceId = useEffectiveServiceId()
+  const bootstrapSettled = useBootstrapSettled()
+  return bootstrapSettled && !!serviceId
 }
 
 export function useBootstrapResolved(): boolean {
@@ -126,9 +148,15 @@ export function useBootstrapPending(): boolean {
 }
 
 export function useBootstrapSettled(): boolean {
-  return useBootstrapCacheSelector(
-    (bootstrapData) => bootstrapData !== undefined,
-    false,
+  const queryClient = useQueryClient()
+  return useSyncExternalStore(
+    (onChange) => queryClient.getQueryCache().subscribe(onChange),
+    () => {
+      const data = queryClient.getQueryData<Record<string, unknown>>(queryKeys.bootstrap())
+      applyBootstrapRuntimeMode(data)
+      return data !== undefined
+    },
+    () => queryClient.getQueryData(queryKeys.bootstrap()) !== undefined,
   )
 }
 
@@ -138,6 +166,8 @@ let _lastReconciledBootstrapState: {
   isStale: boolean
   activeServiceId: string | null
 } | null = null
+
+export { cloudCacheIdentity }
 
 export function useBootstrapSyncEffects(
   query: { data: unknown; isStale?: boolean; dataUpdatedAt?: number },
@@ -149,12 +179,16 @@ export function useBootstrapSyncEffects(
   const isRealQueryResult = typeof query.dataUpdatedAt === 'number'
   const data = query.data as
     | {
+        runtime_mode?: string
+        user?: { id?: string | null; role?: string } | null
         services?: Parameters<typeof toService>[0][]
         active_service_id?: string | null
         pop_geo?: Parameters<ReturnType<typeof usePopGeoStore.getState>['setMap']>[0]
         pops?: Record<string, [number | null, number | null]>
         settings?: {
           is_remote_analyst?: boolean
+          needs_login?: boolean
+          mask_ips?: boolean
         }
         debug_state?: {
           query_debug_visibility?: string
@@ -172,6 +206,24 @@ export function useBootstrapSyncEffects(
       return
     }
     _lastSyncedBootstrapData = data
+    applyBootstrapRuntimeMode(data)
+    if (IS_CLOUD_MODE || isCloudMode() || data.runtime_mode === 'cloud') {
+      const needsLogin = Boolean(data.settings?.needs_login)
+      const maskIps = Boolean(data.settings?.mask_ips)
+      const userId = needsLogin ? null : (data.user?.id ?? null)
+      const role = needsLogin ? null : (data.user?.role ?? null)
+      const nextIdentity = cloudCacheIdentity(data)
+      void import('@/lib/cloud-engine/dashboard/client')
+        .then(async ({ setDashboardCacheIdentity }) => {
+          if (_lastSyncedBootstrapData !== data) return
+          await setDashboardCacheIdentity(nextIdentity)
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (_lastSyncedBootstrapData !== data) return
+          void syncOpsCacheForSession({ userId, role, maskIps, needsLogin })
+        })
+    }
     const { setServices, setInitialized } = useServiceStore.getState()
     setServices((data.services ?? []).map(toService))
     setInitialized(true)
@@ -251,10 +303,17 @@ export function useBootstrapSyncEffects(
 
 export function useBootstrap() {
   const queryClient = useQueryClient()
+  useEffect(() => subscribeCloudMetadataInvalidation(() => {
+    void queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap() })
+    void queryClient.invalidateQueries({ queryKey: queryKeys.services() })
+    void queryClient.invalidateQueries({ queryKey: queryKeys.logFieldsCatalog() })
+  }), [queryClient])
+
   const query = useQuery({
     queryKey: queryKeys.bootstrap(),
-    queryFn: async () => {
-      const data = await unwrapClient(client.GET('/api/bootstrap'))
+    queryFn: async ({ signal }) => {
+      const data = await unwrapClient(client.GET('/api/bootstrap', { signal }))
+      applyBootstrapRuntimeMode(data)
       useSessionRoleStore.getState().setIsRemoteAnalyst(
         data?.settings?.is_remote_analyst === true,
       )
@@ -292,9 +351,10 @@ export function useLogFieldsCatalog(serviceId?: string) {
 
   return useQuery({
     queryKey: queryKeys.logFieldsCatalog(sid),
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       return await unwrapClient(
         client.GET('/api/log-fields/catalog', {
+          signal,
           params: { query: { service_id: sid } },
         }),
       )
@@ -323,17 +383,27 @@ interface UseFieldValuesOptions {
 }
 
 export function useFieldValues({ field, search, limit = 50, enabled = true }: UseFieldValuesOptions) {
+  const queryClient = useQueryClient()
   const activeServiceId = useServiceStore(s => s.activeServiceId)
   const { startTime, endTime } = useFilterStore(
     useShallow(s => ({ startTime: s.startTime, endTime: s.endTime }))
   )
-  const filterPayload = useDebouncedFilterPayload()
+  const filterPayload = useDebouncedFilterPayload(true)
+  const queryKey = useMemo(
+    () => queryKeys.filtered('dashboard', 'field_values', activeServiceId, startTime, endTime, filterPayload, field, search, limit),
+    [activeServiceId, startTime, endTime, filterPayload, field, search, limit],
+  )
+
+  useEffect(() => {
+    if (!enabled) void queryClient.cancelQueries({ queryKey, exact: true })
+  }, [enabled, queryClient, queryKey])
 
   return useQuery({
-    queryKey: queryKeys.filtered('dashboard', 'field_values', activeServiceId, startTime, endTime, filterPayload, field, search),
-    queryFn: async () => {
+    queryKey,
+    queryFn: async ({ signal }) => {
       return await unwrapClient(
         client.POST('/api/dashboard/field-values', {
+          signal,
           body: {
             start_time: startTime,
             end_time: endTime,

@@ -2,17 +2,23 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Callable, Iterable, Mapping
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from backend.core.request_telemetry import HighScaleSections
 from backend.high_scale._common import (
     normalize_cache_bound,
     parse_time_window,
+    range_value,
 )
+from backend.high_scale.archive import build_cmcd_projection_key
+from backend.models.analytics import CmcdRequest
 from backend.repositories.utils.response_cache import (
+    ResponseMemo,
+    bucket_time_to_minute,
     client_cache_token,
     digest_cache_key,
     serialize_filters_for_key,
@@ -24,16 +30,10 @@ from backend.repositories.utils.response_shaping import (
     opt_float,
     pad_timeseries_buckets,
 )
+from backend.utils.bounded_cache import CacheRegistry
 
 if TYPE_CHECKING:
     from backend.high_scale.ingest_controller import HighScaleService
-
-from datetime import timedelta
-
-from backend.high_scale.archive import build_cmcd_projection_key
-from backend.models.analytics import CmcdRequest
-from backend.repositories.utils.response_cache import ResponseMemo
-from backend.utils.bounded_cache import CacheRegistry
 
 
 def project_cmcd(request_event: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -42,6 +42,8 @@ def project_cmcd(request_event: Mapping[str, Any]) -> dict[str, Any] | None:
         return None
     if not isinstance(raw_fields, Mapping):
         raise ValueError("CMCD fields must be a mapping")
+    if not any(v not in (None, "") for v in raw_fields.values()):
+        return None
     request_event_id = request_event.get("event_id")
     if not isinstance(request_event_id, str) or not request_event_id:
         raise ValueError("CMCD projection requires request_event_id")
@@ -54,7 +56,7 @@ def project_cmcd(request_event: Mapping[str, Any]) -> dict[str, Any] | None:
         "service_id": service_id,
         "timestamp": request_event.get("timestamp"),
         "cmcd_version": request_event.get("cmcd_version"),
-        "sid": request_event.get("sid"),
+        "sid": raw_fields.get("sid") or raw_fields.get("cmcd_sid") or "",
         "country": _country(request_event.get("country")),
         "asn": _asn(request_event.get("asn")),
         "fields": dict(raw_fields),
@@ -77,7 +79,8 @@ def _asn(value: object) -> int | None:
     return None
 
 
-_memo = ResponseMemo(ttl=30.0, maxsize=128, prewarmer=False)
+_HS_CMCD_CACHE_TTL = float(os.getenv("HS_CMCD_CACHE_TTL_SECONDS", "60"))
+_memo = ResponseMemo(ttl=_HS_CMCD_CACHE_TTL, maxsize=128, prewarmer=False)
 CacheRegistry.register("hs_cmcd_aggregates_memo", _memo.cache)
 _DEFAULT_WINDOW = timedelta(days=1)
 _BUCKET_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -107,13 +110,13 @@ _VIDEO = "ot = 'v'"
 
 
 def _asn_names(service_id: str, asns: list[int]) -> dict[int, str]:
-    from backend.core import duckdb as _db
+    from backend.core import fos_client as _db
 
     return _db.get_asn_names(service_id, asns)
 
 
 def _asn_label(asn: int, names: Mapping[int, str]) -> str:
-    from backend.core import duckdb as _db
+    from backend.core import fos_client as _db
 
     return _db.format_asn_label(asn, names.get(asn, ""))
 
@@ -125,16 +128,17 @@ def _spec(config: Any) -> tuple[str, list[Any]]:
 
 
 def _filter_clauses(filters: Mapping[str, Any]) -> tuple[list[str], dict[str, Any]]:
-    unsupported = sorted(name for name, config in filters.items() if _spec(config)[1] and name not in _FILTER_COLUMNS)
-    if unsupported:
-        raise ValueError(
-            f"high-scale CMCD projections cannot filter on: {', '.join(unsupported)} (supported: country, asn)"
-        )
     clauses: list[str] = []
     params: dict[str, Any] = {}
+    request_filters: dict[str, Any] = {}
     for i, (name, config) in enumerate(filters.items()):
+        if name == "filter_mode":
+            continue
         mode, values = _spec(config)
         if not values:
+            continue
+        if name not in _FILTER_COLUMNS:
+            request_filters[name] = config
             continue
         keys: list[str] = []
         for j, value in enumerate(values):
@@ -149,6 +153,22 @@ def _filter_clauses(filters: Mapping[str, Any]) -> tuple[list[str], dict[str, An
                 keys.append(f"{{{param}:String}}")
         operator = "NOT IN" if mode == "exclude" else "IN"
         clauses.append(f"{_FILTER_COLUMNS[name]} {operator} ({', '.join(keys)})")
+    if request_filters:
+        from ._common import VISIBLE_PUBLICATION_FENCE_SQL, request_filter_clauses
+
+        req_clauses, req_params = request_filter_clauses(request_filters, prefix="cmcd_req_flt")
+        if req_clauses:
+            params.update(req_params)
+            req_where = " AND ".join(
+                [
+                    "service_id = {service_id:String}",
+                    "event_timestamp >= {start:DateTime64(3)}",
+                    "event_timestamp <= {end:DateTime64(3)}",
+                    VISIBLE_PUBLICATION_FENCE_SQL,
+                    *req_clauses,
+                ]
+            )
+            clauses.append(f"request_event_id IN (SELECT event_id FROM request_facts WHERE {req_where})")
     return clauses, params
 
 
@@ -199,7 +219,42 @@ def _sessions_ts(rows: Iterable[dict[str, Any]], new_sessions: Mapping[str, int]
     }
 
 
-_cmcd_cache_bound = normalize_cache_bound
+def _cmcd_cache_bound(value: str | datetime | None) -> str | None:
+    """Floor a CMCD window bound to the UTC minute so warm reloads within the same minute hit cache."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value.astimezone(UTC) if value.tzinfo is not None else value
+        return dt.strftime("%Y-%m-%dT%H:%M")
+    stripped = str(value).strip()
+    if not stripped:
+        return None
+    try:
+        parsed = range_value(stripped)
+        if parsed is not None:
+            dt = parsed.astimezone(UTC) if parsed.tzinfo is not None else parsed
+            return dt.strftime("%Y-%m-%dT%H:%M")
+    except (ValueError, TypeError):
+        pass
+    return bucket_time_to_minute(normalize_cache_bound(stripped))
+
+
+def _cmcd_cache_bounds(
+    start_time: str | datetime | None,
+    end_time: str | datetime | None,
+) -> tuple[str | None, str | None]:
+    """Bucket >= 1 minute windows to the UTC minute; preserve exact bounds for sub-minute windows."""
+    try:
+        start_dt = range_value(start_time)
+        end_dt = range_value(end_time)
+    except (ValueError, TypeError):
+        return normalize_cache_bound(start_time), normalize_cache_bound(end_time)
+    if start_dt is not None and end_dt is not None:
+        s_utc = start_dt.astimezone(UTC) if start_dt.tzinfo is not None else start_dt.replace(tzinfo=UTC)
+        e_utc = end_dt.astimezone(UTC) if end_dt.tzinfo is not None else end_dt.replace(tzinfo=UTC)
+        if abs((e_utc - s_utc).total_seconds()) < 60:
+            return normalize_cache_bound(start_time), normalize_cache_bound(end_time)
+    return _cmcd_cache_bound(start_time), _cmcd_cache_bound(end_time)
 
 
 def cmcd_aggregates(
@@ -211,12 +266,13 @@ def cmcd_aggregates(
     mask_ips: bool,
 ) -> dict[str, Any]:
     """Return the standard CMCD response shape; ``mask_ips`` is moot because no section emits an IP."""
-    memo_key = digest_cache_key(
+    cache_start, cache_end = _cmcd_cache_bounds(start_time, end_time)
+    digest = digest_cache_key(
         {
             "ep": "hs_cmcd_aggregates",
             "cid": client_cache_token(service.client),
-            "s": _cmcd_cache_bound(start_time),
-            "e": _cmcd_cache_bound(end_time),
+            "s": cache_start,
+            "e": cache_end,
             "b": int(req.bucket_seconds),
             "n": int(req.top_n),
             "sec": sorted(str(s) for s in sections) if sections else None,
@@ -225,16 +281,23 @@ def cmcd_aggregates(
         },
         {"name": service.service_id, "service_id": service.service_id},
     )
-    cached_resp = _memo.get(memo_key)
-    if cached_resp is not None:
-        return dict(cached_resp)
+    memo_key = f"{service.service_id}:{digest}"
+    if _HS_CMCD_CACHE_TTL > 0:
+        cached_resp = _memo.get_with_telemetry(memo_key)
+        if cached_resp is not None:
+            return dict(cached_resp)
 
     def _compute() -> dict[str, Any]:
-        return _cmcd_aggregates_compute(service, req, start_time, end_time, sections, mask_ips)
+        if _HS_CMCD_CACHE_TTL > 0 and (cached_inner := _memo.get_with_telemetry(memo_key)) is not None:
+            return dict(cached_inner)
+        payload = _cmcd_aggregates_compute(service, req, start_time, end_time, sections, mask_ips)
+        if _HS_CMCD_CACHE_TTL > 0:
+            _memo.put(memo_key, payload, strip=("section_timings",))
+        return payload
 
-    result = _memo.coalesce(f"hs_cmcd_agg:{memo_key}", _compute)
-    _memo.put(memo_key, result, strip=("section_timings",))
-    return result
+    if _HS_CMCD_CACHE_TTL > 0:
+        return _memo.coalesce(f"hs_cmcd_agg:{memo_key}", _compute)
+    return _memo.result(_compute(), state="bypass")
 
 
 def _cmcd_aggregates_compute(
@@ -254,66 +317,50 @@ def _cmcd_aggregates_compute(
         return sections is None or name in sections
 
     trace = HighScaleSections(service.service_id, "cmcd")
+    want_overview = wanted("overview")
+    probe_select = [
+        "count() AS events",
+        "uniqExact(sid) AS sessions",
+        "countIf(bl IS NOT NULL) AS has_bl",
+        "countIf(br IS NOT NULL) AS has_br",
+        "countIf(bs IS NOT NULL) AS has_bs",
+        "countIf(mtp IS NOT NULL) AS has_mtp",
+        "countIf(ot != '') AS has_ot",
+        "countIf(sf != '') AS has_sf",
+        "countIf(su IS NOT NULL) AS has_su",
+        "countIf(tb IS NOT NULL) AS has_tb",
+        "countIf(cid != '') AS has_cid",
+        "countIf(country != '') AS has_country",
+        "countIf(asn IS NOT NULL) AS has_asn",
+    ]
+    if want_overview:
+        probe_select += [
+            "uniqExactIf(sid, bs = 1) AS rebuffer_sessions",
+            "avgIf(br, ot = 'v') AS avg_br_v",
+            "avg(br) AS avg_br_all",
+            "avgIf(bl, ot = 'v') AS avg_bl_v",
+            "avg(bl) AS avg_bl_all",
+            "quantileTDigestIf(0.5)(mtp, ot = 'v') AS med_mtp_v",
+            "quantileTDigest(0.5)(mtp) AS med_mtp_all",
+        ]
     probe = trace.run(
         "probe",
-        lambda: execute(
-            "/* cmcd:probe */ SELECT count() AS events, uniqExact(sid) AS sessions, "
-            "countIf(bl IS NOT NULL) AS has_bl, countIf(br IS NOT NULL) AS has_br, countIf(bs IS NOT NULL) AS has_bs, "
-            "countIf(mtp IS NOT NULL) AS has_mtp, countIf(ot != '') AS has_ot, countIf(sf != '') AS has_sf, "
-            "countIf(su IS NOT NULL) AS has_su, countIf(tb IS NOT NULL) AS has_tb, countIf(cid != '') AS has_cid, "
-            "countIf(country != '') AS has_country, countIf(asn IS NOT NULL) AS has_asn "
-            f"FROM ({events})",
-            params,
-        ),
+        lambda: execute(f"/* cmcd:probe */ SELECT {', '.join(probe_select)} FROM ({events})", params),
         source="projected_fact",
         activity="overhead",
     )[0]
     if not int(probe["events"] or 0):
         return empty_cmcd_aggregates(available=True, section_timings=trace.timings())
     has = {key: bool(int(probe[f"has_{key}"] or 0)) for key in ("bl", "br", "bs", "mtp", "ot", "sf", "su", "tb", "cid")}
+    # cmcd_bs is a sparse flag (1/true only on starvation, empty/NULL otherwise), so buffer-length
+    # telemetry proves starvation tracking is active even in healthy windows with zero starvations.
+    has_bs_effective = has["bs"] or has["bl"]
     has_country = bool(int(probe["has_country"] or 0))
     has_asn = bool(int(probe["has_asn"] or 0))
     has_video_filter = has["ot"]
     video = _VIDEO if has_video_filter else "1"
     result: dict[str, Any] = {"available": True, "has_data": True}
     tasks: list[tuple[str, Callable[[], dict[str, Any]]]] = []
-    if wanted("overview"):
-
-        def _run_overview() -> dict[str, Any]:
-            row = execute(
-                "/* cmcd:overview */ SELECT uniqExact(sid) AS active_sessions, "
-                "if(countIf(bs IS NOT NULL) = 0, NULL, "
-                "uniqExactIf(sid, bs = 1) * 100.0 / nullIf(uniqExact(sid), 0)) AS rebuffer_rate, "
-                f"avgIf(br, {video}) AS avg_bitrate, avgIf(bl, {video}) AS avg_buffer_length, "
-                f"quantileTDigestIf(0.5)(mtp, {video}) AS median_throughput FROM ({events})",
-                params,
-            )[0]
-            peak = execute(
-                "/* cmcd:overview_peak */ SELECT max(viewers) AS peak_viewers FROM ("
-                "SELECT uniqExact(sid) AS viewers FROM (" + events + ") "
-                f"GROUP BY {_BUCKET.format(column='ts')})",
-                params,
-            )
-            duration = execute(
-                "/* cmcd:overview_duration */ SELECT avg(duration) AS avg_duration FROM ("
-                "SELECT (toUnixTimestamp64Milli(max(ts)) - toUnixTimestamp64Milli(min(ts))) / 1000.0 AS duration "
-                "FROM (" + events + ") GROUP BY sid HAVING duration > 0)",
-                params,
-            )
-            avg_duration = duration[0].get("avg_duration") if duration else None
-            return {
-                "overview": {
-                    "active_sessions": int(row["active_sessions"] or 0),
-                    "rebuffer_rate": _round(row.get("rebuffer_rate")) if has["bs"] else None,
-                    "avg_bitrate": _round(row.get("avg_bitrate")) if has["br"] else None,
-                    "avg_buffer_length": _round(row.get("avg_buffer_length")) if has["bl"] else None,
-                    "median_throughput": _round(row.get("median_throughput")) if has["mtp"] else None,
-                    "peak_viewers": int((peak[0].get("peak_viewers") if peak else 0) or 0),
-                    "avg_session_duration": int(round(float(avg_duration))) if avg_duration else None,
-                }
-            }
-
-        tasks.append(("overview", _run_overview))
     want_ts = {
         "sessions_ts": wanted("sessions_ts"),
         "buffer_health_ts": wanted("buffer_health_ts") and has["bl"],
@@ -321,23 +368,57 @@ def _cmcd_aggregates_compute(
         "throughput_ts": wanted("throughput_ts") and has["mtp"],
         "startup_ts": wanted("startup_ts") and has["su"],
     }
+    want_duration_dist = wanted("session_duration_dist")
+    overview_extras: dict[str, Any] = {}
+    need_peak_query = want_overview and not want_ts["sessions_ts"]
+    need_duration_query = want_overview and not want_duration_dist
+    if need_peak_query or need_duration_query:
+
+        def _run_overview_extras() -> dict[str, Any]:
+            if need_peak_query:
+                peak = execute(
+                    "/* cmcd:overview_peak */ SELECT max(viewers) AS peak_viewers FROM ("
+                    "SELECT uniqExact(sid) AS viewers FROM (" + events + ") "
+                    f"GROUP BY {_BUCKET.format(column='ts')})",
+                    params,
+                )
+                overview_extras["peak_viewers"] = int((peak[0].get("peak_viewers") if peak else 0) or 0)
+            if need_duration_query:
+                duration = execute(
+                    "/* cmcd:overview_duration */ SELECT avg(duration) AS avg_duration FROM ("
+                    "SELECT (toUnixTimestamp64Milli(max(ts)) - toUnixTimestamp64Milli(min(ts))) / 1000.0 AS duration "
+                    "FROM (" + events + ") GROUP BY sid HAVING duration > 0)",
+                    params,
+                )
+                overview_extras["avg_duration"] = duration[0].get("avg_duration") if duration else None
+            return {}
+
+        tasks.append(("overview", _run_overview_extras))
     if any(want_ts.values()):
 
         def _run_timeseries() -> dict[str, Any]:
             ts_out: dict[str, Any] = {}
             select = [f"{_BUCKET.format(column='ts')} AS bucket"]
             if want_ts["sessions_ts"]:
+                rebuffer_session_expr = (
+                    "uniqExactIf(sid, bs = 1) * 100.0 / nullIf(uniqExact(sid), 0) AS rebuffer_session_pct"
+                    if has_bs_effective
+                    else "CAST(NULL AS Nullable(Float64)) AS rebuffer_session_pct"
+                )
                 select += [
                     "uniqExact(sid) AS concurrent_sessions",
-                    "if(countIf(bs IS NOT NULL) = 0, NULL, "
-                    "uniqExactIf(sid, bs = 1) * 100.0 / nullIf(uniqExact(sid), 0)) AS rebuffer_session_pct",
+                    rebuffer_session_expr,
                 ]
             if want_ts["buffer_health_ts"]:
+                starvation_expr = (
+                    "countIf(bs = 1) * 100.0 / nullIf(count(), 0) AS starvation_rate"
+                    if has_bs_effective
+                    else "CAST(NULL AS Nullable(Float64)) AS starvation_rate"
+                )
                 select += [
                     f"quantileTDigestIf(0.5)(bl, {video}) AS p50_buffer",
                     f"quantileTDigestIf(0.95)(bl, {video}) AS p95_buffer",
-                    "if(countIf(bs IS NOT NULL) = 0, NULL, countIf(bs = 1) * 100.0 / nullIf(count(), 0)) "
-                    "AS starvation_rate",
+                    starvation_expr,
                 ]
             if want_ts["bitrate_ts"]:
                 select += [
@@ -351,9 +432,7 @@ def _cmcd_aggregates_compute(
                     f"quantileTDigestIf(0.99)(mtp, {video}) AS p99_throughput",
                 ]
             if want_ts["startup_ts"]:
-                select.append(
-                    "if(countIf(su IS NOT NULL) = 0, NULL, countIf(su = 1) * 100.0 / nullIf(count(), 0)) AS startup_ratio"
-                )
+                select.append("countIf(su = 1) * 100.0 / nullIf(count(), 0) AS startup_ratio")
             rows = execute(
                 f"/* cmcd:timeseries */ SELECT {', '.join(select)} FROM ({events}) GROUP BY bucket ORDER BY bucket",
                 params,
@@ -373,6 +452,11 @@ def _cmcd_aggregates_compute(
                 )
 
             if want_ts["sessions_ts"]:
+                if want_overview:
+                    overview_extras["peak_viewers"] = max(
+                        (int(row.get("concurrent_sessions") or 0) for row in rows),
+                        default=0,
+                    )
                 first_seen = execute(
                     "/* cmcd:new_sessions */ SELECT "
                     f"{_BUCKET.format(column='first_ts')} AS bucket, count() AS new_sessions FROM ("
@@ -445,7 +529,7 @@ def _cmcd_aggregates_compute(
             }
 
         tasks.append(("top_content", _run_top_content))
-    if wanted("rebuffer_by_country") and has_country and has["bs"]:
+    if wanted("rebuffer_by_country") and has_country and has_bs_effective:
 
         def _run_rebuffer_country() -> dict[str, Any]:
             rows = execute(
@@ -471,7 +555,7 @@ def _cmcd_aggregates_compute(
             }
 
         tasks.append(("rebuffer_country", _run_rebuffer_country))
-    if wanted("rebuffer_by_asn") and has_asn and has["bs"]:
+    if wanted("rebuffer_by_asn") and has_asn and has_bs_effective:
 
         def _run_rebuffer_asn() -> dict[str, Any]:
             rows = execute(
@@ -530,17 +614,26 @@ def _cmcd_aggregates_compute(
             }
 
         tasks.append(("streaming_format", _run_streaming_format))
-    if wanted("session_duration_dist"):
+    if want_duration_dist:
 
         def _run_session_duration() -> dict[str, Any]:
             rows = execute(
-                "/* cmcd:session_duration_dist */ SELECT sort_order, count() AS session_count FROM ("
-                "SELECT multiIf(duration < 30, 1, duration < 120, 2, duration < 300, 3, duration < 600, 4, "
+                "/* cmcd:session_duration_dist */ SELECT sort_order, count() AS session_count, "
+                "sumIf(duration, duration > 0) AS positive_duration_sum, "
+                "countIf(duration > 0) AS positive_duration_count FROM ("
+                "SELECT duration, multiIf(duration < 30, 1, duration < 120, 2, duration < 300, 3, duration < 600, 4, "
                 "duration < 1800, 5, duration < 3600, 6, 7) AS sort_order FROM ("
                 "SELECT (toUnixTimestamp64Milli(max(ts)) - toUnixTimestamp64Milli(min(ts))) / 1000.0 AS duration "
                 f"FROM ({events}) GROUP BY sid)) GROUP BY sort_order ORDER BY sort_order",
                 params,
             )
+            if want_overview:
+                pos_count = sum(int(row.get("positive_duration_count") or 0) for row in rows)
+                if pos_count > 0:
+                    pos_sum = sum(float(row.get("positive_duration_sum") or 0.0) for row in rows)
+                    overview_extras["avg_duration"] = pos_sum / pos_count
+                else:
+                    overview_extras["avg_duration"] = None
             return {
                 "session_duration_dist": [
                     {
@@ -554,6 +647,24 @@ def _cmcd_aggregates_compute(
         tasks.append(("session_duration", _run_session_duration))
     for d in trace.run_parallel(tasks, source="projected_fact", max_workers=8).values():
         result.update(d)
+    if want_overview:
+        active_sessions = int(probe["sessions"] or 0)
+        rebuffer_sessions = int(probe.get("rebuffer_sessions") or 0)
+        rebuffer_rate = (rebuffer_sessions * 100.0 / active_sessions) if active_sessions > 0 else None
+        avg_duration = overview_extras.get("avg_duration")
+        result["overview"] = {
+            "active_sessions": active_sessions,
+            "rebuffer_rate": _round(rebuffer_rate) if has_bs_effective else None,
+            "avg_bitrate": _round(probe.get("avg_br_v" if has_video_filter else "avg_br_all")) if has["br"] else None,
+            "avg_buffer_length": (
+                _round(probe.get("avg_bl_v" if has_video_filter else "avg_bl_all")) if has["bl"] else None
+            ),
+            "median_throughput": (
+                _round(probe.get("med_mtp_v" if has_video_filter else "med_mtp_all")) if has["mtp"] else None
+            ),
+            "peak_viewers": int(overview_extras.get("peak_viewers") or 0),
+            "avg_session_duration": int(round(float(avg_duration))) if avg_duration else None,
+        }
     if "rebuffer_by_asn" in result:
 
         def _label_asns() -> None:

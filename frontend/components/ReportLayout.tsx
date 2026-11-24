@@ -226,8 +226,8 @@ export function useViewMetricUrlSync(options?: { setMetric?: (m: string) => void
       return
     }
 
-    if (urlMetric) {
-      setMetric?.(urlMetric)
+    if (urlMetric && setMetric) {
+      setMetric(urlMetric)
       void setUrlParams({ metric: null })
     }
     // addFilter/setRange/setMetric/clearFilters are Zustand store methods —
@@ -302,6 +302,8 @@ interface ReportLayoutProps {
   defaultInterval?: ChartInterval
   headerActions?: React.ReactNode
   serviceId?: string | null
+  /** Set false when the child page owns the ?metric= URL query param directly via nuqs (e.g. /origin). */
+  syncMetricFromUrl?: boolean
   children: (props: ReportLayoutRenderProps) => React.ReactNode
 }
 
@@ -313,6 +315,7 @@ export function ReportLayout({
   defaultInterval = '1 hour',
   headerActions,
   serviceId,
+  syncMetricFromUrl = true,
   children
 }: ReportLayoutProps) {
   const { startTime, endTime } = useTimeRange()
@@ -333,7 +336,7 @@ export function ReportLayout({
     }
   }, [queryClient, queryKey])
 
-  useViewMetricUrlSync({ setMetric })
+  useViewMetricUrlSync(syncMetricFromUrl ? { setMetric } : undefined)
 
   const bucketSeconds = INTERVAL_SECONDS[config.effectiveInterval as keyof typeof INTERVAL_SECONDS] ?? 3600
 

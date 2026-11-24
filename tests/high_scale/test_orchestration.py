@@ -50,6 +50,7 @@ from backend.high_scale.ingest_controller import (
     SourceObjectPage,
 )
 from backend.high_scale.postgres_control import PostgresControlPlane
+from backend.high_scale.postgres_control import control_plane as control_plane_module
 from tests.high_scale.conftest import (
     HighScaleLedger,
     OwnershipStore,
@@ -307,7 +308,11 @@ class _ThreadSafeControl:
         return SimpleNamespace(claimed=True, lease_generation=1)
 
     def source(self, service_id: str, object_key: str):
-        raise KeyError(object_key)
+        return SimpleNamespace(
+            object_key=object_key,
+            status="claimed",
+            claim_token=SimpleNamespace(object_key=object_key, owner="worker", owner_epoch=1, lease_generation=1),
+        )
 
     def advance_source_cursor(self, service_id: str, cursor: str, **kwargs: object) -> None:
         with self._lock:
@@ -368,7 +373,7 @@ class _ContendedControl(_ThreadSafeControl):
     def source(self, service_id: str, object_key: str):
         if object_key in self.finished and object_key in self.claimed:
             return SimpleNamespace(status="acknowledged")
-        raise KeyError(object_key)
+        return super().source(service_id, object_key)
 
 
 class _CountingController:
@@ -711,6 +716,9 @@ def test_partitioned_cursors_advance_independently() -> None:
 
     connection.execute.side_effect = record_execute
 
+    token_a = SimpleNamespace(object_key="raw/00/a.gz", owner="mock", owner_epoch=1, lease_generation=1)
+    token_b = SimpleNamespace(object_key="raw/10/b.gz", owner="mock", owner_epoch=1, lease_generation=1)
+    control._locked_claim_rows = MagicMock(return_value={})  # type: ignore[method-assign]
     control.acknowledge_sources_batch(
         "svc1",
         ["raw/00/a.gz"],
@@ -719,6 +727,7 @@ def test_partitioned_cursors_advance_independently() -> None:
         next_cursor="cursor_a",
         domain="request",
         partition_id="00-09",
+        claim_tokens=(token_a,),
     )
     control.acknowledge_sources_batch(
         "svc1",
@@ -728,6 +737,7 @@ def test_partitioned_cursors_advance_independently() -> None:
         next_cursor="cursor_b",
         domain="request",
         partition_id="10-19",
+        claim_tokens=(token_b,),
     )
 
     assert cursors.get(("svc1", "request", "00-09")) == "cursor_a"
@@ -737,6 +747,7 @@ def test_partitioned_cursors_advance_independently() -> None:
 
 def test_stale_epoch_fences_all_partition_cursors() -> None:
     control, _ = _mock_control(owner_epoch=2)
+    token = SimpleNamespace(object_key="raw/00/a.gz", owner="mock", owner_epoch=1, lease_generation=1)
     with pytest.raises(ValueError, match="owner epoch"):
         control.acknowledge_sources_batch(
             "svc1",
@@ -746,6 +757,36 @@ def test_stale_epoch_fences_all_partition_cursors() -> None:
             next_cursor="cursor_a",
             domain="request",
             partition_id="00-09",
+            claim_tokens=(token,),
+        )
+
+
+@pytest.mark.no_postgres
+def test_claim_rows_require_immutable_owner_epoch_and_lease_generation(monkeypatch: pytest.MonkeyPatch) -> None:
+    source = SimpleNamespace(
+        object_key="raw/a.log",
+        status="claimed",
+        owner="worker-new",
+        owner_epoch=4,
+        lease_generation=8,
+    )
+    monkeypatch.setattr(control_plane_module, "_source_from_row", lambda _row: source)
+    connection = MagicMock()
+    connection.execute.return_value.fetchall.return_value = [object()]
+    token = SimpleNamespace(
+        object_key="raw/a.log",
+        owner="worker-old",
+        owner_epoch=4,
+        lease_generation=7,
+    )
+
+    with pytest.raises(RuntimeError, match="stale or missing claim"):
+        PostgresControlPlane._locked_claim_rows(
+            connection,
+            "svc",
+            ("raw/a.log",),
+            claim_tokens=(token,),
+            expected_owner_epoch=4,
         )
 
 
@@ -1008,7 +1049,15 @@ def _reinspection_harness(
     control.source_cursor_for.return_value = forward_cursor
     control.source_reinspection_state_for.return_value = reinspection_state
     control.discover_source.return_value = SimpleNamespace(status="discovered")
-    control.claim_sources_batch = MagicMock(return_value=tuple(SimpleNamespace(object_key=k) for k in claimed_keys))
+    control.claim_sources_batch = MagicMock(
+        return_value=tuple(
+            SimpleNamespace(
+                object_key=k,
+                claim_token=SimpleNamespace(object_key=k, owner=worker_id, owner_epoch=owner_epoch, lease_generation=1),
+            )
+            for k in claimed_keys
+        )
+    )
     control.expired_claims.return_value = ()
     control.advance_source_cursor = MagicMock()
     lister, reader, controller = MagicMock(), MagicMock(), MagicMock()
@@ -1477,7 +1526,7 @@ def test_clickhouse_adapter_rejects_invalid_rows_before_http() -> None:
         batch.service_id,
         batch.domain,
         batch.generation,
-        ({**batch.rows[0], "custom_fields": {"bad": 1}},),
+        ({**batch.rows[0], "custom_fields": {"bad": [1]}},),
     )
     client = FakeHttpClickHouse()
     with pytest.raises(ValueError, match="keys and values"):
@@ -1616,6 +1665,74 @@ def _rum_batch(domain: str, row: dict) -> HighScaleBatch:
         "transform_version": "normalize.v1",
     }
     return HighScaleBatch(f"batch-{domain}", "svc", domain, "4", ({**base, **row},))
+
+
+@pytest.mark.parametrize("domain", ["rum_vitals", "rum_errors"])
+def test_rum_receipt_identity_repeats_across_child_facts_without_duplicate_retry(domain: str) -> None:
+    fields = {"metric_name": "LCP", "metric_value": 1.5} if domain == "rum_vitals" else {"error_message": "boom"}
+    batch = _rum_batch(domain, {**fields, "req_id": "run-seq-42-not-a-uuid", "client_id": "session-1"})
+    batch = HighScaleBatch(
+        batch.batch_id,
+        batch.service_id,
+        batch.domain,
+        batch.generation,
+        (batch.rows[0], {**batch.rows[0], "event_id": f"{domain}-2"}),
+    )
+    client = FakeHttpClickHouse()
+    adapter = ClickHouseBatchAdapter(client)
+    assert adapter.insert(batch) == adapter.insert(batch)
+    facts = [(columns, rows) for table, columns, rows in client.inserts if table != "high_scale_batch_publications"]
+    assert len(facts) == 1
+    columns, rows = facts[0]
+    projected = [dict(zip(columns, row, strict=True)) for row in rows]
+    assert [row["req_id"] for row in projected] == ["run-seq-42-not-a-uuid"] * 2
+    assert len({row["event_id"] for row in projected}) == 2
+    assert all(row["client_id"] == "session-1" and row["request_event_id"] is None for row in projected)
+
+
+def test_rum_receipt_identity_schema_installer_upgrades_existing_writer_contract(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from backend.high_scale.archive import clickhouse_batch
+
+    class ExistingRumSchemaClient(FakeHttpClickHouse):
+        def __init__(self) -> None:
+            super().__init__()
+            self.schemas = {
+                table: set(_DOMAIN_COLUMNS[domain]) - {"req_id"}
+                for domain, table in (("rum_vitals", "rum_vitals_facts"), ("rum_errors", "rum_error_facts"))
+            }
+
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            if sql.startswith("CREATE TABLE IF NOT EXISTS"):
+                return []
+            migration = re.fullmatch(r"ALTER TABLE (\w+) ADD COLUMN IF NOT EXISTS (\w+) .+", sql)
+            if migration:
+                table, column = migration.groups()
+                self.schemas[table].add(column)
+                return []
+            return super().execute(sql, params)
+
+        def insert_rows(self, table: str, columns: list[str], rows: list[tuple]) -> None:
+            if table in self.schemas and not set(columns) <= self.schemas[table]:
+                raise ValueError(f"unknown columns in existing {table}")
+            super().insert_rows(table, columns, rows)
+
+    client = ExistingRumSchemaClient()
+    monkeypatch.setattr(clickhouse_batch, "get_clickhouse_client", lambda: client)
+    monkeypatch.setattr(clickhouse_batch, "_SCHEMA_FILES", ["rum_schema.sql"])
+    clickhouse_batch.install_clickhouse_schema()
+    clickhouse_batch.install_clickhouse_schema()
+    adapter = ClickHouseBatchAdapter(client)
+    for domain, fields in (
+        ("rum_vitals", {"metric_name": "LCP", "metric_value": 1.5}),
+        ("rum_errors", {"error_message": "boom"}),
+    ):
+        adapter.insert(_rum_batch(domain, {**fields, "req_id": "run-seq-42-not-a-uuid"}))
+    facts = [(columns, rows) for table, columns, rows in client.inserts if table in client.schemas]
+    assert len(facts) == 2
+    assert all(dict(zip(columns, rows[0], strict=True))["req_id"] == "run-seq-42-not-a-uuid" for columns, rows in facts)
+    assert "Failed to install schema" not in caplog.text
 
 
 def test_rum_vitals_rows_persist_environment_columns_after_country() -> None:
@@ -1947,10 +2064,12 @@ _SCHEMAS = {
     "rum_vitals_facts": [
         ("service_id", "LowCardinality(String)"), ("event_timestamp", "DateTime64(3, 'UTC')"),
         ("client_id", "String"), ("request_event_id", "Nullable(UUID)"), ("metric_name", "LowCardinality(String)"),
+        ("req_id", "String"),
     ],
     "rum_error_facts": [
         ("service_id", "LowCardinality(String)"), ("event_timestamp", "DateTime64(3, 'UTC')"),
         ("client_id", "Nullable(String)"), ("error_message", "String"),
+        ("req_id", "String"),
     ],
 }  # fmt: skip
 
@@ -2030,7 +2149,11 @@ def test_each_mode_reads_through_its_own_views() -> None:
 def test_a_masked_view_replaces_client_ips_and_sensitive_map_keys_in_the_data() -> None:
     view = _view_stmt(_provision(), "svc-a", True, "request_facts")
     assert "if(isNull(`client_ip`) OR `client_ip` = '', `client_ip`, '[redacted]') AS `client_ip`" in view
-    assert "mapApply((k, v) -> (k, if(lower(k) IN (" in view and "AS `custom_fields`" in view and "AS `cmcd`" in view
+    assert (
+        "mapApply((k, v) -> (k, if((arrayExists(seg -> seg != '' AND (seg IN (" in view
+        and "AS `custom_fields`" in view
+        and "AS `cmcd`" in view
+    )
     for key in ("cookie_session", "cid", "ip", "client_ip", "client_id", "sid", "x-forwarded-for", "true-client-ip"):
         assert f"'{key}'" in view
 
@@ -2039,7 +2162,7 @@ def test_a_masked_view_replaces_client_ips_and_sensitive_map_keys_in_the_data() 
 def test_a_masked_view_lists_its_columns_explicitly_so_a_new_base_column_is_invisible_not_leaked() -> None:
     admin = _provision()
     for table, columns in _SCHEMAS.items():
-        select = _view_stmt(admin, "svc-a", True, table).split(" AS SELECT ", 1)[1].split(" FROM ", 1)[0]
+        select = _view_stmt(admin, "svc-a", True, table).split(" AS SELECT ", 1)[1].rsplit(" FROM ", 1)[0]
         assert not re.search(r"(^|,\s)\*(\s|,|$)", select) and all(f"`{name}`" in select for name, _ in columns)
 
 
@@ -2073,6 +2196,9 @@ def test_the_rum_client_id_is_redacted_in_masked_rum_views_including_nullable_co
     admin = _provision()
     assert "AS `client_id`" in _view_stmt(admin, "svc-a", True, "rum_vitals_facts")
     assert "AS `client_id`" in _view_stmt(admin, "svc-a", True, "rum_error_facts")
+    for table in ("rum_vitals_facts", "rum_error_facts"):
+        view = _view_stmt(admin, "svc-a", True, table)
+        assert "`req_id`" in view and "AS `req_id`" not in view
 
 
 @pytest.mark.security_regression
@@ -2354,7 +2480,7 @@ _COMMON = {
     "service_id", "event_id", "event_timestamp", "ingest_timestamp", "source_object_key", "source_object_version",
     "line_ordinal", "transform_version", "batch_id", "publication_state", "country",
 }  # fmt: skip
-_RUM_SHARED = {"client_id", "request_event_id", "pathname", "browser", "os", "device", "city", "region", "pop", "tls", "ttfb"}  # fmt: skip
+_RUM_SHARED = {"client_id", "request_event_id", "req_id", "pathname", "browser", "os", "device", "city", "region", "pop", "tls", "ttfb"}  # fmt: skip
 _REVIEWED_COLUMNS = {
     "request_facts": _COMMON | {"client_ip", "url", "custom_fields", "cmcd"},
     "rum_vitals_facts": _COMMON | _RUM_SHARED | {"metric_name", "metric_value", "metric_rating"},
@@ -2633,8 +2759,7 @@ def test_table_filters_default_still_pins_service_fence_and_window_for_the_privi
     "sql",
     [
         "SELECT * FROM fla_cv_abc_m_request_facts", "SELECT * FROM fla_cv_abc_r_request_facts",
-        "SELECT * FROM default.fla_cv_abc_m_request_facts", "SELECT * FROM request_facts",
-        "SELECT * FROM high_scale_batch_publications",
+        "SELECT * FROM default.fla_cv_abc_m_request_facts", "SELECT * FROM high_scale_batch_publications",
     ],
 )  # fmt: skip
 def test_an_analyst_cannot_name_a_view_or_base_table_directly(sql: str) -> None:
@@ -3613,17 +3738,17 @@ def test_archive_storage_summary_separates_live_recently_expired_and_old_expired
     control.create_schema()
     sid = "svc-archive-summary"
 
-    def insert(manifest_id, state, size, expired_days_ago=None):
+    def insert(manifest_id, state, size, expired_days_ago=None, domain="request"):
         with control.transaction() as connection:
             connection.execute(
                 "INSERT INTO high_scale_archive_manifests (manifest_id, service_id, domain, source_key, source_checksum, "
                 "source_size, artifact_uri, artifact_checksum, artifact_size, row_count, byte_count, canonical_digest, "
                 "schema_version, transform_version, coverage_start, coverage_end, retention_deadline, "
                 "deletion_authorization_deadline, archive_epoch, owner_epoch, state, archive_expired_at) VALUES "
-                "(%s, %s, 'request', %s, 'c', 1, %s, 'c', %s, 1, 1, 'd', 'v', 'v', clock_timestamp(), clock_timestamp(), "
+                "(%s, %s, %s, %s, 'c', 1, %s, 'c', %s, 1, 1, 'd', 'v', 'v', clock_timestamp(), clock_timestamp(), "
                 "clock_timestamp(), clock_timestamp(), 0, 1, %s, "
                 "CASE WHEN %s::int IS NULL THEN NULL ELSE clock_timestamp() - make_interval(days => %s::int) END)",
-                (manifest_id, sid, f"raw/{manifest_id}", f"s3://a/{manifest_id}.parquet", size, state, expired_days_ago, expired_days_ago),
+                (manifest_id, sid, domain, f"raw/{manifest_id}", f"s3://a/{manifest_id}.parquet", size, state, expired_days_ago, expired_days_ago),
             )
 
     try:
@@ -3631,10 +3756,368 @@ def test_archive_storage_summary_separates_live_recently_expired_and_old_expired
         insert("recent", "source_deleted", 200, expired_days_ago=1)
         insert("old", "source_deleted", 400, expired_days_ago=40)
         insert("uploading", "artifact_uploading", 800)
-        assert control.archive_storage_summary(sid) == {"live_bytes": 100, "live_objects": 3, "expired_30d_bytes": 200}
+        insert("vitals", "source_deleted", 30, domain="rum_vitals")
+        insert("errors", "source_deleted", 20, domain="rum_errors")
+        assert control.archive_storage_summary(sid) == {
+            "live_bytes": 150, "live_objects": 9, "expired_30d_bytes": 200, "live_rum_bytes": 50
+        }  # fmt: skip
         assert control.archive_storage_summary("svc-with-no-archive") == {
-            "live_bytes": 0, "live_objects": 0, "expired_30d_bytes": 0
+            "live_bytes": 0, "live_objects": 0, "expired_30d_bytes": 0, "live_rum_bytes": 0
         }  # fmt: skip
     finally:
         with control.transaction() as connection:
             connection.execute("DELETE FROM high_scale_archive_manifests WHERE service_id = %s", (sid,))
+
+
+def _insert_source_objects(control: PostgresControlPlane, sid: str, objects: list[tuple]) -> None:
+    """Insert ``(object_key, domain, status, size_bytes, accepted_rows, discovered_at)`` ledger rows."""
+    with control.transaction() as connection:
+        for key, domain, status, size, rows, discovered_at in objects:
+            connection.execute(
+                "INSERT INTO high_scale_source_objects (object_id, service_id, domain, object_key, checksum, "
+                "size_bytes, status, accepted_rows, discovered_at) VALUES (%s, %s, %s, %s, 'c', %s, %s, %s, %s)",
+                (f"{sid}:{key}", sid, domain, key, size, status, rows, discovered_at),
+            )
+
+
+def test_source_activity_buckets_processed_rows_and_bytes_by_discovery_time_in_the_inclusive_window() -> None:
+    control = PostgresControlPlane()
+    control.create_schema()
+    sid = "svc-source-activity"
+    start, end = datetime(2026, 11, 7, 10, 0, tzinfo=UTC), datetime(2026, 11, 7, 12, 0, tzinfo=UTC)
+    _insert_source_objects(
+        control,
+        sid,
+        [
+            ("raw/request/a", "request", "source_deleted", 100, 10, start),
+            ("raw/rum/b", "rum_vitals", "acknowledged", 20, 2, datetime(2026, 11, 7, 10, 59, 59, tzinfo=UTC)),
+            ("raw/request/c", "request", "appended", 300, 30, end),
+            ("raw/request/in-flight", "request", "claimed", 999, 99, datetime(2026, 11, 7, 11, 0, tzinfo=UTC)),
+            ("raw/request/before", "request", "source_deleted", 999, 99, start - timedelta(milliseconds=1)),
+            ("raw/request/after", "request", "source_deleted", 999, 99, end + timedelta(milliseconds=1)),
+        ],
+    )
+    _insert_source_objects(control, "svc-other", [("raw/request/x", "request", "source_deleted", 999, 99, start)])
+    try:
+        assert control.source_activity(sid, start, end, "hour") == [
+            ("2026-11-07T10:00", 12, 120),
+            ("2026-11-07T12:00", 30, 300),
+        ]
+        assert control.source_activity(sid, start, end, "day") == [("2026-11-07", 42, 420)]
+        assert control.source_activity(sid, start, end, "minute")[1] == ("2026-11-07T10:59", 2, 20)
+    finally:
+        with control.transaction() as connection:
+            connection.execute(
+                "DELETE FROM high_scale_source_objects WHERE service_id = ANY(%s)", ([sid, "svc-other"],)
+            )
+
+
+def test_source_storage_window_counts_every_discovered_object_and_splits_rum_bytes() -> None:
+    control = PostgresControlPlane()
+    control.create_schema()
+    sid = "svc-source-storage"
+    start, end = datetime(2026, 10, 8, 22, 0, tzinfo=UTC), datetime(2026, 11, 7, 22, 0, tzinfo=UTC)
+    _insert_source_objects(
+        control,
+        sid,
+        [
+            ("raw/request/a", "request", "source_deleted", 1000, 10, start),
+            ("raw/request/b", "request", "discovered", 200, 0, datetime(2026, 11, 1, tzinfo=UTC)),
+            ("raw/rum/c", "rum_vitals", "source_deleted", 30, 3, datetime(2026, 11, 2, tzinfo=UTC)),
+            ("raw/rum/d", "rum_errors", "source_missing", 4, 0, end),
+            ("raw/request/before", "request", "source_deleted", 9999, 1, start - timedelta(milliseconds=1)),
+            ("raw/rum/after", "rum_vitals", "source_deleted", 9999, 1, end + timedelta(milliseconds=1)),
+        ],
+    )
+    try:
+        assert control.source_storage_window(sid, start, end) == {"files": 4, "bytes": 1234, "rum_bytes": 34}
+        assert control.source_storage_window("svc-with-no-sources", start, end) == {
+            "files": 0, "bytes": 0, "rum_bytes": 0
+        }  # fmt: skip
+    finally:
+        with control.transaction() as connection:
+            connection.execute("DELETE FROM high_scale_source_objects WHERE service_id = %s", (sid,))
+
+
+def test_request_files_per_flush_averages_whole_flushes_among_the_most_recent_request_objects() -> None:
+    control = PostgresControlPlane()
+    control.create_schema()
+    sid = "svc-files-per-flush"
+    at = datetime(2026, 11, 7, 12, 0, tzinfo=UTC)
+    request = "tenant-a/raw/request/year=2026/month=11/day=07/hour=11"
+    flushes = {35: 6, 36: 4, 37: 1, 38: 5, 39: 1}
+    objects = [
+        (f"{request}/minute={m}/2026-11-07T11:{m}:00.000-node{n}.log.zst", "request", "source_deleted", 1, 1, at)
+        for m, count in flushes.items()
+        for n in range(count)
+    ]
+    objects += [
+        (f"{request}/minute=39/no-timestamp.log.zst", "request", "source_deleted", 1, 1, at),
+        ("tenant-a/raw/rum/year=2026/month=11/day=07/hour=11/minute=40/2026-11-07T11:40:00.000-a.log.zst",
+         "rum_vitals", "source_deleted", 1, 1, at),
+    ]  # fmt: skip
+    _insert_source_objects(control, sid, objects)
+    try:
+        # The oldest sampled flush may be cut off by the sample and the newest may still be arriving.
+        assert control.request_files_per_flush(sid) == pytest.approx(10 / 3)
+        assert control.request_files_per_flush(sid, recent_objects=9) == 3.0
+        assert control.request_files_per_flush(sid, recent_objects=2) is None
+        assert control.request_files_per_flush("svc-with-no-sources") is None
+    finally:
+        with control.transaction() as connection:
+            connection.execute("DELETE FROM high_scale_source_objects WHERE service_id = %s", (sid,))
+
+
+def test_request_flush_accounting_counts_ingested_request_files_per_emission_bucket_in_the_inclusive_window() -> None:
+    control = PostgresControlPlane()
+    control.create_schema()
+    sid = "svc-flush-accounting"
+    at = datetime(2026, 11, 7, 13, 0, tzinfo=UTC)
+
+    def key(hh: int, mm: int, node: str) -> str:
+        return f"tenant-a/raw/request/year=2026/month=11/day=07/hour={hh:02d}/minute={mm:02d}/2026-11-07T{hh:02d}:{mm:02d}:00.000-{node}.log.zst"
+
+    _insert_source_objects(
+        control,
+        sid,
+        [
+            (key(9, 59, "early"), "request", "source_deleted", 1, 1000, at),
+            (key(10, 0, "a"), "request", "source_deleted", 1, 10, at),
+            (key(11, 30, "a"), "request", "appended", 1, 5, at),
+            (key(11, 30, "b"), "request", "source_missing", 1, 0, at),
+            (key(11, 31, "queued"), "request", "discovered", 1, 0, at),
+            (key(12, 59, "a"), "request", "archived", 1, 7, at),
+            (key(13, 0, "late"), "request", "source_deleted", 1, 1000, at),
+            (key(11, 30, "x").replace("raw/request/", "raw/rum/"), "rum_vitals", "source_deleted", 1, 1000, at),
+            ("tenant-a/raw/request/year=2026/month=11/day=07/hour=11/minute=30/no-timestamp.log.zst",
+             "request", "source_deleted", 1, 1000, at),
+        ],
+    )  # fmt: skip
+    start, end = datetime(2026, 11, 7, 10, 0, tzinfo=UTC), datetime(2026, 11, 7, 12, 0, tzinfo=UTC)
+    try:
+        assert control.request_flush_accounting(sid, start, end, 13) == {
+            "2026-11-07T10": (10, 1),
+            "2026-11-07T11": (5, 2),
+            "2026-11-07T12": (7, 1),
+        }
+        day = datetime(2026, 11, 7, tzinfo=UTC)
+        assert control.request_flush_accounting(sid, day, day + timedelta(days=1), 10) == {"2026-11-07": (2022, 6)}
+        assert control.request_flush_accounting("svc-with-no-sources", start, end, 13) == {}
+    finally:
+        with control.transaction() as connection:
+            connection.execute("DELETE FROM high_scale_source_objects WHERE service_id = %s", (sid,))
+
+
+def test_latest_request_ingest_is_the_discovery_time_of_the_newest_ingested_request_object() -> None:
+    control = PostgresControlPlane()
+    control.create_schema()
+    sid = "svc-latest-ingest"
+    base = "tenant-a/raw/request/year=2026/month=11/day=07/hour=11"
+    ingested_at = datetime(2026, 11, 7, 11, 31, 5, tzinfo=UTC)
+    _insert_source_objects(
+        control,
+        sid,
+        [
+            (f"{base}/minute=30/2026-11-07T11:30:00.000-a.log.zst", "request", "source_deleted", 1, 1,
+             datetime(2026, 11, 7, 11, 30, 5, tzinfo=UTC)),
+            (f"{base}/minute=31/2026-11-07T11:31:00.000-a.log.zst", "request", "source_deleted", 1, 1, ingested_at),
+            (f"{base}/minute=32/2026-11-07T11:32:00.000-a.log.zst", "request", "claimed", 1, 0,
+             datetime(2026, 11, 7, 11, 32, 5, tzinfo=UTC)),
+            ("tenant-a/raw/rum/year=2026/month=11/day=07/hour=11/minute=40/2026-11-07T11:40:00.000-a.log.zst",
+             "rum_vitals", "source_deleted", 1, 1, datetime(2026, 11, 7, 11, 40, 5, tzinfo=UTC)),
+        ],
+    )  # fmt: skip
+    try:
+        assert control.latest_request_ingest(sid) == ingested_at
+        assert control.latest_request_ingest("svc-with-no-sources") is None
+    finally:
+        with control.transaction() as connection:
+            connection.execute("DELETE FROM high_scale_source_objects WHERE service_id = %s", (sid,))
+
+
+def test_clickhouse_adapter_chunks_large_inserts_and_cleans_up_on_mid_chunk_failure(monkeypatch) -> None:
+    monkeypatch.setenv("HIGH_SCALE_INSERT_CHUNK_ROWS", "2")
+    base_row = _request_batch().rows[0]
+    rows = tuple({**base_row, "event_id": f"evt-{i}", "line_ordinal": i} for i in range(5))
+    batch = HighScaleBatch("svc:request:chunked", "svc", "request", "4", rows)
+
+    client = FakeHttpClickHouse()
+    result = ClickHouseBatchAdapter(client).insert(batch)
+    assert result.rows_inserted == 5
+    fact_chunks = [len(chunk) for table, _, chunk in client.inserts if table == "request_facts"]
+    assert fact_chunks == [2, 2, 1]
+
+    class FailingMidChunkClickHouse(FakeHttpClickHouse):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fact_calls = 0
+            self.deleted_batches: list[tuple[str, str]] = []
+
+        def insert_rows(self, table: str, columns: list[str], rows: list[tuple]) -> None:
+            if table == "request_facts":
+                self.fact_calls += 1
+                if self.fact_calls == 2:
+                    raise RuntimeError("clickhouse memory limit on chunk 2")
+            super().insert_rows(table, columns, rows)
+
+        def delete_batch_rows(self, table: str, batch_id: str) -> None:
+            self.deleted_batches.append((table, batch_id))
+
+    failing_client = FailingMidChunkClickHouse()
+    with pytest.raises(RuntimeError, match="clickhouse memory limit on chunk 2"):
+        ClickHouseBatchAdapter(failing_client).insert(batch)
+    assert len(failing_client.deleted_batches) == 1
+    assert failing_client.deleted_batches[0][0] == "request_facts"
+
+
+def test_request_lister_backscans_current_minute_when_forward_terminal_cursor_is_empty() -> None:
+    terminal_cursor = (
+        f"{TERMINAL_SOURCE_CURSOR_PREFIX}"
+        "raw/request/year=2026/month=11/day=02/hour=20/minute=33/"
+        "2026-11-02T20:33:55.000-svc-YYZ-00259.log.zst"
+    )
+    missed_key = (
+        "raw/request/year=2026/month=11/day=02/hour=20/minute=33/"
+        "2026-11-02T20:33:55.000-svc-DEN-00105.log.zst"
+    )
+    client = _Client_late_rum_discovery([_page(), _page(key=missed_key)])
+    lister = S3SourceObjectLister(client, bucket="archive-bucket")
+
+    page = lister.list_source_objects("svc", "request", page_size=250, cursor=terminal_cursor)
+
+    assert [obj.object_key for obj in page.objects] == [missed_key]
+    assert len(client.paginator.requests) == 2
+    assert client.paginator.requests[0]["StartAfter"] == terminal_cursor.removeprefix(TERMINAL_SOURCE_CURSOR_PREFIX)
+    assert client.paginator.requests[1]["Prefix"] == "raw/request/"
+    assert (
+        client.paginator.requests[1]["StartAfter"]
+        == "raw/request/year=2026/month=11/day=02/hour=20/minute=33/"
+    )
+    assert page.next_cursor is None
+
+
+def test_postgres_batch_discovery_source_counts_and_retryable_discovered_claims() -> None:
+    control = PostgresControlPlane()
+    control.create_schema()
+    sid = f"svc-batch-{uuid4().hex[:8]}"
+    try:
+        owner = control.initialize_owner(sid, owner="high_scale", source_cursor="initial")
+        descriptors = [
+            SourceObjectDescriptor(f"raw/request/{i}.log.zst", f"etag-{i}", 100 + i, "v1")
+            for i in range(3)
+        ]
+        discovered = control.discover_sources_batch(
+            sid,
+            "request",
+            descriptors,
+            expected_owner="high_scale",
+            expected_owner_epoch=owner.owner_epoch,
+        )
+        assert len(discovered) == 3
+        assert list(discovered.keys()) == [d.object_key for d in descriptors]
+
+        claimed = control.claim_sources_batch(
+            sid,
+            [d.object_key for d in descriptors[:2]],
+            "w1",
+            lease_seconds=60,
+            expected_owner_epoch=owner.owner_epoch,
+            expected_owner="high_scale",
+        )
+        assert len(claimed) == 2
+
+        control.fail_sources_batch(
+            sid,
+            [descriptors[0].object_key],
+            expected_owner_epoch=owner.owner_epoch,
+            error="Memory limit exceeded",
+            claim_tokens=(claimed[0].claim_token,),
+        )
+        retryable = control.expired_claims(sid, "request", limit=10)
+        assert [r.object_key for r in retryable] == [descriptors[0].object_key]
+
+        reclaimed = control.claim_sources_batch(
+            sid,
+            [descriptors[0].object_key],
+            "w2",
+            lease_seconds=60,
+            expected_owner_epoch=owner.owner_epoch,
+            expected_owner="high_scale",
+        )
+        assert len(reclaimed) == 1 and reclaimed[0].last_error is None
+
+        control.record_source_counts_batch(
+            sid,
+            [
+                (descriptors[0].object_key, 490, 10),
+                (descriptors[1].object_key, 600, 0),
+            ],
+            expected_owner_epoch=owner.owner_epoch,
+        )
+        refreshed = control.source(sid, descriptors[0].object_key)
+        assert (refreshed.accepted_rows, refreshed.malformed_rows) == (490, 10)
+    finally:
+        with control.transaction() as connection:
+            connection.execute("DELETE FROM high_scale_source_objects WHERE service_id = %s", (sid,))
+            connection.execute("DELETE FROM high_scale_ownership WHERE service_id = %s", (sid,))
+
+
+@pytest.mark.parametrize("operation", ["acknowledge", "fail", "bind"])
+def test_postgres_batch_terminal_transitions_reject_stale_claim_tokens(operation: str) -> None:
+    control = PostgresControlPlane()
+    control.create_schema()
+    sid = f"svc-fence-{uuid4().hex[:8]}"
+    descriptor = SourceObjectDescriptor("raw/request/fenced.log.zst", "etag-fenced", 100, "v1")
+    try:
+        owner = control.initialize_owner(sid, owner="high_scale", source_cursor="initial")
+        control.discover_sources_batch(
+            sid,
+            "request",
+            (descriptor,),
+            expected_owner="high_scale",
+            expected_owner_epoch=owner.owner_epoch,
+        )
+        stale = control.claim_sources_batch(
+            sid,
+            (descriptor.object_key,),
+            "worker-old",
+            lease_seconds=60,
+            expected_owner="high_scale",
+            expected_owner_epoch=owner.owner_epoch,
+        )[0].claim_token
+        with control.transaction() as connection:
+            connection.execute(
+                "UPDATE high_scale_source_objects SET lease_until=clock_timestamp() - interval '1 second' "
+                "WHERE service_id=%s AND object_key=%s",
+                (sid, descriptor.object_key),
+            )
+        control.claim_sources_batch(
+            sid,
+            (descriptor.object_key,),
+            "worker-new",
+            lease_seconds=60,
+            expected_owner="high_scale",
+            expected_owner_epoch=owner.owner_epoch,
+        )
+
+        kwargs = {
+            "expected_owner_epoch": owner.owner_epoch,
+            "claim_tokens": (stale,),
+        }
+        with pytest.raises(RuntimeError, match="stale or missing claim"):
+            if operation == "acknowledge":
+                control.acknowledge_sources_batch(
+                    sid, (descriptor.object_key,), manifest_id="manifest-fenced", **kwargs
+                )
+            elif operation == "fail":
+                control.fail_sources_batch(sid, (descriptor.object_key,), error="stale failure", **kwargs)
+            else:
+                control.bind_sources_to_archive_manifest(
+                    sid, (descriptor.object_key,), manifest_id="manifest-fenced", error="stale bind", **kwargs
+                )
+
+        assert control.source(sid, descriptor.object_key).owner == "worker-new"
+    finally:
+        with control.transaction() as connection:
+            connection.execute("DELETE FROM high_scale_source_objects WHERE service_id = %s", (sid,))
+            connection.execute("DELETE FROM high_scale_ownership WHERE service_id = %s", (sid,))

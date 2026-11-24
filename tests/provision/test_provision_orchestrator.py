@@ -6,6 +6,7 @@ import contextlib
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -13,6 +14,8 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 import vcr
+
+pytestmark = pytest.mark.no_postgres
 
 from backend import config as svcconfig
 from backend.core.fastly.client import fastly as real_fastly
@@ -65,7 +68,6 @@ def _write_cfg(tmp_path: Path, state: dict, *, existing_cfg: object = ...):
     saved_cfgs: list[tuple[str, dict]] = []
     patches = [
         patch("backend.config.save_config", side_effect=lambda sid, cfg: saved_cfgs.append((sid, cfg))),
-        patch("backend.config.duckdb_path", return_value=str(tmp_path / "db.duckdb")),
     ]
     if existing_cfg is not ...:
         patches.append(patch("backend.config.load_config", return_value=existing_cfg))
@@ -128,7 +130,6 @@ def _mocked_provision_steps(
     write_side_effect=...,
     upload_faro_side_effect=...,
     source_return=None,
-    storage_side_effect=None,
     teardown_side_effect=None,
 ):
     reconcile_kw = (
@@ -136,6 +137,7 @@ def _mocked_provision_steps(
     )
     with contextlib.ExitStack() as stack:
         stack.enter_context(patch("backend.provision.orchestrator.validate_log_format", return_value=[]))
+        stack.enter_context(patch("backend.provision.orchestrator.logging_endpoint_role_error", return_value=None))
         stack.enter_context(
             patch("backend.provision.orchestrator.ensure_fos_access_key", side_effect=[_fos_key("T"), _fos_key("P")])
         )
@@ -158,13 +160,8 @@ def _mocked_provision_steps(
             stack.enter_context(
                 patch("backend.provision.orchestrator.perform_teardown", side_effect=teardown_side_effect)
             )
-        stack.enter_context(patch("backend.core.duckdb.get_source_for_service", return_value=source_return))
-        if source_return is not None:
-            stack.enter_context(patch("backend.core.duckdb.get_connection"))
-        mock_storage = stack.enter_context(
-            patch("backend.core.storage.init_storage_table", side_effect=storage_side_effect)
-        )
-        yield {"upload": mock_upload, "storage": mock_storage}
+        stack.enter_context(patch("backend.core.fos_client.get_source_for_service", return_value=source_return))
+        yield {"upload": mock_upload}
 
 
 def _teardown_state(**overrides) -> dict:
@@ -239,9 +236,6 @@ def test_write_service_config_options_and_defaults(tmp_path):
     assert _write_cfg(tmp_path, _make_state(log_period=120))["provisioning"]["cron_sync"]["interval_seconds"] == 120
     assert _write_cfg(tmp_path, _make_state(log_period=2))["provisioning"]["cron_sync"]["interval_seconds"] == 5
 
-    cfg = _write_cfg(tmp_path, _make_state(log_period=60, commit_interval_mins=15))
-    assert cfg["provisioning"]["cron_sync"]["commit_interval_mins"] == 15
-
     state = _make_state()
     state.pop("log_period", None)
     state["provisioning"] = {"log_period": 120}
@@ -255,15 +249,13 @@ def test_write_service_config_options_and_defaults(tmp_path):
     state_noname.pop("name", None)
     assert _write_cfg(tmp_path, state_noname)["name"] == "svc-test"
 
-    cfg_cron = _write_cfg(tmp_path, _make_state(enable_cron_sync=False, enable_cron_compact=False, delete_after=False))
+    cfg_cron = _write_cfg(tmp_path, _make_state(enable_cron_sync=False, delete_after=False))
     assert cfg_cron["provisioning"]["cron_sync"]["enabled"] is False
-    assert cfg_cron["provisioning"]["cron_compact"]["enabled"] is False
     assert cfg_cron["provisioning"]["cron_sync"]["delete_after"] is False
 
     cfg_ret = _write_cfg(tmp_path, _make_state(log_retention_days=90))
     assert cfg_ret["log_retention_days"] == 90
     assert cfg_ret["provisioning"]["cron_sync"]["log_retention_days"] == 90
-    assert cfg_ret["provisioning"]["cron_compact"]["log_retention_days"] == 90
 
     assert _write_cfg(tmp_path, _make_state(rate_limiting=False))["provisioning"]["rate_limiting"] is False
     assert _write_cfg(tmp_path, _make_state())["provisioning"]["rate_limiting"] is True
@@ -315,6 +307,38 @@ def test_run_with_events_and_state_persistence():
         orchestrator.save_state({"k": "v"})
 
 
+@pytest.mark.no_postgres
+def test_resume_state_is_persisted_without_credentials(tmp_path, monkeypatch):
+    monkeypatch.setattr(orchestrator, "_state_file_path", lambda: str(tmp_path / "setup-state.json"))
+    orchestrator.save_state(
+        {
+            "logging_service_id": "svc",
+            "admin_token": "fastly-token",
+            "fos_access_key": "access",
+            "fos_secret_key": "secret",
+            "nested": {"request_secret": "request", "keep": 1},
+            "step": 4,
+        }
+    )
+
+    persisted = json.loads((tmp_path / "setup-state.json").read_text())
+    assert persisted == {"logging_service_id": "svc", "nested": {"keep": 1}, "step": 4}
+    assert orchestrator.load_state() == persisted
+
+
+@pytest.mark.no_postgres
+def test_vcl_lock_heartbeats_while_held(tmp_path, monkeypatch):
+    from backend.provision.declarative.fastly_ops import acquire_vcl_lock
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("FASTLY_VCL_LOCK_STALE_SECONDS", "0.05")
+
+    with acquire_vcl_lock("svc", timeout_sec=1) as lock:
+        first_mtime = lock.lock_path.stat().st_mtime
+        time.sleep(0.08)
+        assert lock.lock_path.stat().st_mtime > first_mtime
+
+
 # ── cleanup_local_data tests ──
 
 
@@ -328,17 +352,12 @@ def test_cleanup_local_data_variants(tmp_path, monkeypatch):
         orchestrator.cleanup_local_data("svc", remove_data=False)
     assert not cfg_file.exists()
 
-    db, wal = tmp_path / "x.duckdb", tmp_path / "x.duckdb.wal"
-    db.write_text("")
-    wal.write_text("")
     with (
         patch("backend.config.config_path", return_value=str(tmp_path / "no.json")),
-        patch("backend.config.duckdb_path", return_value=str(db)),
         patch("backend.core.metadata.teardown", side_effect=RuntimeError("locked")),
         patch("backend.provision.orchestrator._sync_crontab"),
     ):
         orchestrator.cleanup_local_data("svc", remove_data=True)
-    assert not db.exists() and not wal.exists()
 
     monkeypatch.chdir(tmp_path)
     cache_dir = tmp_path / "cache" / "test-bucket"
@@ -346,40 +365,11 @@ def test_cleanup_local_data_variants(tmp_path, monkeypatch):
     (cache_dir / "stale.parquet").write_text("data")
     with (
         patch("backend.config.config_path", return_value=str(tmp_path / "no.json")),
-        patch("backend.config.duckdb_path", return_value=str(tmp_path / "no.duckdb")),
         patch("backend.core.metadata.teardown"),
         patch("backend.provision.orchestrator._sync_crontab"),
     ):
         orchestrator.cleanup_local_data("svc", bucket="test-bucket", remove_data=True)
     assert not cache_dir.exists()
-
-
-def test_cleanup_local_data_drops_ducklake_state_only_with_remove_data(tmp_path):
-    with (
-        patch("backend.config.config_path", return_value=str(tmp_path / "no.json")),
-        patch("backend.config.duckdb_path", return_value=str(tmp_path / "no.duckdb")),
-        patch("backend.core.metadata.teardown"),
-        patch("backend.core.duckdb.drop_service_ducklake_state", return_value={"tables_dropped": 3}) as drop,
-        patch("backend.provision.orchestrator._sync_crontab"),
-    ):
-        orchestrator.cleanup_local_data("svc", remove_data=False)
-        drop.assert_not_called()
-        orchestrator.cleanup_local_data("svc", remove_data=True)
-    drop.assert_called_once_with("svc")
-
-
-def test_cleanup_local_data_continues_when_ducklake_cleanup_fails(tmp_path):
-    db = tmp_path / "x.duckdb"
-    db.write_text("")
-    with (
-        patch("backend.config.config_path", return_value=str(tmp_path / "no.json")),
-        patch("backend.config.duckdb_path", return_value=str(db)),
-        patch("backend.core.metadata.teardown"),
-        patch("backend.core.duckdb.drop_service_ducklake_state", side_effect=RuntimeError("catalog down")),
-        patch("backend.provision.orchestrator._sync_crontab"),
-    ):
-        orchestrator.cleanup_local_data("svc", remove_data=True)
-    assert not db.exists()
 
 
 def test_sync_crontab_tolerates_missing_scheduler_and_busy_lease():
@@ -404,6 +394,18 @@ def test_provision_preflight_and_happy_path(tmp_path, monkeypatch):
     ):
         events, exc = _consume(orchestrator.provision(_provision_cfg()))
     assert exc is None and events[-1]["type"] == "error" and "Log format" in events[-1]["message"]
+    mock_create_key.assert_not_called()
+
+    with (
+        patch("backend.provision.orchestrator.validate_log_format", return_value=[]),
+        patch(
+            "backend.provision.orchestrator.logging_endpoint_role_error",
+            return_value="Token role 'user' can't add the logging endpoint",
+        ),
+        patch("backend.provision.orchestrator.ensure_fos_access_key") as mock_create_key,
+    ):
+        events, exc = _consume(orchestrator.provision(_provision_cfg()))
+    assert exc is None and events[-1]["type"] == "error" and "Token role 'user'" in events[-1]["message"]
     mock_create_key.assert_not_called()
 
     monkeypatch.chdir(tmp_path)
@@ -454,7 +456,6 @@ def test_provision_satisfies_faro_route_and_object_invariant_end_to_end(tmp_path
     config_dir = tmp_path / "configs"
     config_dir.mkdir(exist_ok=True)
     monkeypatch.setattr(svcconfig, "CONFIGS_DIR", config_dir)
-    monkeypatch.setattr(svcconfig, "duckdb_path", lambda service_id: str(tmp_path / "db.duckdb"))
 
     chosen_version = "2.8.5"
     sample_bundle = (
@@ -497,7 +498,6 @@ def test_provision_faro_upload_failure_and_hash_persistence(tmp_path, monkeypatc
     config_dir = tmp_path / "configs"
     config_dir.mkdir(exist_ok=True)
     monkeypatch.setattr(svcconfig, "CONFIGS_DIR", config_dir)
-    monkeypatch.setattr(svcconfig, "duckdb_path", lambda service_id: str(tmp_path / "db.duckdb"))
 
     teardown_called: list[bool] = []
 
@@ -541,12 +541,13 @@ def test_provision_faro_upload_failure_and_hash_persistence(tmp_path, monkeypatc
     ) == ("1.2.3", "sha256-fake-content-hash", "fake-etag-md5")
 
 
+@pytest.mark.no_postgres
 def test_provision_rollback_resume_and_storage_warnings(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     teardown_called = []
 
     def fake_teardown(state, token, opts=None):
-        teardown_called.append(True)
+        teardown_called.append(opts)
         yield {"type": "status", "message": "rollback step"}
 
     with (
@@ -556,7 +557,18 @@ def test_provision_rollback_resume_and_storage_warnings(tmp_path, monkeypatch):
         patch("backend.config.config_path", return_value=str(tmp_path / "no.json")),
     ):
         events, exc = _consume(orchestrator.provision(_provision_cfg()))
-    assert isinstance(exc, RuntimeError) and "BucketAlreadyExists" in str(exc) and teardown_called == [True]
+    assert isinstance(exc, RuntimeError) and "BucketAlreadyExists" in str(exc)
+    assert teardown_called == [
+        {
+            "remove_logging": False,
+            "remove_rum": False,
+            "remove_cdn": False,
+            "remove_bucket": False,
+            "remove_scoring": False,
+            "remove_fos_tokens": False,
+            "fos_key_ids": ["ID_T"],
+        }
+    ]
     assert any("BucketAlreadyExists" in e["message"] for e in events if e["type"] == "error")
 
     orchestrator.save_state(
@@ -565,6 +577,7 @@ def test_provision_rollback_resume_and_storage_warnings(tmp_path, monkeypatch):
     captured_state = {}
     with (
         patch("backend.provision.orchestrator.validate_log_format", return_value=[]),
+        patch("backend.provision.orchestrator.logging_endpoint_role_error", return_value=None),
         patch(
             "backend.provision.orchestrator.ensure_fos_access_key",
             side_effect=lambda desc, state, token, **kw: (
@@ -579,20 +592,26 @@ def test_provision_rollback_resume_and_storage_warnings(tmp_path, monkeypatch):
         _consume(orchestrator.provision(_provision_cfg(), _resume_from_state=True))
     assert captured_state["state"]["temp_admin_key_id"] == "PREV_ID"
 
-    with _mocked_provision_steps(write_side_effect=None, source_return=None) as env:
-        events, exc = _consume(orchestrator.provision(_provision_cfg()))
-    assert exc is None and events[-1]["type"] == "done" and not env["storage"].called
-    assert any(e["type"] == "status" and "not initialized" in e["message"].lower() for e in events)
-
-    with _mocked_provision_steps(
-        write_side_effect=None,
-        source_return={"name": "svc", "service_id": "sid", "logging_service_id": "lsid"},
-        storage_side_effect=RuntimeError("FOS not ready"),
-    ) as env:
+    with _mocked_provision_steps(write_side_effect=None, source_return=None):
         events, exc = _consume(orchestrator.provision(_provision_cfg()))
     assert exc is None and events[-1]["type"] == "done"
-    env["storage"].assert_called_once()
-    assert any(e["type"] == "status" and "deferred to first commit" in e["message"].lower() for e in events)
+
+    with (
+        _mocked_provision_steps(
+            write_side_effect=None,
+            source_return={"name": "svc", "service_id": "sid", "logging_service_id": "lsid", "bucket": "b"},
+        ),
+        patch.multiple(
+            "backend.high_scale.ingest_controller",
+            create=True,
+            HighScaleServiceRegistration=MagicMock(),
+            get_high_scale_service_registry=MagicMock(),
+        ),
+        patch("backend.core.metadata.record_audit") as mock_audit,
+    ):
+        events, exc = _consume(orchestrator.provision(_provision_cfg()))
+    assert exc is None and events[-1]["type"] == "done"
+    mock_audit.assert_called_once()
 
 
 # ── perform_teardown() tests ──
@@ -675,8 +694,8 @@ def test_write_service_config_preserves_scoring_and_ngwaf(tmp_path, monkeypatch)
         "log_fields": {
             "groups": ["A"],
             "custom_fields": [
-                {"name": "edge_score", "duckdb_type": "INTEGER", "enabled": True},
-                {"name": "my_field", "duckdb_type": "VARCHAR", "enabled": True},
+                {"name": "edge_score", "sql_type": "INTEGER", "enabled": True},
+                {"name": "my_field", "sql_type": "VARCHAR", "enabled": True},
             ],
         },
     }
@@ -685,7 +704,6 @@ def test_write_service_config_preserves_scoring_and_ngwaf(tmp_path, monkeypatch)
         patch(
             "backend.config._save_config_unlocked", side_effect=lambda sid, cfg, **_kw: saved_cfgs.append((sid, cfg))
         ),
-        patch("backend.config.duckdb_path", return_value=str(tmp_path / "db.duckdb")),
     ):
         orchestrator.write_service_config(_make_state())
 
@@ -784,11 +802,8 @@ def test_fos_path_safety_and_reconciler_edge_cases(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="state missing logging_service_id"):
         next(orchestrator.ensure_logging_via_reconciler({}, "tok"))
 
-    with (
-        patch(
-            "backend.provision.declarative.reconciler.FeatureState.from_config", side_effect=KeyError("missing_field")
-        ),
-        patch("backend.config.duckdb_path", return_value=str(tmp_path / "db.duckdb")),
+    with patch(
+        "backend.provision.declarative.reconciler.FeatureState.from_config", side_effect=KeyError("missing_field")
     ):
         with pytest.raises(RuntimeError, match="Invalid feature state configuration"):
             next(orchestrator.ensure_logging_via_reconciler({"logging_service_id": "svc-test"}, "tok"))
@@ -831,7 +846,6 @@ def test_fos_path_safety_and_reconciler_edge_cases(tmp_path, monkeypatch):
     symlink.symlink_to(external_dir)
     with (
         patch("backend.config.config_path", return_value=str(cfg_file)),
-        patch("backend.config.duckdb_path", return_value=str(tmp_path / "noexist.duckdb")),
         patch("backend.provision.orchestrator._sync_crontab"),
     ):
         orchestrator.cleanup_local_data("svc", bucket="../../../tmp", remove_data=True)
@@ -892,8 +906,15 @@ def test_provision_partial_failure_at_step_7_and_early_config_persist(tmp_path, 
             raise RuntimeError("config write failed mid-flow")
 
     with (
-        _mocked_provision_steps(logging_return=99, write_side_effect=raising_write, teardown_side_effect=fake_teardown),
+        _mocked_provision_steps(
+            logging_side_effect=lambda state, _token, **_kwargs: (state.__setitem__("previous_logging_version", 5), 99)[
+                1
+            ],
+            write_side_effect=raising_write,
+            teardown_side_effect=fake_teardown,
+        ),
         patch("backend.config.config_path", return_value=str(tmp_path / "no.json")),
+        patch("backend.core.fastly.client.fastly", return_value={}),
     ):
         events, exc = _consume(orchestrator.provision(_provision_cfg_provision_fastly_failures()))
 
@@ -919,6 +940,123 @@ def test_provision_partial_failure_at_step_7_and_early_config_persist(tmp_path, 
         finally:
             gen.close()
     assert calls_before_cdn is not None and calls_before_cdn >= 1
+
+
+@pytest.mark.no_postgres
+def test_provision_failure_after_activation_restores_vcl_and_config_before_cleanup(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    service_id = "SU3xxxxxxxxxxxxxx0000"
+    config_file = tmp_path / f"{service_id}.json"
+    original = {"service_id": service_id, "rum_enabled": True, "marker": "preexisting"}
+    config_file.write_text(json.dumps(original))
+    calls: list[str] = []
+    writes = 0
+
+    def activate_side_effect(state, _token, **_kwargs):
+        state["previous_logging_version"] = 5
+        return 99
+
+    def write_and_fail(_state):
+        nonlocal writes
+        writes += 1
+        if writes >= 3:
+            raise RuntimeError("finalize failed")
+        svcconfig.save_config(service_id, {"service_id": service_id, "marker": "new"})
+
+    def fastly_call(method, path, **_kwargs):
+        calls.append(f"{method} {path}")
+        return {}
+
+    def fake_teardown(state, _token, opts=None):
+        calls.append("teardown")
+        assert json.loads(config_file.read_text()) == original
+        yield {"type": "status", "message": "cleanup"}
+
+    with (
+        _mocked_provision_steps(
+            logging_side_effect=activate_side_effect,
+            write_side_effect=write_and_fail,
+            teardown_side_effect=fake_teardown,
+        ),
+        patch("backend.config.config_path", return_value=config_file),
+        patch("backend.core.fastly.client.fastly", side_effect=fastly_call),
+    ):
+        _, exc = _consume(orchestrator.provision(_provision_cfg_provision_fastly_failures()))
+
+    assert isinstance(exc, RuntimeError) and "finalize failed" in str(exc)
+    assert calls == [f"PUT /service/{service_id}/version/5/activate", "teardown"]
+    assert json.loads(config_file.read_text()) == original
+
+
+@pytest.mark.no_postgres
+def test_provision_reconciler_failure_after_activation_still_restores_vcl(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    service_id = "SU3xxxxxxxxxxxxxx0000"
+    config_file = tmp_path / f"{service_id}.json"
+    original = {"service_id": service_id, "marker": "preexisting"}
+    config_file.write_text(json.dumps(original))
+    calls: list[str] = []
+
+    def activate_then_fail(state, _token, **_kwargs):
+        state["previous_logging_version"] = 5
+        raise RuntimeError("reconciler finalization failed")
+
+    def fastly_call(method, path, **_kwargs):
+        calls.append(f"{method} {path}")
+        return {}
+
+    def fake_teardown(state, _token, opts=None):
+        calls.append("teardown")
+        assert json.loads(config_file.read_text()) == original
+        yield {"type": "status", "message": "cleanup"}
+
+    with (
+        _mocked_provision_steps(
+            logging_side_effect=activate_then_fail,
+            teardown_side_effect=fake_teardown,
+        ),
+        patch("backend.config.config_path", return_value=config_file),
+        patch("backend.core.fastly.client.fastly", side_effect=fastly_call),
+    ):
+        _, exc = _consume(orchestrator.provision(_provision_cfg_provision_fastly_failures()))
+
+    assert isinstance(exc, RuntimeError) and "reconciler finalization failed" in str(exc)
+    assert calls == [f"PUT /service/{service_id}/version/5/activate", "teardown"]
+    assert json.loads(config_file.read_text()) == original
+
+
+@pytest.mark.no_postgres
+def test_provision_keeps_created_resources_when_active_vcl_rollback_fails(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    service_id = "SU3xxxxxxxxxxxxxx0000"
+    config_file = tmp_path / f"{service_id}.json"
+    config_file.write_text(json.dumps({"service_id": service_id, "marker": "preexisting"}))
+    teardown = MagicMock(return_value=iter([]))
+    writes = 0
+
+    def activate_side_effect(state, _token, **_kwargs):
+        state["previous_logging_version"] = 5
+        return 99
+
+    def fail_finalize(_state):
+        nonlocal writes
+        writes += 1
+        if writes >= 3:
+            raise RuntimeError("finalize failed")
+
+    with (
+        _mocked_provision_steps(
+            logging_side_effect=activate_side_effect,
+            write_side_effect=fail_finalize,
+            teardown_side_effect=teardown,
+        ),
+        patch("backend.config.config_path", return_value=config_file),
+        patch("backend.core.fastly.client.fastly", side_effect=RuntimeError("activation denied")),
+    ):
+        _, exc = _consume(orchestrator.provision(_provision_cfg_provision_fastly_failures()))
+
+    assert isinstance(exc, RuntimeError) and "created resources retained" in str(exc)
+    teardown.assert_not_called()
 
 
 # ── Merged from tests/provision/test_vcl_builder.py ──
@@ -1154,6 +1292,7 @@ def test_deploy_and_delete_remote_frontend_flows():
             override_host="my-override.example.com",
         )
     backend_payload = next(c[2] for c in calls_ssl if c[1] == "/service/service123/version/1/backend")
+    assert backend_payload["ssl_check_cert"] is True
     assert (
         backend_payload["override_host"]
         == backend_payload["ssl_sni_hostname"]
@@ -1885,7 +2024,8 @@ def test_enable_rum_ordering_and_non_blocking_tracker_upload():
     assert result["activated"] is True and _disk(service_id)["rum_enabled"] is True
 
 
-def test_enable_and_disable_rum_activate_false_and_non_blocking_delete():
+@pytest.mark.no_postgres
+def test_enable_and_disable_rum_activate_false_and_preserves_live_state():
     service_id = "srv_test"
     _seed({"service_id": service_id, "rum_enabled": False, "last_activated_version": 1, **_FOS_CFG})
     with (
@@ -1904,19 +2044,30 @@ def test_enable_and_disable_rum_activate_false_and_non_blocking_delete():
 
     _seed({"service_id": service_id, "rum_enabled": True, "last_activated_version": 5, **_FOS_CFG})
     with (
-        patch("backend.provision.rum_assets.delete_rum_tracker_js", side_effect=RuntimeError("FOS unreachable")),
+        patch("backend.provision.rum_assets.delete_rum_tracker_js") as delete_js,
+        patch("backend.provision.fos_setup.delete_fos_prefix") as delete_prefix,
+        patch("backend.provision.fos_setup.delete_fos_bucket") as delete_bucket,
         patch(
             "backend.provision.rum_orchestrator.reconcile_vcl_state",
             return_value=MagicMock(activated_version=None, draft_version=6),
         ) as mock_rec_dis,
     ):
-        res_dis = disable_rum(service_id, "test_token", activate=False)
+        res_dis = disable_rum(
+            service_id,
+            "test_token",
+            activate=False,
+            remove_cloud_files=True,
+            remove_bucket=True,
+        )
         mock_rec_dis.assert_called_once_with(service_id, "test_token", dry_run=False, status_cb=None, activate=False)
         assert (
             res_dis["deactivated"] is False
             and res_dis["logging_service_active_version"] == 6
-            and _disk(service_id)["rum_enabled"] is False
+            and _disk(service_id)["rum_enabled"] is True
         )
+        delete_js.assert_not_called()
+        delete_prefix.assert_not_called()
+        delete_bucket.assert_not_called()
 
 
 def test_upgrade_faro_version_orchestration():
@@ -2062,10 +2213,20 @@ def stubs():
         yield MagicMock(upload=upload, reconcile=reconcile, tracker=tracker, delete_js=delete_js)
 
 
+@pytest.mark.no_postgres
 def test_enable_and_disable_persist_owned_keys_without_holding_lock(disabled_cfg, stubs):
     salt = disabled_cfg["rum"]["cid_salt"]
     held: list[bool] = []
-    stubs.upload.side_effect = AsyncMock(side_effect=lambda *_a, **_kw: held.append(_lock_held()))
+
+    def assert_upload_precedes_enable() -> None:
+        assert _persisted()["rum_enabled"] is False
+
+    stubs.upload.side_effect = AsyncMock(
+        side_effect=lambda *_a, **_kw: (
+            assert_upload_precedes_enable(),
+            held.append(_lock_held()),
+        )
+    )
     stubs.reconcile.side_effect = lambda *_a, **_kw: (
         held.append(_lock_held()),
         MagicMock(activated_version=7, draft_version=None),
@@ -2087,6 +2248,7 @@ def test_enable_and_disable_persist_owned_keys_without_holding_lock(disabled_cfg
     assert saved_dis["rum_enabled"] is False and "rum_vcl_sha" not in saved_dis and saved_dis["keep_me"] == 1
 
 
+@pytest.mark.no_postgres
 @pytest.mark.parametrize("fail_stage", ["upload", "reconcile"])
 def test_enable_rollback_keeps_concurrent_writes_and_restores_pin(disabled_cfg, stubs, fail_stage):
     salt = disabled_cfg["rum"]["cid_salt"]
@@ -2125,6 +2287,7 @@ def test_enable_rollback_keeps_concurrent_writes_and_restores_pin(disabled_cfg, 
     assert _persisted()["rum"]["faro_version"] == OLD_VERSION
 
 
+@pytest.mark.no_postgres
 def test_upgrade_and_disable_concurrent_write_preservation(enabled_cfg, stubs):
     stubs.upload.side_effect = AsyncMock(
         side_effect=lambda *_a, **_kw: svcconfig.mutate_config(
@@ -2175,22 +2338,161 @@ def test_upgrade_and_disable_concurrent_write_preservation(enabled_cfg, stubs):
     )
 
 
-def test_cli_restore_data_runs_the_cloud_restore_for_the_service():
-    from typer.testing import CliRunner
+@pytest.mark.no_postgres
+def test_write_only_dictionary_parity():
+    from backend.provision.declarative.vcl_builder import desired_dictionaries
 
-    from backend.provision.cli import app
-
-    src = {"service_id": "svc-r", "name": "svc-r", "bucket": "bkt"}
-    result = {"remote_files": 4, "downloaded": 3, "registered": 4, "reindexed": 7}
-    with (
-        patch("backend.core.duckdb.get_source_for_service", return_value=src),
-        patch("backend.core.storage.backup.restore_from_cloud", return_value=result) as restore,
-    ):
-        out = CliRunner().invoke(app, ["restore-data", "--service-id", "svc-r"])
-    assert (
-        out.exit_code == 0 and "4 cloud file(s): 3 downloaded, 4 registered, 7 raw object(s) re-indexed" in out.output
+    root = Path(__file__).resolve().parents[2]
+    rum_state = FeatureState(
+        service_id="svc_dict",
+        log_period=60,
+        sample_rate=100,
+        edge_only=True,
+        custom_condition="",
+        fos_prefix="",
+        fos_endpoint="us-east-1.object.fastlystorage.app",
+        fos_access_key_id="AK",
+        fos_secret_access_key="SK",
+        fos_bucket="bkt",
+        logging_enabled=True,
+        rum_enabled=True,
     )
-    assert restore.call_args.args[0] == src
+    py_dicts = desired_dictionaries(rum_state)
+    assert [(d.name, d.write_only) for d in py_dicts] == [("fos_credentials", True)]
 
-    with patch("backend.core.duckdb.get_source_for_service", return_value=None):
-        assert CliRunner().invoke(app, ["restore-data", "--service-id", "nope"]).exit_code != 0
+    orchestrate_src = (root / "backend" / "provision" / "declarative" / "orchestrate.py").read_text()
+    assert re.search(r'ServiceDictionary\(\s*name="fos_credentials",\s*write_only=True', orchestrate_src)
+    assert re.search(r'ServiceDictionary\(\s*name="cdn_auth",\s*write_only=True', orchestrate_src)
+
+    reconcile_rs = (root / "compute" / "cloud" / "src" / "admin" / "reconcile.rs").read_text()
+    assert '"name": "fos_credentials",' in reconcile_rs
+    assert '"write_only": true,' in reconcile_rs
+    assert '"write_only":boolean(&value["write_only"],true)' in reconcile_rs
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec14_rum_tracker_js_escapes_script_and_string_breakout(monkeypatch) -> None:
+    monkeypatch.setattr(svcconfig, "load_config", lambda _sid: {})
+    injected_sid = "svc'; globalThis.pwned = 1; //</script><script>alert(1)</script>&x=1"
+    injected_beacon = "/rum-beacon'); globalThis.pwned = 2; //{service_id}"
+    js = generate_rum_tracker_js(injected_sid, beacon_endpoint=injected_beacon)
+    assert "</script>" not in js.lower()
+    assert "globalThis.pwned = 1;" in js  # inside JSON string literal only, never executed!
+
+    program = r"""
+const fs = require('node:fs');
+const vm = require('node:vm');
+let calls = [];
+let config;
+const window = {
+  location: { pathname: '/home' },
+  addEventListener: function() {},
+  fetch: async (url, options) => { calls.push({ url, options }); },
+  Faro: {
+    ErrorsInstrumentation: class {},
+    initializeFaro: value => { config = value; },
+  },
+};
+const sandbox = {
+  pwned: 0,
+  alert: () => { throw new Error('XSS executed'); },
+  window,
+  console,
+  Response,
+  setTimeout,
+  encodeURIComponent,
+  document: { cookie: 'rum_cid=c1', addEventListener: function() {} },
+  navigator: {},
+};
+vm.runInNewContext(fs.readFileSync(0, 'utf8'), sandbox);
+config.beforeSend({
+  type: 'measurement',
+  payload: { type: 'web-vitals', values: { LCP: 100 } },
+});
+window.fetch(config.url, { method: 'POST' });
+process.stdout.write(JSON.stringify({ pwned: sandbox.pwned, calls }));
+"""
+    result = subprocess.run(
+        ["node", "-e", program],
+        input=js,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    )
+    out = json.loads(result.stdout)
+    assert out["pwned"] == 0
+    assert len(out["calls"]) == 1
+    from urllib.parse import parse_qs, urlparse
+
+    qparams = parse_qs(urlparse(out["calls"][0]["url"]).query, keep_blank_values=True)
+    assert qparams["service_id"] == [injected_sid]
+
+
+@pytest.mark.security_regression
+@pytest.mark.no_postgres
+def test_sec14_rum_tracker_js_blocks_capture_flag_injection_none_and_format_leak(monkeypatch) -> None:
+    monkeypatch.setattr(
+        svcconfig,
+        "load_config",
+        lambda _sid: {
+            "rum": {
+                "capture_vitals": "false; globalThis.pwned = 1; //",
+                "capture_errors": "</script><script>alert(1)</script>",
+                "capture_performance": None,
+                "capture_events": "off",
+            }
+        },
+    )
+    sid_with_ls_ps = "svc_ls\u2028ps\u2029x"
+    beacon_fmt_trap = "/rum/{service_id.__class__.__name__}/{unmatched}/{service_id}"
+    js = generate_rum_tracker_js(sid_with_ls_ps, beacon_endpoint=beacon_fmt_trap)
+
+    assert "</script>" not in js.lower()
+    assert "globalThis.pwned" not in js
+    assert "str" not in js.split("BEACON_ENDPOINT = ", 1)[1].splitlines()[0]
+    assert "\u2028" not in js.splitlines()[0] and "\u2029" not in js.splitlines()[0]
+    assert "var CAPTURE_VITALS = true;" in js
+    assert "var CAPTURE_ERRORS = true;" in js
+    assert "var CAPTURE_PERFORMANCE = true;" in js
+    assert "var CAPTURE_EVENTS = false;" in js
+
+    program = r"""
+const fs = require('node:fs');
+const vm = require('node:vm');
+let config;
+const window = {
+  location: { pathname: '/home' },
+  addEventListener: function() {},
+  fetch: async () => {},
+  Faro: {
+    ErrorsInstrumentation: class {},
+    initializeFaro: value => { config = value; },
+  },
+};
+const sandbox = {
+  pwned: 0,
+  alert: () => { throw new Error('XSS executed'); },
+  window,
+  console,
+  Response,
+  setTimeout,
+  encodeURIComponent,
+  document: { cookie: '', addEventListener: function() {} },
+  navigator: {},
+};
+vm.runInNewContext(fs.readFileSync(0, 'utf8'), sandbox);
+process.stdout.write(JSON.stringify({ pwned: sandbox.pwned, url: config.url }));
+"""
+    result = subprocess.run(
+        ["node", "-e", program],
+        input=js,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    )
+    out = json.loads(result.stdout)
+    assert out["pwned"] == 0
+    assert "{service_id.__class__.__name__}/{unmatched}/" in out["url"]

@@ -48,6 +48,7 @@ from filelock import Timeout as _FileLockTimeout
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait_fixed
 
+from backend.core.service_defaults import DEFAULT_LOG_PERIOD_SECONDS
 from backend.utils.bounded_cache import BoundedLRUCache
 from backend.utils.telemetry import atomic_write_json
 
@@ -68,11 +69,6 @@ SERVICES_DATA_DIR = DATA_DIR / "services"
 NGWAF_DATA_DIR = DATA_DIR / "ngwaf"
 CACHE_DATA_DIR = DATA_DIR / "cache"
 SYSTEM_DATA_DIR = DATA_DIR / "system"
-
-# Deployment topology is deployment-wide rather than per-service. Define this
-# before the default source is built so config_to_source() can safely include
-# it during module import.
-DEPLOYMENT_MODE = os.getenv("DEPLOYMENT_MODE", "standard").strip().lower()
 
 
 @dataclass(frozen=True)
@@ -113,7 +109,7 @@ def _clickhouse_number(name: str, default: float, maximum: float, *, integer: bo
 
 
 def load_clickhouse_config() -> ClickHouseConfig | None:
-    """CLICKHOUSE_ENABLED is opt-in; disabled mode ignores all other settings.
+    """CLICKHOUSE_ENABLED defaults to true when ClickHouse settings are present.
 
     Enabled mode requires HOST (bare DNS/IP), DATABASE and USER. SECURE defaults
     to true (verified HTTPS, port 8443; HTTP uses 8123). A missing PASSWORD is
@@ -122,9 +118,11 @@ def load_clickhouse_config() -> ClickHouseConfig | None:
     CONNECT/POOL_TIMEOUT_S are 0.01..60; QUERY/INSERT_TIMEOUT_S 0.01..300;
     POOL_MAX_SIZE is 1..64. Environment changes require a process restart.
     """
-    if os.getenv("DEPLOYMENT_MODE", "").strip().lower() == "standard":
+    if not _clickhouse_bool("CLICKHOUSE_ENABLED", "true"):
         return None
-    if not _clickhouse_bool("CLICKHOUSE_ENABLED", "false"):
+    if os.getenv("CLICKHOUSE_ENABLED") is None and not any(
+        os.getenv(f"CLICKHOUSE_{k}", "").strip() for k in ("HOST", "DATABASE", "USER")
+    ):
         return None
     required = {}
     for key in ("HOST", "DATABASE", "USER"):
@@ -292,11 +290,6 @@ def _validate_service_id(service_id: str) -> str:
 def config_path(service_id: str) -> Path:
     _validate_service_id(service_id)
     return CONFIGS_DIR / f"{service_id}.json"
-
-
-def duckdb_path(service_id: str) -> str:
-    _validate_service_id(service_id)
-    return str(SERVICES_DATA_DIR / f"{service_id}.duckdb")
 
 
 def load_config(service_id: str | None) -> dict | None:
@@ -475,6 +468,11 @@ def _save_config_unlocked(service_id: str, cfg: dict, *, allow_cid_salt_change: 
             rum = {}
             cfg["rum"] = rum
         rum["cid_salt"] = secrets.token_hex(32)
+    from backend.core import catalog
+
+    # Resolved here only, so the list matches the settings last saved (and deployed), even after
+    # a release changes the catalog.
+    cfg["active_log_field_ids"] = catalog.resolve_active_log_field_ids(catalog.get_lf_config(cfg))
     try:
         _atomic_write_json(config_path(service_id), cfg)
     except (OSError, PermissionError) as e:
@@ -495,6 +493,16 @@ def _save_config_unlocked(service_id: str, cfg: dict, *, allow_cid_salt_change: 
     _invalidate_service_ids_cache()
 
 
+def active_log_field_ids(cfg: dict) -> list[str]:
+    """The service's enabled log field ids, as stored by the last save of its log field settings."""
+    from backend.core import catalog
+
+    stored = cfg.get("active_log_field_ids")
+    if isinstance(stored, list):
+        return list(stored)
+    return catalog.resolve_active_log_field_ids(catalog.get_lf_config(cfg))
+
+
 def save_config(service_id: str, cfg: dict):
     """Write a service config atomically. See :func:`_atomic_write_json`."""
     with config_lock(service_id):
@@ -508,7 +516,7 @@ def mutate_config(
 
     Returns the saved config, or ``None`` when the service has no config.
     Use for partial edits so a concurrent writer's changes are not clobbered.
-    ``allow_cid_salt_change`` is reserved for ``backend.core.duckdb.rotate_cid_salt``; every other
+    ``allow_cid_salt_change`` is reserved for ``backend.core.fos_client.rotate_cid_salt``; every other
     writer has the persisted cid salt re-adopted.
     """
     with config_lock(service_id):
@@ -527,6 +535,19 @@ def snapshot_config(service_id: str) -> str | None:
             return config_path(service_id).read_text()
         except FileNotFoundError:
             return None
+
+
+def restore_config_snapshot(service_id: str, raw: str) -> None:
+    """Atomically restore a previously captured raw service config."""
+    global _cdn_service_id_map
+
+    snapshot = json.loads(raw)
+    with config_lock(service_id):
+        _atomic_write_json(config_path(service_id), snapshot)
+    with _config_cache_lock:
+        _config_cache.pop(service_id, None)
+    _cdn_service_id_map = None
+    _invalidate_service_ids_cache()
 
 
 def update_status(service_id: str, status: dict):
@@ -625,10 +646,8 @@ class _SourceConfigModel(BaseModel):
     cdn_secret: Any = ""
     cdn_service_id: Any = ""
     logging_service_id: Any = Field("", validation_alias="service_id")
-    duckdb_path: str = ""
-    deployment_mode: str = DEPLOYMENT_MODE
     storage_mode: Any = "cloud"
-    log_period: int = 60
+    log_period: int = DEFAULT_LOG_PERIOD_SECONDS
     log_fields: Annotated[dict[str, Any], BeforeValidator(lambda v: dict(v) if v else {})] = Field(default_factory=dict)
     provisioning: dict[str, Any] = Field(default_factory=dict)
     rum_enabled: bool = False
@@ -641,7 +660,7 @@ class _SourceConfigModel(BaseModel):
         # requests, so writes and lists must go direct.
         if "fos_native_endpoint" not in self.model_fields_set:
             self.fos_native_endpoint = f"{self.region}.object.fastlystorage.app"
-        # Prefer CDN URL as the S3 endpoint for DuckDB httpfs reads (parquet GETs)
+        # Prefer CDN URL as the S3 endpoint for FOS object reads
         # so we benefit from caching and free egress.
         self.endpoint = (
             self.cdn_url.replace("https://", "").replace("http://", "").split("/")[0]
@@ -657,11 +676,8 @@ class _SourceConfigModel(BaseModel):
 
 
 def config_to_source(cfg: dict) -> dict:
-    """Convert a service config dict to the db.py 'source' dict format."""
-    actual_db_path = duckdb_path(cfg.get("service_id", "default"))
+    """Convert a service config dict to the normalized 'source' dict format."""
     out = _SourceConfigModel.model_validate(cfg).model_dump()
-    out["duckdb_path"] = actual_db_path
-    out["deployment_mode"] = DEPLOYMENT_MODE
     out["rum_enabled"] = is_rum_enabled(cfg)
     return out
 
@@ -871,16 +887,12 @@ class _UsageLoggingConfigModel(BaseModel):
 
     enabled: bool = False
     retention_days: int = 30
-    class_a_rate_per_1k: float = 0.005
-    class_b_rate_per_10k: float = 0.01
+    class_a_rate_per_1k: float = 0.0025
+    class_b_rate_per_10k: float = 0.004
     cdn_egress_rate_per_gb: float = 0.12
     storage_rate_per_gb_month: float = 0.02
     min_billed_days: int = 30
     billing_zone: str = "MBZ200"
-    # When true, every DuckDB connection enables HTTP-only structured logging
-    # so we can record httpfs FOS GETs (parquet scans) as Class B ops. Adds
-    # tiny per-query overhead (one in-memory log scan + truncate at close).
-    track_duckdb_httpfs: bool = True
 
 
 _USAGE_LOGGING_DEFAULTS: dict = _UsageLoggingConfigModel().model_dump()
@@ -931,9 +943,8 @@ _CacheRegistry.register("config._config_cache", _config_cache)
 _CacheRegistry.register("config._scalar_caches", _ConfigScalarCaches())
 
 # Cloud / Scalability Overrides (Phase 2+)
+# Valkey URL (SSE backplane, log flusher); the name predates the Celery worker's removal.
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "")
-DUCKLAKE_CATALOG = os.getenv("DUCKLAKE_CATALOG", "")
-DUCKLAKE_DATA_PATH = os.getenv("DUCKLAKE_DATA_PATH", "")
 HOT_S3_ENDPOINT = os.getenv("HOT_S3_ENDPOINT", "")
 HOT_S3_KEY = os.getenv("HOT_S3_KEY", "")
 HOT_S3_SECRET = os.getenv("HOT_S3_SECRET", "")
@@ -942,97 +953,56 @@ HOT_S3_SECRET = os.getenv("HOT_S3_SECRET", "")
 def _default_sse_backplane() -> str:
     if explicit := os.getenv("SSE_BACKPLANE"):
         return explicit.strip()
-    return "valkey" if (DEPLOYMENT_MODE == "high_scale" or bool(CELERY_BROKER_URL)) else "local"
+    return "valkey" if bool(CELERY_BROKER_URL) else "local"
 
 
 SSE_BACKPLANE = _default_sse_backplane()
 
 
-def high_scale_shared_source_enabled(cfg: dict | None) -> bool:
-    """Return whether this service's raw request/RUM stream is shared with an
-    out-of-band high-scale consumer (``provisioning.cron_sync.high_scale_shared_source``).
-
-    While this is set, the high-scale archive deletion controller
-    (``backend/high_scale/archive/jobs.py``) is the sole raw-deletion authority for
-    this service's stream — every legacy raw-deletion path (standard sync's
-    ``delete_after``, celery-mode ``finalize_committed_raw``, RUM cleanup) must
-    stand down regardless of its own ``delete_after`` setting. See
-    ``resolve_raw_delete_after``, the single place that enforces this.
-    """
-    return bool((cfg or {}).get("provisioning", {}).get("cron_sync", {}).get("high_scale_shared_source", False))
-
-
 def resolve_raw_delete_after(cfg: dict | None, requested: bool | None = None) -> bool:
     """Resolve the effective delete_after decision for raw FOS objects.
 
-    ``requested`` lets a caller pass an explicit override the way a cron
-    argument normally would; ``None`` falls back to the configured
-    ``provisioning.cron_sync.delete_after`` (default True). A high-scale
-    shared source always forces this to False — see
-    ``high_scale_shared_source_enabled`` — because raw-deletion authority for
-    that stream belongs to the high-scale deletion controller, not legacy sync.
+    ``requested`` lets a caller pass an explicit override; ``None`` falls back to
+    the configured ``provisioning.cron_sync.delete_after`` (default True), enforced
+    by the archive deletion controller.
     """
-    if high_scale_shared_source_enabled(cfg):
-        return False
     if requested is not None:
         return bool(requested)
     return bool((cfg or {}).get("provisioning", {}).get("cron_sync", {}).get("delete_after", True))
 
 
-def is_high_scale_mode(source: dict | None = None) -> bool:
-    """Return whether the deployment uses the high-scale ClickHouse topology."""
-    mode = (source or {}).get("deployment_mode") or DEPLOYMENT_MODE
-    if mode == "high_scale":
-        return True
-    if mode == "standard":
-        return False
-    return os.getenv("HIGH_SCALE_ENABLED", "0").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+def resolve_snapshot_interval_minutes(cfg: dict | None, requested: int | None = None) -> int:
+    """Resolve the effective snapshot_interval_minutes (5, 15, 30, 60, 360, 1440; default 5)."""
+    from backend.core.service_defaults import (
+        DEFAULT_SNAPSHOT_INTERVAL_MINUTES,
+        VALID_SNAPSHOT_INTERVAL_MINUTES,
+    )
 
+    raw: Any = requested
+    if raw is None:
+        prov = cfg.get("provisioning") if isinstance(cfg, dict) else None
+        cron_sync = prov.get("cron_sync") if isinstance(prov, dict) else None
+        raw = cron_sync.get("snapshot_interval_minutes") if isinstance(cron_sync, dict) else None
 
-def is_durable_serving_mode(source: dict | None = None) -> bool:
-    """Return whether serving must use durable shared state only.
+    if raw is None or isinstance(raw, bool):
+        return DEFAULT_SNAPSHOT_INTERVAL_MINUTES
+    if isinstance(raw, float):
+        if not math.isfinite(raw) or not raw.is_integer():
+            return DEFAULT_SNAPSHOT_INTERVAL_MINUTES
+        val = int(raw)
+    elif isinstance(raw, int):
+        val = raw
+    elif isinstance(raw, str):
+        try:
+            val = int(raw.strip())
+        except ValueError:
+            return DEFAULT_SNAPSHOT_INTERVAL_MINUTES
+    else:
+        return DEFAULT_SNAPSHOT_INTERVAL_MINUTES
 
-    The durable serving mode is used in high-scale topology with a Postgres
-    DuckLake catalog. Sync/file mode keeps its existing native per-service
-    DuckDB file and local-buffer behavior.
-    """
-    return is_high_scale_mode(source) and DUCKLAKE_CATALOG.startswith(("postgres://", "postgresql://"))
-
-
-def validate_deployment_mode() -> None:
-    """Fail fast on incoherent deployment configuration.
-
-    Allowed modes are 'standard' and 'high_scale'.
-    DEPLOYMENT_MODE=high_throughput has been completely removed.
-    Both modes require DUCKLAKE_CATALOG and METADATA_DSN to be Postgres DSNs per ADR-22.
-    """
-    if DEPLOYMENT_MODE == "high_throughput":
-        raise RuntimeError("DEPLOYMENT_MODE=high_throughput has been removed; use 'standard' or 'high_scale'")
-    if DEPLOYMENT_MODE not in {"standard", "high_scale"}:
-        raise RuntimeError(f"DEPLOYMENT_MODE must be either 'standard' or 'high_scale'; got {DEPLOYMENT_MODE!r}")
-    if not DUCKLAKE_CATALOG.startswith(("postgres://", "postgresql://")):
-        raise RuntimeError(
-            f"DEPLOYMENT_MODE={DEPLOYMENT_MODE} requires DUCKLAKE_CATALOG to be a Postgres DSN — "
-            "a DuckDB-file catalog is single-process and cannot serve concurrent "
-            "worker writers plus backend readers (torn merges corrupt the catalog). "
-            f"Got: {DUCKLAKE_CATALOG!r}"
-        )
-    metadata_dsn = os.getenv("METADATA_DSN", "")
-    if not metadata_dsn.startswith(("postgres://", "postgresql://")):
-        raise RuntimeError(
-            f"DEPLOYMENT_MODE={DEPLOYMENT_MODE} requires METADATA_DSN to be a Postgres DSN — "
-            "per-service SQLite metadata is a pod-local file, so the cron lease "
-            "(job_runs), the ingest ledger, and the ingested-file manifest would "
-            "each be private to one process: every worker would re-discover and "
-            "re-convert the same objects and no lease could serialize them. A "
-            "shared multi-writer metadata database (Postgres DSN) is REQUIRED. "
-            f"Got: {metadata_dsn!r}"
-        )
+    if val in VALID_SNAPSHOT_INTERVAL_MINUTES:
+        return val
+    return DEFAULT_SNAPSHOT_INTERVAL_MINUTES
 
 
 def service_id_from_source(

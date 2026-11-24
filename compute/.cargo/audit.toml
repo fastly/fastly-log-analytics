@@ -1,0 +1,3 @@
+[advisories]
+# crypto-bigint via p256 0.13; fixed by the coordinated RustCrypto bump (remediation plan 15.5).
+ignore = ["RUSTSEC-2026-0387"]

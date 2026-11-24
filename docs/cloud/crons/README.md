@@ -1,0 +1,72 @@
+# Crons
+
+`flp`'s tick-driven background jobs. Two health-check probes run from every Fastly POP at the clock interval: half the shortest log period, 1–30 s, so 30 s for every Cloud install (log periods are at least 60 s). The IAD shield lets about one probe a second through to Compute, and a turn that stops with work left starts the next one itself. On `/_tick` a dispatcher decides from a Core Cache schedule whether ingest, raw delete or a maintenance stage on `flp-worker` is due; on `/_flush` it decides whether the operational-log flush is due. Idle probes do nothing and write nothing.
+
+This directory documents the code under `compute/cloud/` at `540813619`, not the plans. Each file cites `file:line`; bare paths such as `admin/mod.rs` are relative to `compute/cloud/src/`.
+
+## Purpose
+
+`flp` has no server, no scheduler process, and no state that survives between requests. Each "cron" here is one stage run during a single Compute execution: in `crate::admin::record_tick`, in `crate::admin::record_flush`, or in a `flp-worker` execution the tick dispatches. All state lives in KV, Core Cache and FOS.
+
+## Why it exists
+
+Compute only runs when a request arrives. The front VCL service supplies that request itself, so ingestion and housekeeping keep running without outside infrastructure.
+
+## How it works
+
+The clock and the tick orchestration are documented in [clock.md](clock.md). In summary:
+- A VCL health check probes `/_tick` from every POP at the clock interval (30 s on Cloud), which every reconcile sets on both clock checks (`clock_interval_ms`, `compute/cloud/src/admin/reconcile.rs`); VCL caches the answer at the IAD shield for 1 s, or for the sleep TTL Compute returns while nothing is due (up to 60 s), so at most about one probe a second reaches Compute. Compute answers 200 at once, then calls `crate::admin::record_tick` (`compute/cloud/src/shell.rs:633-642`). A turn that leaves work starts the next one by calling its own `/_tick` with the CDN key, which the front passes past its cache (up to 20 in a row; [clock.md](clock.md)).
+- `record_tick` claims the Core Cache schedule record `flp-sched-v1` with one atomic replace (`compute/cloud/src/admin/schedule.rs`). Off-shield, idle and busy ticks stop there with no backend call. A due tick takes a 55 s lease and runs request_ingest (whose dispatch batch can carry one maintenance stage request) → raw_delete → rows → `cron:state` save → lease release.
+- Ingest is due once per log period (`max(5, log_period)` s; settings hold `log_period` to at least 60 s) as soon as the period closes, with no grace (`INGEST_GRACE_S` is 0), and on every tick while a backlog remains. RUM ingest waits `max(rum log_period, 60) + 120` s past its period's close. Maintenance is due every 120 s (30 s while `summary_bundle` has work), and request compaction is its own job every 30 s (10 s while behind). The Config Store keys `grace_s` and `run_interval_s` are written at provisioning but ignored. Durable per-job state is in KV `cron:state.jobs`; the cache record mirrors it and is rebuilt after an eviction.
+- The maintenance stage runs on `flp-worker` (`/_internal/stage`): a pending Delete Data job first, then the first of retention_sweep → log_compact → delete_history → storage_reconcile → summary_bundle → request_compact (always skipped; it has its own job) → delete_data, from `cron:state.maint_next`, that has work ([stage-worker.md](stage-worker.md)).
+- A second health check probes `/_flush` the same way. `crate::admin::record_flush` claims its own record `flp-flush-sched-v1` and runs log_flush, alone in its execution, at most once a minute when idle and on the next probe while work remains.
+- Each execution has 32 backend calls, and KV operations charge the budget too (`admin/transport.rs:45-89`). Each also has 64 Core Cache operations (`CACHE_OP_BUDGET`, `shell.rs:16`).
+  - A stage is admitted only if its call need fits the remaining budget.
+  - Stage loops stop starting new work 40 s into the execution.
+  - Unfinished work resumes from KV on the next tick.
+
+| Cron | `cron_kind` | Runs when | File |
+|---|---|---|---|
+| The clock (`/_tick`) | none (idle ticks counted on the next `cron_runs` row) | Probes every 30 s from each POP, about once a second at the IAD shield, and at once after a turn that left work; decides what is due | [clock.md](clock.md) |
+| Request ingest | `request_ingest` | Once per log period after its grace, and every tick while a backlog remains | [request-ingest.md](request-ingest.md) |
+| Ingest worker (`/_internal/ingest`) | none (reported by request_ingest) | Per ingest shard, dispatched by the coordinator to `flp-worker` | [ingest-worker.md](ingest-worker.md) |
+| Raw delete | `raw_delete` | After a successful ingest, and every tick while deletes remain queued | [raw-delete.md](raw-delete.md) |
+| The flush probe (`/_flush`) → log flush | `log_flush` | Every second at the shield; flushes at most once a minute when idle, back to back while work remains | [log-flush.md](log-flush.md) |
+| Stage worker (`/_internal/stage`) | none (each stage writes its own row) | At most once per 120 s, dispatched with the ingest shards (or alone) to `flp-worker` | [stage-worker.md](stage-worker.md) |
+| Request and RUM compaction | `request_compact`, `rum_compact` | Every 30 s on its own `flp-worker` execution when the `compaction` setting is on. RUM tables (`client_vitals`, `client_errors`) each keep their own state (`ingest:compact_state:rum:{table}`), take passes after request compaction in the same execution, and are listed at most every 5 min once caught up | `compute/cloud/src/ingest/compaction.rs` |
+| Log compact | `log_compact` | Its round-robin turn on the stage worker, when a day has work | [log-compact.md](log-compact.md) |
+| Retention sweep | `retention_sweep` | Its turn, every 6 h and every turn until a sweep completes | [retention-sweep.md](retention-sweep.md) |
+| Storage reconcile | `storage_reconcile` | Its turn, every 6 hours on its own or after an admin request | [storage-reconcile.md](storage-reconcile.md) |
+| Delete history | `delete_history` | Its turn, while an admin-started job is incomplete | [delete-history.md](delete-history.md) |
+
+Provisioning, reconcile and teardown jobs (`job:<id>`) are not tick stages. They advance only through admin calls to `POST /api/admin/jobs/{id}/step` (`admin/mod.rs:278-281`).
+
+## Roles and permissions
+
+`/_tick` and `/_flush` carry only the front service key; they are limited to GET on the exact path, cached for 1 s (unless a continuation carries the CDN key) and run only on the shield. `/_internal/stage` needs the worker peer key. Every manual control is admin-only. Details are in [clock.md](clock.md) and each cron file.
+
+## Manual triggers and admin controls
+
+`POST /api/cron-runs/trigger` runs a full tick right away (see [clock.md](clock.md)). Per-cron endpoints are listed in each file.
+
+## Telemetry
+
+Runs are recorded in:
+- `cron:state.runs` (the last 50 runs, in KV);
+- `cron_runs` (one row per stage that ran, with `idle_ticks` and `idle_vcpu_ms` counting the idle probes before it, and `worker_executions` counting the flp-worker requests this execution sent, plus the peer executions its ingest relays started).
+
+Idle probes write nothing. `cron_ticks` is retired.
+
+A `partial` outcome is a stage that stopped at its execution budget (calls, wall time, vCPU, a held lease, or a request compaction state write the KV API had not yet shown, `stopped: state_lag`) with `more_pending`; the next turn continues it. The `/logs` Jobs tab shows it as Success with a "More queued" tag. Partial Success there means the run rejected lines (`bad_lines` > 0), and Error means the row carries an error.
+
+Field details are in [clock.md](clock.md).
+
+## TODOs
+
+Cross-cutting items (plan checkboxes, the wanted tick view and per-tick counters) are in [clock.md](clock.md). Job-specific items are in each file.
+
+## Code
+
+- `compute/cloud/src/admin/schedule.rs`: the 1 s dispatcher's claim, due rules and release.
+- `compute/cloud/src/admin/mod.rs:1800-1836`, `2083-3157`: `record_flush`, `record_tick` and `dispatch`.
+- `compute/cloud/src/admin/stage.rs`; `compute/cloud/src/admin/logs.rs:736-808`: the stage worker and `maintenance_stage`.

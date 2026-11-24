@@ -4,23 +4,22 @@ This guide deploys the Docker Compose stack on one VM, using GCE as the worked
 example. The same stack runs unchanged on AWS / Azure / bare metal; only the
 host-provisioning steps differ. Production uses `docker-compose.yml` plus the
 `docker-compose.prod.yml` overlay (host networking, loopback-only binds,
-PostgreSQL 16 bound to `127.0.0.1`, anti-spoofing proxy settings), not a plain
-`docker compose up`. Set `DUCKLAKE_PG_PASSWORD` in your environment or `.env`
-before the first start; the built-in default is a development value (PostgreSQL is
+PostgreSQL 16 and ClickHouse 24.8 bound to `127.0.0.1`, anti-spoofing proxy settings), not a plain
+`docker compose up`. Set `POSTGRES_PASSWORD` and `CLICKHOUSE_PASSWORD` in your environment or `.env`
+before the first start; the built-in defaults are development values (PostgreSQL and ClickHouse are
 bound to loopback only, but do not rely on that).
 
 ## 1. Host provisioning
 
 - **Image**: `debian-12-bookworm-v*` or `ubuntu-2204-jammy-v*`. Both ship a
   recent enough kernel for the Docker overlay2 driver.
-- **Machine type**: `e2-standard-2` (2 vCPU / 8 GB) is the minimum. DuckDB
-  and pyarrow load the active session's parquet shards into memory, and the
-  OS plus the Next.js frontend eat ~1 GB before the backend starts.
-  `e2-standard-4` (16 GB) is the comfortable size for a busy single-tenant
-  deploy.
+- **Machine type**: `e2-standard-2` (2 vCPU / 8 GB) is the minimum for running
+  ClickHouse 24.8, PostgreSQL 16, the stateless ingest worker, the FastAPI
+  backend, and the Next.js frontend together. `e2-standard-4` (16 GB) is the
+  comfortable size for a busy single-tenant deploy.
 - **Boot disk**: 50 GB pd-balanced is fine for the OS plus container images.
 - **Data disk**: attach a separate persistent disk (100-500 GB pd-balanced
-  depending on cache retention) and mount at `/mnt/app-data`. The data
+  depending on ClickHouse retention) and mount at `/mnt/app-data`. The data
   directory must live on a persistent disk — the boot disk is fine for
   software but a separate disk lets you snapshot data without snapshotting
   the OS.
@@ -66,11 +65,11 @@ echo "UUID=$(sudo blkid -s UUID -o value /dev/sdb) /mnt/app-data ext4 defaults,n
   | sudo tee -a /etc/fstab
 
 sudo chown -R $USER:$USER /mnt/app-data
-mkdir -p /mnt/app-data/{data,cache,configs,postgres}
+mkdir -p /mnt/app-data/{data,configs,postgres,clickhouse}
 ```
 
-`docker-compose.prod.yml` bind-mounts `/mnt/app-data/{configs,data,cache,postgres}`
-directly into the `backend` and `postgres` containers (overriding the relative
+`docker-compose.prod.yml` bind-mounts `/mnt/app-data/{configs,data,postgres,clickhouse}`
+directly into the `backend`, `worker`, `postgres`, and `clickhouse` containers (overriding the relative
 paths in `docker-compose.yml`), so `/mnt/app-data` must exist at that path.
 
 ## 4. Caddy / SSL
@@ -91,9 +90,9 @@ custom Caddy image and set `CLOUDFLARE_API_TOKEN` in the env file.
 cd /mnt/app-data
 git clone https://github.com/fastly/fastly-log-analytics.git
 cd fastly-log-analytics
-# Create .env from .env.example and set DUCKLAKE_PG_PASSWORD.
-# The backend runs as UID/GID 1000: make data/, cache/, configs/ and the
-# postgres directory writable by that user (sudo chown -R 1000:1000 ...).
+# Create .env from .env.example and set POSTGRES_PASSWORD and CLICKHOUSE_PASSWORD.
+# The backend and worker run as UID/GID 1000: make data/, configs/ and the
+# database directories writable as needed (sudo chown -R 1000:1000 /mnt/app-data/{data,configs}).
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
 
@@ -114,10 +113,10 @@ that page. Three specifics make the difference between ~45 s of downtime and
   though its image is unchanged. Worse, `compose build` with no service list
   rebuilds it too, and `caddy/Dockerfile` runs `xcaddy build`, which
   recompiles and yields a **new image id every time** — so compose then
-  recreates it on principle. Build only `backend frontend`. A `Caddyfile`
+  recreates it on principle. Build only `backend worker frontend`. A `Caddyfile`
   edit only needs `caddy reload` (zero downtime); a `caddy/` edit is the one
   case that justifies a rebuild.
-- **Recreate backend and frontend as two separate commands.** The base
+- **Recreate backend/worker and frontend as separate commands.** The base
   compose has `frontend depends_on backend: condition: service_healthy`, so
   naming both in one `up` makes compose hold the frontend until the backend
   healthcheck passes — roughly 40 s of extra downtime on its own.
@@ -140,12 +139,12 @@ CHANGED="$(git diff --name-only "$BEFORE" HEAD)"
 
 
 # 1. Build the app images while the current stack keeps serving.
-"${COMPOSE[@]}" build backend frontend || {
+"${COMPOSE[@]}" build backend worker frontend || {
   echo "build failed — nothing stopped, old stack still serving"; exit 1; }
 
 # 2. Swap the app containers. Separate commands so compose can't serialize
 #    the frontend behind the backend healthcheck.
-"${COMPOSE[@]}" up -d --no-deps backend
+"${COMPOSE[@]}" up -d --no-deps backend worker
 "${COMPOSE[@]}" up -d --no-deps frontend
 
 # 3. Touch Caddy only if it actually changed.
@@ -159,9 +158,9 @@ fi
 # 4. Poll the SAME readiness signal as the Docker healthcheck in
 # docker-compose.prod.yml — NOT `curl .../api/health`, which returns 200 the
 # moment the HTTP server binds and so reports "ready" within seconds while the
-# per-service warm-up loop (`_background_startup` in `backend/core/lifespan.py`) still has
-# 15-20 min to run. Check the response BODY for the top-level "status":"ok".
-echo "site is serving; waiting for warm-up (can take 15-20 min, safe to Ctrl-C)..."
+# per-service warm-up loop (`_background_startup` in `backend/core/lifespan.py`) is running.
+# Check the response BODY for the top-level "status":"ok".
+echo "site is serving; waiting for warm-up (safe to Ctrl-C)..."
 for i in $(seq 1 100); do  # 100 * 15s = 25 min budget, matches compose start_period
   if curl -fsS 'http://localhost:8000/api/health?deep=1' 2>/dev/null | grep -q '^{"status":"ok"'; then
     echo "backend warm after $((i * 15))s"
@@ -216,8 +215,8 @@ sudo systemctl enable --now fastly-log-analytics
 
 ## 6. Secrets management
 
-The stack reads database and auth secrets (`DUCKLAKE_PG_PASSWORD`, `METADATA_DSN`,
-`DUCKLAKE_CATALOG`, `ADMIN_SHARED_SECRET`, `OAUTH_*`) from environment variables,
+The stack reads database and auth secrets (`POSTGRES_PASSWORD`, `METADATA_DSN`,
+`CLICKHOUSE_PASSWORD`, `ADMIN_SHARED_SECRET`, `OAUTH_*`) from environment variables,
 while per-service Fastly Object Storage credentials live in `configs/{service_id}.json`
 (and the PostgreSQL metadata store).
 Three options for managing VM environment secrets, in order of preference:

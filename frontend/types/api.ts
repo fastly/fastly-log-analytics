@@ -10,7 +10,6 @@ export function toService(s: components['schemas']['BootstrapService']): Service
     name: s.name || s.service_id,
     cmcdEnabled: s.cmcd_enabled ?? undefined,
     rum_enabled: s.rum_enabled ?? undefined,
-    is_high_scale: s.is_high_scale ?? undefined,
   }
 }
 
@@ -18,6 +17,14 @@ export function toService(s: components['schemas']['BootstrapService']): Service
  * Valid chart metric keys. Mirrors the ChartMetric Literal in backend/models/analytics/dashboard.py.
  */
 export type ChartMetric = components['schemas']['AggregatesRequest']['chart_metric']
+
+// Typed as a Record so a change to the generated union fails tsc until this list matches it.
+const CHART_METRICS: Record<ChartMetric, true> = {
+  requests: true, '5xx': true, '4xx': true, hit_rate: true, p50_latency: true, p95_latency: true,
+  p99_latency: true, throughput: true, req_size: true, ttfb: true,
+}
+
+export const isChartMetric = (value: string): value is ChartMetric => Object.hasOwn(CHART_METRICS, value)
 
 // ── Wire-parity guards ────────────────────────────────────────────────────────
 //
@@ -89,7 +96,9 @@ export type ServiceConfig = components['schemas']['ServiceConfig']
 
 export type LogFieldsConfig = components['schemas']['LogFieldsConfig']
 
-export type BootstrapResponse = components['schemas']['BootstrapResponse']
+export type BootstrapResponse = components['schemas']['BootstrapResponse'] & {
+  build_sha?: string
+}
 
 export type DashboardTableData = components['schemas']['FieldAggregate']
 

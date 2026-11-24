@@ -1,4 +1,4 @@
-# Optional standard Compose overlay (base shared-network namespace).
+# Optional single-host Compose overlay (base shared-network namespace).
 # docker compose -f docker-compose.yml -f docker-compose.admin-mtls.yml up -d
 # Set ADMIN_GATEWAY_REQUIRED=1 in the operator's .env for enforced admin mTLS.
 services:

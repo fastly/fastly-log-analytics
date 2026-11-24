@@ -3,17 +3,19 @@ from __future__ import annotations
 import json
 import logging
 import re
-import secrets
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
 import tenacity
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
 
+from backend.core.catalog import _VCL_ID_BOUNDARY, _opt_int, validate_vcl_custom_condition
+from backend.utils.date_utils import parse_iso_utc
 from backend.utils.runtime_modes import mock_mode_enabled
 
 logger = logging.getLogger(__name__)
@@ -84,7 +86,7 @@ def render_vcl_sigv4_signing_block(
         else []
     )
     bucket_comment = (
-        "# Only prepend bucket if not already present (handles direct S3-style paths from DuckDB/Boto3)"
+        "# Only prepend bucket if not already present (handles direct S3-style paths from Boto3)"
         if detailed_comments
         else "# Prepend bucket if not already present"
     )
@@ -210,82 +212,92 @@ penaltybox auth_fail_pb {}
 #RATELIMIT_END
 
 sub miss_pass {
+    unset bereq.http.x-fastly-key;
+    unset bereq.http.Cookie;
 """
         + sigv4_block
         + """
 }
 
 sub vcl_recv {
-  # Authenticate and take authority over the client IP exactly once, on
-  # the first Fastly POP to handle the request (the edge).
-  # ``fastly.ff.visits_this_service`` is 0 only on that first touch; any
-  # request arriving with it > 0 has already transited — and been
-  # authenticated by — our own edge, so re-running the gate here would
-  # only 401 a legitimately-forwarded request (the ``key`` param is
-  # stripped before forwarding). Unauthenticated requests ``error 401``
-  # at the edge and are never forwarded to the shield. A client cannot
-  # forge ``visits_this_service`` > 0: each ``Fastly-FF`` entry is a
-  # salted hash that only genuine Fastly hops can produce.
+  # Authenticate, rate-limit, and take authority over the client IP on the
+  # first Fastly POP to handle the request (the edge).
   if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {
-    # A client may supply Fastly-Client-IP; overwrite it with the real
-    # connection IP so downstream logging / rate-limiting can't be spoofed.
     set req.http.Fastly-Client-IP = client.ip;
 
-    # Block requests that do not provide the correct secret key.
-    # NOTE on the auth fallback: the third argument to ``table.lookup`` is
-    # returned when ``cdn_auth.secret`` is absent from the edge dictionary.
-    # Defaulting to ``""`` is fail-open — an attacker who sends an empty
-    # ``key`` query param trivially matches. The literal fallback string
-    # below is substituted in load_vcl() with an unguessable
-    # ``unprovisioned-fallback-`` + ``secrets.token_hex(32)`` value, which
-    # is never knowable to an attacker and therefore fails closed when the
-    # dictionary is unprovisioned. The human-readable prefix makes clear in
-    # the rendered VCL that this is a throwaway placeholder, NOT the real
-    # ``cdn_auth.secret`` (which lives only in the write-only edge dict).
-    if (subfield(req.url.qs, "key", "&") != table.lookup(cdn_auth, "secret", "REPLACE_AT_LOAD_VCL_FALLBACK_SECRET") && req.http.x-fastly-key != table.lookup(cdn_auth, "secret", "REPLACE_AT_LOAD_VCL_FALLBACK_SECRET")) {
+#RATELIMIT_BEGIN
+    declare local var.rl_key STRING;
+    if (addr.is_ipv6(client.ip)) {
+      set var.rl_key = "v6:" + addr.extract_bits(client.ip, 96, 32) + ":" + addr.extract_bits(client.ip, 64, 32);
+    } else {
+      set var.rl_key = "v4:" + client.ip;
+    }
+    if (ratelimit.penaltybox_has(auth_fail_pb, var.rl_key)) {
+      unset req.http.x-fastly-key;
+      error 429 "Too Many Requests";
+    }
+#RATELIMIT_END
+
+    declare local var.expected STRING;
+    set var.expected = table.lookup(cdn_auth, "secret_key", table.lookup(cdn_auth, "secret", ""));
+    if (var.expected == "") {
+      set var.expected = table.lookup(cdn_auth, "secret", "");
+    }
+    if (var.expected == "") {
+      unset req.http.x-fastly-key;
+      error 403 "Forbidden";
+    }
+
+    if (!req.http.x-fastly-key || !digest.secure_is_equal(var.expected, req.http.x-fastly-key)) {
 #RATELIMIT_BEGIN
       declare local var.last_minute INTEGER;
-      set var.last_minute = ratelimit.ratecounter_increment(auth_fail_rc, req.http.Fastly-Client-IP, 1);
-      if (var.last_minute >= 2) {
-        ratelimit.penaltybox_add(auth_fail_pb, req.http.Fastly-Client-IP, 1m);
+      set var.last_minute = ratelimit.ratecounter_increment(auth_fail_rc, var.rl_key, 1);
+      if (var.last_minute >= 10) {
+        ratelimit.penaltybox_add(auth_fail_pb, var.rl_key, 15m);
       }
 #RATELIMIT_END
+      unset req.http.x-fastly-key;
       error 401 "Unauthorized";
     }
-#RATELIMIT_BEGIN
-    if (req.method != "FASTLYPURGE" && ratelimit.penaltybox_has(auth_fail_pb, req.http.Fastly-Client-IP)) {
-      error 401 "Unauthorized";
+
+    unset req.http.x-fastly-key;
+    if (req.method != "GET" && req.method != "HEAD") {
+      error 405 "Method Not Allowed";
     }
-#RATELIMIT_END
+  }
+
+  unset req.http.x-fastly-key;
+  unset req.http.Cookie;
+  unset req.http.Authorization;
+  if (req.method != "GET" && req.method != "HEAD") {
+    error 405 "Method Not Allowed";
   }
 
   # Enable segmented caching for potentially large log or parquet files
   set req.enable_segmented_caching = true;
   set segmented_caching.block_size = 20971520; # 20 MB, the maximum
 
-  # Cache-key hardening (post-auth — auth check above still reads the
-  # `key` qs param from the original req.url):
-  #   1. querystring.filter_except keeps ONLY the S3-API parameters the
-  #      FOS origin actually understands and strips everything else
-  #      (including our auth `key` secret, any caller-injected tracking
-  #      params, marketing UTM params, session IDs, etc.). Unexpected
-  #      params no longer fracture the cache or leak into req.hash.
-  #   2. querystring.sort canonicalises the remaining param order so
-  #      `?prefix=foo&max-keys=10` and `?max-keys=10&prefix=foo` resolve
-  #      to one cache entry instead of two.
-  # Allow-list rationale (S3 API surface FOS exposes):
-  #   - List objects v2: list-type, prefix, delimiter, continuation-token,
-  #                       start-after, max-keys, encoding-type, fetch-owner
-  #   - List objects v1: marker
-  #   - Get object:      versionId, partNumber, response-content-type,
-  #                       response-content-disposition, response-cache-control
-  # Anything else is silently dropped. If a legitimate S3 param needs to
-  # pass through later, add it to this list and re-deploy.
-  set req.url = querystring.filter_except(req.url, "list-type,prefix,delimiter,continuation-token,start-after,max-keys,encoding-type,fetch-owner,marker,versionId,partNumber,response-content-type,response-content-disposition,response-cache-control");
+  set req.url = querystring.filter_except(
+    req.url,
+    "list-type" + querystring.filtersep() +
+    "prefix" + querystring.filtersep() +
+    "delimiter" + querystring.filtersep() +
+    "continuation-token" + querystring.filtersep() +
+    "start-after" + querystring.filtersep() +
+    "max-keys" + querystring.filtersep() +
+    "encoding-type" + querystring.filtersep() +
+    "fetch-owner" + querystring.filtersep() +
+    "marker" + querystring.filtersep() +
+    "versionId" + querystring.filtersep() +
+    "partNumber" + querystring.filtersep() +
+    "response-content-type" + querystring.filtersep() +
+    "response-content-disposition" + querystring.filtersep() +
+    "response-cache-control"
+  );
   set req.url = querystring.sort(req.url);
 
-  # Never cache admin_state.json — it changes on every mutation
-  if (req.url ~ "/meta/admin_state\\.json$") {
+  # Never cache admin_state.json or dr_state.json — they change on mutations/snapshots
+  if (req.url.path ~ "/meta/(admin_state|dr_state)\\.json$") {
     return(pass);
   }
 
@@ -295,13 +307,6 @@ sub vcl_recv {
   }
 
 #FASTLY recv
-  # Normally, you should consider requests other than GET and HEAD to be uncacheable
-  # (to this we add the special FASTLYPURGE method)
-  if (req.method != "HEAD" && req.method != "GET" && req.method != "FASTLYPURGE") {
-    return(pass);
-  }
-  # If you are using image optimization, insert the code to enable it here
-  # See https://www.fastly.com/documentation/reference/io/ for more information.
   return(lookup);
 }
 sub vcl_hash {
@@ -376,6 +381,19 @@ unset beresp.http.x-amz-version-id;
 }
 sub vcl_error {
 #FASTLY error
+  if (obj.status == 401 || obj.status == 403 || obj.status == 405 || obj.status == 429) {
+    set obj.ttl = 0s;
+    set obj.http.Cache-Control = "no-store";
+    set obj.http.Content-Type = "text/plain; charset=utf-8";
+    if (obj.status == 405) {
+      set obj.http.Allow = "GET, HEAD";
+    }
+    if (obj.status == 429) {
+      set obj.http.Retry-After = "900";
+    }
+    synthetic obj.response;
+    return(deliver);
+  }
   return(deliver);
 }
 sub vcl_deliver {
@@ -393,8 +411,7 @@ sub vcl_log {
 }"""
     )
     if not rate_limiting:
-        vcl = re.sub(r"\s*#RATELIMIT_BEGIN.*?#RATELIMIT_END", "", vcl, flags=re.DOTALL)
-    vcl = vcl.replace("REPLACE_AT_LOAD_VCL_FALLBACK_SECRET", "unprovisioned-fallback-" + secrets.token_hex(32))
+        vcl = re.sub(r"#RATELIMIT_BEGIN\n.*?#RATELIMIT_END\n?", "", vcl, flags=re.DOTALL)
     return vcl
 
 
@@ -410,11 +427,17 @@ RUM_SNIPPET_NAMES = frozenset(
 )
 
 _FARO_VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
-_RUM_PATH_PREDICATE = re.compile(r"\breq\.url(\.path)?\b")
+_RUM_PATH_PREDICATE = re.compile(
+    rf"(?<!\.){_VCL_ID_BOUNDARY}req\s*\.\s*url(?:\s*\.\s*path\b|(?!\s*\.))",
+    re.IGNORECASE,
+)
 
 
-def validate_rum_custom_condition(condition: str) -> str | None:
-    """Return an error message if ``condition`` can't work, else None."""
+def validate_rum_custom_condition(condition: str | None) -> str | None:
+    """Return an error message if ``condition`` can't work or is unsafe, else None."""
+    base_err = validate_vcl_custom_condition(condition, field_name="rum_custom_condition")
+    if base_err is not None:
+        return base_err
     cond = (condition or "").strip()
     if not cond:
         return None
@@ -426,8 +449,6 @@ def validate_rum_custom_condition(condition: str) -> str | None:
             "beacons by page URL, filter in the tracker — the page URL is in the beacon's "
             "POST body, which VCL cannot read."
         )
-    if "'" in cond:
-        return "VCL string literals use double quotes, not single quotes."
     return None
 
 
@@ -458,6 +479,7 @@ def _generate_recv_vcl() -> str:
     return (
         """# Edge-only (first hop, no restarts) block for RUM
 if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {
+    unset req.http.X-FOS-Request;
     # Handle RUM beacon POST to /rum-beacon
     if (req.url.path == "/rum-beacon") {
 """
@@ -500,6 +522,10 @@ error 611 "No Content";"""
 
 def _generate_asset_fetch_vcl(shield_pop: str = "iad-va-us", faro_version: str | None = None) -> str:
     """Fetch /js/rum.js (and optionally /js/faro-sdk.js) from FOS with SigV4 signing."""
+    if shield_pop is not None and not isinstance(shield_pop, str):
+        raise ValueError(f"shield_pop must be a string; got {type(shield_pop).__name__}")
+    if shield_pop and not re.fullmatch(r"^[A-Za-z0-9_-]{1,64}$", shield_pop):
+        raise ValueError(f"shield_pop must match ^[A-Za-z0-9_-]{{1,64}}$; got {shield_pop!r}")
     if shield_pop and shield_pop.lower() != "none":
         shield_var = f"ssl_shield_{shield_pop.replace('-', '_')}"
         backend_str = f"fastly.try_select_shield({shield_var}, F_fos_origin)"
@@ -524,8 +550,13 @@ if ({path_condition} && req.method == "GET") {{
 
 def _generate_sigv4_sign_vcl(faro_version: str | None = None) -> str:
     """SigV4 signing for FOS requests in miss/pass stages."""
+    if faro_version is None:
+        path_guard = 'req.url.path == "/js/rum.js"'
+    else:
+        _assert_faro_version_safe(faro_version)
+        path_guard = '(req.url.path == "/js/rum.js" || req.url.path == "/js/faro-sdk.js")'
     body = render_vcl_sigv4_signing_block(
-        condition='req.http.X-FOS-Request == "1" && !req.backend.is_shield',
+        condition=f'req.http.X-FOS-Request == "1" && req.backend == F_fos_origin && !req.backend.is_shield && {path_guard}',
         pre_bucket_lines=(
             "# If the user-facing path is /js/rum.js, point to the actual FOS object path",
             'if (bereq.url.path == "/js/rum.js") {',
@@ -537,7 +568,6 @@ def _generate_sigv4_sign_vcl(faro_version: str | None = None) -> str:
     if faro_version is None:
         return body
 
-    _assert_faro_version_safe(faro_version)
     anchor = """    if (bereq.url.path == "/js/rum.js") {
         set bereq.url = "/rum/rum-tracker.js";
     }"""
@@ -582,7 +612,7 @@ if (req.restarts == 1 && fastly.ff.visits_this_service == 0 && req.url.path != "
     # Only set on the pass-2 deliver (after potential scorer restart), excluding beacons
     # Read rum_cid from the edge scorer's sid (set by scoring's deliver snippet)
     if (req.http.x-edge-score:sid) {
-        set resp.http.Set-Cookie = "rum_cid=" + req.http.x-edge-score:sid + "; Path=/; SameSite=Lax";
+        add resp.http.Set-Cookie = "rum_cid=" + req.http.x-edge-score:sid + "; Path=/; SameSite=Lax; Secure";
     }
 }"""
 
@@ -650,6 +680,9 @@ def mock_response(method: str, path: str, body: dict | None = None) -> Any:
             "services": [],
         }
 
+    if path == "/current_user" and method == "GET":
+        return {"id": "mock-user", "role": "superuser", "limit_services": False}
+
     if path == "/service" and method == "POST":
         return {"id": "mock-svc-id", "name": (body or {}).get("name", "mock"), "version": 1}
 
@@ -670,7 +703,7 @@ def mock_response(method: str, path: str, body: dict | None = None) -> Any:
         return {"number": 1, "active": True}
 
     if method == "GET" and "/version/" in path:
-        if path.endswith(("/logging/s3", "/snippet", "/condition", "/domain", "/backend", "/vcl")):
+        if path.endswith(("/logging/s3", "/logging/fos", "/snippet", "/condition", "/domain", "/backend", "/vcl")):
             return []
 
     if "/version/" in path and "/activate" in path:
@@ -726,6 +759,9 @@ def mock_response(method: str, path: str, body: dict | None = None) -> Any:
             return {"data": {"id": "mock-bucket-id", "attributes": {"name": (body or {}).get("name", "mock-bucket")}}}
         if method == "GET":
             return {"data": []}
+
+    if method == "GET" and path.startswith("/metrics/v2/platform/"):
+        return {"data": [], "meta": {}}
 
     return {"ok": True}
 
@@ -881,6 +917,128 @@ def fastly_rt(path, *, token, max_retries=0, timeout=10):
     )
 
 
+_PLATFORM_GRANULARITIES = {
+    "minute": "minutely",
+    "minutely": "minutely",
+    "hour": "hourly",
+    "hourly": "hourly",
+    "day": "daily",
+    "daily": "daily",
+}
+_RFC3339_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
+_PLATFORM_METRICS_MAX_PAGES = 1000
+
+
+def fastly_platform_metrics(
+    *,
+    entity_id: str | None,
+    granularity: str,
+    from_epoch: int,
+    to_epoch: int,
+    metrics: tuple[str, ...] | list[str],
+    token: str,
+    group_by: Literal["region", "datacenter"] | None = None,
+    max_retries: int = 3,
+    timeout: float = 30,
+) -> dict[str, Any]:
+    """Fetch and normalize all pages from Fastly Platform Metrics."""
+    try:
+        platform_granularity = _PLATFORM_GRANULARITIES[granularity]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported Platform Metrics granularity: {granularity}") from exc
+    if not metrics:
+        raise ValueError("Platform Metrics requires at least one metric")
+    if to_epoch <= from_epoch:
+        raise ValueError("Platform Metrics end must be after start")
+    if group_by is not None and group_by not in ("region", "datacenter"):
+        raise ValueError("Unsupported Platform Metrics group_by")
+
+    if entity_id is None:
+        endpoint = f"/metrics/v2/platform/aggregate/{platform_granularity}"
+    else:
+        endpoint = f"/metrics/v2/platform/entities/{urllib.parse.quote(entity_id, safe='')}/{platform_granularity}"
+
+    from_time = datetime.fromtimestamp(from_epoch, tz=UTC)
+    to_time = datetime.fromtimestamp(to_epoch, tz=UTC)
+    bucket_seconds = {"minutely": 60, "hourly": 3600, "daily": 86400}[platform_granularity]
+    first_bucket = from_epoch - from_epoch % bucket_seconds
+    last_bucket = ((to_epoch - 1) // bucket_seconds) * bucket_seconds
+    params = {
+        "from": from_time.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "to": to_time.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "metric": ",".join(metrics),
+        "limit": "10000",
+    }
+    if group_by is not None:
+        params["group_by"] = group_by
+    records: list[dict[str, Any]] = []
+    identities: set[tuple[int, str | None]] = set()
+    cursors: set[str] = set()
+    cursor: str | None = None
+    meta: dict[str, Any] = {}
+
+    for _ in range(_PLATFORM_METRICS_MAX_PAGES):
+        page_params = dict(params)
+        if cursor is not None:
+            page_params["cursor"] = cursor
+        query = urllib.parse.urlencode(page_params, quote_via=urllib.parse.quote, safe=",")
+        page = fastly(
+            "GET",
+            f"{endpoint}?{query}",
+            token=token,
+            max_retries=max_retries,
+            timeout=timeout,
+        )
+        if not isinstance(page, dict):
+            raise RuntimeError("Platform Metrics returned a malformed response")
+        page_records = page.get("data")
+        if not isinstance(page_records, list):
+            raise RuntimeError("Platform Metrics returned malformed data")
+        page_meta = page.get("meta")
+        if page_meta is not None:
+            if not isinstance(page_meta, dict):
+                raise RuntimeError("Platform Metrics returned malformed metadata")
+            meta.update(page_meta)
+
+        for record in page_records:
+            if not isinstance(record, dict):
+                raise RuntimeError("Platform Metrics returned a malformed record")
+            timestamp = record.get("timestamp")
+            if not isinstance(timestamp, str) or not _RFC3339_RE.fullmatch(timestamp):
+                raise RuntimeError("Platform Metrics returned a malformed timestamp")
+            parsed = parse_iso_utc(timestamp)
+            if parsed is None:
+                raise RuntimeError("Platform Metrics returned a malformed timestamp")
+            epoch = int(parsed.timestamp())
+            if epoch < first_bucket or epoch > last_bucket:
+                raise RuntimeError("Platform Metrics returned an out-of-window timestamp")
+            group: str | None = None
+            if group_by is not None:
+                group_value = record.get(group_by)
+                if not isinstance(group_value, str) or not group_value.strip():
+                    raise RuntimeError(f"Platform Metrics returned a malformed {group_by} group")
+                group = group_value
+            identity = (epoch, group)
+            if identity in identities:
+                raise RuntimeError("Platform Metrics returned a duplicate timestamp and group")
+            identities.add(identity)
+            records.append({**record, "start_time": epoch})
+
+        next_cursor = page.get("next_cursor")
+        if next_cursor is None or next_cursor == "":
+            break
+        if not isinstance(next_cursor, str):
+            raise RuntimeError("Platform Metrics returned a malformed cursor")
+        if next_cursor in cursors:
+            raise RuntimeError("Platform Metrics returned a repeated cursor")
+        cursors.add(next_cursor)
+        cursor = next_cursor
+    else:
+        raise RuntimeError("Platform Metrics pagination exceeded the page limit")
+
+    return {"status": "success", "data": records, "meta": meta}
+
+
 PageStyle = Literal["cursor", "page", "link"]
 
 
@@ -938,8 +1096,12 @@ def fastly_paginate(
             node: Any = page
             for key in next_cursor_path:
                 node = node.get(key) if isinstance(node, dict) else None
-            if not node or not isinstance(node, str) or node in seen:
+            if node is None or node == "":
                 return
+            if not isinstance(node, str):
+                raise RuntimeError("Fastly pagination returned a malformed cursor")
+            if node in seen:
+                raise RuntimeError("Fastly pagination cursor repeated")
             seen.add(node)
             cursor = node
         elif style == "page":
@@ -952,12 +1114,16 @@ def fastly_paginate(
             if not link or not isinstance(link, str):
                 return
             next_path = _next_path_from_link(link)
-            if next_path is None or next_path in seen:
-                return
+            if next_path is None:
+                raise RuntimeError("Fastly pagination returned an off-host next link")
+            if next_path in seen:
+                raise RuntimeError("Fastly pagination next link repeated")
             seen.add(next_path)
 
         if page_delay:
             time.sleep(page_delay)
+    else:
+        raise RuntimeError(f"Fastly pagination truncated at max_pages={max_pages}")
 
 
 def _count(value: Any) -> int:
@@ -965,15 +1131,6 @@ def _count(value: Any) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
-
-
-def _opt_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
 
 
 Count = Annotated[int, BeforeValidator(_count)]
@@ -985,7 +1142,7 @@ class _Tolerant(BaseModel):
 
 
 class StatsRecord(_Tolerant):
-    """One bucket of ``/stats/service/{id}`` or ``/stats/aggregate``."""
+    """One normalized Platform Metrics time bucket."""
 
     start_time: OptInt = None
     requests: Count = 0
@@ -1100,11 +1257,59 @@ def ensure_condition(name: str, statement: str, type: str, service_id: str, vers
     return fastly("POST", f"/service/{service_id}/version/{version}/condition", payload, token=token)
 
 
-def list_s3_endpoints(service_id: str, version: int, token: str) -> list[str]:
+# New installs use the native "fos" endpoint; "s3" is the legacy S3-compatible endpoint older installs still run.
+LOG_ENDPOINT_TYPES = ("s3", "fos")
+
+
+def list_log_endpoints(service_id: str, version: int, token: str) -> dict[str, str]:
+    """Map each FOS-capable logging endpoint name on a version to its endpoint type."""
+    found: dict[str, str] = {}
+    for endpoint_type in LOG_ENDPOINT_TYPES:
+        try:
+            items = fastly("GET", f"/service/{service_id}/version/{version}/logging/{endpoint_type}", token=token)
+        except RuntimeError:
+            continue
+        for item in items if isinstance(items, list) else []:
+            found.setdefault(item["name"], endpoint_type)
+    return found
+
+
+def get_log_endpoint(service_id: str, version: int, name: str, token: str) -> dict:
+    """Read a logging endpoint by name, native FOS first, then the legacy S3 endpoint."""
+    encoded = urllib.parse.quote(name, safe="")
     try:
-        return [r["name"] for r in fastly("GET", f"/service/{service_id}/version/{version}/logging/s3", token=token)]
-    except RuntimeError:
-        return []
+        return fastly("GET", f"/service/{service_id}/version/{version}/logging/fos/{encoded}", token=token)
+    except RuntimeError as exc:
+        if "404" not in str(exc):
+            raise
+    return fastly("GET", f"/service/{service_id}/version/{version}/logging/s3/{encoded}", token=token)
+
+
+def logging_endpoint_role_error(token: str) -> str | None:
+    """Explain why ``token`` can't manage a logging endpoint, or return None when it can.
+
+    Fastly requires Engineer with access to all services, or Superuser, to create
+    a native FOS logging endpoint (Engineers can also create the CDN service and
+    Object Storage keys); this mirrors the Cloud install's token check.
+    """
+    try:
+        info = fastly("GET", "/tokens/self", token=token)
+        if info.get("user_id"):
+            user = fastly("GET", "/current_user", token=token)
+            role = user.get("role") or ""
+            if role == "superuser" or (role == "engineer" and user.get("limit_services") is False):
+                return None
+            if role == "engineer":
+                return "Token belongs to an Engineer limited to some services; use an Engineer with all-services access, or Superuser."
+        else:
+            role = info.get("role") or ""
+            if not role and info.get("id"):
+                role = fastly("GET", f"/automation-tokens/{info['id']}", token=token).get("role") or ""
+            if role in ("engineer", "superuser"):
+                return None
+    except RuntimeError as exc:
+        return f"Could not verify the token's role with Fastly: {exc}"
+    return f"Token role {role or 'unknown'!r} can't add the logging endpoint; use an Engineer with all-services access, or Superuser."
 
 
 def list_vcl_snippets(service_id: str, version: int, token: str) -> list[str]:

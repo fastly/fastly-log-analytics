@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS rum_vitals_facts
     publication_state Enum8('pending' = 1, 'visible' = 2),
     client_id String,
     request_event_id Nullable(UUID),
+    req_id String,
     metric_name LowCardinality(String),
     metric_value Float64,
     metric_rating LowCardinality(String),
@@ -45,6 +46,7 @@ CREATE TABLE IF NOT EXISTS rum_error_facts
     publication_state Enum8('pending' = 1, 'visible' = 2),
     client_id String,
     request_event_id Nullable(UUID),
+    req_id String,
     error_message String,
     error_file String,
     pathname String,
@@ -65,6 +67,8 @@ PARTITION BY toYYYYMMDD(event_timestamp)
 ORDER BY (service_id, toStartOfHour(event_timestamp), event_timestamp)
 TTL toDateTime(event_timestamp) + INTERVAL 30 DAY;
 
+ALTER TABLE rum_vitals_facts ADD COLUMN IF NOT EXISTS req_id String;
+ALTER TABLE rum_error_facts ADD COLUMN IF NOT EXISTS req_id String;
 ALTER TABLE rum_vitals_facts ADD COLUMN IF NOT EXISTS browser LowCardinality(String);
 ALTER TABLE rum_vitals_facts ADD COLUMN IF NOT EXISTS os LowCardinality(String);
 ALTER TABLE rum_vitals_facts ADD COLUMN IF NOT EXISTS device LowCardinality(String);

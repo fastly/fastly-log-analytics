@@ -2,7 +2,8 @@
 
 import * as React from "react"
 import { useQuery } from "@tanstack/react-query"
-import { flexRender, getCoreRowModel, useReactTable, type ColumnDef } from "@tanstack/react-table"
+import { flexRender, useTable } from "@tanstack/react-table"
+import { basicTableFeatures, type BasicColumnDef } from "@/lib/table"
 import { ArrowDown, ArrowUp, ArrowUpDown, Loader2, Lock } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
@@ -85,7 +86,7 @@ export function SessionsPanel({ status, onRefresh, onError }: SessionsPanelProps
     defaultDir: 'desc',
   })
 
-  const columns = React.useMemo<ColumnDef<ShareSession>[]>(
+  const columns = React.useMemo<BasicColumnDef<ShareSession>[]>(
     () => [
       {
         id: 'analyst',
@@ -148,7 +149,7 @@ export function SessionsPanel({ status, onRefresh, onError }: SessionsPanelProps
     [lockoutsByIp, failuresByIp, busy],
   )
 
-  const table = useReactTable({ data: sorted, columns, getCoreRowModel: getCoreRowModel() })
+  const table = useTable({ features: basicTableFeatures, data: sorted, columns })
 
   return (
     <section className="rounded-lg border bg-card p-4 space-y-3" data-testid="admin-share-sessions-panel">
@@ -214,9 +215,10 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
     setAppliedFilters(initialEmailFilter ? { event_type: 'ALL', email: initialEmailFilter, since: '', until: '' } : null)
   }
 
+  const loadRecentAudit = status !== null && status.audit_logs == null
   const auditQuery = useQuery({
     queryKey: ['share-audit-logs', appliedFilters],
-    enabled: appliedFilters !== null,
+    enabled: appliedFilters !== null || loadRecentAudit,
     retry: false,
     queryFn: async () => {
       onError('')
@@ -254,9 +256,20 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
     if (onClearInitialFilter) onClearInitialFilter()
   }
 
-  const filteredLogs = appliedFilters !== null ? (auditQuery.data ?? null) : null
+  const filteredLogs = appliedFilters !== null || loadRecentAudit ? (auditQuery.data ?? null) : null
   const loading = auditQuery.isFetching
-  const rows = filteredLogs ?? status?.audit_logs ?? []
+  const rows = React.useMemo(
+    () => filteredLogs ?? status?.audit_logs ?? [],
+    [filteredLogs, status?.audit_logs],
+  )
+  const eventTypeOptions = React.useMemo(
+    () => [...new Set([
+      ...EVENT_TYPE_FILTER_OPTIONS,
+      ...rows.map((row) => row.event_type).filter((event): event is string => typeof event === 'string' && event.length > 0),
+      filters.event_type,
+    ])],
+    [rows, filters.event_type],
+  )
 
   const auditAccessors = React.useMemo<SortAccessors<AuditLog>>(
     () => ({
@@ -273,7 +286,7 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
     defaultDir: 'desc',
   })
 
-  const auditColumns = React.useMemo<ColumnDef<AuditLog>[]>(
+  const auditColumns = React.useMemo<BasicColumnDef<AuditLog>[]>(
     () => [
       { id: 'timestamp', cell: ({ row }) => formatDeterministicUTC(row.original.timestamp) },
       { id: 'event_type', cell: ({ row }) => <Badge variant="outline" className="text-[10px]">{row.original.event_type}</Badge> },
@@ -283,7 +296,7 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
     ],
     [],
   )
-  const auditTable = useReactTable({ data: sorted, columns: auditColumns, getCoreRowModel: getCoreRowModel() })
+  const auditTable = useTable({ features: basicTableFeatures, data: sorted, columns: auditColumns })
 
   return (
     <div className="space-y-3" data-testid="admin-share-audit-panel">
@@ -295,7 +308,7 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
             <Select value={filters.event_type} onValueChange={(v) => setFilters((f) => ({ ...f, event_type: v ?? 'ALL' }))}>
               <SelectTrigger id="audit-event-type"><SelectValue /></SelectTrigger>
               <SelectContent>
-                {EVENT_TYPE_FILTER_OPTIONS.map((opt) => (
+                {eventTypeOptions.map((opt) => (
                   <SelectItem key={opt} value={opt}>{opt}</SelectItem>
                 ))}
               </SelectContent>
@@ -324,7 +337,7 @@ export function AuditLogPanel({ status, onError, initialEmailFilter, onClearInit
       </section>
       <section className="rounded-lg border bg-card p-4 max-h-[480px] overflow-y-auto">
         <h4 className="text-sm font-semibold mb-2">
-          {filteredLogs ? 'Filtered audit events' : 'Recent audit events'}
+          {appliedFilters !== null ? 'Filtered audit events' : 'Recent audit events'}
         </h4>
         <Table className="font-mono text-[11px]">
           <TableHeader>

@@ -2,7 +2,7 @@
 
 import React from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { ColumnDef } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import { Brain, Info, KeyRound, Loader2, ScrollText } from 'lucide-react'
 import { AnalyticsCard, CardErrorState } from '@/components/AnalyticsCard'
 import { DataTableReadonly } from '@/components/DataTable'
@@ -15,6 +15,8 @@ import { Label } from '@/components/ui/label'
 import { SkeletonGrid } from '@/components/ui/skeleton'
 import { useAutoFlash, useOpenGeneration } from '@/hooks/useSSE'
 import { client, unwrapClient } from '@/lib/api'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
+import { retrainCloudScoring } from '@/lib/cloud-engine/scoring-train'
 import { formatCount, formatTimeAgo } from '@/lib/utils'
 import type { components } from '@/types/api'
 import { AuditLogHelp } from './help-content'
@@ -82,12 +84,28 @@ function RetrainDialogBody({ serviceId, onClose }: { serviceId: string; onClose:
   const [sinceDays, setSinceDays] = React.useState(7)
   const [result, setResult] = React.useState<RetrainResult | null>(null)
   const mutation = useMutation({
-    mutationFn: (): Promise<RetrainResult> =>
-      unwrapClient(
+    mutationFn: async (): Promise<RetrainResult> => {
+      if (isCloudMode()) {
+        const res = await retrainCloudScoring(serviceId, { sinceDays })
+        return {
+          ok: res.ok,
+          version: res.version,
+          vocab_size: res.stats.routes_seen,
+          session_count: res.stats.sessions_kept,
+          transition_count: res.stats.transitions,
+          sessions_in: res.stats.sessions_in,
+          sessions_dropped_short: res.stats.sessions_dropped_short,
+          sessions_dropped_fast: res.stats.sessions_dropped_fast,
+          kv_pushed: res.kv_pushed ?? true,
+          auc: res.auc_against_labels,
+        } as unknown as RetrainResult
+      }
+      return unwrapClient(
         client.POST('/api/services/{service_id}/scoring/retrain', {
           params: { path: { service_id: serviceId }, query: { since_days: sinceDays } },
         }),
-      ),
+      )
+    },
     onSuccess: (data) => {
       setResult(data)
       invalidateServiceScoringQueries(queryClient, serviceId)
@@ -102,7 +120,7 @@ function RetrainDialogBody({ serviceId, onClose }: { serviceId: string; onClose:
           Retrain scoring matrix
         </DialogTitle>
         <DialogDescription>
-          Builds a fresh transition matrix from the last N days of DuckDB traffic and evaluates AUC against your
+          Builds a fresh transition matrix from the last N days of ClickHouse traffic and evaluates AUC against your
           labels. Saves matrix.json + publishes to FOS so every backend host sees the new matrix. The Wasm rebuild +
           Compute deploy is a separate step (requires Fastly CLI on your local box).
         </DialogDescription>

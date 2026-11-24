@@ -22,15 +22,16 @@ _NUMERIC_FIELD_MAX_LEN = 20
 
 VALID_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,47}$")
 
-_DUCKDB_RESERVED = frozenset(
+_SQL_RESERVED = frozenset(
     "select from where table column index view join on as is in not null true false "
     "and or case when then else end order group by having limit offset union all "
     "distinct with insert update delete create drop alter add set values into exists "
     "between like ilike cast try_cast extract interval timestamp date time integer "
     "varchar boolean double bigint float struct list map dt timestamp_hour".split()
 )
+_DUCKDB_RESERVED = _SQL_RESERVED
 
-_DUCKDB_TYPE_VALUE_TYPE_COMPAT: dict[str, set[str]] = {
+_SQL_TYPE_VALUE_TYPE_COMPAT: dict[str, set[str]] = {
     "VARCHAR": {"string", "ip", "url"},
     "INTEGER": {"numeric"},
     "BIGINT": {"numeric"},
@@ -38,33 +39,100 @@ _DUCKDB_TYPE_VALUE_TYPE_COMPAT: dict[str, set[str]] = {
     "BOOLEAN": {"boolean"},
 }
 
+
+class _CatalogEntry(dict[str, Any]):
+    """Dict-backed catalog entry that also exposes attribute access and cloud key aliases."""
+
+    _vcl_format_override: str | None = None
+
+    @property
+    def name(self) -> str:
+        return str(super().__getitem__("id"))
+
+    @property
+    def group(self) -> str | None:
+        return super().get("group")
+
+    @property
+    def vcl_format(self) -> str | None:
+        if self._vcl_format_override is not None:
+            return self._vcl_format_override
+        val = super().get("vcl")
+        return None if val is None else str(val)
+
+    @property
+    def sql_type(self) -> str:
+        return str(super().__getitem__("sql_type"))
+
+    @property
+    def duckdb_type(self) -> str:
+        return str(super().__getitem__("sql_type"))
+
+    def __getitem__(self, key: str) -> Any:
+        if super().__contains__(key):
+            return super().__getitem__(key)
+        if key == "name":
+            return super().__getitem__("id")
+        if key == "vcl_format":
+            return self.vcl_format
+        if key == "duckdb_type":
+            return super().__getitem__("sql_type")
+        raise KeyError(key)
+
+
+class _CatalogList(list[dict[str, Any]]):
+    """List of catalog entries that also supports string field-ID membership and key lookup."""
+
+    def __contains__(self, item: object) -> bool:
+        if isinstance(item, str):
+            return any(entry["id"] == item for entry in self)
+        return super().__contains__(item)
+
+    def __getitem__(self, index: Any) -> Any:
+        if isinstance(index, str):
+            for entry in self:
+                if entry["id"] == index:
+                    return entry
+            raise KeyError(index)
+        return super().__getitem__(index)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        for entry in self:
+            if entry["id"] == key:
+                return entry
+        return default
+
+
 # fmt: off
 
 
 def _f(
     id: str, group: str | None, label: str, description: str, vcl: str | None,
-    duckdb_type: str = "VARCHAR", typical_bytes: int = 0, required_by: list[str] | None = None, *,
+    sql_type: str = "VARCHAR", typical_bytes: int = 0, required_by: list[str] | None = None, *,
     formatter: str | None = None, precision: int | None = None, unit: str | None = None,
     note: str | None = None, individually_toggleable: bool | None = None,
     pii: bool | None = None, default_off: bool | None = None,
-) -> dict[str, Any]:
-    d: dict[str, Any] = {"id": id, "group": group, "label": label, "description": description}
+    vcl_format: str | None = None,
+) -> _CatalogEntry:
+    d = _CatalogEntry({"id": id, "group": group, "label": label, "description": description})
     for k, v in (("formatter", formatter), ("precision", precision), ("unit", unit), ("note", note)):
         if v is not None:
             d[k] = v
-    d.update({"vcl": vcl, "duckdb_type": duckdb_type, "typical_bytes": typical_bytes})
+    d.update({"vcl": vcl, "sql_type": sql_type, "typical_bytes": typical_bytes})
     for k, v in (("individually_toggleable", individually_toggleable), ("pii", pii), ("default_off", default_off)):
         if v is not None:
             d[k] = v
     d["required_by"] = list(required_by) if required_by is not None else []
+    if vcl_format is not None:
+        d._vcl_format_override = vcl_format
     return d
 
 
-def _m(id: str, label: str, description: str, formatter: str, duckdb_type: str = "DOUBLE", unit: str | None = None) -> dict[str, Any]:
-    return _f(id, "METRICS", label, description, None, duckdb_type, 0, formatter=formatter, unit=unit)
+def _m(id: str, label: str, description: str, formatter: str, sql_type: str = "DOUBLE", unit: str | None = None) -> _CatalogEntry:
+    return _f(id, "METRICS", label, description, None, sql_type, 0, formatter=formatter, unit=unit)
 
 
-def _v(id: str, label: str, description: str) -> dict[str, Any]:
+def _v(id: str, label: str, description: str) -> _CatalogEntry:
     return _f(id, "VIRTUAL", label, description, None, "VARCHAR", 0)
 
 
@@ -77,8 +145,9 @@ def _g(label: str, description: str, *, locked: bool = False, requires: str | No
     return d
 
 
-LOG_FIELD_CATALOG: list[dict[str, Any]] = [
+LOG_FIELD_CATALOG: list[dict[str, Any]] = _CatalogList([
     _f('timestamp', None, 'Timestamp', 'UTC timestamp of the request start time (ISO 8601 with timezone).', '"timestamp":"%{strftime(\\{"%Y-%m-%dT%H:%M:%S%z"\\},time.start)}V"', 'TIMESTAMP', 40),
+    _f('ts_ms', None, 'Timestamp (ms)', 'Request start time in milliseconds since the Unix epoch. Routes rows into windows and orders window files.', '"ts_ms":%{time.start.msec}V', 'TIMESTAMP', 22),
     _f('ip', None, 'Client IP', 'Client IP address. Captured at the real edge via x-fos-edge-data header; falls back to client.ip for requests answered before capture ran (e.g. redirects).', '"ip":"%{json.escape(if(req.http.x-fos-edge-data:ip != "", req.http.x-fos-edge-data:ip, if(req.http.Fastly-Client-IP != "", req.http.Fastly-Client-IP, client.ip)))}V"', 'VARCHAR', 22, ['low_and_slow', 'credential_enumeration', 'content_discovery', 'botnet_grouping']),
     _f('status', None, 'Response Status', 'HTTP response status code (e.g. 200, 404, 503).', '"status":%{if(resp.status > 0, "" + resp.status, "null")}V', 'USMALLINT', 17, ['error_spikes', 'city_error_spikes', 'credential_enumeration', 'content_discovery', 'waf_signal_spikes', 'image_optimization_opportunities'], formatter='status'),
     _f('elapsed', None, 'Elapsed Time (µs)', 'Total request processing time in microseconds.', '"elapsed":%{if(time.elapsed.usec != "", time.elapsed.usec, "null")}V', 'UBIGINT', 18, ['latency_regression', 'city_latency_regressions', 'network_asn_health', 'tail_latency', 'region_latency'], formatter='number', unit='µs'),
@@ -129,11 +198,11 @@ LOG_FIELD_CATALOG: list[dict[str, Any]] = [
     _f('cookie_session', 'H', 'Session Cookie (hashed)', "SHA-256 hash of the client's session cookie — the FIRST present among a common framework allowlist (sessionid, PHPSESSID, JSESSIONID, ASP.NET_SessionId, connect.sid, session, sid). Hashed AT THE EDGE via digest.hash_sha256, so the raw cookie value is never logged or forwarded past Fastly. Empty when no session cookie is present. PRIVACY: this is a stable per-session client identifier — it MUST be masked for analysts exactly like the client IP (see mask_ips policy).", '"cookie_session":"%{json.escape(req.http.x-fos-edge-data:cookie_session)}V"', 'VARCHAR', 40, ['session_harvesting'], individually_toggleable=True, pii=True, default_off=True),
     _f('p_type', 'I', 'Proxy Type', 'Anonymizing proxy type: VPN, Tor, DCH (data center), etc.', '"p_type":"%{json.escape(if(req.http.x-fos-edge-data:p_type != "", req.http.x-fos-edge-data:p_type, if(client.geo.proxy_type == "?", "", client.geo.proxy_type)))}V"', 'VARCHAR', 10, ['asn_hosting_shift', 'proxy_surge']),
     _f('p_desc', 'I', 'Proxy Description', 'Anonymizing proxy provider name.', '"p_desc":"%{json.escape(if(req.http.x-fos-edge-data:p_desc != "", req.http.x-fos-edge-data:p_desc, if(client.geo.proxy_description == "?", "", client.geo.proxy_description)))}V"', 'VARCHAR', 10, ['proxy_surge']),
-    _f('waf', 'J', 'WAF Executed', 'Whether NGWAF (Signal Sciences) processed this request.', '"waf":%{if(waf.executed, "1", "0")}V', 'BOOLEAN', 8, ['waf_signal_spikes']),
-    _f('waf_resp', 'J', 'WAF Agent Response', 'NGWAF agent decision code (HTTP status equivalent).', '"waf_resp":%{if(waf.executed, if(req.http.x-sigsci-agentresponse ~ "^[0-9]+$", req.http.x-sigsci-agentresponse, "null"), "null")}V', 'USMALLINT', 16, ['waf_signal_spikes'], formatter='status'),
-    _f('waf_ms', 'J', 'WAF Latency (ms)', 'Milliseconds the NGWAF inspection added to the request.', '"waf_ms":%{if(waf.executed, if(req.http.x-sigsci-decision-ms ~ "^[0-9]+$", req.http.x-sigsci-decision-ms, "null"), "null")}V', 'UINTEGER', 13, formatter='number', unit='ms'),
-    _f('waf_sig', 'J', 'WAF Signal Tags', 'NGWAF signal tags (e.g. SQLI, XSS, CMDEXE).', '"waf_sig":"%{if(waf.executed, if(req.http.x-sigsci-tags != "", json.escape(req.http.x-sigsci-tags), ""), "")}V"', 'VARCHAR', 13, ['waf_signal_spikes']),
-    _f('waf_req_id', 'J', 'WAF Request ID', 'NGWAF request correlation ID for cross-referencing with Signal Sciences.', '"waf_req_id":"%{if(waf.executed, if(req.http.x-fastly-ngwaf:requestid != "", json.escape(req.http.x-fastly-ngwaf:requestid), if(req.http.x-sigsci-requestid != "", json.escape(req.http.x-sigsci-requestid), "")), "")}V"', 'VARCHAR', 16),
+    _f('waf', 'J', 'WAF Executed', 'Whether NGWAF inspected this request (waf.inspection.verdict is set). NGWAF runs only on cache misses and passes, so hits are false.', '"waf":%{if(waf.inspection.verdict != "", "1", "0")}V', 'BOOLEAN', 8, ['waf_signal_spikes']),
+    _f('waf_resp', 'J', 'WAF Agent Response', 'NGWAF decision code: waf.inspection.agentresponse when set, else the response status for a block verdict or 200 for allow (the edge integration leaves agentresponse 0); null when uninspected.', '"waf_resp":%{if(waf.inspection.verdict != "" && waf.inspection.agentresponse > 0, std.itoa(waf.inspection.agentresponse), if(waf.inspection.verdict == "block", std.itoa(resp.status), if(waf.inspection.verdict == "allow", "200", "null")))}V', 'USMALLINT', 16, ['waf_signal_spikes'], formatter='status'),
+    _f('waf_ms', 'J', 'WAF Latency (ms)', 'NGWAF inspection decision time in ms (waf.inspection.decision_ms); null when uninspected.', '"waf_ms":%{if(waf.inspection.verdict != "" && waf.inspection.decision_ms >= 0, std.itoa(waf.inspection.decision_ms), "null")}V', 'UINTEGER', 13, formatter='number', unit='ms'),
+    _f('waf_sig', 'J', 'WAF Signal Tags', 'NGWAF signal tags from waf.inspection.tags (e.g. SQLI, XSS, TRAVERSAL).', '"waf_sig":"%{json.escape(waf.inspection.tags)}V"', 'VARCHAR', 13, ['waf_signal_spikes']),
+    _f('waf_req_id', 'J', 'WAF Request ID', 'NGWAF request correlation ID header, when the edge integration sets one.', '"waf_req_id":"%{if(req.http.x-fastly-ngwaf:requestid != "", json.escape(req.http.x-fastly-ngwaf:requestid), if(req.http.x-sigsci-requestid != "", json.escape(req.http.x-sigsci-requestid), ""))}V"', 'VARCHAR', 16, vcl_format='"waf_req_id":"%{if(waf.inspection.request_id != "", json.escape(waf.inspection.request_id), if(req.http.x-fastly-ngwaf:requestid != "", json.escape(req.http.x-fastly-ngwaf:requestid), if(req.http.x-sigsci-requestid != "", json.escape(req.http.x-sigsci-requestid), "")))}V"'),
     _f('q_rtt', 'K', 'QUIC Smoothed RTT (µs)', 'QUIC smoothed RTT in microseconds. Null for TCP connections.', '"q_rtt":%{if(req.http.x-fos-edge-data:q_rtt ~ "^[0-9]+$", req.http.x-fos-edge-data:q_rtt, if(transport.type == "quic", "" + quic.rtt.smoothed, "null"))}V', 'UINTEGER', 19, formatter='number', unit='µs'),
     _f('q_rtt_var', 'K', 'QUIC RTT Variance (µs)', 'QUIC RTT variance in microseconds. Null for TCP connections.', '"q_rtt_var":%{if(req.http.x-fos-edge-data:q_rtt_var ~ "^[0-9]+$", req.http.x-fos-edge-data:q_rtt_var, if(transport.type == "quic", "" + quic.rtt.variance, "null"))}V', 'UINTEGER', 19, formatter='number', unit='µs'),
     _f('q_lost', 'K', 'QUIC Packets Lost', 'QUIC packets lost counter. Null for TCP connections.', '"q_lost":%{if(req.http.x-fos-edge-data:q_lost ~ "^[0-9]+$", req.http.x-fos-edge-data:q_lost, if(transport.type == "quic", "" + quic.num_packets.lost, "null"))}V', 'UINTEGER', 17, formatter='number'),
@@ -166,7 +235,7 @@ LOG_FIELD_CATALOG: list[dict[str, Any]] = [
     _v("waf_sig_ind", "NGWAF Signals", "Individual NGWAF signals extracted from the waf_sig list."),
     _v('edge_score_reason_ind', 'Score Reasons', "Individual scoring reasons extracted from the comma-separated edge_score_reason field (e.g. 'cookie-missing', 'impossibly-fast', 'robotic-consistency', 'rare-transition'). Lets the dashboard show top-N reason breakdowns and filter by a single reason even when one request triggers multiple."),
     _f('_source_file', 'INTERNAL', 'Source File', 'Original raw log file in Fastly Object Storage.', None, 'VARCHAR', 60),
-]
+])
 
 GROUP_INFO: dict[str | None, dict[str, Any]] = {
     None: _g('Core Delivery', 'Always-on fields required for basic metrics: error rates, latency, hit rates, throughput.', locked=True),
@@ -179,10 +248,10 @@ GROUP_INFO: dict[str | None, dict[str, Any]] = {
     "G": _g('Network Quality — Deep', 'Packet loss, RTT variance/jitter, retransmissions, TCP delivery rate, data segments, and connection type. Requires Network Core.', requires='F'),
     "H": _g('Security: TLS Fingerprinting', 'JA3, JA4, cipher suite fingerprints, and a hashed session-cookie id for botnet grouping, scanner detection, and session-harvesting analysis.'),
     "I": _g("Security: Proxy Detection", "Anonymizing proxy type and provider name (VPN, Tor, DCH)."),
-    "J": _g('WAF / NGWAF', 'Signal Sciences / NGWAF fields. All null if NGWAF is not deployed on this service.', note='All fields are null/empty if NGWAF is not deployed on this service.'),
+    "J": _g('WAF / NGWAF', 'NGWAF fields from the vcl_log-only waf.inspection.* variables. Null/empty if NGWAF is not deployed on this service.', note='All fields are null/empty if NGWAF is not deployed on this service.'),
     "K": _g('QUIC / HTTP3', 'QUIC-specific RTT, variance, packet loss, congestion window, and bandwidth estimate. All null for TCP connections.', note='All fields are null for TCP connections. Only useful if your service has meaningful HTTP/3 traffic.'),
     "L": _g('Origin Metrics', 'Origin/shield fetch timing, bytes, IP, and retries on cache misses and passes. VCL hooks applied automatically. ottfb/ottlb/oconnect_ms/ost/obytes/oip/oretries are null on HITs; rid is always set; prid set only on shield log lines.', note='Enabling this group deploys additional VCL timing snippets to your service automatically.', recommended_with=['C']),
-    "M": _g('Image Optimizer Metrics', 'Per-request IO input/output sizes and formats from Fastly-Io-Transform-Stats. Enables actual compression ratio and format conversion analysis.', note='Enabling this group deploys additional VCL snippets to your service. All fields are null for non-IO requests.', recommended_with=['A']),
+    "M": _g('Image Optimizer Metrics', 'Per-request IO input/output sizes and formats from Fastly-Io-Transform-Stats. Enables actual compression ratio and format conversion analysis.', note='These fields require a dedicated VCL extraction snippet. Values are null for non-IO requests; ordinary field groups only change logging capture.', recommended_with=['A']),
     "METRICS": _g("Aggregate Metrics", "Computed aggregate metrics used for charts and dashboards.", locked=True),
     "VIRTUAL": _g('Virtual Fields', 'Derived or enriched fields that are not present in the raw logs but computed during analysis.', locked=True),
 }
@@ -193,6 +262,13 @@ GROUP_DEPENDENCIES = {g: info["requires"] for g, info in GROUP_INFO.items() if i
 
 # Opt-in field IDs: excluded from resolve_enabled_fields unless explicitly opted in via field_overrides.
 DEFAULT_OFF_FIELD_IDS: frozenset[str] = frozenset(f["id"] for f in LOG_FIELD_CATALOG if f.get("default_off"))
+
+
+def resolve_active_log_field_ids(lf_config: dict) -> list[str]:
+    """Enabled catalog field ids in id order, then the enabled custom field names."""
+    return sorted(resolve_enabled_fields(lf_config)) + [
+        cf["name"] for cf in lf_config.get("custom_fields", []) if cf.get("enabled", True)
+    ]
 
 
 def resolve_enabled_fields(cfg: dict) -> set:
@@ -235,7 +311,7 @@ def estimate_log_line_bytes(log_fields_config: dict) -> int:
     enabled = resolve_enabled_fields(log_fields_config)
     field_bytes = sum(f["typical_bytes"] for f in LOG_FIELD_CATALOG if f["id"] in enabled)
     custom_enabled = [cf for cf in log_fields_config.get("custom_fields", []) if cf.get("enabled", True)]
-    field_bytes += sum(cf.get("bytes_estimate", 0) for cf in custom_enabled)
+    field_bytes += sum(int(cf.get("bytes_estimate") or 0) for cf in custom_enabled)
     return 2 + (len(enabled) + len(custom_enabled)) * 5 + field_bytes
 
 
@@ -286,7 +362,7 @@ def get_catalog_for_api(field_limits: dict[str, int] | None = None) -> list:
             "group": f["group"],
             "label": f["label"],
             "description": f["description"],
-            "duckdb_type": f["duckdb_type"],
+            "sql_type": f["sql_type"],
             "typical_bytes": f["typical_bytes"],
             "required_by": f.get("required_by", []),
             "formatter": f.get("formatter"),
@@ -330,74 +406,263 @@ def get_groups_for_api() -> list:
 
 _BUILTIN_FIELD_NAMES = frozenset(f["id"] for f in LOG_FIELD_CATALOG)
 
+_VCL_CONTROL_CHAR_RE = re.compile(r"[\x00-\x09\x0b\x0c\x0e-\x1f\x7f\x85\u2028\u2029]")
+_VCL_RTIME_BOUNDARY = r"(?<=\dms)|(?<=\d\.ms)|(?<=\d[smhdwy])|(?<=\d\.[smhdwy])"
+_VCL_FN_BOUNDARY = rf"(?:(?<![a-zA-Z0-9_.])(?<![a-zA-Z0-9_]-)|{_VCL_RTIME_BOUNDARY})"
+_VCL_ID_BOUNDARY = rf"(?:(?<![a-zA-Z0-9_])|{_VCL_RTIME_BOUNDARY})"
+_VCL_TABLE_LOOKUP_RE = re.compile(
+    rf"{_VCL_FN_BOUNDARY}(table\s*\.\s*(?:lookup\w*|contains))\b",
+    re.IGNORECASE,
+)
+_VCL_FORBIDDEN_HEADER_COOKIE_FN_RE = re.compile(
+    rf"{_VCL_FN_BOUNDARY}"
+    r"(header\s*\.\s*(?:filter_except|filter|get|set|unset)"
+    r"|setcookie\s*\.\s*[a-zA-Z_]\w*)\b",
+    re.IGNORECASE,
+)
+_FORBIDDEN_VCL_IDENTIFIERS_RE = re.compile(
+    r"("
+    rf"{_VCL_ID_BOUNDARY}(?:fos_credentials|session_scoring_secrets|cdn_auth|auth_fail_rc|auth_fail_pb"
+    r"|flp_fos_credentials|flp_fos_buckets|flp_front_auth|fastly-key|authorization)\b"
+    r"|x-edge-scorer-auth"
+    r"|x-fastly-key"
+    r"|x-flp-"
+    r"|(?:req|bereq|resp|beresp|obj)\.http\.(?:cookie|set-cookie)(?=\b|:)"
+    r")",
+    re.IGNORECASE,
+)
+_FORBIDDEN_VCL_CONDITION_IDENTIFIERS_RE = re.compile(
+    r"("
+    rf"{_VCL_ID_BOUNDARY}(?:fos_credentials|session_scoring_secrets|cdn_auth|auth_fail_rc|auth_fail_pb"
+    r"|flp_fos_credentials|flp_fos_buckets|flp_front_auth|fastly-key|authorization)\b"
+    r"|x-edge-scorer-auth"
+    r"|x-fastly-key"
+    r"|x-flp-"
+    r"|(?:req|bereq|resp|beresp|obj)\.http\.cookie(?=\b|:)"
+    r"|(?:resp|beresp|obj)\.http\.set-cookie(?=\b|:)"
+    r")",
+    re.IGNORECASE,
+)
+_VCL_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
+_VCL_PCT_ESCAPE_ERR = "must not contain percent-encoded hex escapes in VCL string literals"
+_VCL_BS_QUOTE_ERR = 'Backslash-escaped quotes (\\") are not permitted inside VCL string literals'
+_VCL_DEFERRED_QUOTE_ERRS = (_VCL_PCT_ESCAPE_ERR, _VCL_BS_QUOTE_ERR)
+
+
+def check_vcl_quotes_and_parens(expr: str) -> str | None:
+    """Verify balanced Fastly VCL double quotes, balanced parens outside quotes, and no bare backslashes."""
+    in_quotes = False
+    prev_backslash_in_quotes = False
+    has_pct_escape = False
+    has_backslash_quote = False
+    paren_depth = 0
+    for idx, ch in enumerate(expr):
+        if ch == '"':
+            if in_quotes and prev_backslash_in_quotes:
+                has_backslash_quote = True
+            in_quotes = not in_quotes
+            prev_backslash_in_quotes = False
+        elif in_quotes:
+            if ch == "%" and idx + 2 < len(expr):
+                c1, c2 = expr[idx + 1], expr[idx + 2]
+                if (c1 in _VCL_HEX_DIGITS and c2 in _VCL_HEX_DIGITS) or (
+                    c1 in ("u", "U") and (c2 == "{" or c2 in _VCL_HEX_DIGITS)
+                ):
+                    has_pct_escape = True
+            prev_backslash_in_quotes = ch == "\\"
+        else:
+            if ch == "\\":
+                if expr.endswith("\\"):
+                    return "must not end with a trailing backslash"
+                return "must not contain backslashes outside double quotes"
+            if ch == "(":
+                paren_depth += 1
+            elif ch == ")":
+                paren_depth -= 1
+                if paren_depth < 0:
+                    return "contains unbalanced parentheses"
+    if expr.endswith("\\"):
+        return "must not end with a trailing backslash"
+    if in_quotes:
+        return "contains unbalanced double quotes"
+    if paren_depth != 0:
+        return "contains unbalanced parentheses"
+    if has_backslash_quote:
+        return _VCL_BS_QUOTE_ERR
+    if has_pct_escape:
+        return _VCL_PCT_ESCAPE_ERR
+    return None
+
+
+def validate_vcl_log_expression(expr: str, *, field_name: str = "vcl_log_expression") -> list[str]:
+    """Validate a custom-field VCL log expression against syntax breakout and secret exfiltration."""
+    if not isinstance(expr, str) or not expr.strip():
+        return [f"'{field_name}' must not be empty"]
+    errors: list[str] = []
+    if len(expr) > 512:
+        errors.append(f"'{field_name}' must be ≤ 512 characters (got {len(expr)})")
+    if "\n" in expr:
+        errors.append(f"'{field_name}' must not contain raw newlines")
+    if ";" in expr:
+        errors.append(f"'{field_name}' must not contain semicolons (;)")
+    if "//" in expr or "/*" in expr or "*/" in expr or "#" in expr:
+        errors.append(f"'{field_name}' must not contain VCL comments (//, /*, */, or #)")
+    if "\r" in expr or "\x00" in expr or _VCL_CONTROL_CHAR_RE.search(expr):
+        errors.append(f"'{field_name}' must not contain carriage returns, NUL, or control characters")
+    if "${" in expr or "%{" in expr or "}V" in expr or "{" in expr or "}" in expr:
+        errors.append(f"'{field_name}' must not contain braces or template markers ({{, }}, }}V, ${{, %{{)")
+    if "'" in expr:
+        errors.append(f"'{field_name}' must use double quotes, not single quotes")
+    quote_paren_err = check_vcl_quotes_and_parens(expr)
+    if quote_paren_err:
+        errors.append(f"'{field_name}' {quote_paren_err}")
+    if _VCL_TABLE_LOOKUP_RE.search(expr):
+        errors.append(f"'{field_name}' must not call table.lookup(...)")
+    if m := _VCL_FORBIDDEN_HEADER_COOKIE_FN_RE.search(expr):
+        errors.append(f"'{field_name}' must not call '{m.group(1)}(...)'")
+    if m := _FORBIDDEN_VCL_IDENTIFIERS_RE.search(expr):
+        errors.append(f"'{field_name}' must not reference sensitive dictionary or header '{m.group(1)}'")
+    return errors
+
+
+def validate_vcl_custom_condition(condition: str | None, *, field_name: str = "custom_condition") -> str | None:
+    """Validate a VCL boolean condition embedded inside ``if (<condition>)``."""
+    if condition is None:
+        return None
+    if not isinstance(condition, str):
+        return f"'{field_name}' must be a string"
+    if "\n" in condition or "\r" in condition or "\x00" in condition or _VCL_CONTROL_CHAR_RE.search(condition):
+        return f"'{field_name}' must be a single-line VCL boolean expression without control characters"
+    raw = condition.strip()
+    if not raw:
+        return None
+    if len(raw) > 2048:
+        return f"'{field_name}' exceeds maximum length of 2048 characters"
+    if ";" in raw:
+        return f"'{field_name}' must not contain semicolons (;)"
+    if "${" in raw or "%{" in raw or "}V" in raw or "{" in raw or "}" in raw:
+        return f"'{field_name}' must not contain braces or template markers ({{, }}, }}V, ${{, %{{)"
+    if "'" in raw:
+        return f"'{field_name}' must use double quotes, not single quotes"
+    if "//" in raw or "/*" in raw or "*/" in raw or "#" in raw:
+        return f"'{field_name}' must not contain VCL comments (//, /*, */, or #)"
+    quote_paren_err = check_vcl_quotes_and_parens(raw)
+    if quote_paren_err and quote_paren_err not in _VCL_DEFERRED_QUOTE_ERRS:
+        return f"'{field_name}' {quote_paren_err}"
+    if _VCL_TABLE_LOOKUP_RE.search(raw):
+        return f"'{field_name}' must not call table.lookup(...)"
+    if m := _VCL_FORBIDDEN_HEADER_COOKIE_FN_RE.search(raw):
+        return f"'{field_name}' must not call '{m.group(1)}(...)'"
+    if quote_paren_err:
+        return f"'{field_name}' {quote_paren_err}"
+    if m := _FORBIDDEN_VCL_CONDITION_IDENTIFIERS_RE.search(raw):
+        return f"'{field_name}' must not reference sensitive dictionary or header '{m.group(1)}'"
+    return None
+
+
+def _parse_strict_custom_field_int(
+    val: Any, *, field_name: str, min_val: int, max_val: int
+) -> tuple[int | None, str | None]:
+    """Parse an integer custom-field property, rejecting bool/float/non-int."""
+    if isinstance(val, (bool, float)) or not isinstance(val, (int, str)):
+        return None, f"'{field_name}' must be an integer"
+    try:
+        parsed = int(val.strip() if isinstance(val, str) else val)
+    except (TypeError, ValueError):
+        return None, f"'{field_name}' must be an integer"
+    if not (min_val <= parsed <= max_val):
+        return parsed, f"'{field_name}' must be between {min_val} and {max_val}"
+    return parsed, None
+
 
 def validate_custom_field(field: dict, existing_names: list[str]) -> list[str]:
     """Validate a custom field definition dict; returns list of error/WARN strings."""
+    if not isinstance(field, dict):
+        return ["Custom field must be an object"]
     errors: list[str] = []
     name = field.get("name", "")
-    for key in ("name", "label", "vcl_log_expression", "duckdb_type", "value_type", "bytes_estimate"):
+    for key in ("name", "label", "vcl_log_expression", "sql_type", "value_type", "bytes_estimate"):
         if key not in field or field[key] is None:
             errors.append(f"Missing required field: '{key}'")
     if errors:
         return errors
 
-    if not VALID_NAME_RE.fullmatch(name):
+    if not isinstance(name, str):
         errors.append("Field name must be lowercase alphanumeric + underscore, start with a letter, 1–48 chars")
-    if name in _DUCKDB_RESERVED:
-        errors.append(f"'{name}' is a DuckDB/SQL reserved word and cannot be used as a field name")
-    if name in _BUILTIN_FIELD_NAMES:
-        errors.append(f"'{name}' is already a built-in field name")
-    if name in existing_names:
-        errors.append(f"A custom field named '{name}' already exists on this service")
-    if not (1 <= len(field.get("label", "")) <= 80):
+    else:
+        if not VALID_NAME_RE.fullmatch(name):
+            errors.append("Field name must be lowercase alphanumeric + underscore, start with a letter, 1–48 chars")
+        if name in _SQL_RESERVED:
+            errors.append(f"'{name}' is a SQL reserved word and cannot be used as a field name")
+        if name in _BUILTIN_FIELD_NAMES:
+            errors.append(f"'{name}' is already a built-in field name")
+        if _is_system_field(name):
+            errors.append(f"'{name}' is a system-managed field name")
+        if name in existing_names:
+            errors.append(f"A custom field named '{name}' already exists on this service")
+
+    raw_label = field.get("label")
+    if not isinstance(raw_label, str) or not (1 <= len(raw_label) <= 80):
         errors.append("'label' must be 1–80 characters")
-    if len(field.get("description", "")) > 500:
+
+    raw_desc = field.get("description")
+    if raw_desc is None:
+        raw_desc = ""
+    if not isinstance(raw_desc, str):
+        errors.append("'description' must be a string")
+    elif len(raw_desc) > 500:
         errors.append("'description' must not exceed 500 characters")
 
-    expr = field.get("vcl_log_expression", "")
-    if not expr.strip():
-        errors.append("'vcl_log_expression' must not be empty")
-    elif len(expr) > 512:
-        errors.append(f"'vcl_log_expression' must be ≤ 512 characters (got {len(expr)})")
-    elif "\n" in expr:
-        errors.append("'vcl_log_expression' must not contain raw newlines")
+    expr = field.get("vcl_log_expression")
+    if not isinstance(expr, str):
+        errors.append("'vcl_log_expression' must be a non-empty string")
     else:
-        if ";" in expr:
-            errors.append("'vcl_log_expression' must not contain semicolons (;)")
-        if "//" in expr or "/*" in expr or "#" in expr:
-            errors.append("'vcl_log_expression' must not contain VCL comments (//, /*, or #)")
+        errors.extend(validate_vcl_log_expression(expr))
 
-    valid_types = set(_DUCKDB_TYPE_VALUE_TYPE_COMPAT)
-    duckdb_type = field.get("duckdb_type", "")
-    if duckdb_type not in valid_types:
-        errors.append(f"'duckdb_type' must be one of: {', '.join(sorted(valid_types))}")
+    valid_types = set(_SQL_TYPE_VALUE_TYPE_COMPAT)
+    sql_type = field.get("sql_type")
+    if not isinstance(sql_type, str) or sql_type not in valid_types:
+        errors.append(f"'sql_type' must be one of: {', '.join(sorted(valid_types))}")
 
     all_value_types = {"string", "numeric", "boolean", "ip", "url"}
-    value_type = field.get("value_type", "")
-    if value_type not in all_value_types:
+    value_type = field.get("value_type")
+    if not isinstance(value_type, str) or value_type not in all_value_types:
         errors.append(f"'value_type' must be one of: {', '.join(sorted(all_value_types))}")
 
-    if duckdb_type in _DUCKDB_TYPE_VALUE_TYPE_COMPAT and value_type in all_value_types:
-        if value_type not in _DUCKDB_TYPE_VALUE_TYPE_COMPAT[duckdb_type]:
-            compat = ", ".join(sorted(_DUCKDB_TYPE_VALUE_TYPE_COMPAT[duckdb_type]))
+    if (
+        isinstance(sql_type, str)
+        and isinstance(value_type, str)
+        and sql_type in _SQL_TYPE_VALUE_TYPE_COMPAT
+        and value_type in all_value_types
+    ):
+        if value_type not in _SQL_TYPE_VALUE_TYPE_COMPAT[sql_type]:
+            compat = ", ".join(sorted(_SQL_TYPE_VALUE_TYPE_COMPAT[sql_type]))
             errors.append(
-                f"'value_type' '{value_type}' is not compatible with 'duckdb_type' '{duckdb_type}'. "
+                f"'value_type' '{value_type}' is not compatible with 'sql_type' '{sql_type}'. "
                 f"Compatible value_types: {compat}"
             )
 
-    bytes_est = field.get("bytes_estimate", 0)
-    try:
-        bytes_est = int(bytes_est)
-        if not (1 <= bytes_est <= 1024):
-            errors.append("'bytes_estimate' must be between 1 and 1024")
-    except (TypeError, ValueError):
-        errors.append("'bytes_estimate' must be an integer")
+    bytes_est, bytes_err = _parse_strict_custom_field_int(
+        field.get("bytes_estimate"), field_name="bytes_estimate", min_val=1, max_val=1024
+    )
+    if bytes_err:
+        errors.append(bytes_err)
 
-    stage = field.get("collection_stage", "edge")
-    if stage not in ("edge", "origin"):
+    if "byte_limit" in field and field["byte_limit"] is not None:
+        _, bl_err = _parse_strict_custom_field_int(
+            field["byte_limit"], field_name="byte_limit", min_val=1, max_val=FASTLY_LOG_LINE_DELIVER_MAX
+        )
+        if bl_err:
+            errors.append(bl_err)
+
+    raw_stage = field.get("collection_stage", "edge")
+    stage = "edge" if raw_stage is None else raw_stage
+    if not isinstance(stage, str) or stage not in ("edge", "origin"):
         errors.append(f"'collection_stage' must be 'edge' or 'origin' (got '{stage}')")
 
-    if isinstance(bytes_est, int) and isinstance(name, str):
+    if bytes_est is not None and isinstance(name, str):
         min_bytes = len(name) + 5
         if 1 <= bytes_est < min_bytes:
             errors.append(
@@ -407,6 +672,186 @@ def validate_custom_field(field: dict, existing_names: list[str]) -> list[str]:
     return errors
 
 
+_CANONICAL_SYSTEM_FIELD_SPECS: Mapping[str, tuple[str, str]] = MappingProxyType(
+    {
+        "service_id": ("beacon", "req.service_id"),
+        "rum_cid": ("beacon", "req.http.x-fos-edge-data:rum_cid"),
+        "fastly_req_id": ("beacon", "req.http.x-fos-edge-data:fastly_req_id"),
+        "rum_metric_name": ("beacon", "req.http.x-fos-edge-data:rum_metric_name"),
+        "rum_metric_value": ("beacon", "req.http.x-fos-edge-data:rum_metric_value"),
+        "rum_metric_rating": ("beacon", "req.http.x-fos-edge-data:rum_metric_rating"),
+        "rum_error_message": ("beacon", "req.http.x-fos-edge-data:rum_error_message"),
+        "rum_error_stack": ("beacon", "req.http.x-fos-edge-data:rum_error_stack"),
+        "rum_trace_id": ("beacon", "req.http.x-fos-edge-data:rum_trace_id"),
+        "rum_span_id": ("beacon", "req.http.x-fos-edge-data:rum_span_id"),
+        "rum_pathname": ("beacon", "req.http.x-fos-edge-data:rum_pathname"),
+        "rum_connection_speed": ("beacon", "req.http.x-fos-edge-data:rum_connection_speed"),
+        "rum_dns_ms": ("beacon", "req.http.x-fos-edge-data:rum_dns_ms"),
+        "rum_tcp_ms": ("beacon", "req.http.x-fos-edge-data:rum_tcp_ms"),
+        "rum_tls_ms": ("beacon", "req.http.x-fos-edge-data:rum_tls_ms"),
+        "rum_ttfb_ms": ("beacon", "req.http.x-fos-edge-data:rum_ttfb_ms"),
+        "rum_raw_query": ("beacon", "req.http.x-fos-edge-data:rum_raw_query"),
+        "rum_body": ("beacon", "req.http.x-fos-edge-data:rum_body"),
+        "edge_score": ("deliver", "req.http.x-edge-score:score"),
+        "edge_score_l1": ("deliver", "req.http.x-edge-score:l1"),
+        "edge_score_l2": ("deliver", "req.http.x-edge-score:l2"),
+        "edge_cookie_compliance": ("deliver", "req.http.x-edge-score:compliance"),
+        "edge_score_reason": ("deliver", "req.http.x-edge-score:reason"),
+        "edge_sid": ("deliver", "req.http.x-edge-score:sid"),
+        "edge_score_rtt_us": ("deliver", "req.http.x-edge-score:rtt"),
+        "edge_score_exec_us": ("deliver", "req.http.x-edge-score:exec"),
+        "edge_matrix_version": ("deliver", "req.http.x-edge-score:matrix"),
+        "cmcd_sid": ("edge", "req.http.x-cmcd:sid"),
+        "cmcd_cid": ("edge", "req.http.x-cmcd:cid"),
+        "cmcd_br": ("edge", "req.http.x-cmcd:br"),
+        "cmcd_bl": ("edge", "req.http.x-cmcd:bl"),
+        "cmcd_bs": ("edge", "req.http.x-cmcd:bs"),
+        "cmcd_d": ("edge", "req.http.x-cmcd:d"),
+        "cmcd_dl": ("edge", "req.http.x-cmcd:dl"),
+        "cmcd_mtp": ("edge", "req.http.x-cmcd:mtp"),
+        "cmcd_ot": ("edge", "req.http.x-cmcd:ot"),
+        "cmcd_sf": ("edge", "req.http.x-cmcd:sf"),
+        "cmcd_st": ("edge", "req.http.x-cmcd:st"),
+        "cmcd_su": ("edge", "req.http.x-cmcd:su"),
+        "cmcd_tb": ("edge", "req.http.x-cmcd:tb"),
+        "cmcd_rtp": ("edge", "req.http.x-cmcd:rtp"),
+    }
+)
+
+
+def validate_custom_field_entry(
+    field: dict[str, Any],
+    existing_names: list[str],
+    *,
+    system_names: set[str] | frozenset[str] = frozenset(),
+) -> list[str]:
+    """Validate a full or partial custom-field entry in a ``log_fields`` payload."""
+    if not isinstance(field, dict):
+        return ["Custom field entry must be an object"]
+    name = field.get("name")
+    if not isinstance(name, str) or not name:
+        return ["Missing required field: 'name'"]
+
+    if name in system_names:
+        errs: list[str] = []
+        if name in existing_names:
+            errs.append(f"A custom field named '{name}' already exists on this service")
+        canonical_spec = _CANONICAL_SYSTEM_FIELD_SPECS.get(name)
+        raw_stage = field.get("collection_stage")
+        if raw_stage is not None:
+            if not isinstance(raw_stage, str) or raw_stage not in ("edge", "origin", "deliver", "beacon"):
+                errs.append(f"'collection_stage' must be a valid stage (got '{raw_stage}')")
+            elif canonical_spec is not None and raw_stage != canonical_spec[0]:
+                errs.append(
+                    f"System custom field '{name}' must keep canonical collection_stage "
+                    f"{canonical_spec[0]!r} (got {raw_stage!r})"
+                )
+        if "vcl_log_expression" in field:
+            raw_expr = field["vcl_log_expression"]
+            if not isinstance(raw_expr, str):
+                errs.append("'vcl_log_expression' must be a non-empty string")
+            else:
+                errs.extend(validate_vcl_log_expression(raw_expr))
+                if canonical_spec is not None and raw_expr != canonical_spec[1]:
+                    errs.append(f"System custom field '{name}' must keep its canonical vcl_log_expression")
+        for opt_str_key in ("label", "description", "sql_type", "value_type"):
+            if field.get(opt_str_key) is not None and not isinstance(field[opt_str_key], str):
+                errs.append(f"'{opt_str_key}' must be a string")
+        if field.get("bytes_estimate") is not None:
+            _, sys_be_err = _parse_strict_custom_field_int(
+                field["bytes_estimate"], field_name="bytes_estimate", min_val=1, max_val=1024
+            )
+            if sys_be_err:
+                errs.append(sys_be_err)
+        if field.get("byte_limit") is not None:
+            _, sys_bl_err = _parse_strict_custom_field_int(
+                field["byte_limit"],
+                field_name="byte_limit",
+                min_val=1,
+                max_val=FASTLY_LOG_LINE_DELIVER_MAX,
+            )
+            if sys_bl_err:
+                errs.append(sys_bl_err)
+        return errs
+
+    full_keys = ("name", "label", "vcl_log_expression", "sql_type", "value_type", "bytes_estimate")
+    if all(k in field and field[k] is not None for k in full_keys):
+        return [err_txt for err_txt in validate_custom_field(field, existing_names) if not err_txt.startswith("WARN:")]
+
+    errs = []
+    if not VALID_NAME_RE.fullmatch(name):
+        errs.append("Field name must be lowercase alphanumeric + underscore, start with a letter, 1–48 chars")
+    if name in _SQL_RESERVED:
+        errs.append(f"'{name}' is a SQL reserved word and cannot be used as a field name")
+    if name in _BUILTIN_FIELD_NAMES:
+        errs.append(f"'{name}' is already a built-in field name")
+    if _is_system_field(name):
+        errs.append(f"'{name}' is a system-managed field name")
+    if name in existing_names:
+        errs.append(f"A custom field named '{name}' already exists on this service")
+
+    raw_stage = field.get("collection_stage", "edge")
+    stage = "edge" if raw_stage is None else raw_stage
+    if not isinstance(stage, str) or stage not in ("edge", "origin"):
+        errs.append(f"'collection_stage' must be 'edge' or 'origin' (got '{stage}')")
+
+    if "label" in field and field["label"] is not None:
+        if not isinstance(field["label"], str) or not (1 <= len(field["label"]) <= 80):
+            errs.append("'label' must be 1–80 characters")
+
+    if "description" in field and field["description"] is not None:
+        if not isinstance(field["description"], str):
+            errs.append("'description' must be a string")
+        elif len(field["description"]) > 500:
+            errs.append("'description' must not exceed 500 characters")
+
+    valid_types = set(_SQL_TYPE_VALUE_TYPE_COMPAT)
+    has_valid_sql_type = False
+    if "sql_type" in field and field["sql_type"] is not None:
+        if not isinstance(field["sql_type"], str) or field["sql_type"] not in valid_types:
+            errs.append(f"'sql_type' must be one of: {', '.join(sorted(valid_types))}")
+        else:
+            has_valid_sql_type = True
+
+    all_value_types = {"string", "numeric", "boolean", "ip", "url"}
+    has_valid_value_type = False
+    if "value_type" in field and field["value_type"] is not None:
+        if not isinstance(field["value_type"], str) or field["value_type"] not in all_value_types:
+            errs.append(f"'value_type' must be one of: {', '.join(sorted(all_value_types))}")
+        else:
+            has_valid_value_type = True
+
+    if has_valid_sql_type and has_valid_value_type:
+        if field["value_type"] not in _SQL_TYPE_VALUE_TYPE_COMPAT[field["sql_type"]]:
+            compat = ", ".join(sorted(_SQL_TYPE_VALUE_TYPE_COMPAT[field["sql_type"]]))
+            errs.append(
+                f"'value_type' '{field['value_type']}' is not compatible with 'sql_type' '{field['sql_type']}'. "
+                f"Compatible value_types: {compat}"
+            )
+
+    if "bytes_estimate" in field and field["bytes_estimate"] is not None:
+        _, be_err = _parse_strict_custom_field_int(
+            field["bytes_estimate"], field_name="bytes_estimate", min_val=1, max_val=1024
+        )
+        if be_err:
+            errs.append(be_err)
+
+    if "byte_limit" in field and field["byte_limit"] is not None:
+        _, bl_err = _parse_strict_custom_field_int(
+            field["byte_limit"], field_name="byte_limit", min_val=1, max_val=FASTLY_LOG_LINE_DELIVER_MAX
+        )
+        if bl_err:
+            errs.append(bl_err)
+
+    if "vcl_log_expression" in field:
+        raw_expr = field["vcl_log_expression"]
+        if not isinstance(raw_expr, str):
+            errs.append("'vcl_log_expression' must be a non-empty string")
+        else:
+            errs.extend(validate_vcl_log_expression(raw_expr))
+    return errs
+
+
 def get_custom_fields_catalog_entries(log_fields_config: dict) -> list[dict]:
     """Return custom fields in the same shape as built-in catalog entries."""
     return [
@@ -414,8 +859,8 @@ def get_custom_fields_catalog_entries(log_fields_config: dict) -> list[dict]:
             "id": cf["name"],
             "label": cf["label"],
             "group": "custom",
-            "duckdb_type": cf.get("duckdb_type", "VARCHAR"),
-            "description": cf.get("description", ""),
+            "sql_type": cf.get("sql_type", "VARCHAR"),
+            "description": "" if cf.get("description") is None else cf.get("description", ""),
             "show_in_dashboard": cf.get("show_in_dashboard", False),
             "show_in_logs": cf.get("show_in_logs", True),
             "filterable": cf.get("filterable", True),
@@ -423,20 +868,31 @@ def get_custom_fields_catalog_entries(log_fields_config: dict) -> list[dict]:
             "is_custom": True,
         }
         for cf in log_fields_config.get("custom_fields", [])
-        if cf.get("enabled", True)
+        if isinstance(cf, dict) and cf.get("enabled", True)
     ]
 
 
 _DEFAULT_LF_CONFIG: dict = {"schema_version": 2, "custom_fields": []}
+_VALUE_TYPE_TO_SQL_TYPE: dict[str, str] = {
+    "integer": "BIGINT",
+    "numeric": "BIGINT",
+    "float": "DOUBLE",
+    "number": "DOUBLE",
+    "boolean": "BOOLEAN",
+}
 
 
 def get_lf_config(cfg: dict) -> dict:
     """Return the log_fields config from a service config dict, with a safe default."""
-    return cfg.get("log_fields") or _DEFAULT_LF_CONFIG.copy()
+    lf = cfg.get("log_fields") or _DEFAULT_LF_CONFIG.copy()
+    for cf in lf.get("custom_fields", []):
+        if isinstance(cf, dict) and "sql_type" not in cf:
+            cf["sql_type"] = _VALUE_TYPE_TO_SQL_TYPE.get(str(cf.get("value_type", "")).lower(), "VARCHAR")
+    return lf
 
 
-class DuckType(StrEnum):
-    """DuckDB column types in use across the field catalog."""
+class SqlType(StrEnum):
+    """Logical SQL column types in use across the field catalog."""
 
     TIMESTAMP = "TIMESTAMP"
     VARCHAR = "VARCHAR"
@@ -477,6 +933,13 @@ class Group(StrEnum):
         return cls.CORE if raw is None else cls(raw)
 
 
+import sys as _sys
+import types as _types
+
+if __name__ not in _sys.modules:
+    _sys.modules[__name__] = _types.ModuleType(__name__)
+
+
 @dataclass(frozen=True, slots=True)
 class LogField:
     """One row of the field catalog (frozen + slotted typed read view)."""
@@ -484,7 +947,7 @@ class LogField:
     code: str
     label: str
     group: Group
-    duck_type: DuckType
+    sql_type: SqlType
     description: str = ""
     vcl: str | None = None
     typical_bytes: int = 0
@@ -536,7 +999,7 @@ def _field_from_dict(d: Mapping[str, Any]) -> LogField:
         code=code,
         label=str(d.get("label", code)),
         group=Group.from_legacy(raw_group if raw_group is None else str(raw_group)),
-        duck_type=DuckType(str(d["duckdb_type"])),
+        sql_type=SqlType(str(d["sql_type"])),
         description=str(d.get("description", "")),
         vcl=vcl,
         typical_bytes=int(d.get("typical_bytes", 0) or 0),
@@ -585,11 +1048,15 @@ def derived() -> tuple[LogField, ...]:
 
 
 def _is_system_field(field_name: str) -> bool:
-    return field_name.startswith("cmcd_") or field_name.startswith("edge_")
+    if not isinstance(field_name, str):
+        return False
+    return (
+        field_name in _CANONICAL_SYSTEM_FIELD_SPECS or field_name.startswith("cmcd_") or field_name.startswith("edge_")
+    )
 
 
 def _filter_user_custom_fields(custom_fields: list[dict]) -> list[dict]:
-    return [f for f in custom_fields if not _is_system_field(f.get("name", ""))]
+    return [f for f in custom_fields if isinstance(f, dict) and not _is_system_field(f.get("name", ""))]
 
 
 # ── Encode tables (human-readable → single-char code) ─────────────────────────
@@ -639,14 +1106,3 @@ def vcl_encode_chain(vcl_var: str, encode: dict[str, str]) -> str:
         expr = f'if({vcl_var} == "{value}", "{code}", {expr})'
     expr = f'if({vcl_var} == "?", "", {expr})'
     return expr
-
-
-def duckdb_decode_case(col: str, encode: dict[str, str]) -> str:
-    """Return a SQL CASE expression that maps single-char codes back to full values."""
-    decode = {code: value for value, code in encode.items()}
-    clauses = []
-    for code, value in decode.items():
-        clauses.append(f"WHEN \"{col}\" = '{code}' THEN '{value}'")
-    for value in encode:
-        clauses.append(f"WHEN \"{col}\" = '{value}' THEN '{value}'")
-    return f'CASE {" ".join(clauses)} ELSE "{col}" END'

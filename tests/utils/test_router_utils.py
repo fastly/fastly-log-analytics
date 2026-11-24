@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sqlite3
 import sys
 import threading
 import time
@@ -14,7 +15,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import duckdb
 import httpx
 import pytest
 from fastapi import HTTPException
@@ -24,19 +24,15 @@ import backend.core.realtime as poller_mod
 import backend.utils.telemetry as vp
 from backend import config as config_mod
 from backend.config import service_id_from_source
-from backend.core import duckdb as core_duckdb
 from backend.core.retry import retry_call
 from backend.core.sql_validator import (
     _ALLOWED_TABLE_FUNCTIONS,
+    _TABLE_FUNCTIONS,
     MAX_INPUT_BYTES,
     SQLValidationError,
-    apply_user_query_limits,
     escape_sql_literal,
     validate_user_sql,
 )
-from backend.core.storage import execute_with_stale_view_retry, is_stale_view_error
-from backend.core.storage._core import configure_duckdb_s3
-from backend.repositories._base import QueryRunner
 from backend.utils import router_utils
 from backend.utils.auth import analyst_allowed_services, mask_ips_for, require_owned_row
 from backend.utils.http import make_client
@@ -56,7 +52,7 @@ def _isolate_module_globals():
     """``PUBLISH_STATS``, the rate-limit clock and the cached sync client are
     all module-global — without a reset, assertions here would be cumulative
     and order-dependent (the same test-isolation trap as
-    ``_lock_retry_count`` in tests/core/test_duckdb_concurrency.py)."""
+    ``_lock_retry_count`` in tests/core/test_fos_client.py)."""
     saved_stats = dict(vp.PUBLISH_STATS)
     saved_client = vp._sync_redis
     for k in vp.PUBLISH_STATS:
@@ -224,6 +220,84 @@ def test_query_errors_maps_unknown_exception_to_configured_status_without_trace(
     assert "trace" not in (exc.value.detail or {}), (
         "stack-trace leakage regression — query_errors must not put a 'trace' key in the response detail (security)"
     )
+
+
+class OutOfMemoryException(RuntimeError):
+    pass
+
+
+@pytest.mark.parametrize("is_async", [False, True])
+def test_query_errors_maps_out_of_memory_to_retryable_503_without_leaking_internals(caplog, is_async):
+    """A heavy scan that exhausts memory or its temp-spill cap used to surface as an opaque 500
+    ``unhandled_error``. It must be a 503 with a stable code and actionable guidance, and must not echo the
+    engine message (which carries server paths)."""
+    oom = OutOfMemoryException(
+        "Out of Memory Error: failed to offload data block of size 96.0 KiB (9.3 GiB/9.3 GiB used). /app/data/.tmp/x.tmp"
+    )
+
+    @router_utils.query_errors(status_code=500)
+    def sync_handler():
+        raise oom
+
+    @router_utils.query_errors(status_code=500)
+    async def async_handler():
+        raise oom
+
+    with caplog.at_level(logging.ERROR), pytest.raises(HTTPException) as exc:
+        if is_async:
+            asyncio.run(async_handler())
+        else:
+            sync_handler()
+    assert exc.value.status_code == 503
+    assert exc.value.detail["error"] == "query_resource_limit"
+    assert "time range" in exc.value.detail["message"]
+    assert "/app/data" not in str(exc.value.detail) and "GiB" not in str(exc.value.detail)
+    assert exc.value.detail.get("error_id"), "the failure must stay correlatable with the server-side log"
+    assert any("query_resource_limit" in r.getMessage() for r in caplog.records)
+
+
+def test_query_errors_maps_a_wrapped_out_of_memory_by_walking_the_cause_chain():
+    """The exact-window path re-raises any read failure as ``HistoricalCoverageUnavailable`` (a RuntimeError) ``from``
+    the engine error, so the memory failure is only reachable through ``__cause__``. Under load that surfaced as an
+    opaque 500 even after plain OOMs were mapped."""
+
+    class _Wrapper(RuntimeError):
+        pass
+
+    @router_utils.query_errors(status_code=500)
+    def explicit_cause():
+        try:
+            raise OutOfMemoryException("Out of Memory Error: failed to offload data block (9.3 GiB/9.3 GiB used)")
+        except OutOfMemoryException as exc:
+            raise _Wrapper("exact retained read failed") from exc
+
+    @router_utils.query_errors(status_code=500)
+    def implicit_context():
+        try:
+            raise OutOfMemoryException("Out of Memory Error")
+        except OutOfMemoryException:
+            raise _Wrapper("exact retained read failed")  # noqa: B904 - exercising __context__ on purpose
+
+    for handler in (explicit_cause, implicit_context):
+        with pytest.raises(HTTPException) as exc:
+            handler()
+        assert exc.value.status_code == 503
+        assert exc.value.detail["error"] == "query_resource_limit"
+        assert "GiB" not in str(exc.value.detail) and "exact retained" not in str(exc.value.detail)
+
+
+def test_query_errors_leaves_unrelated_wrapped_errors_as_unhandled():
+    @router_utils.query_errors(status_code=500)
+    def handler():
+        try:
+            raise KeyError("not a resource problem")
+        except KeyError as exc:
+            raise RuntimeError("wrapped") from exc
+
+    with pytest.raises(HTTPException) as exc:
+        handler()
+    assert exc.value.status_code == 500
+    assert exc.value.detail["error"] == "unhandled_error"
 
 
 def test_query_errors_preserves_function_metadata_and_forwards_args():
@@ -650,7 +724,7 @@ def test_channel_is_scoped_by_prefix_and_service():
 
 
 def test_publish_without_bound_loop_uses_sync_client():
-    """The bug this class exists to fix: in a Celery worker ``bind_loop`` is
+    """The bug this class exists to fix: in a worker process ``bind_loop`` is
     never called, and worker-originated cron/sync events were silently
     dropped. No loop bound MUST mean a real sync publish."""
     client = _fake_sync_client()
@@ -883,21 +957,20 @@ async def test_subscribe_reconnects_after_broker_loss():
 
 # ── Merged from tests/utils/test_sql_validator.py ──
 #
-# Acceptance tests for the DuckDB user-SQL validator (security).
+# Acceptance tests for the user-SQL validator (security).
 # The Decision B policy is defined in security_remediation_final_v6.md §2 and
 # implemented in backend/utils/sql_validator.py. This file pins every
 # acceptance criterion called out in that document so a future refactor
 # can't silently weaken the policy.
-# The validator runs against a real DuckDB connection (the same engine the
+# The validator runs against a SQL parser connection (the same engine the
 # production app uses), so test coverage is end-to-end on the parse-tree
 # walker — no mocking the json_serialize_sql output.
 
 
 @pytest.fixture
 def con():
-    """A fresh in-memory DuckDB connection for each test. Sized minimally —
-    these tests never execute the SQL, only parse it."""
-    c = duckdb.connect(":memory:")
+    """A fresh in-memory SQLite connection for each test."""
+    c = sqlite3.connect(":memory:")
     yield c
     c.close()
 
@@ -938,14 +1011,14 @@ def test_valid_user_queries_pass(con, sql):
         ("SELECT * FROM read_blob('/etc/passwd')", "read_blob"),
         ("SELECT getenv('AWS_SECRET_ACCESS_KEY')", "getenv"),
         ("SELECT current_setting('s3_secret_access_key')", "current_setting"),
-        ("SELECT * FROM duckdb_secrets()", "duckdb_secrets"),
+        ("SELECT * FROM current_setting('s3_access_key_id')", "current_setting"),
         ("SELECT * FROM glob('/etc/*')", "glob"),
         ("SELECT * FROM lsdir('/')", "lsdir"),
         ("SELECT * FROM postgres_scan('host=evil', 'public', 't')", "postgres_scan"),
         ("SELECT * FROM sqlite_scan('/tmp/x.db', 't')", "sqlite_scan"),
         ("SELECT * FROM iceberg_scan('/tmp/iceberg')", "iceberg_scan"),
         # Regression for audit finding 014: parquet_scan / parquet_metadata
-        # / parquet_schema / parquet_kv_metadata are DuckDB aliases that
+        # / parquet_schema / parquet_kv_metadata are table-function aliases that
         # bypassed the denylist before. They must be rejected for the same
         # reason as read_parquet (arbitrary path → exfil).
         ("SELECT * FROM parquet_scan('/etc/passwd.parquet')", "parquet_scan"),
@@ -962,22 +1035,22 @@ def test_blocked_functions_rejected(con, sql, blocked_function):
 
 # ── REGRESSION (C1): denylist→allowlist for table functions ─────────────────
 #
-# The pre-fix gate was a function-NAME denylist. DuckDB 1.5.x ships file/
+# The pre-fix gate was a function-NAME denylist. SQL engines ship file/
 # external-resource table functions that were never in that list, so an
 # authenticated analyst could read arbitrary server files and other tenants'
 # databases through /api/query. The fix adds (a) a static name-prefix
 # denylist and (b) a table-function ALLOWLIST derived from the live engine's
-# duckdb_functions(). These tests pin both halves.
+# function catalog. These tests pin both halves.
 
 
 @pytest.mark.parametrize(
     ("sql", "expected_prefix"),
     [
         # The exact five functions the old denylist missed (verified file/
-        # external-resource readers in DuckDB 1.5.3). Each is now caught by
+        # external-resource readers). Each is now caught by
         # the static prefix layer.
         ("SELECT * FROM sniff_csv('/srv/app/config/other.json')", "sniff_"),
-        ("SELECT * FROM read_duckdb('/srv/app/data/metadata.duckdb')", "read_"),
+        ("SELECT * FROM read_sqlite('/srv/app/data/metadata.db')", "read_"),
         ("SELECT * FROM parquet_file_metadata('s3://other-tenant/raw/x.parquet')", "parquet_"),
         ("SELECT * FROM parquet_full_metadata('/tmp/x.parquet')", "parquet_"),
         ("SELECT * FROM parquet_bloom_probe('/tmp/x.parquet', 'c', 1)", "parquet_"),
@@ -1046,12 +1119,10 @@ def test_c1_ordinary_scalar_query_still_passes(con):
 
 
 def test_c1_allowlist_tracks_live_engine_enumeration(con):
-    """Belt check: every table-typed function the live build exposes is either
+    """Belt check: every table-typed function in the table-function catalog is either
     explicitly allowlisted or rejected by validate_user_sql — there is no
-    table function that silently passes. Guards against a future engine build
-    adding a file reader that slips the gate."""
-    rows = con.execute("SELECT DISTINCT function_name FROM duckdb_functions() WHERE function_type='table'").fetchall()
-    names = [r[0] for r in rows]
+    table function that silently passes."""
+    names = sorted(_TABLE_FUNCTIONS)
     assert names, "expected a non-empty table-function enumeration"
     leaked = []
     for name in names:
@@ -1073,10 +1144,10 @@ def test_c1_allowlist_tracks_live_engine_enumeration(con):
 @pytest.mark.parametrize(
     ("sql", "blocked_prefix"),
     [
-        ("SELECT * FROM duckdb_secrets", "duckdb_"),
-        ("SELECT * FROM duckdb_settings", "duckdb_"),
-        ("SELECT * FROM duckdb_variables", "duckdb_"),
-        ("SELECT * FROM duckdb_extensions", "duckdb_"),
+        ("SELECT * FROM pg_shadow", "pg_"),
+        ("SELECT * FROM pg_roles", "pg_"),
+        ("SELECT * FROM pg_user", "pg_"),
+        ("SELECT * FROM pg_authid", "pg_"),
         ("SELECT * FROM pg_settings", "pg_"),
     ],
 )
@@ -1113,8 +1184,8 @@ def test_blocked_schemas_rejected(con, sql, blocked_schema):
     "sql",
     [
         "ATTACH '/etc/passwd' AS x",
-        "INSTALL httpfs",
-        "LOAD httpfs",
+        "OPTIMIZE TABLE logs FINAL",
+        "TRUNCATE TABLE logs",
         "PRAGMA enable_external_access",
         "UPDATE logs SET x = 1",
         "INSERT INTO logs VALUES (1)",
@@ -1193,7 +1264,7 @@ def test_show_ref_statements_rejected(con, sql):
     """SHOW / DESCRIBE / SUMMARIZE all parse as SELECT_NODE with from_table
     of type SHOW_REF — they slip past the statement-type whitelist. Live-
     confirmed that SHOW TABLES leaks foreign service table names from the
-    pooled DuckDB connection; SUMMARIZE and DESCRIBE leak schemas. Reject
+    pooled connection; SUMMARIZE and DESCRIBE leak schemas. Reject
     them on the user-query path."""
     with pytest.raises(SQLValidationError) as exc:
         validate_user_sql(sql, parser_con=con)
@@ -1242,10 +1313,10 @@ def test_allowed_tables_permits_valid_queries(con, sql, allowed):
         # A JOIN against a foreign table must be rejected.
         ("SELECT * FROM logs a JOIN logs_other b ON a.id = b.id", frozenset({"logs"})),
         # Finding 009 (run 80e9f210): a CTE declared in an INNER subquery must not whitelist its name
-        # for a SIBLING outer reference, which DuckDB resolves to the real base table.
+        # for a SIBLING outer reference, which resolves to the real base table.
         ("SELECT * FROM logs_other, (WITH logs_other AS (SELECT 1) SELECT * FROM logs_other) sub", frozenset({"logs"})),
         # Finding 017 (run 80e9f210): a same-named CTE must not excuse a schema/catalog-qualified
-        # reference — ``main.logs_other`` resolves to the base table in DuckDB, not the CTE.
+        # reference — ``main.logs_other`` resolves to the base table, not the CTE.
         ("WITH logs_other AS (SELECT 1) SELECT * FROM main.logs_other", frozenset({"logs"})),
         # CTE expansion only whitelists the declared alias names — not an unrelated foreign table.
         ("WITH x AS (SELECT 1) SELECT * FROM logs_other", frozenset({"logs"})),
@@ -1257,27 +1328,16 @@ def test_allowed_tables_blocks_foreign_references(con, sql, allowed):
     assert exc.value.reason == "catalog_blocklist:foreign_table"
 
 
-# ── apply_user_query_limits ─────────────────────────────────────────────────
-
-
-def test_apply_user_query_limits_sets_memory_limit(con):
-    apply_user_query_limits(con, memory_limit="256MB", timeout_seconds=5)
-    # The setting is visible via current_setting (note: validator would
-    # block this in user SQL — but this is a meta-test on the helper).
-    assert con.execute("SELECT current_setting('memory_limit')").fetchone()[0]
-
-
 # ── escape_sql_literal characterization tests (security) ───────────────
 #
 # These tests target the REAL attack vectors enumerated in the v6
-# remediation doc, not just the happy path. They use a real DuckDB
-# connection to round-trip the escaped value back through the parser, so
-# any future bug in the escape function fails the test instead of silently
-# allowing a known attack shape.
+# remediation doc, not just the happy path. They round-trip the escaped
+# value back through a real SQL parser, so any future bug in the escape
+# function fails the test instead of silently allowing a known attack shape.
 
 
-def _roundtrip(con: duckdb.DuckDBPyConnection, value: str) -> str:
-    """Embed ``value`` in a DuckDB string literal via escape_sql_literal
+def _roundtrip(con: sqlite3.Connection, value: str) -> str:
+    """Embed ``value`` in a SQL string literal via escape_sql_literal
     and confirm the engine returns it unchanged."""
     return con.execute(f"SELECT '{escape_sql_literal(value)}'").fetchone()[0]
 
@@ -1294,7 +1354,7 @@ def _roundtrip(con: duckdb.DuckDBPyConnection, value: str) -> str:
             " CREATE TABLE pwned AS SELECT 1 AS flag;"
             " SELECT ignore(--"
         ),  # exact payload shape from the audit's proof-of-concept
-        r"a\nb\tc\\d",  # backslash is literal in DuckDB standard mode
+        r"a\nb\tc\\d",  # backslash is literal in standard SQL
         "a\tb\nc",  # control chars pass through unchanged
         "café'résumé",  # multibyte UTF-8 with U+0027
         "smart ’quote",  # U+2019 right single quotation mark
@@ -1307,18 +1367,17 @@ def test_escape_roundtrip(con, value):
     assert _roundtrip(con, value) == value
 
 
-def test_escape_null_byte_raises_in_duckdb(con):
-    """DuckDB's parser terminates literals on NUL bytes (treats them as
-    a C-style string terminator). S3 object keys cannot contain NUL
-    (S3 API rejects them), so this is a non-issue for the production
-    callsite — but pinning the behavior here ensures any future fix to
-    the escape helper that tries to handle NUL silently doesn't end up
-    in a passing test.
+def test_escape_null_byte_raises_in_sql_parser(con):
+    """SQL parsers reject literals containing NUL bytes. Pinning the
+    behavior here ensures any future fix to the escape helper that tries
+    to handle NUL silently doesn't end up in a passing test.
     """
     escaped = escape_sql_literal("a\x00b")
     assert "\x00" in escaped
-    with pytest.raises(duckdb.ParserException):
+    with pytest.raises((ValueError, sqlite3.Error)):
         con.execute(f"SELECT '{escaped}'")
+    with pytest.raises(SQLValidationError):
+        validate_user_sql(f"SELECT '{escaped}'")
 
 
 @pytest.mark.parametrize("bad_input", [b"bytes", 42, None])
@@ -1335,7 +1394,7 @@ def test_escape_rejects_non_string(bad_input):
     ("sql", "reason"),
     [
         # Finding 010: Ensure query() table function is blocked.
-        ("SELECT * FROM query('SELECT * FROM duckdb_secrets()')", "function_denylist:query"),
+        ("SELECT * FROM query('SELECT * FROM pg_shadow')", "function_denylist:query"),
         # Finding 029: Ensure table names containing slashes, backslashes, or dots (replacement scans) are rejected.
         ("SELECT * FROM '/etc/passwd'", "catalog_blocklist:table_name_path"),
         ("SELECT * FROM 'data.parquet'", "catalog_blocklist:table_name_path"),
@@ -1364,147 +1423,6 @@ def test_batch_b_hardening_rejections(con, sql, reason):
 )
 def test_service_id_from_source(src, override, prefer_name, expected):
     assert service_id_from_source(src, override, prefer_name=prefer_name) == expected
-
-
-# ── Merged from tests/utils/test_query_retries.py ───────────────────────────
-#
-# From the former self-heal test module:
-# Tests for the storage.execute_with_stale_view_retry helper.
-# The helper exists so background-job code paths (rdns_cache discovery,
-# rollups DESCRIBE) — which open raw DuckDB connections instead of going
-# through QueryRunner — can recover from the same buffer-deletion race
-# that QueryRunner.execute already handles. Production incident
-# 2026-06-10 (~8 hours of 100%-failing rdns discovery runs spamming
-# the log) is the regression these tests pin against.
-
-
-class TestIsStaleViewError:
-    @pytest.mark.parametrize(
-        "msg",
-        [
-            'IO Error: No files found that match the pattern "cache/foo/batch_abc.parquet"',
-            "Catalog Error: Table with name logs_xyz does not exist",
-            "No such file or directory: /tmp/buf.parquet",
-            # DuckLake's brief DETACH window during commit/optimize: a
-            # reader mid-checkout hits this exact CatalogException text.
-            'Catalog Error: Table with name "lake.logs" does not exist because schema "lake" does not exist.',
-        ],
-    )
-    def test_recognises_known_messages(self, msg: str) -> None:
-        assert is_stale_view_error(Exception(msg)) is True
-
-    @pytest.mark.parametrize("msg", ["Syntax error at line 1", "Permission denied", "Connection refused"])
-    def test_returns_false_for_unrelated_errors(self, msg: str) -> None:
-        assert is_stale_view_error(Exception(msg)) is False
-
-    def test_recognises_real_duckdb_exception_from_detached_ducklake_catalog(self) -> None:
-        """Not just a string fixture — a REAL DuckDB error from the exact
-        DuckLake DETACH-then-query race (commit_batch/optimize briefly
-        detach 'lake' on a connection other readers share), confirming the
-        matcher isn't accidentally coupled to a specific error phrasing
-        that a future DuckDB version could change."""
-        con = duckdb.connect()
-        con.execute("ATTACH ':memory:' AS lake")
-        con.execute("CREATE TABLE lake.logs (x INT)")
-        con.execute("DETACH lake")
-        try:
-            con.execute("SELECT * FROM lake.logs")
-        except Exception as e:
-            assert is_stale_view_error(e) is True
-        else:
-            pytest.fail("expected querying a detached catalog to raise")
-
-
-@contextmanager
-def _patch_storage_caches():
-    with (
-        patch("backend.core.storage._core.clear_source_caches") as mock_clear,
-        patch("backend.core.storage._core.update_storage_view") as mock_update,
-    ):
-        yield mock_clear, mock_update
-
-
-class TestExecuteWithStaleViewRetry:
-    def test_passthrough_when_fn_succeeds(self) -> None:
-        """No retry / no cache bust when the first call succeeds."""
-        con, fn = MagicMock(), MagicMock(return_value="ok")
-        with _patch_storage_caches() as (mock_clear, mock_update):
-            assert execute_with_stale_view_retry(con, {"name": "svc-a"}, fn) == "ok"
-        fn.assert_called_once_with(con)
-        mock_clear.assert_not_called()
-        mock_update.assert_not_called()
-
-    def test_retries_once_after_stale_view_error(self) -> None:
-        """First call raises a stale-view error → bust caches + force rebind + retry."""
-        con, src = MagicMock(), {"name": "svc-b"}
-        fn = MagicMock(
-            side_effect=[
-                Exception('IO Error: No files found that match the pattern "buffer/batch_x.parquet"'),
-                ["row1", "row2"],
-            ]
-        )
-        with _patch_storage_caches() as (mock_clear, mock_update):
-            assert execute_with_stale_view_retry(con, src, fn) == ["row1", "row2"]
-        assert fn.call_count == 2 and all(call.args[0] is con for call in fn.call_args_list)
-        mock_clear.assert_called_once_with("svc-b", keep_snapshot_cache=True)
-        mock_update.assert_called_once_with(con, src, force=True, target_table="logs")
-
-    def test_non_stale_error_propagates_without_retry(self) -> None:
-        """A non-stale error must surface immediately — don't waste a rebind on a real failure."""
-        con, fn = MagicMock(), MagicMock(side_effect=ValueError("bad SQL"))
-        with _patch_storage_caches() as (mock_clear, mock_update), pytest.raises(ValueError, match="bad SQL"):
-            execute_with_stale_view_retry(con, {"name": "svc-c"}, fn)
-        assert fn.call_count == 1
-        mock_clear.assert_not_called()
-        mock_update.assert_not_called()
-
-    def test_second_attempt_failure_propagates(self) -> None:
-        """If the retry itself fails, propagate — caller chooses fallback (log + skip vs raise)."""
-        con, fn = MagicMock(), MagicMock(side_effect=[Exception("No files found"), RuntimeError("still broken")])
-        with _patch_storage_caches(), pytest.raises(RuntimeError, match="still broken"):
-            execute_with_stale_view_retry(con, {"name": "svc-d"}, fn)
-        assert fn.call_count == 2
-
-    def test_passes_through_extra_args_and_kwargs(self) -> None:
-        """The helper must forward *args and **kwargs to ``fn``."""
-        con, fn = MagicMock(), MagicMock(return_value=42)
-        with _patch_storage_caches():
-            assert execute_with_stale_view_retry(con, {"name": "svc-e"}, fn, "a", 1, key="value") == 42
-        fn.assert_called_once_with(con, "a", 1, key="value")
-
-    def test_default_source_key_when_name_missing(self) -> None:
-        """``src`` without a ``name`` key falls back to ``"default"`` for the cache-bust call."""
-        con, fn = MagicMock(), MagicMock(side_effect=[Exception("No files found"), "ok"])
-        with _patch_storage_caches() as (mock_clear, _):
-            assert execute_with_stale_view_retry(con, {}, fn) == "ok"
-        mock_clear.assert_called_once_with("default", keep_snapshot_cache=True)
-
-
-class TestConfigureDuckdbS3:
-    def test_configure_duckdb_s3_loads_extensions(self) -> None:
-        con = MagicMock()
-        configure_duckdb_s3(con)
-        assert any("LOAD httpfs; LOAD parquet;" in c.args[0] for c in con.execute.call_args_list)
-
-    def test_configure_duckdb_s3_installs_httpfs_on_load_failure(self) -> None:
-        con, seen = MagicMock(), []
-
-        def side_effect(sql, *args):
-            seen.append(sql)
-            if sql == "LOAD httpfs; LOAD parquet;" and seen.count("LOAD httpfs; LOAD parquet;") == 1:
-                raise RuntimeError("Extension not installed")
-
-        con.execute.side_effect = side_effect
-        configure_duckdb_s3(con)
-        assert "INSTALL httpfs; INSTALL parquet;" in seen
-
-    def test_configure_duckdb_s3_reraises_when_install_also_fails(self) -> None:
-        con = MagicMock()
-        con.execute.side_effect = lambda sql, *args: (
-            (_ for _ in ()).throw(RuntimeError("offline")) if "httpfs" in sql else None
-        )
-        with pytest.raises(RuntimeError, match="offline"):
-            configure_duckdb_s3(con)
 
 
 # ── From test_retry.py ──
@@ -1754,108 +1672,6 @@ def test_poller_error_and_short_circuit_cases(_poller_creds, script, cursor, exc
     with _captured_sleeps("backend.core.realtime._retry_sleep") as delays, pytest.raises(exc_type):
         _fetch(session, cursor=cursor)
     assert session.calls == expected_calls and delays == expected_delays
-
-
-def _configure(con) -> None:
-    with (
-        patch("backend.core.duckdb._load_httpfs"),
-        patch("backend.utils.telemetry.start_proxy_server"),
-        patch("backend.utils.telemetry.proxy_endpoint", return_value="http://127.0.0.1:1"),
-    ):
-        core_duckdb._configure_fos(con, {"name": "svc-retry", "access_key_id": "a", "secret_access_key": "b"})
-
-
-def _con_failing_secret(errors: list[BaseException]) -> MagicMock:
-    con, pending = MagicMock(), list(errors)
-
-    def _execute(sql, *args, **kwargs):
-        if "CREATE OR REPLACE SECRET" in str(sql) and pending:
-            raise pending.pop(0)
-        return MagicMock()
-
-    con.execute.side_effect = _execute
-    return con
-
-
-def _secret_calls(con) -> int:
-    return sum(1 for c in con.execute.call_args_list if "CREATE OR REPLACE SECRET" in str(c.args[0]))
-
-
-def test_fos_secret_retries_write_write_conflict_with_rollback_each_attempt():
-    con = _con_failing_secret([Exception("Write-Write Conflict on x"), Exception("write-write conflict")])
-    with _captured_sleeps() as delays:
-        bg = threading.Thread(target=time.sleep, args=(0.001,), daemon=True)
-        bg.start()
-        bg.join(timeout=1.0)
-        _configure(con)
-    assert _secret_calls(con) == 3 and con.rollback.call_count == 3 and delays == []
-
-
-def test_fos_secret_third_conflict_is_raised():
-    con = _con_failing_secret([Exception("write-write conflict")] * 3)
-    with _captured_sleeps(), pytest.raises(Exception, match="write-write conflict"):
-        _configure(con)
-    assert _secret_calls(con) == 3
-
-
-def test_fos_secret_other_error_raises_immediately():
-    con = _con_failing_secret([RuntimeError("bad key")])
-    with pytest.raises(RuntimeError, match="bad key"):
-        _configure(con)
-    assert _secret_calls(con) == 1
-
-
-def _stale() -> Exception:
-    return duckdb.IOException("No files found: batch_x.parquet")
-
-
-def _runner(side_effects: list) -> QueryRunner:
-    runner = QueryRunner(duckdb.connect(":memory:"), {"name": "svc"})
-    runner.con = MagicMock()
-    runner.con.execute.side_effect = side_effects
-    return runner
-
-
-@pytest.mark.parametrize(
-    ("effects", "refresh_err", "expected_out", "expected_refreshes", "expected_calls"),
-    [
-        (["cur"], None, "cur", 0, 1),
-        ([_stale(), "cur"], None, "cur", 1, 2),
-        # QueryRunner.execute self-heals once internally; outer retry fires when inner retry also hits stale-view.
-        ([_stale(), _stale(), "cur"], None, "cur", 2, 3),
-        ([_stale(), _stale(), RuntimeError("late")], None, None, 2, 3),
-        ([_stale()], RuntimeError("refresh"), None, 2, 1),
-    ],
-)
-def test_execute_with_retry_cases(effects, refresh_err, expected_out, expected_refreshes, expected_calls):
-    runner = _runner(effects)
-    with patch("backend.core.storage.update_storage_view", side_effect=refresh_err) as refresh:
-        assert runner.execute_with_retry("SELECT 1") == expected_out
-    assert refresh.call_count == expected_refreshes
-    assert runner.con.execute.call_count == expected_calls
-
-
-def test_execute_with_retry_non_stale_raises_without_refresh():
-    runner = _runner([RuntimeError("syntax")])
-    with patch("backend.core.storage.update_storage_view") as refresh, pytest.raises(RuntimeError, match="syntax"):
-        runner.execute_with_retry("SELECT 1")
-    refresh.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    ("effects", "refresh_err", "expected_out", "expected_refreshes"),
-    [
-        ([_stale(), "cur"], None, True, 1),
-        ([_stale(), _stale(), "cur"], None, True, 2),
-        ([_stale(), _stale(), RuntimeError("late")], None, False, 2),
-        ([_stale()], RuntimeError("refresh"), False, 2),
-    ],
-)
-def test_create_temp_table_cases(effects, refresh_err, expected_out, expected_refreshes):
-    runner = _runner(effects)
-    with patch("backend.core.storage.update_storage_view", side_effect=refresh_err) as refresh:
-        assert runner.create_temp_table("CREATE TEMP TABLE t AS SELECT 1") is expected_out
-    assert refresh.call_count == expected_refreshes
 
 
 # ── Merged from test_http_make_client.py ──────────────────────────────────────────────

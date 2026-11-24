@@ -47,7 +47,6 @@ export function useReportCancelQueries(queryKeysToCancel: ReadonlyArray<readonly
 export {
   useAnalyticsReportQuery,
   useColumnVisibility,
-  useFieldLabel,
   usePlotlyRangeZoom,
   useReportRangeAnchor,
   useServiceQuery,

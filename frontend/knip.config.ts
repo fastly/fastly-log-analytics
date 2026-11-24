@@ -29,6 +29,10 @@ const config: KnipConfig = {
     'e2e/**/*.{ts,tsx}',
     'scripts/**/*.{js,mjs,ts}',
     'lib/workers/*.ts',
+    'lib/cloud-engine/**/*.worker.ts',
+    'lib/cloud-engine/**/*.test.{ts,tsx}',
+    'lib/cloud-engine/tools/**/*.ts',
+    'lib/cloud-engine/**/*.ts',
   ],
 
   project: ['**/*.{ts,tsx}!'],
@@ -42,6 +46,7 @@ const config: KnipConfig = {
     // hook. Operation IDs and schema definitions aren't always
     // consumed by hand-written TS.
     'types/api.generated.ts',
+    'lib/cloud-engine/cloud-api.generated.ts',
   ],
 
   ignoreDependencies: [
@@ -64,6 +69,12 @@ const config: KnipConfig = {
     // components/CodeEditor for keymap composition. Knip resolves
     // this as "unlisted" because the import looks transitive.
     '@codemirror/commands',
+    // Cloud browser engine dependencies
+    '@duckdb/duckdb-wasm',
+    '@simplewebauthn/browser',
+    'hyparquet',
+    'hyparquet-compressors',
+    'hyparquet-writer',
   ],
 
   ignoreBinaries: [

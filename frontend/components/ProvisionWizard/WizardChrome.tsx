@@ -1,6 +1,7 @@
 "use client"
 
 import React from 'react'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -144,7 +145,11 @@ export function WizardFooter({ s }: { s: WizardState }) {
 
   return (
     <DialogFooter className={panelDialogFooter}>
-      {!isDeploying && step !== "mode" && step !== "terraform" && !(step === "connect" && setupPhase === "done") && (
+      {!isDeploying &&
+        step !== "mode" &&
+        !(isCloudMode() && step === "token") &&
+        step !== "terraform" &&
+        !(step === "connect" && setupPhase === "done") && (
         <Button variant="ghost" className="mr-auto h-9 text-xs" onClick={handleBack}>
           <ChevronLeft className="h-4 w-4 mr-1" /> Back
         </Button>
@@ -188,7 +193,15 @@ export function WizardFooter({ s }: { s: WizardState }) {
           )}
           {step === "storage" && (
             <Button
-              onClick={() => setStep(config.logging_enabled ? "ngwaf" : "execute")}
+              onClick={() =>
+                setStep(
+                  config.capture === "attached" || !config.logging_enabled
+                    ? "execute"
+                    : isCloudMode()
+                      ? "fields"
+                      : "ngwaf",
+                )
+              }
               disabled={domainStatus === "taken" || domainStatus === "checking"}
               className="h-9 text-xs"
             >

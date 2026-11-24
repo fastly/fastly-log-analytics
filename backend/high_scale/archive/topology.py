@@ -111,7 +111,6 @@ def build_topology_profile(profile_name: str) -> TopologyProfile:
 
 @dataclass(frozen=True)
 class HighScaleConfig:
-    enabled: bool
     clickhouse_url: str | None
     fos_bucket: str | None
     archive_manifest_dsn: str | None
@@ -123,8 +122,6 @@ class HighScaleConfig:
         return _resolve_topology_profile(self.profile)
 
     def validate(self) -> None:
-        if not self.enabled:
-            return
         for value, message in (
             (self.clickhouse_url, "high-scale mode requires a ClickHouse URL"),
             (self.fos_bucket, "high-scale mode requires an FOS archive bucket"),
@@ -147,12 +144,20 @@ def _resolve_topology_profile(profile_name: str) -> TopologyProfile:
 
 def from_environment(env: Mapping[str, str] | None = None) -> HighScaleConfig:
     source = os.environ if env is None else env
+    fos_bucket = source.get("HIGH_SCALE_FOS_BUCKET")
+    if not fos_bucket and env is None:
+        from backend import config as app_config
+
+        fos_bucket = next(
+            (str(cfg["bucket"]) for cfg in app_config.list_configs() if isinstance(cfg, dict) and cfg.get("bucket")),
+            "fos-archive",
+        )
+    metadata_dsn = source.get("METADATA_DSN")
     config = HighScaleConfig(
-        enabled=source.get("HIGH_SCALE_ENABLED", "").lower() in {"1", "true", "yes"},
-        clickhouse_url=source.get("HIGH_SCALE_CLICKHOUSE_URL"),
-        fos_bucket=source.get("HIGH_SCALE_FOS_BUCKET"),
-        archive_manifest_dsn=source.get("HIGH_SCALE_ARCHIVE_MANIFEST_DSN"),
-        worker_queue_url=source.get("HIGH_SCALE_WORKER_QUEUE_URL"),
+        clickhouse_url=source.get("CLICKHOUSE_URL"),
+        fos_bucket=fos_bucket,
+        archive_manifest_dsn=source.get("HIGH_SCALE_ARCHIVE_MANIFEST_DSN") or metadata_dsn,
+        worker_queue_url=source.get("HIGH_SCALE_WORKER_QUEUE_URL") or source.get("CELERY_BROKER_URL") or metadata_dsn,
         persistent_storage=source.get("HIGH_SCALE_PERSISTENT_STORAGE", "true").lower() not in {"0", "false", "no"},
         profile=source.get("HIGH_SCALE_PROFILE", "local"),
     )

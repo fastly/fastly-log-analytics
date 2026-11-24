@@ -15,6 +15,7 @@ from pydantic import (
     Field,
     PlainSerializer,
     model_serializer,
+    model_validator,
 )
 
 
@@ -246,17 +247,68 @@ FiltersDict = dict[str, FilterSpec]
 # ── Shared request fragments ──────────────────────────────────────────────────
 
 
+def resolve_legacy_range_shorthand(data: dict[str, Any]) -> dict[str, Any]:
+    if data.get("start_time") is not None or data.get("end_time") is not None:
+        return data
+    raw_range = data.get("range_token") or data.get("range")
+    if not isinstance(raw_range, str):
+        return data
+    from backend.utils.time_window import resolve_window
+
+    resolved = resolve_window(raw_range, data.get("anchor") if isinstance(data.get("anchor"), str) else None)
+    if resolved is None:
+        return data
+    out = dict(data)
+    out["start_time"], out["end_time"] = resolved
+    return out
+
+
 class DateRangeMixin(BaseModel):
     """Mixin for endpoints that accept a start/end time window."""
 
     start_time: str | None = None
     end_time: str | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_legacy_range_shorthand(cls, data: Any) -> Any:
+        if not isinstance(data, dict) or "range_token" in cls.model_fields:
+            return data
+        return resolve_legacy_range_shorthand(data)
+
 
 class FilteredRequest(DateRangeMixin):
     """Base for POST bodies that carry both a date range and column filters."""
 
     filters: FiltersDict = {}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_list_filters(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        raw_filters = data.get("filters")
+        if not isinstance(raw_filters, dict) or not raw_filters:
+            return data
+        default_mode = raw_filters.get("filter_mode") or data.get("filter_mode") or "include"
+        if default_mode not in ("include", "exclude"):
+            default_mode = "include"
+        needs_normalization = "filter_mode" in raw_filters or any(
+            isinstance(v, (list, tuple)) for k, v in raw_filters.items() if k != "filter_mode"
+        )
+        if not needs_normalization:
+            return data
+        normalized: dict[str, Any] = {}
+        for k, v in raw_filters.items():
+            if k == "filter_mode":
+                continue
+            if isinstance(v, (list, tuple)):
+                normalized[k] = {"mode": default_mode, "values": list(v)}
+            else:
+                normalized[k] = v
+        out = dict(data)
+        out["filters"] = normalized
+        return out
 
 
 class RangeKeyedRequest(FilteredRequest):
@@ -274,6 +326,15 @@ class RangeKeyedRequest(FilteredRequest):
 
     range_token: str | None = None
     anchor: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_range_alias(cls, data: Any) -> Any:
+        if isinstance(data, dict) and data.get("range_token") is None and isinstance(data.get("range"), str):
+            out = dict(data)
+            out["range_token"] = out["range"]
+            return out
+        return data
 
 
 class LimitedRequest(FilteredRequest):

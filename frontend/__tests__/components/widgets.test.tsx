@@ -6,13 +6,13 @@ import {
 import { render, screen, fireEvent, cleanup, act, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, test, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest'
-import { http, HttpResponse } from 'msw'
+import { http, HttpResponse } from 'msw/http'
 import { QueryClient, type QueryCacheNotifyEvent } from '@tanstack/react-query'
 import { axe } from 'vitest-axe'
 import React, { type ComponentProps, type ReactNode } from 'react'
 import { renderToString } from 'react-dom/server'
 import * as bootstrapHooks from '@/hooks/useBootstrap'
-import type { CellContext, ColumnDef } from '@tanstack/react-table'
+import type { CellContext, ColumnDef } from '@/lib/table'
 import type { components } from '@/types/api.generated'
 import type { PlotlyConfig, PlotlyGraphDiv, PlotlyLayout, PlotlyRelayoutEvent, PlotlyTrace } from '@/types/api'
 
@@ -46,6 +46,8 @@ const mocks = vi.hoisted(() => ({
   maskIps: vi.fn(() => false),
   fieldValues: undefined as { values: { value: string | null; count: number; label?: string }[] } | undefined,
   fieldValuesLoading: false,
+  fieldValuesError: null as Error | null,
+  fieldValuesRefetch: vi.fn(),
   activeFields: new Set<string>(),
   logFieldsCatalog: vi.fn(() => ({ data: undefined as unknown })),
   useRealPlotly: false,
@@ -199,7 +201,10 @@ vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
   useMounted: () => true, useMaskIps: () => mocks.maskIps(), useEnforceMaskedFilters: () => {},
   useLogFieldsCatalog: () => mocks.logFieldsCatalog(),
   useFieldLabel: () => (id: string) => id,
-  useFieldValues: () => ({ data: mocks.fieldValues, isLoading: mocks.fieldValuesLoading, isFetching: false }),
+  useFieldValues: () => ({
+    data: mocks.fieldValues, isLoading: mocks.fieldValuesLoading, isFetching: false,
+    error: mocks.fieldValuesError, refetch: mocks.fieldValuesRefetch,
+  }),
   useActiveLogFields: () => ({
     ready: true,
     isFieldActive: (id: string) => mocks.activeFields.has(id),
@@ -222,7 +227,15 @@ vi.mock('@/lib/utils', async (importOriginal) => ({
     range: [start, end],
   }),
 }))
-vi.mock('@/components/SSEModal', () => ({ ControlledSSEModal: () => null, SSEModal: () => null, SSEProgressView: () => null, SSEExecutionSection: () => null, SSEDialogFooter: () => null }))
+vi.mock('@/components/SSEModal', () => ({
+  ControlledSSEModal: () => null,
+  SSEModal: () => null,
+  SSEProgressView: () => null,
+  SSEExecutionSection: () => null,
+  SSEDialogFooter: () => null,
+  SSEActionDialogShell: ({ open, children, confirmButton }: { open?: boolean; children?: React.ReactNode; confirmButton?: React.ReactNode }) =>
+    open ? <div>{children}{confirmButton}</div> : null,
+}))
 vi.mock('@/components/SyncStatusBadge/SyncStatusBadge', async (importOriginal) => ({ ...(await importOriginal<typeof import('@/components/SyncStatusBadge/SyncStatusBadge')>()), BackfillRangeModal: () => null }))
 vi.mock('@/components/ReportLayout', async (importOriginal) => ({ ...(await importOriginal<typeof import('@/components/ReportLayout')>()), NoServiceSelected: () => null }))
 
@@ -238,8 +251,9 @@ import { getTimezoneAbbr, DEBUG_RESPONSES_COOKIE } from '@/lib/utils'
 import { DebugPanel } from '@/components/DebugPanel'
 import { DiagnosticsPanel } from '@/app/admin/_sections/OperationsOverview'
 import { server } from '@/__tests__/helpers/msw/handlers'
-import { client, getApiBase } from '@/lib/api'
-import { LogSyncSection } from '@/components/CronSettingsModal/CronSettingsModal'
+import { client, getApiBase, getPageLoadId } from '@/lib/api'
+import { setCloudModeRuntime } from '@/lib/cloud-engine/mode'
+import { CronSettingsModal, LogSyncSection } from '@/components/CronSettingsModal/CronSettingsModal'
 import LogsClient, { CronLiveLog, QuickActionsBar, SchemaTab, CRON_EXPLANATIONS, CRON_DISPLAY_NAMES, CRON_GROUPS } from '@/app/logs/_sections/LogsClient'
 import { DataTable, DataTableReadonly, DateTimeCell, FilterValueCell, buildDashboardFilterUrl, makeLatencyColumns, type LatencyRow } from '@/components/DataTable'
 import { BotSourcesPanel } from '@/app/control-room/_sections/ControlRoomClient'
@@ -349,12 +363,27 @@ describe('LazyMount', () => {
 })
 
 describe('ServerFooter', () => {
+  const savedEnv = {
+    COMMIT_HASH: process.env.COMMIT_HASH,
+    K8S_CLUSTER_NAME: process.env.K8S_CLUSTER_NAME,
+    KUBERNETES_SERVICE_HOST: process.env.KUBERNETES_SERVICE_HOST,
+    POD_NAME: process.env.POD_NAME,
+  }
   beforeEach(() => {
     setHeaders({})
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => 'secret-instance' }))
     process.env.COMMIT_HASH = 'abc1234'
+    delete process.env.K8S_CLUSTER_NAME
+    delete process.env.KUBERNETES_SERVICE_HOST
+    delete process.env.POD_NAME
   })
-  afterEach(() => { vi.unstubAllGlobals() })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+  })
   it('renders infrastructure details for admin requests and nothing for Caddy-proxied requests', async () => {
     const el = await ServerFooter()
     expect(el).not.toBeNull()
@@ -363,6 +392,18 @@ describe('ServerFooter', () => {
     vi.stubGlobal('fetch', fetchSpy)
     setHeaders({ 'x-proxied-by-caddy': 'true' })
     expect(await ServerFooter()).toBeNull()
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+  it('prefers Kubernetes over GCE metadata so GKE/managed Kubernetes pods are not labeled as gce', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, text: async () => 'gke-node-1' })
+    vi.stubGlobal('fetch', fetchSpy)
+    process.env.KUBERNETES_SERVICE_HOST = '10.0.0.1'
+    process.env.POD_NAME = 'fla-frontend-abc'
+    const el = await ServerFooter()
+    const serialized = JSON.stringify(el)
+    expect(serialized).toContain('k8s')
+    expect(serialized).toContain('fla-frontend-abc')
+    expect(serialized).not.toContain('gce')
     expect(fetchSpy).not.toHaveBeenCalled()
   })
 })
@@ -655,6 +696,20 @@ describe('request header timestamp', () => {
     expect(screen.getByText(syncTimestamp)).toBeInTheDocument()
   })
 
+  it('prefers newer request.last_sync_at over a stale legacy log_discovery lastSync timestamp', async () => {
+    const newerSyncTimestamp = '2026-09-08T17:59:55Z'
+    mocks.lastSync.mockReturnValue({ data: { started_at: oldTimestamp, status: 'success' } })
+    mocks.status.mockReturnValue({
+      data: {
+        latest_log_at: requestTimestamp,
+        request: { latest_log_at: requestTimestamp, last_sync_at: newerSyncTimestamp },
+      },
+    })
+    mountBadge()
+    await waitFor(() => expect(screen.getByText(newerSyncTimestamp)).toBeInTheDocument())
+    expect(screen.queryByText(oldTimestamp)).not.toBeInTheDocument()
+  })
+
   it('uses the analyst request extent from bootstrap and omits stale-log dot', async () => {
     mocks.analyst.mockReturnValue(true)
     mocks.bootstrap.mockReturnValue({ data: { header_badge: { latest_log_at: oldTimestamp, request: { latest_log_at: requestTimestamp } } } })
@@ -710,9 +765,43 @@ const renderDebugWith = (qc: QueryClient) => renderWithQuery(<DebugPanel />, { q
 
 describe('DebugPanel & DiagnosticsPanel', () => {
   beforeEach(() => {
-    act(() => { useDebugStore.setState({ enabled: false, apiCallsEnabled: false }) })
+    act(() => { useDebugStore.setState({ enabled: false, apiCallsEnabled: false, apiCalls: [] }) })
     document.cookie = `${DEBUG_RESPONSES_COOKIE}=1; path=/`
     server.use(http.get(`${API_BASE}/api/debug/recent-postgres`, () => HttpResponse.json({ queries: [], buffer_size: 0, buffer_cap: 500, dropped: 0 })))
+  })
+
+  afterEach(() => setCloudModeRuntime(false))
+
+  test('Cloud call panel displays current-page worker observations and updates as calls arrive', async () => {
+    setCloudModeRuntime(true)
+    const currentCall = {
+      source: 'FOS S3', method: 'GET', path: '/processed/current.parquet',
+      status: 206, duration_ms: 12.5, page_load_id: getPageLoadId() ?? undefined,
+    }
+    act(() => {
+      useDebugStore.setState({
+        apiCallsEnabled: true,
+        apiCalls: [
+          { ...currentCall, path: '/processed/previous.parquet', page_load_id: 'previous-page' },
+          currentCall,
+        ],
+      })
+    })
+    renderDebugWith(makeDebugClient())
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: /Show 1 calls/i }))
+    expect(screen.getByText('/processed/current.parquet')).toBeInTheDocument()
+    expect(screen.queryByText('/processed/previous.parquet')).not.toBeInTheDocument()
+    expect(screen.getByText('FOS S3')).toBeInTheDocument()
+    act(() => {
+      useDebugStore.getState().addApiCall({
+        ...currentCall, source: 'Fastly API', path: '/service/current', status: 503, duration_ms: 7.25,
+      })
+    })
+    await screen.findByRole('button', { name: /Hide 2 calls/i })
+    expect(screen.getByText('/service/current')).toBeInTheDocument()
+    expect(screen.getByText('503')).toBeInTheDocument()
+    expect(screen.getByText('19.75ms')).toBeInTheDocument()
   })
 
   test('cookie-heal shim writes missing cookie + invalidates cache, and skips when cookie present', async () => {
@@ -784,7 +873,7 @@ describe('DebugPanel & DiagnosticsPanel', () => {
   test('subscription picks up _debug_queries / _debug_calls, deduplicates identical notifications, and labels engine dynamically', async () => {
     act(() => {
       useDebugStore.setState({ enabled: true, apiCallsEnabled: true })
-      useServiceStore.setState({ activeServiceId: 'std-svc', services: [{ id: 'std-svc', name: 'Standard Service', is_high_scale: false } as never] })
+      useServiceStore.setState({ activeServiceId: 'std-svc', services: [{ id: 'std-svc', name: 'Default Service' }] })
     })
     const qc = makeDebugClient()
     const { useQuery } = await import('@tanstack/react-query')
@@ -802,7 +891,7 @@ describe('DebugPanel & DiagnosticsPanel', () => {
       expect(screen.getByRole('button', { name: /Show 1 calls/i })).toBeInTheDocument()
     })
     expect(screen.getByText(/12\.50ms/)).toBeInTheDocument()
-    expect(screen.getByText('Data Queries (DuckDB)')).toBeInTheDocument()
+    expect(screen.getByText('Data Queries (ClickHouse)')).toBeInTheDocument()
     await act(async () => {
       const q = qc.getQueryCache().find({ queryKey: ['debug-fixture', 'one'] })!
       qc.getQueryCache().notify({ type: 'updated', query: q } as QueryCacheNotifyEvent)
@@ -811,10 +900,10 @@ describe('DebugPanel & DiagnosticsPanel', () => {
     expect(screen.getByRole('button', { name: /Show 1 queries/i })).toBeInTheDocument()
     await act(async () => {
       qc.setQueryData(['debug-fixture', 'one'], {
-        _debug_queries: [{ sql: 'SELECT 1', time_ms: 99 }],
+        _debug_queries: [{ sql: 'SELECT 1', time_ms: 99, engine: 'ClickHouse' }],
         _debug_calls: [{ service: 'FOS', method: 'GET', path: '/x', time_ms: 8, status: 'OK' }],
       })
-      useServiceStore.setState({ activeServiceId: 'hs-svc', services: [{ id: 'hs-svc', name: 'High-Scale Service', is_high_scale: true } as never] })
+      useServiceStore.setState({ activeServiceId: 'hs-svc', services: [{ id: 'hs-svc', name: 'High-Scale Service' }] })
     })
     await waitFor(() => {
       expect(screen.getByText(/99\.00ms/)).toBeInTheDocument()
@@ -881,15 +970,15 @@ describe('CronLiveLog, LogSyncSection & LogsClient', () => {
     expect(onDone).toHaveBeenCalledTimes(1)
   })
 
-  test('LogSyncSection polling mode selector, RUM disabled banner, and Enable RUM Beacon Sync switch', async () => {
+  test('LogSyncSection polling mode selector, snapshot interval selector, RUM disabled banner, and Enable RUM Beacon Sync switch', async () => {
     mocks.useRealSelect = true
     const user = userEvent.setup()
-    const setPollingMode = vi.fn(), setRumSyncEnabled = vi.fn()
+    const setPollingMode = vi.fn(), setSnapshotIntervalMinutes = vi.fn(), setRumSyncEnabled = vi.fn()
     const baseProps = {
       syncEnabled: true, setSyncEnabled: vi.fn(), pollingMode: 'regular' as const, setPollingMode,
+      snapshotIntervalMinutes: '5', setSnapshotIntervalMinutes,
       deleteAfter: false, setDeleteAfter: vi.fn(), dataRetention: '30', setDataRetention: vi.fn(),
-      cacheRetention: '90', setCacheRetention: vi.fn(), rollupRetention: '12', setRollupRetention: vi.fn(),
-      commitInterval: '5', setCommitInterval: vi.fn(), syncLogEnabled: true, setSyncLogEnabled: vi.fn(),
+      syncLogEnabled: true, setSyncLogEnabled: vi.fn(),
       syncRetention: '7', setSyncRetention: vi.fn(), syncFreqLabel: 'every 2 minutes', isAnalyst: false,
       syncIntervalNum: 120, adminSyncSeconds: 120, rumRetention: '30', setRumRetention: vi.fn(),
       rumEnabled: false, rumLogPeriod: '300', setRumLogPeriod: vi.fn(), rumDeleteAfter: false, setRumDeleteAfter: vi.fn(),
@@ -899,6 +988,12 @@ describe('CronLiveLog, LogSyncSection & LogsClient', () => {
     await user.click(screen.getByRole('combobox', { name: 'Discovery Polling Mode' }))
     await user.click(await screen.findByRole('option', { name: 'Adaptive' }))
     expect(setPollingMode).toHaveBeenCalledWith('adaptive')
+    await user.click(screen.getByRole('combobox', { name: 'Cloud Snapshot Interval' }))
+    for (const label of ['5m', '15m', '30m', '1h', '6h', '24h']) {
+      expect(await screen.findByRole('option', { name: label })).toBeInTheDocument()
+    }
+    await user.click(screen.getByRole('option', { name: '1h' }))
+    expect(setSnapshotIntervalMinutes).toHaveBeenCalledWith('60')
     expect(screen.getByText(/Real User Monitoring is not currently enabled on Fastly edge/)).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Configure RUM' })).toHaveAttribute('href', '/admin/rum?service=test-service-123')
     rerender(<LogSyncSection {...baseProps} rumEnabled={true} rumSyncEnabled={false} setRumSyncEnabled={setRumSyncEnabled} serviceId="test-service-123" />)
@@ -908,15 +1003,49 @@ describe('CronLiveLog, LogSyncSection & LogsClient', () => {
     expect(setRumSyncEnabled).toHaveBeenCalledWith(true, expect.anything())
   })
 
-  test('LogsClient mounts in cron mode, QuickActionsBar handles failures, and partial_hour_merge is registered', async () => {
+  test('CronSettingsModal initializes snapshot_interval_minutes and posts numeric value on save', async () => {
+    mocks.useRealSelect = true
+    const user = userEvent.setup()
+    sseState.status = 'idle'
+    sseState.start.mockClear()
+    const svc = {
+      service_id: 'svc-snap',
+      name: 'Snap Service',
+      log_period: 60,
+      cron_sync: {
+        enabled: true,
+        delete_after: true,
+        polling_mode: 'adaptive' as const,
+        snapshot_interval_minutes: 30 as const,
+        log_enabled: true,
+        log_retention_days: 30,
+        data_retention_days: 30,
+        rum_retention_days: 30,
+      },
+    } as never
+    renderWithQuery(<CronSettingsModal service={svc} open={true} onOpenChange={vi.fn()} />)
+    const trigger = screen.getByRole('combobox', { name: 'Cloud Snapshot Interval' })
+    expect(trigger).toHaveTextContent('30m')
+    await user.click(trigger)
+    await user.click(await screen.findByRole('option', { name: '6h' }))
+    await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+    expect(sseState.start).toHaveBeenCalledWith(
+      '/api/services/svc-snap/cron-settings',
+      expect.objectContaining({
+        cron_sync: expect.objectContaining({ snapshot_interval_minutes: 360 }),
+      }),
+    )
+  })
+
+  test('LogsClient mounts in cron mode, QuickActionsBar handles failures, and sync tasks are registered', async () => {
     useServiceStore.setState({ activeServiceId: 'test-svc' })
     mocks.status.mockReturnValue({ data: { idle: true } })
     const { unmount } = renderWithQuery(<LogsClient initialTab="cron" />)
     expect(screen.getByText('Data Management')).toBeInTheDocument()
     expect(errorSpy).not.toHaveBeenCalled(); unmount()
-    expect(CRON_DISPLAY_NAMES.partial_hour_merge).toBeTruthy()
-    expect(CRON_EXPLANATIONS.partial_hour_merge).toBeTruthy()
-    expect(CRON_GROUPS.find((g) => g.tasks.includes('rollup_hour_heal'))?.tasks).toContain('partial_hour_merge')
+    expect(CRON_DISPLAY_NAMES.log_discovery).toBeTruthy()
+    expect(CRON_EXPLANATIONS.log_discovery).toBeTruthy()
+    expect(CRON_GROUPS.find((g) => g.tasks.includes('log_discovery'))?.tasks).toContain('gap_heal')
     const postSpy = vi.spyOn(client, 'POST'), start = vi.fn()
     renderWithQuery(
       <QuickActionsBar
@@ -934,6 +1063,25 @@ describe('CronLiveLog, LogSyncSection & LogsClient', () => {
     await waitFor(() => expect(mocks.showToast).toHaveBeenCalledWith('No run id returned'))
     expect(start).not.toHaveBeenCalled()
     postSpy.mockRestore()
+  })
+
+  test('LogsClient shows the active service archive bucket and region', async () => {
+    useServiceStore.setState({ activeServiceId: 'test-svc' })
+    mocks.bootstrap.mockReturnValue({
+      data: {
+        services: [{
+          service_id: 'test-svc',
+          name: 'Test',
+          fos_bucket: 'archive-prod',
+          fos_region: 'eu-west-1',
+        }],
+      },
+    })
+    renderWithQuery(<LogsClient initialTab="storage" />)
+
+    expect(await screen.findByText('Archive Parquet Layout')).toBeInTheDocument()
+    expect(screen.getByText('archive-prod')).toBeInTheDocument()
+    expect(screen.getByText('eu-west-1')).toBeInTheDocument()
   })
 })
 
@@ -969,6 +1117,30 @@ describe('DataTable & DataTableReadonly', () => {
   it('has no axe-detectable a11y violations', async () => {
     const { container } = render(<DataTable columns={COLUMNS} data={DATA} hideToolbar />)
     expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('sorts locally via auto sort fns and filters via searchKey', async () => {
+    const user = userEvent.setup()
+    render(<DataTable columns={COLUMNS} data={[DATA[1], DATA[2], DATA[0]]} searchKey="name" />)
+    const names = () => screen.getAllByRole('row').slice(1).map((r) => within(r).queryByText(/^(alpha|beta|gamma)$/)?.textContent)
+    const header = (label: string) => screen.getByRole('button', { name: label }).closest('th')
+    await user.click(screen.getByRole('button', { name: 'Name' }))
+    expect(header('Name')?.getAttribute('aria-sort')).toBe('ascending')
+    expect(names()).toEqual(['alpha', 'beta', 'gamma'])
+    await user.click(screen.getByRole('button', { name: 'Status' }))
+    expect(header('Status')?.getAttribute('aria-sort')).toBe('descending')
+    expect(names()).toEqual(['gamma', 'beta', 'alpha'])
+    await user.type(screen.getByPlaceholderText('Filter name...'), 'ET')
+    expect(names()).toEqual(['beta'])
+  })
+
+  it('auto-sorts string columns case-insensitively and in natural order, as under react-table v8', async () => {
+    const user = userEvent.setup()
+    const rows: Row[] = [{ id: 1, name: 'item10', status: 200 }, { id: 2, name: 'Item2', status: 200 }, { id: 3, name: 'item1', status: 200 }]
+    render(<DataTable columns={COLUMNS} data={rows} hideToolbar />)
+    await user.click(screen.getByRole('button', { name: 'Name' }))
+    const names = screen.getAllByRole('row').slice(1).map((r) => within(r).queryByText(/^item\d+$/i)?.textContent)
+    expect(names).toEqual(['item1', 'Item2', 'item10'])
   })
 
   it('hands every row to virtualizer when showPagination={false} and pages at 50 by default', () => {
@@ -1029,7 +1201,7 @@ describe('SchemaTab & BotSourcesPanel', () => {
   it('SchemaTab renders every column past 50 rows with formatted stats and em-dash for bare columns', () => {
     const schema = Array.from({ length: 80 }, (_, i) => ({ name: `col_${i}`, type: 'VARCHAR', null_percentage: i === 0 ? 25 : 0, approx_unique: 1234, min: 'a', max: 'z' }))
     const { unmount } = render(<SchemaTab schemaData={{ schema } as unknown as SchemaResponse} isLoadingSchema={false} />)
-    for (const name of ['Column Name', 'DuckDB Type', 'Populated %', 'Approx Unique', 'Min Value', 'Max Value']) expect(screen.getByRole('columnheader', { name })).toBeTruthy()
+    for (const name of ['Column Name', 'ClickHouse Type', 'Populated %', 'Approx Unique', 'Min Value', 'Max Value']) expect(screen.getByRole('columnheader', { name })).toBeTruthy()
     expect(screen.getByText('col_79')).toBeTruthy()
     expect(screen.getByText('75.0%')).toBeTruthy(); unmount()
     render(<SchemaTab schemaData={{ schema: [{ name: 'bare', type: 'INTEGER' }] } as unknown as SchemaResponse} isLoadingSchema={false} />)
@@ -1509,11 +1681,18 @@ describe('FilterBar, ActiveFiltersBanner, AddFilterDialogContent & FilterValueCe
       expect(container.querySelector('button')).toBeNull()
     })
 
-    it('still allows filtering by oip (origin IP) when masking', () => {
+    it('also renders oip (origin IP) as plain text (no filter menu) when masking while keeping non-PII fields interactive', () => {
       mocks.maskIps.mockReturnValue(true)
-      render(<FilterValueCell filters={[{ column: 'oip', value: '151.101.1.51' }]} />)
+      const { container, unmount } = render(
+        <FilterValueCell filters={[{ column: 'oip', value: '151.101.1.51' }]} />,
+      )
+      expect(screen.getByText('151.101.1.51')).toBeInTheDocument()
+      expect(container.querySelector('button')).toBeNull()
+      unmount()
+
+      render(<FilterValueCell filters={[{ column: 'pop', value: 'JFK' }]} />)
       expect(
-        screen.getByRole('button', { name: /Filter actions for 151.101.1.51/i }),
+        screen.getByRole('button', { name: /Filter actions for JFK/i }),
       ).toBeInTheDocument()
     })
   })
@@ -1741,7 +1920,13 @@ describe('TimeSeriesChart, ScorerSeries, PlotlyChart, TrafficChart, CardGrid, Fi
         expect(tracesToTable(emptyInput)).toMatchObject({ empty: true, rows: [] })
       }
       expect(tracesToTable([], 'My chart').title).toBe('My chart')
-      expect(tracesToTable([{ type: 'heatmap', x: ['t1'], y: ['a'], z: [[1]] }], 'HM').empty).toBe(true)
+      expect(tracesToTable([{ type: 'heatmap', x: ['t1'], y: ['a'], z: [[1]] }], 'HM')).toMatchObject({
+        title: 'HM',
+        columns: ['Series', 't1'],
+        rows: [['a', 1]],
+        empty: false,
+      })
+      expect(tracesToTable([{ type: 'surface', x: ['t1'], y: ['a'], z: [[1]] }], 'SF').empty).toBe(true)
 
       const emptyDom = render(<ChartA11yTable shape={tracesToTable([], 'Empty chart')} />)
       expect(emptyDom.container.querySelector('table')).toBeNull()
@@ -1974,6 +2159,52 @@ describe('TimeSeriesChart, ScorerSeries, PlotlyChart, TrafficChart, CardGrid, Fi
       expect(screen.getByText('Failed to load bot data.')).toBeInTheDocument()
       expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
     })
+
+    it('reserves a consistent 392px height for skeletons and pending lazy cards to prevent scroll CLS', () => {
+      const { container, rerender } = render(
+        <CardGrid
+          visibleCardList={[]}
+          isReady={false}
+          isFetchingAggs={false}
+          aggregates={undefined}
+          compareAggregates={undefined}
+          compareMode={false}
+          topBotsData={undefined}
+          collapsedSections={new Set()}
+          toggleSectionCollapsed={() => {}}
+          onRowClick={() => {}}
+        />,
+      )
+      const skeleton = container.querySelector('[data-empty-placeholder="true"]')
+      expect(skeleton?.className).toContain('h-[392px]')
+      expect(skeleton?.className).toContain('[contain-intrinsic-size:392px]')
+
+      stubIntersectionObserver()
+      const prevMockTopTen = mocks.mockTopTenTable
+      mocks.mockTopTenTable = false
+      try {
+        rerender(
+          <CardGrid
+            visibleCardList={[{ id: 'status', label: 'Status', inActiveFormat: true }]}
+            isReady={true}
+            isFetchingAggs={false}
+            aggregates={{ data: { status: { total: 10, top: [{ value: '200', count: 10 }] } } }}
+            compareAggregates={undefined}
+            compareMode={false}
+            topBotsData={undefined}
+            collapsedSections={new Set()}
+            toggleSectionCollapsed={() => {}}
+            onRowClick={() => {}}
+          />,
+        )
+        const lazyPanel = container.querySelector('[data-lazy-panel="pending"]') as HTMLElement | null
+        expect(lazyPanel).not.toBeNull()
+        expect(lazyPanel?.style.minHeight).toBe('392px')
+      } finally {
+        mocks.mockTopTenTable = prevMockTopTen
+        vi.unstubAllGlobals()
+      }
+    })
   })
 
   function seedFilters(filters: { column: string; value: string; mode?: 'include' | 'exclude' }[]) {
@@ -1989,6 +2220,8 @@ describe('TimeSeriesChart, ScorerSeries, PlotlyChart, TrafficChart, CardGrid, Fi
 
   describe('FieldSearchDialog', () => {
     beforeEach(() => {
+      mocks.fieldValuesError = null
+      mocks.fieldValuesRefetch.mockReset()
       useFilterStore.setState({ filters: [] })
       usePopGeoStore.setState({ map: {} })
       mocks.fieldValues = {
@@ -2000,6 +2233,18 @@ describe('TimeSeriesChart, ScorerSeries, PlotlyChart, TrafficChart, CardGrid, Fi
         ],
       }
       mocks.fieldValuesLoading = false
+    })
+
+    it('surfaces a failed search instead of showing an empty success and permits retry', async () => {
+      mocks.fieldValues = undefined
+      mocks.fieldValuesError = new Error('The file manifest for this range is incomplete; choose a shorter range.')
+      const user = userEvent.setup()
+      render(<FieldSearchDialog field="host" title="Host" />)
+      await user.click(screen.getByRole('button', { name: 'Search Host' }))
+      expect(await screen.findByRole('alert')).toHaveTextContent('file manifest for this range is incomplete')
+      expect(screen.queryByText('No results found')).not.toBeInTheDocument()
+      await user.click(screen.getByRole('button', { name: 'Retry search' }))
+      expect(mocks.fieldValuesRefetch).toHaveBeenCalledOnce()
     })
 
     it('pins selected values for its own field (including unfetched/exclude/geo), filters by search, and removes on click', async () => {
@@ -2109,7 +2354,7 @@ describe('TimeSeriesChart, ScorerSeries, PlotlyChart, TrafficChart, CardGrid, Fi
       expect(urlRowButton.className).toMatch(/\bpl-4\.5\b/)
     })
 
-    it('disables drill-down on `ip` when masking while keeping `oip` clickable', () => {
+    it('disables drill-down on `ip` and `oip` when masking while keeping non-PII fields clickable', () => {
       mocks.maskIps.mockReturnValue(true)
       const onRowClick = vi.fn()
       const { unmount } = render(
@@ -2121,9 +2366,16 @@ describe('TimeSeriesChart, ScorerSeries, PlotlyChart, TrafficChart, CardGrid, Fi
       expect(screen.queryByRole('button', { name: /filter to/i })).toBeNull()
       unmount()
 
-      render(<TopTenTable title="Top Origin IPs" field="oip" data={{ total: 1, top: [{ value: '151.101.1.51', count: 9 }] }} onRowClick={onRowClick} />)
-      fireEvent.click(screen.getByRole('button', { name: /filter to 151.101.1.51/i }))
-      expect(onRowClick).toHaveBeenCalledWith('oip', '151.101.1.51')
+      const { unmount: unmountOip } = render(
+        <TopTenTable title="Top Origin IPs" field="oip" data={{ total: 1, top: [{ value: '151.101.1.xxx', count: 9 }] }} onRowClick={onRowClick} />,
+      )
+      expect(screen.getByText('151.101.1.xxx')).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: /filter to/i })).toBeNull()
+      unmountOip()
+
+      render(<TopTenTable title="Top POPs" field="pop" data={{ total: 1, top: [{ value: 'JFK', count: 9 }] }} onRowClick={onRowClick} />)
+      fireEvent.click(screen.getByRole('button', { name: /filter to JFK/i }))
+      expect(onRowClick).toHaveBeenCalledWith('pop', 'JFK')
     })
 
     it('copies CSV to clipboard, escapes formula-injection payloads, mounts NotLoggedIndicator, and colors deltas', async () => {
@@ -2165,6 +2417,18 @@ describe('TimeSeriesChart, ScorerSeries, PlotlyChart, TrafficChart, CardGrid, Fi
       expect(screen.getByLabelText(/no change/i).className).toMatch(/text-muted-foreground/)
       expect(container.querySelector('svg.lucide-trending-up')).not.toBeNull()
       expect(container.querySelector('svg.lucide-trending-down')).not.toBeNull()
+    })
+
+    it('reserves 392px min-height and contain-intrinsic-size in both empty and populated states', () => {
+      const { container, rerender } = render(<TopTenTable title="Status" field="status" data={{ total: 0, top: [] }} />)
+      const emptyCard = container.firstElementChild as HTMLElement
+      expect(emptyCard.className).toContain('min-h-[392px]')
+      expect(emptyCard.className).toContain('[contain-intrinsic-size:392px]')
+
+      rerender(<TopTenTable title="Status" field="status" data={{ total: 5, top: [{ value: '200', count: 5 }] }} />)
+      const populatedCard = container.firstElementChild as HTMLElement
+      expect(populatedCard.className).toContain('min-h-[392px]')
+      expect(populatedCard.className).toContain('[contain-intrinsic-size:392px]')
     })
   })
 

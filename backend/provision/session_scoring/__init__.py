@@ -10,7 +10,7 @@ from backend.core.fastly.client import (
     fastly,
     fastly_raw,
     get_active_version,
-    list_s3_endpoints,
+    list_log_endpoints,
     list_vcl_snippets,
 )
 from backend.core.vcl_generator import VclSafetyError, validate_quoted_literal
@@ -193,7 +193,7 @@ __all__ = [
     "generate_scoring_vcl",
     "get_active_version",
     "info",
-    "list_s3_endpoints",
+    "list_log_endpoints",
     "list_vcl_snippets",
     "merge_scoring_custom_fields",
     "miss_snippet",

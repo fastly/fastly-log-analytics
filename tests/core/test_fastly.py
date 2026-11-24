@@ -23,6 +23,7 @@ import io
 import json
 import os
 import urllib.error
+import urllib.parse
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -57,6 +58,379 @@ def _fake_resp(body: bytes = b'{"ok": true}') -> MagicMock:
     resp.__enter__ = lambda s: s
     resp.__exit__ = MagicMock(return_value=False)
     return resp
+
+
+@pytest.mark.parametrize(
+    ("granularity", "path_granularity", "timestamp", "expected_start_time"),
+    [
+        ("minute", "minutely", "2026-07-23T10:00:00Z", 1784800800),
+        ("hour", "hourly", "2026-07-23T10:00:00Z", 1784800800),
+        ("day", "daily", "2026-07-23T00:00:00Z", 1784764800),
+    ],
+)
+def test_platform_metrics_maps_granularity_and_queries_entities(
+    granularity, path_granularity, timestamp, expected_start_time
+):
+    calls = []
+
+    def fake_fastly(method, path, **kwargs):
+        calls.append((method, path, kwargs))
+        return {
+            "data": [
+                {
+                    "timestamp": timestamp,
+                    "requests": 12,
+                    "edge_requests": 7,
+                }
+            ],
+            "meta": {"total": 1},
+        }
+
+    with patch.object(fastly_client, "fastly", side_effect=fake_fastly):
+        result = fastly_client.fastly_platform_metrics(
+            entity_id="svc/entity",
+            granularity=granularity,
+            from_epoch=1784800800,
+            to_epoch=1784804400,
+            metrics=("requests", "edge_requests"),
+            token="sentinel-platform-token",
+        )
+
+    method, path, kwargs = calls[0]
+    parsed = urllib.parse.urlsplit(path)
+    assert method == "GET"
+    assert parsed.path == f"/metrics/v2/platform/entities/svc%2Fentity/{path_granularity}"
+    assert urllib.parse.parse_qs(parsed.query) == {
+        "from": ["2026-07-23T10:00:00Z"],
+        "to": ["2026-07-23T11:00:00Z"],
+        "metric": ["requests,edge_requests"],
+        "limit": ["10000"],
+    }
+    assert kwargs == {
+        "token": "sentinel-platform-token",
+        "timeout": 30,
+        "max_retries": 3,
+    }
+    assert result == {
+        "status": "success",
+        "data": [
+            {
+                "timestamp": timestamp,
+                "start_time": expected_start_time,
+                "requests": 12,
+                "edge_requests": 7,
+            }
+        ],
+        "meta": {"total": 1},
+    }
+
+
+def test_platform_metrics_works_in_mock_mode():
+    with patch.object(fastly_client, "is_mock_mode", return_value=True):
+        result = fastly_client.fastly_platform_metrics(
+            entity_id="svc-1",
+            granularity="hour",
+            from_epoch=1784800800,
+            to_epoch=1784804400,
+            metrics=("requests",),
+            token="mock-token",
+        )
+    assert result == {"status": "success", "data": [], "meta": {}}
+
+
+def test_platform_metrics_queries_aggregate_and_keeps_sparse_records_sparse():
+    calls = []
+    with patch.object(
+        fastly_client,
+        "fastly",
+        side_effect=lambda method, path, **kwargs: (
+            calls.append(path) or {"data": [{"timestamp": "2026-07-23T10:05:00+00:00", "requests": 3}]}
+        ),
+    ):
+        result = fastly_client.fastly_platform_metrics(
+            entity_id=None,
+            granularity="minutely",
+            from_epoch=1784801100,
+            to_epoch=1784801160,
+            metrics=("requests", "edge_requests"),
+            token="token",
+            timeout=8,
+            max_retries=1,
+        )
+
+    assert urllib.parse.urlsplit(calls[0]).path == "/metrics/v2/platform/aggregate/minutely"
+    assert result["data"] == [
+        {
+            "timestamp": "2026-07-23T10:05:00+00:00",
+            "start_time": 1784801100,
+            "requests": 3,
+        }
+    ]
+
+
+def test_platform_metrics_adds_supported_group_by_and_preserves_group():
+    with patch.object(
+        fastly_client,
+        "fastly",
+        return_value={"data": [{"timestamp": "2026-07-23T00:00:00Z", "region": "europe", "requests": 3}]},
+    ) as fetch:
+        result = fastly_client.fastly_platform_metrics(
+            entity_id="svc",
+            granularity="day",
+            from_epoch=1784764800,
+            to_epoch=1784851200,
+            metrics=("requests",),
+            token="token",
+            group_by="region",
+        )
+
+    query = urllib.parse.parse_qs(urllib.parse.urlsplit(fetch.call_args.args[1]).query)
+    assert query["group_by"] == ["region"]
+    assert result["data"][0]["region"] == "europe"
+
+
+def test_platform_metrics_rejects_unsupported_group_by():
+    with pytest.raises(ValueError, match="Unsupported Platform Metrics group_by"):
+        fastly_client.fastly_platform_metrics(
+            entity_id="svc",
+            granularity="day",
+            from_epoch=1784764800,
+            to_epoch=1784851200,
+            metrics=("requests",),
+            token="token",
+            group_by="service",  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("group", [None, "", "   ", 42])
+def test_platform_metrics_rejects_missing_or_invalid_group(group):
+    with (
+        patch.object(
+            fastly_client,
+            "fastly",
+            return_value={"data": [{"timestamp": "2026-07-23T00:00:00Z", "region": group, "requests": 3}]},
+        ),
+        pytest.raises(RuntimeError, match="group"),
+    ):
+        fastly_client.fastly_platform_metrics(
+            entity_id="svc",
+            granularity="day",
+            from_epoch=1784764800,
+            to_epoch=1784851200,
+            metrics=("requests",),
+            token="token",
+            group_by="region",
+        )
+
+
+def test_platform_metrics_allows_same_timestamp_for_distinct_groups():
+    with patch.object(
+        fastly_client,
+        "fastly",
+        return_value={
+            "data": [
+                {"timestamp": "2026-07-23T00:00:00Z", "region": "europe", "requests": 3},
+                {"timestamp": "2026-07-23T00:00:00Z", "region": "usa", "requests": 2},
+            ]
+        },
+    ):
+        result = fastly_client.fastly_platform_metrics(
+            entity_id="svc",
+            granularity="day",
+            from_epoch=1784764800,
+            to_epoch=1784851200,
+            metrics=("requests",),
+            token="token",
+            group_by="region",
+        )
+
+    assert [row["region"] for row in result["data"]] == ["europe", "usa"]
+
+
+def test_platform_metrics_rejects_duplicate_timestamp_and_group():
+    with (
+        patch.object(
+            fastly_client,
+            "fastly",
+            return_value={
+                "data": [
+                    {"timestamp": "2026-07-23T00:00:00Z", "region": "europe", "requests": 3},
+                    {"timestamp": "2026-07-23T00:00:00Z", "region": "europe", "requests": 2},
+                ]
+            },
+        ),
+        pytest.raises(RuntimeError, match="duplicate"),
+    ):
+        fastly_client.fastly_platform_metrics(
+            entity_id="svc",
+            granularity="day",
+            from_epoch=1784764800,
+            to_epoch=1784851200,
+            metrics=("requests",),
+            token="token",
+            group_by="region",
+        )
+
+
+def test_platform_metrics_accepts_buckets_overlapping_partial_window():
+    with patch.object(
+        fastly_client,
+        "fastly",
+        return_value={
+            "data": [
+                {"timestamp": "2026-07-23T10:00:00Z", "requests": 1},
+                {"timestamp": "2026-07-23T10:01:00Z", "requests": 2},
+            ]
+        },
+    ):
+        result = fastly_client.fastly_platform_metrics(
+            entity_id="svc",
+            granularity="minute",
+            from_epoch=1784800830,
+            to_epoch=1784800890,
+            metrics=("requests",),
+            token="token",
+        )
+
+    assert [row["start_time"] for row in result["data"]] == [1784800800, 1784800860]
+
+
+def test_platform_metrics_follows_top_level_cursor_until_omitted():
+    paths = []
+    pages = iter(
+        [
+            {
+                "data": [{"timestamp": "2026-07-23T10:00:00Z", "requests": 1}],
+                "next_cursor": "page-2",
+                "meta": {"region": "all"},
+            },
+            {
+                "data": [{"timestamp": "2026-07-23T10:01:00Z", "requests": 2}],
+                "meta": {"region": "all", "complete": True},
+            },
+        ]
+    )
+
+    def fake_fastly(method, path, **kwargs):
+        paths.append(path)
+        return next(pages)
+
+    with patch.object(fastly_client, "fastly", side_effect=fake_fastly):
+        result = fastly_client.fastly_platform_metrics(
+            entity_id="svc",
+            granularity="minute",
+            from_epoch=1784800800,
+            to_epoch=1784800920,
+            metrics=("requests",),
+            token="token",
+        )
+
+    assert len(result["data"]) == 2
+    assert urllib.parse.parse_qs(urllib.parse.urlsplit(paths[1]).query)["cursor"] == ["page-2"]
+    assert result["meta"] == {"region": "all", "complete": True}
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        "not-a-time",
+        "2026-07-23T10:00:00",
+        "2026-07-23 10:00:00Z",
+        "2026-07-23T09:59:59Z",
+        "2026-07-23T11:00:00Z",
+    ],
+)
+def test_platform_metrics_rejects_malformed_and_out_of_window_timestamps_without_leaking_token(timestamp):
+    token = "sentinel-do-not-log"
+    with (
+        patch.object(
+            fastly_client,
+            "fastly",
+            return_value={"data": [{"timestamp": timestamp, "requests": 1}]},
+        ),
+        pytest.raises(RuntimeError) as exc,
+    ):
+        fastly_client.fastly_platform_metrics(
+            entity_id="svc",
+            granularity="hour",
+            from_epoch=1784800800,
+            to_epoch=1784804400,
+            metrics=("requests",),
+            token=token,
+        )
+
+    assert token not in str(exc.value)
+
+
+def test_platform_metrics_rejects_duplicate_timestamps_across_pages():
+    pages = iter(
+        [
+            {
+                "data": [{"timestamp": "2026-07-23T10:00:00Z", "requests": 1}],
+                "next_cursor": "page-2",
+            },
+            {"data": [{"timestamp": "2026-07-23T10:00:00Z", "requests": 2}]},
+        ]
+    )
+    with (
+        patch.object(fastly_client, "fastly", side_effect=lambda *args, **kwargs: next(pages)),
+        pytest.raises(RuntimeError, match="duplicate"),
+    ):
+        fastly_client.fastly_platform_metrics(
+            entity_id="svc",
+            granularity="hour",
+            from_epoch=1784800800,
+            to_epoch=1784804400,
+            metrics=("requests",),
+            token="token",
+        )
+
+
+def test_platform_metrics_rejects_repeated_cursor_without_exposing_it():
+    cursor = "sentinel-cursor"
+    with (
+        patch.object(
+            fastly_client,
+            "fastly",
+            side_effect=[
+                {"data": [], "next_cursor": cursor},
+                {"data": [], "next_cursor": cursor},
+            ],
+        ),
+        pytest.raises(RuntimeError, match="repeated cursor") as exc,
+    ):
+        fastly_client.fastly_platform_metrics(
+            entity_id="svc",
+            granularity="hour",
+            from_epoch=1784800800,
+            to_epoch=1784804400,
+            metrics=("requests",),
+            token="token",
+        )
+
+    assert cursor not in str(exc.value)
+
+
+def test_platform_metrics_bounds_unique_cursor_pages(monkeypatch):
+    monkeypatch.setattr(fastly_client, "_PLATFORM_METRICS_MAX_PAGES", 2)
+    pages = iter(
+        [
+            {"data": [], "next_cursor": "page-2"},
+            {"data": [], "next_cursor": "page-3"},
+        ]
+    )
+    with (
+        patch.object(fastly_client, "fastly", side_effect=lambda *args, **kwargs: next(pages)),
+        pytest.raises(RuntimeError, match="page limit"),
+    ):
+        fastly_client.fastly_platform_metrics(
+            entity_id="svc",
+            granularity="hour",
+            from_epoch=1784800800,
+            to_epoch=1784804400,
+            metrics=("requests",),
+            token="token",
+        )
 
 
 def test_fastly_returns_parsed_json_on_success():
@@ -431,7 +805,7 @@ def seeded_metadata_db():
 @patch("backend.core.metadata.log_synthetic_usage")
 def test_backfill_calls_metadata_db(_log_synth, _enabled, seeded_metadata_db):
     """backfill should hand a list of synthesised PUT_OBJECT calls to metadata_db.log_synthetic_usage."""
-    from backend.core import duckdb as _db
+    from backend.core import fos_client as _db
 
     _log_synth.return_value = 3
     inserted = _db.backfill_fastly_edge_writes({"name": seeded_metadata_db})
@@ -454,7 +828,7 @@ def test_backfill_calls_metadata_db(_log_synth, _enabled, seeded_metadata_db):
 @patch("backend.config.is_usage_logging_enabled", return_value=True)
 def test_backfill_is_idempotent_end_to_end(_enabled, seeded_metadata_db):
     """Running backfill multiple times should not insert duplicate rows."""
-    from backend.core import duckdb as _db
+    from backend.core import fos_client as _db
 
     first = _db.backfill_fastly_edge_writes({"name": seeded_metadata_db})
     second = _db.backfill_fastly_edge_writes({"name": seeded_metadata_db})
@@ -475,7 +849,7 @@ def test_backfill_is_idempotent_end_to_end(_enabled, seeded_metadata_db):
 @patch("backend.config.is_usage_logging_enabled", return_value=False)
 @patch("backend.core.metadata.log_synthetic_usage")
 def test_backfill_skips_when_usage_logging_disabled(_log_synth, _enabled, seeded_metadata_db):
-    from backend.core import duckdb as _db
+    from backend.core import fos_client as _db
 
     inserted = _db.backfill_fastly_edge_writes({"name": seeded_metadata_db})
 
@@ -490,7 +864,7 @@ def test_backfill_incremental_skips_already_backfilled_files(_enabled, seeded_me
     SQL level, so we don't even pay the dedup IN-clause cost.
     """
     import backend.core.metadata as metadata_db
-    from backend.core import duckdb as _db
+    from backend.core import fos_client as _db
 
     first = _db.backfill_fastly_edge_writes({"name": seeded_metadata_db})
     assert first == 3
@@ -673,20 +1047,44 @@ def test_cursor_three_pages_sends_cursor_and_stops_on_empty():
     assert all(c.kwargs["token"] == "t" and c.args[0] == "GET" for c in f.call_args_list)
 
 
-def test_cursor_repeat_is_cut_off():
+@pytest.mark.no_postgres
+def test_cursor_repeat_raises():
     f = _pages(*[{"data": [i], "meta": {"next_cursor": "same"}} for i in range(10)])
     with patch.object(fastly_client, "fastly", f):
-        pages = list(fastly_client.fastly_paginate("/x", token="t"))
+        with pytest.raises(RuntimeError, match="cursor.*repeated"):
+            list(fastly_client.fastly_paginate("/x", token="t"))
+    assert f.call_count == 2
+
+
+@pytest.mark.no_postgres
+def test_non_string_cursor_raises():
+    f = _pages({"data": [1], "meta": {"next_cursor": 42}})
+    with patch.object(fastly_client, "fastly", f):
+        with pytest.raises(RuntimeError, match="malformed cursor"):
+            list(fastly_client.fastly_paginate("/x", token="t"))
+
+
+@pytest.mark.no_postgres
+def test_max_pages_raises_while_more_pages_remain():
+    f = _pages(*[{"data": [i], "meta": {"next_cursor": f"c{i}"}} for i in range(10)])
+    with patch.object(fastly_client, "fastly", f):
+        with pytest.raises(RuntimeError, match="max_pages=3"):
+            list(fastly_client.fastly_paginate("/x", token="t", max_pages=3))
+    assert f.call_count == 3
+
+
+@pytest.mark.no_postgres
+def test_max_pages_does_not_raise_after_terminal_page():
+    f = _pages(
+        {"data": [1], "meta": {"next_cursor": "c1"}},
+        {"data": [2], "meta": {"next_cursor": ""}},
+    )
+    with patch.object(fastly_client, "fastly", f):
+        pages = list(fastly_client.fastly_paginate("/x", token="t", max_pages=2))
     assert len(pages) == 2
 
 
-def test_max_pages_bounds_iteration():
-    f = _pages(*[{"data": [i], "meta": {"next_cursor": f"c{i}"}} for i in range(10)])
-    with patch.object(fastly_client, "fastly", f):
-        pages = list(fastly_client.fastly_paginate("/x", token="t", max_pages=3))
-    assert len(pages) == 3
-
-
+@pytest.mark.no_postgres
 def test_page_style_stops_on_short_page():
     f = _pages({"data": [1, 2]}, {"data": [3, 4]}, {"data": [5]})
     with patch.object(fastly_client, "fastly", f):
@@ -699,6 +1097,7 @@ def test_page_style_stops_on_short_page():
     ]
 
 
+@pytest.mark.no_postgres
 def test_link_style_follows_relative_and_api_host_links():
     f = _pages(
         {"data": [1], "links": {"next": "/x?page=2"}},
@@ -711,11 +1110,12 @@ def test_link_style_follows_relative_and_api_host_links():
     assert [c.args[1] for c in f.call_args_list] == ["/x", "/x?page=2", "/x?page=3"]
 
 
+@pytest.mark.no_postgres
 def test_link_style_refuses_off_host_link():
     f = _pages({"data": [1], "links": {"next": "https://evil.example/x?page=2"}}, {"data": [2]})
     with patch.object(fastly_client, "fastly", f):
-        pages = list(fastly_client.fastly_paginate("/x", token="t", style="link"))
-    assert len(pages) == 1
+        with pytest.raises(RuntimeError, match="off-host"):
+            list(fastly_client.fastly_paginate("/x", token="t", style="link"))
     assert f.call_count == 1
 
 
@@ -728,7 +1128,7 @@ def test_mock_mode_makes_no_network_calls(monkeypatch):
 
 
 def test_ngwaf_verified_bots_paged_uses_cursor_pagination():
-    from backend.core.rollups.security_dims import fetch_verified_bots_paged
+    from backend.cron.jobs.metadata import fetch_verified_bots_paged
 
     bot = {"id": "r1", "timestamp": "2026-10-01T00:00:00Z", "signals": [{"id": "VERIFIED-BOT", "value": "Googlebot"}]}
     f = _pages(
@@ -939,18 +1339,75 @@ def test_ensure_condition_url_encodes_condition_name():
     assert put_path.endswith("Path%20%2F%20With%20%25%20Spaces")
 
 
-def test_list_s3_endpoints_returns_names_list():
-    fake = [{"name": "logs-fos"}, {"name": "audit-logs"}]
-    with patch("backend.core.fastly.client.fastly", return_value=fake):
-        assert service.list_s3_endpoints("svc", 5, "tkn") == ["logs-fos", "audit-logs"]
+def test_list_log_endpoints_maps_names_to_their_endpoint_type():
+    def fake(method, path, **_kw):
+        if path.endswith("/logging/s3"):
+            return [{"name": "logs-fos"}, {"name": "audit-logs"}]
+        return [{"name": "native-logs"}]
+
+    with patch("backend.core.fastly.client.fastly", side_effect=fake):
+        assert service.list_log_endpoints("svc", 5, "tkn") == {
+            "logs-fos": "s3",
+            "audit-logs": "s3",
+            "native-logs": "fos",
+        }
 
 
-def test_list_s3_endpoints_returns_empty_on_error():
-    """RuntimeError → empty list. Pinned because the cron's
+def test_list_log_endpoints_returns_empty_on_error():
+    """RuntimeError → empty mapping. Pinned because the cron's
     teardown-detector reads this to know what to remove; a raise
     would abort the whole teardown."""
     with patch("backend.core.fastly.client.fastly", side_effect=RuntimeError("404")):
-        assert service.list_s3_endpoints("svc", 5, "tkn") == []
+        assert service.list_log_endpoints("svc", 5, "tkn") == {}
+
+
+@pytest.mark.parametrize(
+    ("token_info", "extra", "allowed"),
+    [
+        ({"user_id": "u1"}, {"/current_user": {"role": "superuser", "limit_services": True}}, True),
+        ({"user_id": "u1"}, {"/current_user": {"role": "engineer", "limit_services": False}}, True),
+        ({"user_id": "u1"}, {"/current_user": {"role": "engineer", "limit_services": True}}, False),
+        ({"user_id": "u1"}, {"/current_user": {"role": "user", "limit_services": False}}, False),
+        ({"id": "tok1", "role": "engineer"}, {}, True),
+        ({"id": "tok1"}, {"/automation-tokens/tok1": {"role": "superuser"}}, True),
+        ({"id": "tok1"}, {"/automation-tokens/tok1": {"role": "user"}}, False),
+    ],
+)
+def test_logging_endpoint_role_error(token_info, extra, allowed):
+    responses = {"/tokens/self": token_info, **extra}
+
+    def fake(method, path, **_kw):
+        assert method == "GET"
+        return responses[path]
+
+    with patch("backend.core.fastly.client.fastly", side_effect=fake):
+        error = service.logging_endpoint_role_error("tkn")
+    assert (error is None) is allowed
+    if not allowed:
+        assert "Engineer" in error and "Superuser" in error
+
+
+def test_get_log_endpoint_falls_back_to_the_legacy_s3_endpoint():
+    calls: list[str] = []
+
+    def fake(method, path, **_kw):
+        calls.append(path)
+        if "/logging/fos/" in path:
+            raise RuntimeError("HTTP 404: not found")
+        return {"name": "Fastly Log Analytics", "period": "60"}
+
+    with patch("backend.core.fastly.client.fastly", side_effect=fake):
+        assert service.get_log_endpoint("svc", 5, "Fastly Log Analytics", "tkn")["period"] == "60"
+    assert calls == [
+        "/service/svc/version/5/logging/fos/Fastly%20Log%20Analytics",
+        "/service/svc/version/5/logging/s3/Fastly%20Log%20Analytics",
+    ]
+
+    with (
+        patch("backend.core.fastly.client.fastly", side_effect=RuntimeError("HTTP 500: boom")),
+        pytest.raises(RuntimeError, match="500"),
+    ):
+        service.get_log_endpoint("svc", 5, "Fastly Log Analytics", "tkn")
 
 
 def test_list_vcl_snippets_returns_names_list():
@@ -1388,6 +1845,7 @@ async def test_poller_starts_and_suspends(monkeypatch):
     import backend.core.realtime as poller_mod
     from backend.core.realtime import RealtimeMetricsPublisher
 
+    monkeypatch.setattr("backend.config.SSE_BACKPLANE", "memory")
     test_publisher = RealtimeMetricsPublisher()
     test_publisher.bind_loop(asyncio.get_running_loop())
     monkeypatch.setattr(poller_mod, "publisher", test_publisher)
@@ -1433,6 +1891,7 @@ async def test_cursor_advances(monkeypatch):
     import backend.core.realtime as poller_mod
     from backend.core.realtime import RealtimeMetricsPublisher
 
+    monkeypatch.setattr("backend.config.SSE_BACKPLANE", "memory")
     test_publisher = RealtimeMetricsPublisher()
     test_publisher.bind_loop(asyncio.get_running_loop())
     monkeypatch.setattr(poller_mod, "publisher", test_publisher)

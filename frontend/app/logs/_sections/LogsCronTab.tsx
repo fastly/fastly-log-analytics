@@ -10,7 +10,7 @@ import { Button, buttonVariants } from '@/components/ui/button'
 import { ConfirmDialog, HelpDialog } from '@/components/ui/confirm-dialog'
 import { DataTable, ColumnVisibilityDropdown } from '@/components/DataTable'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import type { ColumnDef } from '@tanstack/react-table'
+import type { ColumnDef } from '@/lib/table'
 import type { components } from '@/types/api.generated'
 import type { CronRun } from './useLogsPageState'
 import {
@@ -35,6 +35,20 @@ export {
   FloatingOperationsDock,
 }
 
+export type CronClock = { probe_interval_s: number; log_period_s: number; rum_log_period_s: number | null }
+
+/** "Each POP probes every 30 s (½ of the 60 s request log period)", naming the cap or floor when one applies. */
+export function describeClock(clock: CronClock): string {
+  const rum = clock.rum_log_period_s
+  const [period, kind] = rum != null && Math.max(rum, 5) < clock.log_period_s
+    ? [Math.max(rum, 5), 'RUM']
+    : [clock.log_period_s, 'request']
+  const every = `Each POP probes every ${clock.probe_interval_s} s`
+  if (Math.abs(period / 2 - clock.probe_interval_s) < 0.001) return `${every} (½ of the ${period} s ${kind} log period)`
+  const bound = clock.probe_interval_s >= 30 ? 'the 30 s maximum' : 'the 1 s minimum'
+  return `${every} (${bound}; ${period} s ${kind} log period)`
+}
+
 export function CronTab({
   cronColumns,
   cronLogs,
@@ -46,7 +60,6 @@ export function CronTab({
   setTaskFilter,
   statusFilter,
   setStatusFilter,
-  status,
   activeServiceId,
   setDisplayedJobs,
   setSelectedConsoleJobId,
@@ -54,6 +67,7 @@ export function CronTab({
   isPurgeOpen,
   setIsPurgeOpen,
   purgeMutation,
+  clock = null,
 }: {
   cronColumns: ColumnDef<CronRun>[]
   cronLogs: components['schemas']['CronRunsResponse'] | undefined
@@ -73,6 +87,8 @@ export function CronTab({
   isPurgeOpen: boolean
   setIsPurgeOpen: (open: boolean) => void
   purgeMutation: { isPending: boolean; mutate: () => void }
+  /** Cloud: how often the front clock health checks probe, and the log periods that set it. */
+  clock?: CronClock | null
 }) {
   const queryClient = useQueryClient()
   const [isHelpOpen, setIsHelpOpen] = React.useState(false)
@@ -89,21 +105,11 @@ export function CronTab({
     () => orderedSchedules.filter((s) => !groupedTaskNames.includes(s.task)),
     [orderedSchedules, groupedTaskNames],
   )
-  const taskFilterOptions: Array<[string, string]> = [
-    ['rum_sync', 'RUM Sync'],
-    ['full_sync', 'Full Sync'],
-    ['gap_heal', 'Gap Heal'],
-    ['alerts', 'Alerts'],
-    ['commit', 'Commit'],
-    ['rum_commit', 'RUM Commit'],
-    ['optimize', 'Optimize'],
-    ['local_compact', 'Local Compact'],
-    ['rollup_compact_daily', 'Rollup Compact'],
-    ['rollup_hour_heal', 'Rollup Heal'],
-    ['expire_snapshots', 'Expire'],
-    ...(status?.ngwaf_workspace_id ? [['ngwaf_sync', 'NGWAF Sync'] as [string, string]] : []),
-    ['metadata_cleanup', 'Metadata Cleanup'],
-  ]
+  const taskFilterOptions = [...new Set([
+    ...orderedSchedules.map((schedule) => schedule.task),
+    ...(cronLogs?.entries ?? []).map((run) => run.task),
+  ])].sort().map((task) => [task, CRON_DISPLAY_NAMES[task] || task])
+  const availableTasks = new Set(taskFilterOptions.map(([task]) => task))
 
   return (
     <div className="p-0">
@@ -123,6 +129,15 @@ export function CronTab({
               <div className="p-4 border-b bg-muted/10 space-y-5">
                 <div className="flex items-center gap-2">
                   <h3 className="text-sm font-medium">Cron Jobs</h3>
+                  {clock && (
+                    <span
+                      data-testid="cron-clock"
+                      className="text-xs text-muted-foreground"
+                      title="Fastly health checks on the front service probe the clock at this interval. Every reconcile (a log settings change, or a deploy) sets it from the log periods."
+                    >
+                      {describeClock(clock)}
+                    </span>
+                  )}
                   <button
                     onClick={() => setIsHelpOpen(true)}
                     aria-label="About background cron jobs"
@@ -143,11 +158,11 @@ export function CronTab({
                       Fastly Log Analytics uses a distributed architecture of background jobs to ingest logs, perform
                       maintenance, and pre-calculate analytics.
                     </p>
-                    {CRON_GROUPS.map((group) => (
+                    {CRON_GROUPS.filter((group) => group.tasks.some((task) => availableTasks.has(task))).map((group) => (
                       <div key={group.title} className="space-y-2">
                         <h4 className="font-semibold text-foreground">{group.title}</h4>
                         <ul className="space-y-3">
-                          {group.tasks.map((task) => (
+                          {group.tasks.filter((task) => availableTasks.has(task)).map((task) => (
                             <li key={task} className="pl-4 border-l-2 border-muted">
                               <div className="flex items-center gap-2 mb-1">
                                 <span className="font-medium text-foreground">{CRON_DISPLAY_NAMES[task] || task}</span>
@@ -206,7 +221,6 @@ export function CronTab({
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="all">All tasks</SelectItem>
-                      <SelectItem value="log_discovery">Log Discovery</SelectItem>
                       {taskFilterOptions.map(([val, label]) => (
                         <SelectItem key={val} value={val}>
                           {label}

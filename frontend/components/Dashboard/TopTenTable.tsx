@@ -1,7 +1,8 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
-import { ColumnDef, flexRender, getCoreRowModel, useReactTable } from '@tanstack/react-table'
+import { flexRender, useTable } from '@tanstack/react-table'
+import { basicTableFeatures, type BasicColumnDef } from '@/lib/table'
 import { DashboardTableData } from '@/types/api'
 import { useFilterStore } from '@/stores/filterStore'
 import { Copy, Check, EyeOff, TrendingUp, TrendingDown, Search, Loader2, X } from 'lucide-react'
@@ -43,7 +44,7 @@ export function FieldSearchDialog({ field, title }: FieldSearchDialogProps) {
   const removeFilter = useFilterStore(s => s.removeFilter)
   const filters = useFilterStore(s => s.filters)
 
-  const { data, isLoading, isFetching } = useFieldValues({ field, search: debouncedSearch, limit: 100, enabled: open })
+  const { data, isLoading, isFetching, error, refetch } = useFieldValues({ field, search: debouncedSearch, limit: 100, enabled: open })
 
   // Filters already active for this field are pinned to the top of the list,
   // so re-opening the dialog shows what's currently selected. They follow the
@@ -126,7 +127,14 @@ export function FieldSearchDialog({ field, title }: FieldSearchDialogProps) {
                   <div className="border-t my-1" aria-hidden="true" />
                 </>
               )}
-              {isLoading ? (
+              {error ? (
+                <div role="alert" className="space-y-2 p-4 text-sm">
+                  <p>{error.message}</p>
+                  <Button variant="outline" size="sm" onClick={() => void refetch()} disabled={isFetching}>
+                    Retry search
+                  </Button>
+                </div>
+              ) : isLoading ? (
                 <div className="space-y-2 p-2">
                   <Skeleton className="h-8 w-full" />
                   <Skeleton className="h-8 w-full" />
@@ -209,7 +217,7 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
   const maxCount = useMemo(() => (topItems.length > 0 ? Math.max(...topItems.map((i) => i.count)) : 1), [topItems])
   const compareMap = useMemo(() => new Map(compareData?.top?.map((i) => [i.value, i.count]) || []), [compareData?.top])
 
-  const columns = useMemo<ColumnDef<TopTenItem>[]>(
+  const columns = useMemo<BasicColumnDef<TopTenItem>[]>(
     () => [
       {
         id: 'row',
@@ -295,7 +303,7 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
     ],
     [field, compareMap, maxCount, filterBlocked, onRowClick],
   )
-  const table = useReactTable({ data: topItems, columns, getCoreRowModel: getCoreRowModel() })
+  const table = useTable({ features: basicTableFeatures, data: topItems, columns })
 
   if (!data || !data.top || data.top.length === 0) {
     let requiredGroupMessage = ''
@@ -325,7 +333,7 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
     }
 
     return (
-      <div className="flex flex-col border rounded-lg p-4 h-full bg-card [content-visibility:auto] [contain-intrinsic-size:300px]">
+      <div className="flex flex-col border rounded-lg p-4 min-h-[392px] h-full bg-card [content-visibility:auto] [contain-intrinsic-size:392px]">
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-sm font-medium tracking-tight flex items-center gap-1.5">
             {icon} {title}
@@ -364,7 +372,7 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
   }
 
   return (
-    <div className="flex flex-col border rounded-lg p-4 h-full bg-card [content-visibility:auto] [contain-intrinsic-size:300px]">
+    <div className="flex flex-col border rounded-lg p-4 min-h-[392px] h-full bg-card [content-visibility:auto] [contain-intrinsic-size:392px]">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-medium tracking-tight flex items-center gap-1.5">
           {icon} {title} <span className="text-muted-foreground font-normal text-xs ml-1">(Top 10)</span>

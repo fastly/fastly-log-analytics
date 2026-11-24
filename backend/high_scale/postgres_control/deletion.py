@@ -292,16 +292,27 @@ class HighScaleDeletionSweeper:
     """Periodically deletes raw source objects whose archive is durably verified and whose grace period has elapsed."""
 
     def __init__(
-        self, *, control: Any, controller: DeletionController, archive_expirer: HighScaleArchiveExpirer | None = None
+        self,
+        *,
+        control: Any,
+        controller: DeletionController,
+        archive_expirer: HighScaleArchiveExpirer | None = None,
+        publication_reaper: Any | None = None,
     ) -> None:
         self._control = control
         self._controller = controller
         self._archive_expirer = archive_expirer
+        self._publication_reaper = publication_reaper
 
     def sweep(self, *, service_id: str, limit: int = 100, now: datetime | None = None) -> DeletionSweepResult:
         result = self._sweep_sources(service_id=service_id, limit=limit, now=now)
         if self._archive_expirer is not None:
             self._archive_expirer.expire(service_id, limit=limit)
+        if self._publication_reaper is not None:
+            try:
+                self._publication_reaper.maybe_reap(service_id)
+            except Exception:
+                logger.warning("high-scale publication reaper failed; retrying next sweep", exc_info=True)
         return result
 
     def _sweep_sources(self, *, service_id: str, limit: int = 100, now: datetime | None = None) -> DeletionSweepResult:

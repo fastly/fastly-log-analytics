@@ -1,0 +1,120 @@
+# storage_reconcile
+
+A resumable job that LISTs every dataset with object sizes and records a byte/object snapshot plus a per-object `storage_inventory` snapshot. It runs on its own every 6 hours (`RECONCILE_INTERVAL_S`, the retention sweep's cadence), and an admin can also request one. That snapshot anchors the storage ledger.
+
+## Purpose
+
+Provides an exact-at-listing-time count of bytes and objects for:
+- `raw/request/`
+- `raw/rum/`
+- `processed/request/`
+- `processed/rum/`
+- `processed/ops/`, with a per-kind breakdown
+
+The `/usage` storage panel adds later `fos_usage` PUT bytes and subtracts deleted bytes on top of the snapshot. The result is labelled "estimated".
+
+## Why it exists
+
+Spec D13 (lines 268, 272, 342) rules out a recursive storage-tree walk on every page load, which would use too many calls and too much CPU for Compute. Instead, storage is a ledger: the last snapshot plus deltas. A full LIST takes many 1,000-key pages, so it runs as a bounded job spread across ticks.
+
+## How it works
+
+**Request** (`POST /api/admin/usage/reconcile-storage`, `admin/logs.rs:668-676`)
+- `request_storage_reconcile` (`retention.rs:945-957`) Add-CASes KV `storage:reconcile`:
+  - `{requested_at, actor, index: 0, token: null, totals: [(0,0)×7], by_kind: {}}`
+- It returns `{started: false}` if a reconcile is already running. Only one runs at a time.
+
+**Schedule** (`request_scheduled_reconcile`, `retention.rs`)
+- On the stage's maintenance turn, `reconcile_stage` first starts a reconcile (actor `system:schedule`) when none is running and the last one completed at least `RECONCILE_INTERVAL_S` (6 h) ago, or never.
+- A full listing costs one Class A LIST per 1,000 objects, so about $0.30 a month per million objects at this cadence.
+- The retention sweep can't double as the inventory: it lists only folders past retention and stops at the first live one.
+
+**Step** (`storage_reconcile_step`, `retention.rs:962-1057`)
+1. Read `storage:reconcile`. If it is absent, return `None` (no row).
+2. While `room(3)` holds (the 40 s wall guard plus calls), LIST one 1,000-key page of `{scope}{folder}` for the current `index`. `scope` is the service's `fos_prefix`.
+3. Add the sizes and counts to `totals[index]`. For `processed/ops/`, also add them to `by_kind[first path segment]`.
+4. Advance `token`, or move to the next dataset. CAS the state after each page. A lost CAS returns `reconcile_state_conflict`.
+5. After the last dataset:
+   - build `{datasets: {name: {bytes, objects[, by_kind]}}, requested_at, completed_at}`;
+   - keep `storage:reconcile` with `completed_at` set (one CAS on the generation read at the start of the step, as no cursor was written in it). The schedule reads this record; the logs status reports a reconcile only while `completed_at` is unset.
+
+****Tick wiring** (`admin/logs.rs:736-808`)
+- The step runs on its round-robin turn in the stage worker ([stage-worker.md](stage-worker.md)), when `enough(RECONCILE_CALLS)` holds (`reconcile_stage`, `admin/logs.rs:1383-1415`).
+- It runs with reserve `TAIL`.
+
+**Output:** the totals are stored as `details_json` on a `cron_runs` row with `outcome = done`, and every object is written as a `storage_inventory` row ending in a `complete` marker.
+
+**How usage reads it** (`fetchCloudStorageInventory`, `frontend/lib/cloud-engine/usage/summary.ts`)
+- Live objects come from the newest complete snapshot. A newer snapshot still listing doesn't invalidate it.
+- A complete snapshot older than 12 hours (two runs) is flagged `cloud:inventory_stale`, so a stopped schedule shows as a partial storage cost.
+- Between snapshots, Parquet files that ingest wrote after the snapshot (`ingest_files.output_keys_json`) are added as live (`liveSinceSnapshot`), so live storage stays current without listing more often. Objects compaction or retention deleted since the snapshot stay counted as live until the next one, at most 6 hours of overlap with their deleted-but-billed interval.
+
+## Roles and permissions
+
+Admin only (`shell.rs:792-806`, `1279-1287`). A request that starts a job is audited as `storage_reconcile_requested` with target `storage`. A request that finds one already running is not audited.
+
+## Manual triggers and admin controls
+
+- No page calls `POST /api/admin/usage/reconcile-storage` today. The Cloud adapter maps `POST /api/admin/metadata-cleanup` with `action: "reconcile_storage"` to it (`frontend/lib/cloud-engine/adapter.ts:1613-1615`).
+- `GET /api/admin/logs/status` returns `storage_reconcile: {requested_at, actor}` while it runs (`logs.rs:174-187`).
+- `POST /api/cron-runs/trigger` advances it right away.
+- The job cannot be cancelled.
+
+## Telemetry
+
+- Each step writes a `cron_runs` row with `cron_kind = storage_reconcile`, buffer `{run_id}-maint`, caller `cron:storage_reconcile`.
+  - `partial` + `more_pending` while unfinished;
+  - `done` + the snapshot once complete;
+  - `error` on failure.
+- The usage summary reads the snapshot from `cron_runs` (`reconcileSnapshot`, `summary.ts:185-206`).
+
+## Constraints and gotchas
+
+**Cost**
+- Whenever the turn reaches reconcile, the stage execution spends 1 GET on `storage:reconcile`, even when nothing was requested.
+- Each page costs 1 LIST, a CAS and a GET.
+
+**Accuracy**
+- The snapshot is not point-in-time. Ingest, flush, compaction and retention keep changing the tree while pages are listed across ticks.
+- `by_kind` keys come from FOS keys. The state keeps at most `MAX_RECONCILE_KINDS` (32) of them and folds further folders into `other` (`retention.rs:914-915`). The whole map is rewritten into the KV state on every page.
+
+**Where the snapshot lives**
+- It exists only in `cron_runs`, so it ages out with that kind's retention (30 days by default).
+- It is invisible to `/usage` once it falls outside the queried window.
+
+**Web summary**
+- `reconcileSnapshot` picks the newest row with outcome `done` **or `partial`**. Partial rows carry no `details_json` datasets, so a reconcile in progress hides the previous completed snapshot and counts each dataset as 0 + deltas.
+
+**Fan-out**
+- Compute cannot call its own domain, and this job never fans out to a peer. Large trees take many ticks.
+
+## Failure modes and recovery
+
+- **Crash between pages:** the KV cursor resumes. A page whose CAS did not land is listed again. Its totals were never persisted, so it is not double counted.
+- **CAS conflict or LIST error:** the row is `error`, the state stays, and the next tick retries.
+- **Crash after the final LIST:** the last page is not CASed. The key is deleted before the row is buffered, so a crash between the delete and the row write loses the snapshot. Request a new reconcile.
+- **Corrupt state** (`reconcile_state_invalid`): every tick fails until the key is deleted by hand. No endpoint clears it.
+
+## Tests
+
+- `compute/cloud/tests/ingest.rs`:
+  - `storage_reconcile_does_nothing_until_requested` (6588)
+  - `storage_reconcile_sums_bytes_and_objects_per_dataset_across_resumed_steps` (6644)
+  - `sweep_and_reconcile_endpoints_run_on_demand_and_are_audited` (6983)
+  - `retention_loops_stop_at_the_wall_and_resume` (7934)
+- Web: `frontend/lib/cloud-engine/usage/summary.test.ts` mocks the endpoint.
+
+## TODOs
+
+- `reconcileSnapshot` should select only `done` rows. As written, a newer partial row hides the snapshot.
+- Persist the last snapshot somewhere longer-lived than `cron_runs` retention, or document the dependency. The spec does not decide this.
+- There is no cancel or reset endpoint for a stuck or corrupt reconcile.
+- v3 parity: v3's usage-log storage cost and "sync and storage state" views ([usage-log.md](../../pages/admin/usage-log.md), [overview.md](../../pages/admin/overview.md) line 27) map to this ledger and `/usage`. Spec D13 covers this, and it is implemented as an estimate.
+
+## Code
+
+- `compute/cloud/src/ingest/retention.rs:913-957`: key, dataset list, state, request.
+- `compute/cloud/src/ingest/retention.rs:962-1057`: `storage_reconcile_step`.
+- `compute/cloud/src/admin/logs.rs:668-676`: endpoint.
+- `compute/cloud/src/admin/logs.rs:1383-1415`: stage wiring.
+- `frontend/lib/cloud-engine/usage/summary.ts:408-435`, `955-1006`: snapshot and ledger.

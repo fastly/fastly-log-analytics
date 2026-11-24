@@ -188,6 +188,3 @@ async def _dispatch_telemetry_response(self: TelemetryResponseBodyMiddleware, re
     except Exception as e:
         logger.warning("[telemetry-middleware] failed to inject telemetry: %s", e)
         return _reconstruct(response, body)
-
-
-TelemetryResponseBodyMiddleware.dispatch = _dispatch_telemetry_response  # type: ignore[method-assign]
