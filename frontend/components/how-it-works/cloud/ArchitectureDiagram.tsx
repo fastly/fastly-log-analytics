@@ -37,7 +37,7 @@ export function ArchitectureDiagram() {
             <DiagramNode
               icon={Radio}
               title="Health-check probes"
-              detail="Fastly's health checks supply the heartbeat, once a second. No external scheduler."
+              detail="Fastly's health checks supply the heartbeat — set to half the shortest log period, up to 30 seconds (30 s at the 60 s minimum). No external scheduler."
             />
             <Connector label="many" />
             <div className="relative rounded-xl border border-primary/40 bg-primary/5 p-4">

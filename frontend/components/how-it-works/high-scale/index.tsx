@@ -422,9 +422,9 @@ export function HighScaleHowItWorks() {
               <Link href="/admin" className={linkClass}>
                 Admin
               </Link>
-              . The setup wizard creates the Object Storage bucket, a
-              bucket-scoped access key, a delivery service and the logging
-              endpoint, and rolls back if a step fails.
+              . The setup wizard creates an opaque-named Object Storage bucket,
+              a bucket-scoped access key, an opaque-named delivery service and
+              the logging endpoint, and rolls back if a step fails.
             </p>
             <p>
               Admins have full access. Analysts join through a share invite from{" "}
@@ -456,10 +456,11 @@ export function HighScaleHowItWorks() {
               <Link href="/usage" className={linkClass}>
                 Usage
               </Link>{" "}
-              page measures Object Storage size and operations, CDN bandwidth,
-              and log and RUM activity, and estimates cost from rates you can
-              edit. Storage sizing follows your retention and includes the
-              archive.
+              page measures Object Storage operations, CDN bandwidth, and log
+              and RUM activity, computes service-local billed GB-hours directly
+              from PostgreSQL&apos;s source-object and archive-manifest ledgers
+              (including live objects, deleted objects and Object Storage&apos;s
+              30-day minimum), and estimates cost from rates you can edit.
             </p>
             <p>
               It does not price your Kubernetes cluster: ClickHouse, PostgreSQL

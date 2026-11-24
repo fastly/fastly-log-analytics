@@ -32,7 +32,7 @@ const maintenance = [
   {
     name: "Storage reconciliation",
     description:
-      "When requested, inventory stored objects in bounded steps to refresh the storage-usage ledger.",
+      "Inventory stored objects in bounded steps every six hours (or when an admin requests one) to write a fresh storage-inventory snapshot.",
   },
   {
     name: "Summary bundles",
@@ -104,10 +104,11 @@ export function CloudHowItWorks() {
             Many probes. One shared fetch.
           </h2>
           <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-            Health checks arrive from across Fastly&apos;s network every second.
-            They should wake the app, not all run the same job. Two layers of
-            caching and a Compute-side lease turn that noisy heartbeat into
-            coordinated work.
+            Health checks arrive from across Fastly&apos;s network at half the
+            shortest configured log period, capped at 30 seconds (every 30
+            seconds at Cloud&apos;s 60-second minimum). They should wake the
+            app, not all run the same job. Two layers of caching and a
+            Compute-side lease turn that heartbeat into coordinated work.
           </p>
         </div>
         <div className="grid gap-4 md:grid-cols-3">
@@ -121,9 +122,10 @@ export function CloudHowItWorks() {
             <CardContent className="space-y-3 text-sm leading-relaxed text-muted-foreground">
               <p>
                 The front VCL service normalizes clock requests to{" "}
-                <code>/_tick</code> or <code>/_flush</code>, dropping the query
-                string and cookies. Probes reuse the same cache entry instead of
-                creating a new one every second.
+                <code>/_tick</code> or <code>/_flush</code>, stripping query
+                strings, cookies and any client-supplied internal headers.
+                Probes reuse the same cache entry instead of creating a new one
+                on every check.
               </p>
               <p>
                 Edge hits stop locally. Misses converge at the IAD shield, where
@@ -149,10 +151,12 @@ export function CloudHowItWorks() {
                 another full sleep interval.
               </p>
               <p>
-                While work is due or running, the interval stays at one second.
-                When the entry expires, the next matching miss wakes Compute
-                again. The health checks keep arriving; most get a cached answer
-                rather than starting an application execution.
+                While work is due or running, the cache TTL stays at one second,
+                and a turn that stops with work left continues itself
+                immediately rather than waiting for the next probe. When the
+                entry expires, the next matching miss wakes Compute again; most
+                probes get a cached answer instead of starting a Compute
+                execution.
               </p>
             </CardContent>
           </Card>
@@ -215,8 +219,9 @@ export function CloudHowItWorks() {
               Request and optional RUM logs each become due once per log
               period, and the minimum log period is 60 seconds. Shorter periods
               would add files and compaction work without making the dashboard
-              fresher. When a pass leaves work pending, ingestion runs again on
-              the next tick until it catches up.
+              fresher. When a pass leaves work pending, the dispatcher continues
+              immediately until it catches up, with the next health-check probe
+              as fallback.
             </dd>
           </div>
           <div className="py-4">
@@ -258,8 +263,8 @@ export function CloudHowItWorks() {
               The separate <code>/_flush</code> path archives telemetry in its
               own execution, with its own schedule and lease, so it never
               competes with ingestion for one execution&apos;s budget. When idle
-              it wakes at most once a minute; unfinished work continues on the
-              next probe.
+              it wakes at most once a minute; unfinished work continues itself
+              immediately, with the next probe as fallback.
             </dd>
           </div>
         </dl>
@@ -466,9 +471,10 @@ export function CloudHowItWorks() {
             <CardContent className="space-y-3 text-sm leading-relaxed text-muted-foreground">
               <p>
                 Signing in sets a signed, expiring cookie tied to the session
-                and role. The front VCL service verifies it and fetches
-                authorized files from Object Storage with signed requests,
-                caching them at the edge.
+                and role. The front VCL service strips any client-supplied
+                internal headers, verifies the cookie, and fetches authorized
+                files from Object Storage with signed requests, caching them at
+                the edge.
               </p>
               <p>
                 Analysts without PII access cannot download raw files, and
@@ -487,9 +493,12 @@ export function CloudHowItWorks() {
                 engine request only the byte ranges of the columns it needs.
               </p>
               <p>
-                Hour and day bundles answer longer ranges with fewer downloads.
-                Files and filtered results are cached locally, scoped to the
-                signed-in user and cleared when that changes.
+                Hour and day v3 summary bundles (with mergeable histograms and
+                HLL sketches) answer longer ranges with fewer downloads, and ASN
+                display labels load from an edge-cached{" "}
+                <code>/geo/asn-names.tsv</code> table. Files and filtered
+                results are cached locally, scoped to the signed-in user and
+                cleared when that changes.
               </p>
             </CardContent>
           </Card>
@@ -510,9 +519,12 @@ export function CloudHowItWorks() {
           </p>
           <p className="text-muted-foreground">
             Invitations expire after seven days and sessions after twelve hours.
-            Credentials stay in a Fastly Secret Store. Each Compute request is
-            independent; durable configuration and account state live in
-            Fastly&apos;s stores, not a long-running application process.
+            Credentials stay in a Fastly Secret Store, and provisioned internal
+            Compute and worker domains and generated Object Storage buckets use
+            opaque random names rather than names derived from the install. Each
+            Compute request is independent; durable configuration and account
+            state live in Fastly&apos;s stores, not a long-running application
+            process.
           </p>
           <Link
             href="/admin"
@@ -538,11 +550,13 @@ export function CloudHowItWorks() {
           <p>
             Admins see measured counts on the Usage page: Object Storage Class
             A and Class B operations, CDN hits, Compute requests and vCPU time,
-            and KV operations. Storage is estimated from a ledger. Writing,
-            listing and deleting objects count as Class A; reads count as Class
-            B, and a CDN hit costs no Object Storage operation. Compacted-away
-            files still bill Object Storage&apos;s 30-day minimum. Usage is not
-            an invoice.
+            and KV operations. Service-local storage (in billed GB-hours) is
+            computed from the newest complete six-hour inventory snapshot plus
+            Parquet files written or deleted since, avoiding full-bucket
+            listings on page load. Writing, listing and deleting objects count
+            as Class A; reads count as Class B, and a CDN hit costs no Object
+            Storage operation. Compacted-away files still bill Object
+            Storage&apos;s 30-day minimum. Usage is not an invoice.
           </p>
           <p>
             The Cost Estimator extrapolates a month from the logged

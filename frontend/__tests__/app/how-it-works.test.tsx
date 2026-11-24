@@ -42,3 +42,23 @@ describe.each([
     expect(internal.filter(href => !routeExists(href))).toEqual([])
   })
 })
+
+describe('/how-it-works factual accuracy', () => {
+  test('Cloud mode describes the 30-second health-check cadence and 6-hour inventory snapshots', () => {
+    mode.cloud = true
+    const { container } = render(<HowItWorksPage />)
+    const text = container.textContent ?? ''
+    expect(text).not.toMatch(/once a second/i)
+    expect(text).not.toMatch(/every second/i)
+    expect(text).toMatch(/30 seconds/)
+    expect(text).toMatch(/six-hour inventory snapshot/i)
+  })
+
+  test('High-Scale mode describes service-local GB-hours billing from PostgreSQL ledgers', () => {
+    mode.cloud = false
+    const { container } = render(<HowItWorksPage />)
+    const text = container.textContent ?? ''
+    expect(text).toMatch(/service-local billed GB-hours/i)
+    expect(text).toMatch(/PostgreSQL/)
+  })
+})
