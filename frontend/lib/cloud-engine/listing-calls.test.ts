@@ -1,5 +1,6 @@
 // @vitest-environment node
 import { afterEach, expect, it, vi } from "vitest";
+import { SNAPSHOT_REUSE_MS } from "./dashboard/catalog-manifest";
 
 const END = "2026-11-06T00:00:00.000Z";
 const SERVICE = "svc";
@@ -102,9 +103,14 @@ const EXPECTED: Record<string, [cold: number, revisit: number, reload: number]> 
   "/fastly-value": [1, 1, 1],
 };
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 it.each(Object.keys(PAGES))("lists %s in one request per range", async (page) => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-11-06T00:05:00.000Z"));
   const calls: Call[] = [];
   vi.stubGlobal("fetch", fakeNetwork(calls));
   vi.stubGlobal("caches", fakeCacheStorage());
@@ -123,8 +129,11 @@ it.each(Object.keys(PAGES))("lists %s in one request per range", async (page) =>
   };
   vi.resetModules();
   const cold = await load();
-  // Past the just-taken snapshot reuse window, so a revisit lists again.
-  await new Promise((resolve) => setTimeout(resolve, 2_100));
+  // Within the snapshot reuse window, an in-app revisit reuses the cached manifest with zero /api/files calls.
+  const reused = await load();
+  expect(reused).toHaveLength(0);
+  // Past the snapshot reuse window, a revisit lists again using since_generation.
+  vi.setSystemTime(Date.now() + SNAPSHOT_REUSE_MS + 1);
   const revisit = await load();
   vi.resetModules();
   const reload = await load();

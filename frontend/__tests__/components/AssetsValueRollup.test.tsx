@@ -144,7 +144,7 @@ describe('AssetsClient on Cloud', () => {
     expect(observed).toContainEqual(expect.objectContaining({ root: mainEl, rootMargin: '0px' }))
   })
 
-  it('waits for the rollup summary to succeed before reading raw URL hotspots even if already in view', async () => {
+  it('waits for the rollup summary to succeed before observing or reading raw URL hotspots', async () => {
     setCloudModeRuntime(true)
     const observer = stubIntersectionObserver()
     let answerSummary: (body: unknown) => void = () => {}
@@ -153,12 +153,17 @@ describe('AssetsClient on Cloud', () => {
     renderBootstrapped(<AssetsClient />, { withNuqs: true })
 
     await waitFor(() => expect(sections).toEqual([['summary']]))
+    // While summary is pending, useInViewOnce is disabled so skeleton layout cannot latch visibility.
     act(() => observer.fire(true))
     await Promise.resolve()
     expect(sections).toEqual([['summary']])
 
-    answerSummary({ ...assetsSummary, rollup: meta })
+    act(() => answerSummary({ ...assetsSummary, rollup: meta }))
     expect(await screen.findByText('4,321 reqs')).toBeInTheDocument()
+    expect(sections).toEqual([['summary']])
+
+    // Once summary succeeds, the observer is attached; reporting in-view triggers the raw hotspots read.
+    act(() => observer.fire(true))
     await waitFor(() => expect(sections).toEqual([['summary'], ['large_uncompressed_assets', 'low_ttl_assets']]))
   })
 
@@ -228,14 +233,26 @@ describe('FastlyValueClient on Cloud', () => {
     expect(await screen.findByText(/^≈120/)).toBeInTheDocument()
   })
 
-  it('keeps one raw read for every section when a filter is applied', async () => {
+  it('splits overview onto filtered_rollups for a single low-cardinality filter, and keeps one raw read for other filters', async () => {
     setCloudModeRuntime(true)
     layout.filterPayload = { pop: { mode: 'include', values: ['LIS'] } }
-    const sections = recordPosts('/api/value/summary', () => ({ overview, network, caching: null }))
+    const split = recordPosts('/api/value/summary', (asked) =>
+      asked?.includes('overview') ? { overview, rollup: meta } : { network, caching: null },
+    )
+    const { unmount } = renderBootstrapped(<FastlyValueClient />, { withNuqs: true })
+
+    expect(await screen.findByText('4.3k')).toBeInTheDocument()
+    expect(split).toEqual(expect.arrayContaining([['overview'], ['caching', 'network']]))
+    expect(split).toHaveLength(2)
+    expect(within(screen.getByTestId('rollup-data-through-slot')).getByText(/Data through 09:45/)).toBeInTheDocument()
+    unmount()
+
+    layout.filterPayload = { url: { mode: 'include', values: ['/api/*'] } }
+    const one = recordPosts('/api/value/summary', () => ({ overview, network, caching: null }))
     renderBootstrapped(<FastlyValueClient />, { withNuqs: true })
 
     expect(await screen.findByText('4.3k')).toBeInTheDocument()
-    expect(sections).toEqual([['overview', 'caching', 'network']])
+    expect(one).toEqual([['overview', 'caching', 'network']])
     expect(screen.queryByTestId('rollup-data-through-slot')).not.toBeInTheDocument()
   })
 
