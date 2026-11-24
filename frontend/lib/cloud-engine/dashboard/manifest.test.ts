@@ -1188,6 +1188,207 @@ describe("closed-hour manifest cache", () => {
     expect(keys(manifest.files)).toEqual(keys([file(T0), file(T0 + H)]));
     expect(attempts).toBe(3);
   });
+
+  it("reuses a recent wider listing for a narrowed sub-range without re-fetching or shrinking the saved snapshot", async () => {
+    const oldFile = file(T0);
+    const midFile = file(T0 + 8 * H);
+    const recentFile = file(T0 + 20 * H);
+    const calls: URLSearchParams[] = [];
+    const fetchJson = Object.assign(
+      vi.fn(async (input: string) => {
+        const params = new URL(input, "http://x").searchParams;
+        calls.push(params);
+        if (!params.has("since_generation")) {
+          return {
+            files: [oldFile, midFile, recentFile],
+            next_cursor: null,
+            complete: true,
+            catalog_generation: 9642,
+          };
+        }
+        return {
+          files: [],
+          changes: [],
+          summary_partitions: [],
+          base_generation: 9642,
+          catalog_generation: 9642,
+          next_cursor: null,
+          complete: true,
+        };
+      }),
+      { manifestCacheScope: () => '["narrow-subrange","service"]' },
+    );
+
+    const full24h = await fetchManifest(
+      fetchJson,
+      iso(T0),
+      iso(T0 + 24 * H),
+      undefined,
+      "request",
+      "raw",
+    );
+    expect(keys(full24h.files)).toEqual(keys([oldFile, midFile, recentFile]));
+    expect(calls).toHaveLength(1);
+
+    // Narrowing to the newest 16h (as loadNewestWindow does on CloudBudgetError)
+    // must slice the recent 24h manifest in memory with zero extra HTTP calls.
+    const narrowed16h = await fetchManifest(
+      fetchJson,
+      iso(T0 + 8 * H),
+      iso(T0 + 24 * H),
+      undefined,
+      "request",
+      "raw",
+    );
+    expect(keys(narrowed16h.files)).toEqual(keys([midFile, recentFile]));
+    expect(narrowed16h.catalogGeneration).toBe(9642);
+    expect(calls).toHaveLength(1);
+
+    // After the reuse window expires, the saved snapshot must still cover the
+    // full 24h range rather than having been shrunk to 16h.
+    vi.setSystemTime(Date.now() + SNAPSHOT_REUSE_MS);
+    await fetchManifest(
+      fetchJson,
+      iso(T0),
+      iso(T0 + 24 * H),
+      undefined,
+      "request",
+      "raw",
+    );
+    expect(calls).toHaveLength(2);
+    expect(calls[1].get("previous_from")).toBe(iso(T0));
+    expect(calls[1].get("previous_to")).toBe(iso(T0 + 24 * H));
+  });
+
+  it("reuses a recent wider listing across serialized page scans that span several seconds without a commit", async () => {
+    const f1 = file(T0);
+    const f2 = file(T0 + 16 * H);
+    const calls: URLSearchParams[] = [];
+    const fetchJson = Object.assign(
+      vi.fn(async (input: string) => {
+        const params = new URL(input, "http://x").searchParams;
+        calls.push(params);
+        if (params.has("since_generation")) {
+          return {
+            files: [],
+            changes: [],
+            summary_partitions: [],
+            base_generation: 9642,
+            catalog_generation: 9643,
+            next_cursor: null,
+            complete: true,
+          };
+        }
+        return {
+          files: [f1, f2],
+          next_cursor: null,
+          complete: true,
+          catalog_generation: 9642,
+        };
+      }),
+      { manifestCacheScope: () => '["serialized-scans","service"]' },
+    );
+
+    // Scan 1 lists 24h.
+    await fetchManifest(
+      fetchJson,
+      iso(T0),
+      iso(T0 + 24 * H),
+      undefined,
+      "request",
+      "raw",
+    );
+    expect(calls).toHaveLength(1);
+
+    // Scan 1 takes 4 seconds to download projected Parquet files and run DuckDB SQL;
+    // Scan 2 then starts on analyticalQueue for the same 24h range and narrows to 16h.
+    vi.setSystemTime(Date.now() + 4_000);
+    const scan2Full = await fetchManifest(
+      fetchJson,
+      iso(T0),
+      iso(T0 + 24 * H),
+      undefined,
+      "request",
+      "raw",
+    );
+    const scan2Narrowed = await fetchManifest(
+      fetchJson,
+      iso(T0 + 8 * H),
+      iso(T0 + 24 * H),
+      undefined,
+      "request",
+      "raw",
+    );
+    expect(calls).toHaveLength(1);
+    expect(keys(scan2Full.files)).toEqual(keys([f1, f2]));
+    expect(keys(scan2Narrowed.files)).toEqual(keys([f2]));
+
+    // A commit notification still invalidates the cached manifest immediately.
+    observeManifestCommit(fetchJson, { type: "commit", generation: 9643 });
+    await fetchManifest(
+      fetchJson,
+      iso(T0 + 8 * H),
+      iso(T0 + 24 * H),
+      undefined,
+      "request",
+      "raw",
+    );
+    expect(calls).toHaveLength(2);
+  });
+
+  it("reuses a recent wider summaries listing for both raw and summaries sub-ranges", async () => {
+    const rawOld = file(T0);
+    const rawNew = file(T0 + 10 * H);
+    const sumOld = { ...file(T0, 60), key: "summary-old", kind: "hour" as const };
+    const sumNew = { ...file(T0 + 10 * H, 60), key: "summary-new", kind: "hour" as const };
+    const fetchJson = vi.fn(async () => ({
+      files: [rawOld, rawNew],
+      summary_files: [sumOld, sumNew],
+      next_cursor: null,
+      complete: true,
+      catalog_generation: 7,
+    }));
+
+    await fetchManifest(
+      fetchJson,
+      iso(T0),
+      iso(T0 + 24 * H),
+      undefined,
+      "request",
+      "raw",
+      true,
+    );
+    expect(fetchJson).toHaveBeenCalledTimes(1);
+
+    const subSummaries = await fetchManifest(
+      fetchJson,
+      iso(T0 + 8 * H),
+      iso(T0 + 24 * H),
+      undefined,
+      "request",
+      "raw",
+      true,
+    );
+    expect(keys(subSummaries.files)).toEqual(keys([rawNew]));
+    expect(keys(subSummaries.summaryFiles ?? [])).toEqual(keys([sumNew]));
+    expect(subSummaries.summaryRange).toEqual({
+      from: iso(T0 + 8 * H),
+      to: iso(T0 + 24 * H),
+    });
+
+    const subRaw = await fetchManifest(
+      fetchJson,
+      iso(T0 + 8 * H),
+      iso(T0 + 24 * H),
+      undefined,
+      "request",
+      "raw",
+      false,
+    );
+    expect(keys(subRaw.files)).toEqual(keys([rawNew]));
+    expect(subRaw.summaryFiles).toBeUndefined();
+    expect(fetchJson).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("forked catalog listing", () => {

@@ -55,12 +55,16 @@ const MAX_SNAPSHOTS = 8;
 const MAX_DELTA_PAGES = 64;
 const DAY_MS = 86_400_000;
 /**
- * A page's scans run one after another, and each asks for the same range
- * again within a second or two. A listing this young is served again without
- * a round trip unless a commit notification or a cache reset arrived since.
+ * A page's scans run one after another on the analytical queue, and each asks
+ * for the same range (or a narrowed sub-range) across several seconds. A
+ * listing this young is served again without a round trip unless a commit
+ * notification or a cache reset arrived since.
  */
-export const SNAPSHOT_REUSE_MS = 2_000;
+export const SNAPSHOT_REUSE_MS = 30_000;
 type Recent = {
+  key: string;
+  fromMs: number;
+  toMs: number;
   manifest: Manifest;
   at: number;
   epoch: number;
@@ -518,13 +522,17 @@ export async function fetchCatalogManifest(
   const required = requirement?.generation;
   const reset = requirement?.reset ?? 0;
   // A listing with inline summaries holds the same raw files, so a raw-only
-  // caller of the same range reuses it rather than listing again.
-  const withSummaries =
+  // caller of the same range (or a narrowed sub-range) reuses it rather than
+  // listing again.
+  const withSummariesKey =
     !summaries &&
     (!dataset || dataset === "request") &&
     (!view || view === "raw")
-      ? `${manifestCacheKey(fetchJson, dataset, view, true)}|${from}|${to}`
+      ? manifestCacheKey(fetchJson, dataset, view, true)
       : null;
+  const withSummaries = withSummariesKey
+    ? `${withSummariesKey}|${from}|${to}`
+    : null;
   const rawOnly = (manifest: Manifest): Manifest => ({
     files: manifest.files,
     complete: manifest.complete,
@@ -532,6 +540,7 @@ export async function fetchCatalogManifest(
       ? { catalogGeneration: manifest.catalogGeneration }
       : {}),
   });
+  const now = Date.now();
   for (const candidate of [shareKey, withSummaries]) {
     const young = candidate ? recent.get(candidate) : undefined;
     if (
@@ -539,9 +548,47 @@ export async function fetchCatalogManifest(
       young.epoch === epoch &&
       young.reset === reset &&
       young.required === required &&
-      Date.now() - young.at < SNAPSHOT_REUSE_MS
+      now - young.at < SNAPSHOT_REUSE_MS
     )
       return candidate === shareKey ? young.manifest : rawOnly(young.manifest);
+  }
+  const fromMs = Date.parse(from);
+  const toMs = Date.parse(to);
+  if (Number.isFinite(fromMs) && Number.isFinite(toMs) && fromMs <= toMs) {
+    const candidateKeys = withSummariesKey ? [key, withSummariesKey] : [key];
+    for (const candidateKey of candidateKeys) {
+      for (const young of recent.values()) {
+        if (
+          young.key !== candidateKey ||
+          young.epoch !== epoch ||
+          young.reset !== reset ||
+          young.required !== required ||
+          now - young.at >= SNAPSHOT_REUSE_MS ||
+          !young.manifest.complete ||
+          !Number.isFinite(young.fromMs) ||
+          !Number.isFinite(young.toMs) ||
+          young.fromMs > fromMs ||
+          toMs > young.toMs
+        )
+          continue;
+        if (summaries && young.manifest.summaryFiles === undefined) continue;
+        return {
+          files: young.manifest.files.filter((file) => overlaps(file, from, to)),
+          complete: young.manifest.complete,
+          ...(young.manifest.catalogGeneration !== undefined
+            ? { catalogGeneration: young.manifest.catalogGeneration }
+            : {}),
+          ...(summaries && young.manifest.summaryFiles !== undefined
+            ? {
+                summaryFiles: young.manifest.summaryFiles.filter((file) =>
+                  overlaps(file, from, to),
+                ),
+                summaryRange: { from, to },
+              }
+            : {}),
+        };
+      }
+    }
   }
   for (const candidate of [shareKey, withSummaries]) {
     const shared = candidate ? inFlight.get(candidate) : undefined;
@@ -578,6 +625,9 @@ export async function fetchCatalogManifest(
     .then((manifest) => {
       if (startEpoch === epoch) {
         recent.set(shareKey, {
+          key,
+          fromMs,
+          toMs,
           manifest,
           at: Date.now(),
           epoch,
