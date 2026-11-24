@@ -1302,7 +1302,8 @@ def usage_log_activity(
             except Exception:
                 logger.debug("usage_log_activity: step failed (ignored)", exc_info=True)
 
-        _USAGE_RESPONSE_MEMO.put(act_memo_key, res)
+        if res.get("data") or res.get("total_rows") or res.get("total_bytes"):
+            _USAGE_RESPONSE_MEMO.put(act_memo_key, res)
         return res
 
     act_payload = _USAGE_RESPONSE_MEMO.coalesce(f"usage_log_activity:{act_memo_key}", _compute_activity)

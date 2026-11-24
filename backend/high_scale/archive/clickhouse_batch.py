@@ -179,21 +179,22 @@ class BaseClickHouseBatchAdapter:
         expected = len(batch.rows)
         existing_rows = self._count_rows(table, batch, batch_uuid, columns=columns, mapped_rows=mapped_rows)
         if existing_rows not in (0, expected):
-            expired_candidates = _count_ttl_expired_rows(table, columns, mapped_rows)
-            if expired_candidates > 0 and (expected - expired_candidates) <= existing_rows < expected:
-                ttl_expired = expected - existing_rows
-                logger.warning(
-                    "clickhouse.ttl_evicted_rows",
-                    table=table,
-                    batch_id=batch.batch_id,
-                    expected_rows=expected,
-                    visible_rows=existing_rows,
-                    ttl_expired_rows=ttl_expired,
-                )
-                self._insert_publication(
-                    batch, batch_uuid, version=version + 1, state="visible", visible_rows=existing_rows
-                )
-                return InsertReceipt(batch.batch_id, existing_rows, batch.digest, ttl_expired_rows=ttl_expired)
+            if existing is not None:
+                expired_candidates = _count_ttl_expired_rows(table, columns, mapped_rows)
+                if expired_candidates > 0 and (expected - expired_candidates) <= existing_rows < expected:
+                    ttl_expired = expected - existing_rows
+                    logger.warning(
+                        "clickhouse.ttl_evicted_rows",
+                        table=table,
+                        batch_id=batch.batch_id,
+                        expected_rows=expected,
+                        visible_rows=existing_rows,
+                        ttl_expired_rows=ttl_expired,
+                    )
+                    self._insert_publication(
+                        batch, batch_uuid, version=version + 1, state="visible", visible_rows=existing_rows
+                    )
+                    return InsertReceipt(batch.batch_id, existing_rows, batch.digest, ttl_expired_rows=ttl_expired)
             self._client.delete_batch_rows(table, batch_uuid)
             raise PartialInsert(existing_rows)
         if existing_rows == 0:

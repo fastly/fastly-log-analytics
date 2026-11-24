@@ -261,6 +261,27 @@ def test_usage_operations_and_log_activity_warm_cache_and_invalidation(monkeypat
     usage.usage_log_activity(source=src_a, start="2026-11-24T10:00:40Z", end="2026-11-24T11:00:40Z", by="hour")
     assert activity_calls["pg"] == 2
 
+    # Empty log-activity windows must not be cached so newly ingested rows appear immediately
+    empty_calls = 0
+
+    def fake_empty_then_seeded(src: dict[str, Any], start_str: str, end_str: str, by: str) -> dict[str, Any]:
+        nonlocal empty_calls
+        empty_calls += 1
+        if empty_calls == 1:
+            return {"granularity": by, "data": [], "total_rows": 0, "total_bytes": 0}
+        return {
+            "granularity": by,
+            "data": [{"time": "2026-01-01T10:00", "row_count": 300, "bytes": 13000}],
+            "total_rows": 300,
+            "total_bytes": 13000,
+        }
+
+    src_empty = {"name": "svc-empty", "service_id": "svc-empty", "logging_service_id": ""}
+    monkeypatch.setattr(usage, "_get_log_activity", fake_empty_then_seeded)
+    e1 = usage.usage_log_activity(source=src_empty, start="2026-01-01", end="2026-01-02", by="hour")
+    e2 = usage.usage_log_activity(source=src_empty, start="2026-01-01", end="2026-01-02", by="hour")
+    assert (e1.total_rows, e2.total_rows, e2.total_bytes, empty_calls) == (0, 300, 13000, 2)
+
 
 def test_usage_rum_breakdown_high_scale_warm_hit_across_seconds_in_same_minute(monkeypatch):
     src_a = {"name": "svc-a", "service_id": "svc-a"}

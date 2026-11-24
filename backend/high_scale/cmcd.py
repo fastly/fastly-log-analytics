@@ -239,6 +239,24 @@ def _cmcd_cache_bound(value: str | datetime | None) -> str | None:
     return bucket_time_to_minute(normalize_cache_bound(stripped))
 
 
+def _cmcd_cache_bounds(
+    start_time: str | datetime | None,
+    end_time: str | datetime | None,
+) -> tuple[str | None, str | None]:
+    """Bucket >= 1 minute windows to the UTC minute; preserve exact bounds for sub-minute windows."""
+    try:
+        start_dt = range_value(start_time)
+        end_dt = range_value(end_time)
+    except (ValueError, TypeError):
+        return normalize_cache_bound(start_time), normalize_cache_bound(end_time)
+    if start_dt is not None and end_dt is not None:
+        s_utc = start_dt.astimezone(UTC) if start_dt.tzinfo is not None else start_dt.replace(tzinfo=UTC)
+        e_utc = end_dt.astimezone(UTC) if end_dt.tzinfo is not None else end_dt.replace(tzinfo=UTC)
+        if abs((e_utc - s_utc).total_seconds()) < 60:
+            return normalize_cache_bound(start_time), normalize_cache_bound(end_time)
+    return _cmcd_cache_bound(start_time), _cmcd_cache_bound(end_time)
+
+
 def cmcd_aggregates(
     service: HighScaleService,
     req: CmcdRequest,
@@ -248,12 +266,13 @@ def cmcd_aggregates(
     mask_ips: bool,
 ) -> dict[str, Any]:
     """Return the standard CMCD response shape; ``mask_ips`` is moot because no section emits an IP."""
+    cache_start, cache_end = _cmcd_cache_bounds(start_time, end_time)
     digest = digest_cache_key(
         {
             "ep": "hs_cmcd_aggregates",
             "cid": client_cache_token(service.client),
-            "s": _cmcd_cache_bound(start_time),
-            "e": _cmcd_cache_bound(end_time),
+            "s": cache_start,
+            "e": cache_end,
             "b": int(req.bucket_seconds),
             "n": int(req.top_n),
             "sec": sorted(str(s) for s in sections) if sections else None,

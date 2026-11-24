@@ -3219,9 +3219,9 @@ def test_healthy_window_with_sparse_bs_and_buffer_length_still_serves_rebuffer_s
             "avg_buffer_length": 8.0,
         }
     ]
-    overview_sql = next(sql for sql, _ in client.calls if "cmcd:overview */" in sql)
+    probe_sql = next(sql for sql, _ in client.calls if "cmcd:probe */" in sql)
     ts_sql = next(sql for sql, _ in client.calls if "cmcd:timeseries */" in sql)
-    assert "countIf(bs IS NOT NULL) = 0" not in overview_sql
+    assert "countIf(bs IS NOT NULL) = 0" not in probe_sql
     assert "countIf(bs IS NOT NULL) = 0" not in ts_sql
     assert "countIf(su IS NOT NULL) = 0" not in ts_sql
 
@@ -3278,7 +3278,7 @@ def test_non_numeric_asn_filter_values_are_rejected() -> None:
 @pytest.mark.usefixtures("_asn_names")
 def test_output_validates_against_the_standard_response_model() -> None:
     model = CmcdAggregatesResponse.model_validate(_run(_Client_cmcd()))
-    assert model.overview is not None and model.overview.peak_viewers == 4
+    assert model.overview is not None and model.overview.peak_viewers == 3
     assert model.rebuffer_by_asn[0].label.endswith("(7922)")
 
 
@@ -3511,7 +3511,6 @@ def test_all_cmcd_tasks_preserve_request_and_page_correlation() -> None:
     timings = {row["section_id"]: row for row in result["section_timings"]}
     expected_sections = {
         "cmcd.probe",
-        "cmcd.overview",
         "cmcd.timeseries",
         "cmcd.top_content",
         "cmcd.rebuffer_country",

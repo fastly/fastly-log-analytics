@@ -1762,11 +1762,13 @@ def test_current_storage_marks_archive_summary_failure_incomplete(client):
 
 def test_current_storage_reads_high_scale_source_and_rum_bytes_from_the_source_ledger(client):
     """High-scale ingest never writes ``ingested_files``; billed source and RUM bytes come from its ledger."""
+    from backend.repositories.utils.response_cache import invalidate_service_cache
     from backend.routers.usage import _STORAGE_INSPECTION_CACHE
 
     svc = "test_current_storage_hs_svc"
     src = {"name": svc, "service_id": svc, "bucket": "b", "prefix": ""}
     _STORAGE_INSPECTION_CACHE.pop((svc, "b", ""), None)
+    invalidate_service_cache(svc)
     app.dependency_overrides[get_source] = lambda: src
     legacy = AssertionError("legacy ledger read")
     try:
@@ -1790,11 +1792,13 @@ def test_current_storage_reads_high_scale_source_and_rum_bytes_from_the_source_l
         ):
             r = client.get("/api/usage/current-storage", headers={"x-fastly-service-id": svc})
             _STORAGE_INSPECTION_CACHE.pop((svc, "b", ""), None)
+            invalidate_service_cache(svc)
             mock_window.side_effect = RuntimeError("control plane unavailable")
             r_err = client.get("/api/usage/current-storage", headers={"x-fastly-service-id": svc})
     finally:
         app.dependency_overrides.pop(get_source, None)
         _STORAGE_INSPECTION_CACHE.pop((svc, "b", ""), None)
+        invalidate_service_cache(svc)
 
     assert r.status_code == 200
     body = r.json()
