@@ -319,37 +319,78 @@ fn faro_payload(body: &str) -> Option<Map<String, Value>> {
     }
 }
 
+fn decode_if_encoded(raw: String) -> String {
+    if raw.contains('%') {
+        decode(&raw)
+    } else {
+        raw
+    }
+}
+
+fn query_string_of(line: &Map<String, Value>) -> Option<String> {
+    for key in ["url", "rum_raw_query"] {
+        if let Some(val) = first(line, &[key]) {
+            if let Some((_, query)) = val.split('#').next().and_then(|s| s.split_once('?')) {
+                if !query.is_empty() {
+                    return Some(query.to_owned());
+                }
+            } else if key == "rum_raw_query" && val.contains('=') {
+                return Some(val);
+            }
+        }
+    }
+    None
+}
+
 fn query_metric(line: &Map<String, Value>) -> Metric {
     let mut name = first(line, &["rum_metric_name"]);
     let mut value = line.get("rum_metric_value").cloned();
     let mut rating = first(line, &["rum_metric_rating"]);
     let mut cid = first(line, &["rum_cid", "cid"]);
-    let mut pathname = first(line, &["rum_pathname"]);
-    let url = first(line, &["url", "rum_raw_query"]).unwrap_or_default();
-    if !url.is_empty() {
-        name = name.or_else(|| query_param(&url, "rum_metric_name"));
+    let mut pathname = first(line, &["rum_pathname"]).map(decode_if_encoded);
+    let mut error_message = first(line, &["rum_error_message"]).map(decode_if_encoded);
+    let mut error_file = first(line, &["rum_error_file"]).map(decode_if_encoded);
+    let mut error_line = int(line.get("rum_error_line"));
+    let mut error_col = int(line.get("rum_error_col"));
+    if let Some(query) = query_string_of(line) {
+        let synthetic = format!("?{query}");
+        name = name.or_else(|| query_param(&synthetic, "rum_metric_name"));
         if matches!(&value, None | Some(Value::Null))
             || value.as_ref().and_then(Value::as_str) == Some("")
         {
-            value = query_param(&url, "rum_metric_value")
+            value = query_param(&synthetic, "rum_metric_value")
                 .map(Value::String)
                 .or(value);
         }
-        rating = rating.or_else(|| query_param(&url, "rum_metric_rating"));
-        cid = cid.or_else(|| query_param(&url, "cid"));
-        pathname = pathname.or_else(|| query_param(&url, "rum_pathname"));
+        rating = rating.or_else(|| query_param(&synthetic, "rum_metric_rating"));
+        cid = cid.or_else(|| {
+            query_param(&synthetic, "cid").or_else(|| query_param(&synthetic, "rum_cid"))
+        });
+        pathname = pathname.or_else(|| query_param(&synthetic, "rum_pathname"));
+        error_message = error_message.or_else(|| query_param(&synthetic, "rum_error_message"));
+        error_file = error_file.or_else(|| query_param(&synthetic, "rum_error_file"));
+        if error_line == 0 {
+            if let Some(raw) = query_param(&synthetic, "rum_error_line") {
+                error_line = int(Some(&Value::String(raw)));
+            }
+        }
+        if error_col == 0 {
+            if let Some(raw) = query_param(&synthetic, "rum_error_col") {
+                error_col = int(Some(&Value::String(raw)));
+            }
+        }
     }
     if pathname.is_none() {
         pathname = first(line, &["referer"])
             .map(|referer| url_path(&referer).to_owned())
             .filter(|p| !p.is_empty());
     }
-    let error = first(line, &["rum_error_message"]).map(|message| {
+    let error = error_message.map(|message| {
         (
             message,
-            first(line, &["rum_error_file"]).unwrap_or_else(|| "unknown.js".into()),
-            int(line.get("rum_error_line")),
-            int(line.get("rum_error_col")),
+            error_file.unwrap_or_else(|| "unknown.js".into()),
+            error_line,
+            error_col,
         )
     });
     Metric {
@@ -372,12 +413,137 @@ fn decode(component: &str) -> String {
         .into_owned()
 }
 
+/// A batched VCL query-string beacon (`?rum_metric_name=...&rum_metric_value=...&rum_error_message=...`):
+/// mirrors `extract_metrics_from_query_params` when >1 metric or error is present.
+fn vcl_query_metrics(line: &Map<String, Value>) -> Option<Vec<Metric>> {
+    let query = query_string_of(line)?;
+    let mut raw_names = Vec::new();
+    let mut raw_values = Vec::new();
+    let mut raw_ratings = Vec::new();
+    let mut raw_err_msgs = Vec::new();
+    let mut raw_err_files = Vec::new();
+    let mut raw_err_lines = Vec::new();
+    let mut raw_err_cols = Vec::new();
+    let mut q_cid: Option<String> = None;
+    let mut q_pathname: Option<String> = None;
+    for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
+        let val = v.into_owned();
+        match k.as_ref() {
+            "rum_metric_name" => raw_names.push(val),
+            "rum_metric_value" => raw_values.push(val),
+            "rum_metric_rating" => raw_ratings.push(val),
+            "rum_error_message" => raw_err_msgs.push(val),
+            "rum_error_file" => raw_err_files.push(val),
+            "rum_error_line" => raw_err_lines.push(val),
+            "rum_error_col" => raw_err_cols.push(val),
+            "cid" | "rum_cid" if q_cid.as_ref().is_none_or(String::is_empty) && !val.is_empty() => {
+                q_cid = Some(val);
+            }
+            "rum_pathname"
+                if q_pathname.as_ref().is_none_or(String::is_empty) && !val.is_empty() =>
+            {
+                q_pathname = Some(val);
+            }
+            _ => {}
+        }
+    }
+    let non_empty_metrics = raw_names.iter().filter(|m| !m.is_empty()).count();
+    let non_empty_errors = raw_err_msgs.iter().filter(|e| !e.is_empty()).count();
+    if non_empty_metrics + non_empty_errors <= 1 {
+        return None;
+    }
+    let cid = q_cid
+        .or_else(|| first(line, &["rum_cid", "cid"]))
+        .unwrap_or_default();
+    let pathname = q_pathname
+        .or_else(|| first(line, &["rum_pathname"]).map(decode_if_encoded))
+        .unwrap_or_else(|| "/".into())
+        .replace("//", "/");
+    let browser = first(line, &["browser"]);
+    let os = first(line, &["os"]);
+    let device = first(line, &["device"]);
+    let mut out = Vec::new();
+    let last_name_idx = raw_names.len().saturating_sub(1);
+    for (idx, name) in raw_names.iter().enumerate() {
+        if name.is_empty() || idx >= raw_values.len() {
+            continue;
+        }
+        let val_str = &raw_values[idx];
+        if idx == last_name_idx && float(Some(&Value::String(val_str.clone()))).is_none() {
+            continue;
+        }
+        let rating = raw_ratings.get(idx).cloned().unwrap_or_default();
+        out.push(Metric {
+            name: Some(name.clone()),
+            value: Some(Value::String(val_str.clone())),
+            rating: Some(rating),
+            pathname: Some(pathname.clone()),
+            cid: Some(cid.clone()),
+            browser: browser.clone(),
+            os: os.clone(),
+            device: device.clone(),
+            error: None,
+            sample_rate: None,
+        });
+    }
+    if !raw_err_msgs.is_empty() {
+        for (idx, err_msg) in raw_err_msgs.iter().enumerate() {
+            if err_msg.is_empty() {
+                continue;
+            }
+            let err_file = raw_err_files
+                .get(idx)
+                .filter(|f| !f.is_empty())
+                .cloned()
+                .unwrap_or_else(|| "unknown.js".into());
+            let err_line = raw_err_lines
+                .get(idx)
+                .map_or(0, |s| int(Some(&Value::String(s.clone()))));
+            let err_col = raw_err_cols
+                .get(idx)
+                .map_or(0, |s| int(Some(&Value::String(s.clone()))));
+            out.push(Metric {
+                name: Some("exception".into()),
+                value: None,
+                rating: Some(String::new()),
+                pathname: Some(pathname.clone()),
+                cid: Some(cid.clone()),
+                browser: browser.clone(),
+                os: os.clone(),
+                device: device.clone(),
+                error: Some((err_msg.clone(), err_file, err_line, err_col)),
+                sample_rate: None,
+            });
+        }
+    } else if let Some(err_msg) = first(line, &["rum_error_message"]).map(decode_if_encoded) {
+        out.push(Metric {
+            name: Some("exception".into()),
+            value: None,
+            rating: Some(String::new()),
+            pathname: Some(pathname.clone()),
+            cid: Some(cid.clone()),
+            browser: browser.clone(),
+            os: os.clone(),
+            device: device.clone(),
+            error: Some((
+                err_msg,
+                first(line, &["rum_error_file"])
+                    .map(decode_if_encoded)
+                    .unwrap_or_else(|| "unknown.js".into()),
+                int(line.get("rum_error_line")),
+                int(line.get("rum_error_col")),
+            )),
+            sample_rate: None,
+        });
+    }
+    Some(out)
+}
+
 /// A batched beacon (`m=name:value:rating,…`, `e=message|file|line|col`, one `e` per error):
 /// every queued metric and error of one page flush. Separators are split before decoding, as
 /// the tracker percent-encodes each component. `None` for a legacy one-metric beacon.
 fn batch_metrics(line: &Map<String, Value>) -> Option<Vec<Metric>> {
-    let url = first(line, &["url"])?;
-    let query = url.split('#').next()?.split_once('?')?.1;
+    let query = query_string_of(line)?;
     let params: Vec<(&str, &str)> = query
         .split('&')
         .filter_map(|pair| pair.split_once('='))
@@ -607,6 +773,7 @@ fn parse_line(bytes: &[u8], service_id: &str) -> Parsed {
         .and_then(faro_payload)
         .map(|payload| faro_metrics(&payload, &line))
         .or_else(|| batch_metrics(&line))
+        .or_else(|| vcl_query_metrics(&line))
         .unwrap_or_else(|| vec![query_metric(&line)]);
     let or = |value: &Option<String>, key: &str, default: &str| {
         value

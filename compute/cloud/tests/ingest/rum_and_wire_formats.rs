@@ -324,6 +324,82 @@ fn one_batched_beacon_expands_into_a_row_per_metric_and_error() {
 }
 
 #[test]
+fn vcl_batched_query_string_beacons_split_metrics_and_errors_and_decode_percent() {
+    let mut batched_via_raw_query: Value =
+        serde_json::from_str(&rum_beacon(BASE + 1, "", "")).unwrap();
+    batched_via_raw_query["url"] = "/rum-beacon".into();
+    batched_via_raw_query["rum_raw_query"] =
+        "/rum-beacon?rum_metric_name=ttfb&rum_metric_value=205.3&rum_metric_rating=good\
+         &rum_metric_name=lcp&rum_metric_value=584&rum_metric_rating=good\
+         &rum_metric_name=truncated_name&rum_metric_value=notanumber\
+         &rum_error_message=Uncaught%20RangeError%3A%20boom&rum_error_file=app.js&rum_error_line=27&rum_error_col=9\
+         &cid=c-batched&rum_pathname=%2Frum-demo%2F"
+            .into();
+    batched_via_raw_query["rum_pathname"] = "%2Frum-demo%2F".into();
+
+    let mut query_only_err: Value = serde_json::from_str(&rum_beacon(BASE + 2, "", "")).unwrap();
+    query_only_err["url"] =
+        "/rum-beacon?rum_error_message=ReferenceError%3A%20x&rum_pathname=%2Frum-demo%2Fpage2&cid=c-err".into();
+
+    let mut vcl_encoded_err: Value = serde_json::from_str(&rum_beacon(BASE + 3, "", "")).unwrap();
+    vcl_encoded_err["url"] = "/rum-beacon".into();
+    vcl_encoded_err["rum_error_message"] = "Uncaught%20Error%3A%20y".into();
+    vcl_encoded_err["rum_error_file"] = "https%3A%2F%2Fexample.test%2Fapp.js".into();
+    vcl_encoded_err["rum_pathname"] = "%2Frum-demo%2Fpage3".into();
+
+    let data = gz(&[
+        batched_via_raw_query.to_string(),
+        query_only_err.to_string(),
+        vcl_encoded_err.to_string(),
+    ]);
+    let rows = ingest::rum::convert_object(&data, 60, BASE, 1 << 20, SID).unwrap();
+    assert_eq!((rows.lines_read, rows.bad_lines, rows.rows), (3, 0, 5));
+
+    let vitals = &rows.windows[&BASE];
+    assert_eq!(
+        strings(vitals, "metric_name"),
+        [Some("ttfb".into()), Some("lcp".into())]
+    );
+    assert_eq!(floats(vitals, "metric_value"), [Some(205.3), Some(584.0)]);
+    assert_eq!(
+        strings(vitals, "pathname"),
+        [Some("/rum-demo/".into()), Some("/rum-demo/".into())]
+    );
+    assert_eq!(
+        strings(vitals, "cid"),
+        [Some("c-batched".into()), Some("c-batched".into())]
+    );
+
+    let errors = &rows.errors[&BASE];
+    assert_eq!(
+        strings(errors, "error_message"),
+        [
+            Some("Uncaught RangeError: boom".into()),
+            Some("ReferenceError: x".into()),
+            Some("Uncaught Error: y".into()),
+        ]
+    );
+    assert_eq!(
+        strings(errors, "error_file"),
+        [
+            Some("app.js".into()),
+            Some("unknown.js".into()),
+            Some("https://example.test/app.js".into()),
+        ]
+    );
+    assert_eq!(ints32(errors, "error_line"), [27, 0, 0]);
+    assert_eq!(ints32(errors, "error_col"), [9, 0, 0]);
+    assert_eq!(
+        strings(errors, "pathname"),
+        [
+            Some("/rum-demo/".into()),
+            Some("/rum-demo/page2".into()),
+            Some("/rum-demo/page3".into()),
+        ]
+    );
+}
+
+#[test]
 fn the_rum_stream_converts_into_both_tables_under_its_own_plan_keys() {
     let fake = Fake::new(BASE + 3600);
     let svc = rum_service();
