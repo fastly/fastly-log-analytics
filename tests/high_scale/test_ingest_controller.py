@@ -2953,6 +2953,13 @@ ALL_SECTIONS = {
 _PRESENT = {
     "events": 40,
     "sessions": 4,
+    "rebuffer_sessions": 1,
+    "avg_br_v": 2500.126,
+    "avg_br_all": 2500.126,
+    "avg_bl_v": 12.0,
+    "avg_bl_all": 12.0,
+    "med_mtp_v": 8000.0,
+    "med_mtp_all": 8000.0,
     **dict.fromkeys(
         (
             "has_bl",
@@ -3006,7 +3013,10 @@ _CMCD_CANNED: dict[str, list[dict[str, Any]]] = {
     "cmcd:rebuffer_by_asn": [{"asn": 7922, "rebuffer_rate": 50.0, "session_count": 2, "avg_br": 2000.0, "avg_bl": 8.0}],
     "cmcd:object_type_dist": [{"object_type": "v", "request_count": 30}, {"object_type": "a", "request_count": 10}],
     "cmcd:streaming_format_dist": [{"streaming_format": "h", "session_count": 4}],
-    "cmcd:session_duration_dist": [{"sort_order": 2, "session_count": 1}, {"sort_order": 5, "session_count": 3}],
+    "cmcd:session_duration_dist": [
+        {"sort_order": 2, "session_count": 1, "positive_duration_sum": 125.4, "positive_duration_count": 1},
+        {"sort_order": 5, "session_count": 3, "positive_duration_sum": 0.0, "positive_duration_count": 0},
+    ],
 }
 
 
@@ -3047,13 +3057,13 @@ def _asn_names(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_probe_and_multicall_overview_share_explicit_projected_fact_ownership() -> None:
     client = _Client_cmcd()
     result = _run(client, sections={"overview"})
-    assert len(client.calls) == 4
-    assert [row["section"] for row in client.scopes] == ["cmcd.probe"] + ["cmcd.overview"] * 3
+    assert len(client.calls) == 3
+    assert [row["section"] for row in client.scopes] == ["cmcd.probe"] + ["cmcd.overview"] * 2
     assert all(row["source"] == "projected_fact" and row["service_id"] == "svc" for row in client.scopes)
     assert len({row["section_id"] for row in client.scopes[1:]}) == 1
     assert len(result["section_timings"]) == 2 and result["section_timings"][0]["section"] == "cmcd.probe"
     hit = _run(client, sections={"overview"})
-    assert len(client.calls) == 4 and hit["_response_cache"]["state"] == "hit" and "section_timings" not in hit
+    assert len(client.calls) == 3 and hit["_response_cache"]["state"] == "hit" and "section_timings" not in hit
 
 
 @pytest.mark.usefixtures("_asn_names")
@@ -3071,7 +3081,7 @@ def test_no_cmcd_events_in_the_window_reports_no_data_after_a_single_probe() -> 
         "available": True,
         "has_data": False,
         "is_cached": False,
-        "_response_cache": {"state": "miss", "ttl_seconds": 30.0, "prewarmer": False, "single_flight": "leader"},
+        "_response_cache": {"state": "miss", "ttl_seconds": 60.0, "prewarmer": False, "single_flight": "leader"},
     }
     hit = _run(client)
     assert hit["_response_cache"]["state"] == "hit" and hit["is_cached"] is True and len(client.calls) == 1
@@ -3087,7 +3097,7 @@ def test_every_section_is_computed_from_the_projection() -> None:
         "avg_bitrate": 2500.13,
         "avg_buffer_length": 12.0,
         "median_throughput": 8000.0,
-        "peak_viewers": 4,
+        "peak_viewers": 3,
         "avg_session_duration": 125,
     }
     assert result["top_content"] == [

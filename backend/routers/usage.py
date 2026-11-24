@@ -38,6 +38,11 @@ from backend.models.admin import (
 )
 from backend.models.common import DEFAULT_ERROR_RESPONSES
 from backend.repositories import assets as repo
+from backend.repositories.utils.response_cache import (
+    ResponseMemo,
+    bucket_time_to_minute,
+    digest_cache_key,
+)
 from backend.repositories.utils.response_shaping import SectionTimer
 from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
@@ -52,10 +57,15 @@ router = usage_router
 _FASTLY_STATS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=60.0)
 _STORAGE_INSPECTION_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=64, ttl_seconds=60.0)
 _PREFILL_META_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=64, ttl_seconds=60.0)
+_PREFILL_ENDPOINT_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=64, ttl_seconds=60.0)
+_EDGE_RATIO_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=64, ttl_seconds=60.0)
 _RUM_BREAKDOWN_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=60.0)
+_USAGE_RESPONSE_MEMO = ResponseMemo(ttl=60.0, maxsize=256, prewarmer=False)
 _CacheRegistry.register("routers.usage._FASTLY_STATS_CACHE", _FASTLY_STATS_CACHE)
 _CacheRegistry.register("routers.usage._STORAGE_INSPECTION_CACHE", _STORAGE_INSPECTION_CACHE)
 _CacheRegistry.register("routers.usage._PREFILL_META_CACHE", _PREFILL_META_CACHE)
+_CacheRegistry.register("routers.usage._PREFILL_ENDPOINT_CACHE", _PREFILL_ENDPOINT_CACHE)
+_CacheRegistry.register("routers.usage._EDGE_RATIO_CACHE", _EDGE_RATIO_CACHE)
 _CacheRegistry.register("routers.usage._RUM_BREAKDOWN_CACHE", _RUM_BREAKDOWN_CACHE)
 
 STORAGE_PLATFORM_METRICS = (
@@ -86,7 +96,7 @@ def _fastly_api(
     from backend.core.fastly.client import fastly_platform_metrics
 
     token_scope = sha256(api_key.encode()).hexdigest()[:16]
-    cache_key = (entity_id, granularity, from_epoch, to_epoch, metrics, group_by, token_scope)
+    cache_key = (entity_id, granularity, from_epoch // 60, to_epoch // 60, metrics, group_by, token_scope)
     cached = _FASTLY_STATS_CACHE.get(cache_key)
     if cached is not None:
         return dict(cached)
@@ -379,19 +389,24 @@ async def prefill(source: dict[str, Any] = Depends(get_source)) -> PrefillRespon
         ).strip()
         svc_id = logging_svc_id
         now = datetime.now(UTC)
-        from_ts = int((now - timedelta(days=3)).timestamp())
-        to_ts = int(now.timestamp())
+        to_ts = (int(now.timestamp()) // 300) * 300
+        from_ts = to_ts - 3 * 86_400
         by = "day"
+        token_scope = sha256(api_key.encode()).hexdigest()[:16]
 
         async def _resolve_endpoint_chain() -> dict[str, Any]:
             updates: dict[str, Any] = {}
             try:
                 if not logging_svc_id:
                     return updates
+                endpoint_name = prov.get("endpoint_name", "Fastly Object Storage Logs")
+                ep_cache_key = (logging_svc_id, endpoint_name, token_scope)
+                cached_ep = _PREFILL_ENDPOINT_CACHE.get(ep_cache_key)
+                if cached_ep is not None:
+                    return dict(cached_ep)
                 active_ver = await asyncio.to_thread(get_active_version, logging_svc_id, api_key)
                 if not active_ver:
                     return updates
-                endpoint_name = prov.get("endpoint_name", "Fastly Object Storage Logs")
                 current_ep = await asyncio.to_thread(
                     get_log_endpoint, logging_svc_id, active_ver, endpoint_name, api_key
                 )
@@ -409,6 +424,7 @@ async def prefill(source: dict[str, Any] = Depends(get_source)) -> PrefillRespon
                             updates["sample_rate"] = int(m.group(1))
                         if "req.restarts == 0" in stmt:
                             updates["edge_only"] = True
+                _PREFILL_ENDPOINT_CACHE[ep_cache_key] = dict(updates)
             except Exception:
                 logger.debug("_resolve_endpoint_chain: step failed (ignored)", exc_info=True)
             return updates
@@ -478,6 +494,9 @@ async def prefill(source: dict[str, Any] = Depends(get_source)) -> PrefillRespon
 
             def _edge_ratio_blocking() -> float | None:
                 service_id = str(source.get("service_id") or source["name"])
+                cached_ratio = _EDGE_RATIO_CACHE.get(service_id)
+                if cached_ratio is not None:
+                    return float(cached_ratio)
                 hs_service = get_high_scale_service_registry().resolve(service_id)
                 client = hs_service.client if hs_service is not None else get_clickhouse_client()
                 if client is None:
@@ -489,7 +508,9 @@ async def prefill(source: dict[str, Any] = Depends(get_source)) -> PrefillRespon
                     {"service_id": service_id},
                 )
                 if rows and rows[0].get("edge_ratio") is not None:
-                    return round(float(rows[0]["edge_ratio"]), 2)
+                    val = round(float(rows[0]["edge_ratio"]), 2)
+                    _EDGE_RATIO_CACHE[service_id] = val
+                    return val
                 return None
 
             _t = _time.perf_counter()
@@ -594,226 +615,255 @@ def usage_current_storage(
         cron_sync = cfg.get("provisioning", {}).get("cron_sync", {})
         delete_after = cron_sync.get("delete_after", True)
         retention_days = int(cron_sync.get("data_retention_days", 30))
-        retention_end_str = now.strftime("%Y-%m-%d %H:%M:%S")
-        MIN_BILLING_DAYS = 30
-        query_days = MIN_BILLING_DAYS if delete_after else retention_days
-        retention_start_str = (now - timedelta(days=query_days)).strftime("%Y-%m-%d %H:%M:%S")
-
-        stats = _get_storage_stats(src, retention_start_str, retention_end_str)
-
-        total_files = stats["total_files"]
-        total_bytes = stats["total_bytes"]
-        debug_queries = stats.get("debug_queries", [])
-
-        cache_key = (src.get("name"), src.get("bucket"), src.get("prefix"))
-        cached_insp = _STORAGE_INSPECTION_CACHE.get(cache_key)
-        if cached_insp is not None:
-            storage_bytes, storage_files, quarantine_bytes, rum_bytes = cached_insp
-        else:
-            storage_bytes = 0
-            storage_files = 0
-            storage_info_success = False
-            cached_status = svcconfig.get_status(src["name"]) or {}
-            cached_ib = cached_status.get("storage_bytes")
-            cached_if = cached_status.get("storage_files")
-            if cached_ib is not None and cached_if is not None:
-                storage_bytes = int(cached_ib)
-                storage_files = int(cached_if)
-                storage_info_success = True
-
-            quarantine_bytes = 0
-            try:
-                from backend.core.metadata.ingest_log import get_quarantine_storage_total
-
-                quarantine_bytes = get_quarantine_storage_total(src["name"])
-            except Exception:
-                logger.debug("usage_current_storage: get_quarantine_storage_total failed (ignored)", exc_info=True)
-
-            rum_bytes = 0
-            rum_from_meta = "rum_bytes" in stats
-            if storage_info_success and not rum_from_meta:
-                try:
-                    from backend.core.metadata.ingest_log import get_rum_storage_stats_window
-
-                    rum_bytes = get_rum_storage_stats_window(src["name"], retention_start_str, retention_end_str)
-                    rum_from_meta = True
-                except Exception:
-                    logger.debug("usage_current_storage: metadata rum_bytes failed (ignored)", exc_info=True)
-
-            if not rum_from_meta:
-                try:
-                    s3 = _get_fos_client(src)
-                    bucket = src["bucket"]
-                    prefix = src.get("prefix", "").strip("/")
-                    rum_prefix = f"{prefix}/raw/rum/" if prefix else "raw/rum/"
-                    paginator = s3.get_paginator("list_objects_v2")
-                    for page in paginator.paginate(Bucket=bucket, Prefix=rum_prefix):
-                        for obj in page.get("Contents", []):
-                            rum_bytes += obj.get("Size", 0)
-                except Exception:
-                    logger.debug("usage_current_storage: step failed (ignored)", exc_info=True)
-
-            _STORAGE_INSPECTION_CACHE[cache_key] = (
-                storage_bytes,
-                storage_files,
-                quarantine_bytes,
-                rum_bytes,
-            )
-
-        archive_bytes = archive_objects = archive_expired_bytes = archive_rum_bytes = 0
         service_id = str(src.get("service_id") or src["name"])
-        try:
-            high_scale_service = get_high_scale_service_registry().resolve(service_id)
-            archive_storage_complete = high_scale_service is None
-        except Exception:
-            high_scale_service = None
-            archive_storage_complete = False
-            logger.debug("usage_current_storage: archive applicability failed (ignored)", exc_info=True)
-        if high_scale_service is not None:
-            try:
-                from backend.high_scale.postgres_control import PostgresControlPlane
 
-                summary = PostgresControlPlane().archive_storage_summary(service_id)
-                archive_bytes, archive_objects = summary["live_bytes"], summary["live_objects"]
-                archive_expired_bytes = summary["expired_30d_bytes"]
-                archive_rum_bytes = int(summary.get("live_rum_bytes", 0))
-                archive_storage_complete = True
-            except Exception:
-                logger.debug("usage_current_storage: archive summary failed (ignored)", exc_info=True)
-
-        # Standard's cloud copy deletes superseded and expired files; FOS bills each for 30 days after deletion.
-        cloud_copy_deleted_bytes = 0
-        cloud_copy_deleted_bytes_complete = True
-        try:
-            from backend.core.metadata.usage_log import cloud_copy_deleted_bytes_in_billing_window
-
-            cloud_copy_deleted_bytes = cloud_copy_deleted_bytes_in_billing_window(src["name"])
-        except Exception:
-            cloud_copy_deleted_bytes_complete = False
-            logger.debug("usage_current_storage: cloud copy deletions failed (ignored)", exc_info=True)
-
-        if "rum_bytes" in stats:
-            rum_bytes = int(stats["rum_bytes"])
-        regular_log_bytes = total_bytes - rum_bytes
-
-        if delete_after:
-            live_bytes = storage_bytes + quarantine_bytes + archive_bytes
-            live_files = storage_files + archive_objects
-            deleted_bytes = total_bytes + archive_expired_bytes + cloud_copy_deleted_bytes
-        else:
-            live_bytes = total_bytes + storage_bytes + quarantine_bytes + archive_bytes
-            live_files = total_files + storage_files + archive_objects
-            deleted_bytes = archive_expired_bytes + cloud_copy_deleted_bytes
-
-        billed_bytes = (
-            total_bytes
-            + storage_bytes
-            + quarantine_bytes
-            + archive_bytes
-            + archive_expired_bytes
-            + cloud_copy_deleted_bytes
+        storage_memo_digest = digest_cache_key(
+            {
+                "ep": "usage_current_storage",
+                "name": src.get("name"),
+                "bucket": src.get("bucket"),
+                "prefix": src.get("prefix"),
+                "s": bucket_time_to_minute(start_str),
+                "e": bucket_time_to_minute(end_str),
+                "delete_after": bool(delete_after),
+                "retention_days": retention_days,
+            },
+            {"service_id": service_id},
         )
-        billed_gb = billed_bytes / 1_000_000_000
-        gb_hours = billed_gb * (MIN_BILLING_DAYS * 24)
+        storage_memo_key = f"{service_id}:{storage_memo_digest}"
+        cached_storage = _USAGE_RESPONSE_MEMO.get_with_telemetry(storage_memo_key)
+        if cached_storage is not None:
+            return CurrentStorageResponse.with_telemetry(**cached_storage)
 
-        live_billed_gb_hours = 0.0
-        deleted_billed_gb_hours = 0.0
-        minimum_billed_gb_hours = 0.0
-        storage_billing_complete = False
-        storage_billing_provenance: list[str] = []
-        storage_intervals: list[StorageBillingInterval] = []
+        def _compute_storage() -> dict[str, Any]:
+            if (cached_inner := _USAGE_RESPONSE_MEMO.get_with_telemetry(storage_memo_key)) is not None:
+                return dict(cached_inner)
 
-        if high_scale_service is not None:
-            pg_live = 0.0
-            pg_deleted = 0.0
-            pg_min = 0.0
-            pg_complete = False
-            pg_provenance: list[str] = []
-            try:
-                from backend.high_scale.postgres_control import PostgresControlPlane
+            retention_end_str = now.strftime("%Y-%m-%d %H:%M:%S")
+            MIN_BILLING_DAYS = 30
+            query_days = MIN_BILLING_DAYS if delete_after else retention_days
+            retention_start_str = (now - timedelta(days=query_days)).strftime("%Y-%m-%d %H:%M:%S")
 
-                pg_live, pg_deleted, pg_min, pg_complete, pg_provenance = (
-                    PostgresControlPlane().storage_billing_summary(
-                        service_id, start_dt, end_dt, minimum_days=MIN_BILLING_DAYS
-                    )
-                )
-            except Exception:
-                pg_complete = False
-                pg_provenance = ["high-scale:postgres_unavailable"]
-                logger.debug("usage_current_storage: storage_billing_summary failed", exc_info=True)
+            stats = _get_storage_stats(src, retention_start_str, retention_end_str)
 
-            cloud_copy_intervals: list[dict[str, Any]] = []
-            cloud_copy_intervals_ok = True
-            try:
-                from backend.core.metadata.fos_usage import cloud_copy_deletion_records_in_window
+            total_files = stats["total_files"]
+            total_bytes = stats["total_bytes"]
+            debug_queries = stats.get("debug_queries", [])
 
-                cloud_copy_intervals = cloud_copy_deletion_records_in_window(
-                    src["name"], start_dt, end_dt, minimum_days=MIN_BILLING_DAYS
-                )
-            except Exception:
-                cloud_copy_intervals_ok = False
-                logger.debug("usage_current_storage: cloud copy deletion records failed", exc_info=True)
-
-            if end_ms >= start_ms:
-                cc_summary = calculate_storage_billing(cloud_copy_intervals, start_ms, end_ms)
-                live_billed_gb_hours = pg_live + cc_summary.live_gb_hours
-                deleted_billed_gb_hours = pg_deleted + cc_summary.deleted_gb_hours
-                minimum_billed_gb_hours = pg_min + cc_summary.minimum_billed_gb_hours
-                gb_hours = live_billed_gb_hours + deleted_billed_gb_hours + minimum_billed_gb_hours
-                storage_billing_complete = (
-                    pg_complete
-                    and cc_summary.complete
-                    and archive_storage_complete
-                    and cloud_copy_deleted_bytes_complete
-                    and cloud_copy_intervals_ok
-                )
-                storage_billing_provenance = sorted(set(pg_provenance) | set(cc_summary.provenance))
+            cache_key = (src.get("name"), src.get("bucket"), src.get("prefix"))
+            cached_insp = _STORAGE_INSPECTION_CACHE.get(cache_key)
+            if cached_insp is not None:
+                storage_bytes, storage_files, quarantine_bytes, rum_bytes = cached_insp
             else:
-                gb_hours = 0.0
-                storage_billing_complete = False
-                storage_billing_provenance = sorted(set(pg_provenance))
-        else:
-            storage_billing_complete = archive_storage_complete and cloud_copy_deleted_bytes_complete
-            storage_billing_provenance = (
-                ["metadata_ledgers"] if storage_billing_complete else ["metadata_ledgers_incomplete"]
-            )
+                storage_bytes = 0
+                storage_files = 0
+                storage_info_success = False
+                cached_status = svcconfig.get_status(src["name"]) or {}
+                cached_ib = cached_status.get("storage_bytes")
+                cached_if = cached_status.get("storage_files")
+                if cached_ib is not None and cached_if is not None:
+                    storage_bytes = int(cached_ib)
+                    storage_files = int(cached_if)
+                    storage_info_success = True
 
-        resp: CurrentStorageResponse = CurrentStorageResponse.with_telemetry(
-            debug_queries=debug_queries,
-            live_bytes=live_bytes,
-            live_files=live_files,
-            deleted_bytes=deleted_bytes,
-            deleted_bytes_complete=archive_storage_complete and cloud_copy_deleted_bytes_complete,
-            deleted_bytes_provenance=(
-                "metadata_ledgers"
-                if archive_storage_complete and cloud_copy_deleted_bytes_complete
-                else "metadata_ledgers_incomplete"
-            ),
-            quarantine_bytes=quarantine_bytes,
-            total_billed_bytes=billed_bytes,
-            total_billed_gb_hours=gb_hours,
-            storage_billing_complete=storage_billing_complete,
-            storage_billing_provenance=storage_billing_provenance,
-            live_billed_gb_hours=live_billed_gb_hours,
-            deleted_billed_gb_hours=deleted_billed_gb_hours,
-            minimum_billed_gb_hours=minimum_billed_gb_hours,
-            storage_intervals=storage_intervals,
-            observed_at=observed_at,
-            archive_bytes=archive_bytes,
-            archive_objects=archive_objects,
-            archive_expired_bytes=archive_expired_bytes,
-            cloud_copy_deleted_bytes=cloud_copy_deleted_bytes,
-            total_files=total_files,
-            total_bytes=total_bytes,
-            rum_bytes=rum_bytes,
-            regular_log_bytes=regular_log_bytes,
-            processed_request_bytes=archive_bytes - archive_rum_bytes,
-            processed_rum_bytes=archive_rum_bytes,
-            processed_objects=archive_objects,
-            raw_logs_deleted=bool(delete_after),
-            start=start_str,
-            end=end_str,
-        )
+                quarantine_bytes = 0
+                try:
+                    from backend.core.metadata.ingest_log import get_quarantine_storage_total
+
+                    quarantine_bytes = get_quarantine_storage_total(src["name"])
+                except Exception:
+                    logger.debug("usage_current_storage: get_quarantine_storage_total failed (ignored)", exc_info=True)
+
+                rum_bytes = 0
+                rum_from_meta = "rum_bytes" in stats
+                if storage_info_success and not rum_from_meta:
+                    try:
+                        from backend.core.metadata.ingest_log import get_rum_storage_stats_window
+
+                        rum_bytes = get_rum_storage_stats_window(src["name"], retention_start_str, retention_end_str)
+                        rum_from_meta = True
+                    except Exception:
+                        logger.debug("usage_current_storage: metadata rum_bytes failed (ignored)", exc_info=True)
+
+                if not rum_from_meta:
+                    try:
+                        s3 = _get_fos_client(src)
+                        bucket = src["bucket"]
+                        prefix = src.get("prefix", "").strip("/")
+                        rum_prefix = f"{prefix}/raw/rum/" if prefix else "raw/rum/"
+                        paginator = s3.get_paginator("list_objects_v2")
+                        for page in paginator.paginate(Bucket=bucket, Prefix=rum_prefix):
+                            for obj in page.get("Contents", []):
+                                rum_bytes += obj.get("Size", 0)
+                    except Exception:
+                        logger.debug("usage_current_storage: step failed (ignored)", exc_info=True)
+
+                _STORAGE_INSPECTION_CACHE[cache_key] = (
+                    storage_bytes,
+                    storage_files,
+                    quarantine_bytes,
+                    rum_bytes,
+                )
+
+            archive_bytes = archive_objects = archive_expired_bytes = archive_rum_bytes = 0
+            try:
+                high_scale_service = get_high_scale_service_registry().resolve(service_id)
+                archive_storage_complete = high_scale_service is None
+            except Exception:
+                high_scale_service = None
+                archive_storage_complete = False
+                logger.debug("usage_current_storage: archive applicability failed (ignored)", exc_info=True)
+            if high_scale_service is not None:
+                try:
+                    from backend.high_scale.postgres_control import PostgresControlPlane
+
+                    summary = PostgresControlPlane().archive_storage_summary(service_id)
+                    archive_bytes, archive_objects = summary["live_bytes"], summary["live_objects"]
+                    archive_expired_bytes = summary["expired_30d_bytes"]
+                    archive_rum_bytes = int(summary.get("live_rum_bytes", 0))
+                    archive_storage_complete = True
+                except Exception:
+                    logger.debug("usage_current_storage: archive summary failed (ignored)", exc_info=True)
+
+            # Standard's cloud copy deletes superseded and expired files; FOS bills each for 30 days after deletion.
+            cloud_copy_deleted_bytes = 0
+            cloud_copy_deleted_bytes_complete = True
+            try:
+                from backend.core.metadata.usage_log import cloud_copy_deleted_bytes_in_billing_window
+
+                cloud_copy_deleted_bytes = cloud_copy_deleted_bytes_in_billing_window(src["name"])
+            except Exception:
+                cloud_copy_deleted_bytes_complete = False
+                logger.debug("usage_current_storage: cloud copy deletions failed (ignored)", exc_info=True)
+
+            if "rum_bytes" in stats:
+                rum_bytes = int(stats["rum_bytes"])
+            regular_log_bytes = total_bytes - rum_bytes
+
+            if delete_after:
+                live_bytes = storage_bytes + quarantine_bytes + archive_bytes
+                live_files = storage_files + archive_objects
+                deleted_bytes = total_bytes + archive_expired_bytes + cloud_copy_deleted_bytes
+            else:
+                live_bytes = total_bytes + storage_bytes + quarantine_bytes + archive_bytes
+                live_files = total_files + storage_files + archive_objects
+                deleted_bytes = archive_expired_bytes + cloud_copy_deleted_bytes
+
+            billed_bytes = (
+                total_bytes
+                + storage_bytes
+                + quarantine_bytes
+                + archive_bytes
+                + archive_expired_bytes
+                + cloud_copy_deleted_bytes
+            )
+            billed_gb = billed_bytes / 1_000_000_000
+            gb_hours = billed_gb * (MIN_BILLING_DAYS * 24)
+
+            live_billed_gb_hours = 0.0
+            deleted_billed_gb_hours = 0.0
+            minimum_billed_gb_hours = 0.0
+            storage_billing_complete = False
+            storage_billing_provenance: list[str] = []
+            storage_intervals: list[StorageBillingInterval] = []
+
+            if high_scale_service is not None:
+                pg_live = 0.0
+                pg_deleted = 0.0
+                pg_min = 0.0
+                pg_complete = False
+                pg_provenance: list[str] = []
+                try:
+                    from backend.high_scale.postgres_control import PostgresControlPlane
+
+                    pg_live, pg_deleted, pg_min, pg_complete, pg_provenance = (
+                        PostgresControlPlane().storage_billing_summary(
+                            service_id, start_dt, end_dt, minimum_days=MIN_BILLING_DAYS
+                        )
+                    )
+                except Exception:
+                    pg_complete = False
+                    pg_provenance = ["high-scale:postgres_unavailable"]
+                    logger.debug("usage_current_storage: storage_billing_summary failed", exc_info=True)
+
+                cloud_copy_intervals: list[dict[str, Any]] = []
+                cloud_copy_intervals_ok = True
+                try:
+                    from backend.core.metadata.fos_usage import cloud_copy_deletion_records_in_window
+
+                    cloud_copy_intervals = cloud_copy_deletion_records_in_window(
+                        src["name"], start_dt, end_dt, minimum_days=MIN_BILLING_DAYS
+                    )
+                except Exception:
+                    cloud_copy_intervals_ok = False
+                    logger.debug("usage_current_storage: cloud copy deletion records failed", exc_info=True)
+
+                if end_ms >= start_ms:
+                    cc_summary = calculate_storage_billing(cloud_copy_intervals, start_ms, end_ms)
+                    live_billed_gb_hours = pg_live + cc_summary.live_gb_hours
+                    deleted_billed_gb_hours = pg_deleted + cc_summary.deleted_gb_hours
+                    minimum_billed_gb_hours = pg_min + cc_summary.minimum_billed_gb_hours
+                    gb_hours = live_billed_gb_hours + deleted_billed_gb_hours + minimum_billed_gb_hours
+                    storage_billing_complete = (
+                        pg_complete
+                        and cc_summary.complete
+                        and archive_storage_complete
+                        and cloud_copy_deleted_bytes_complete
+                        and cloud_copy_intervals_ok
+                    )
+                    storage_billing_provenance = sorted(set(pg_provenance) | set(cc_summary.provenance))
+                else:
+                    gb_hours = 0.0
+                    storage_billing_complete = False
+                    storage_billing_provenance = sorted(set(pg_provenance))
+            else:
+                storage_billing_complete = archive_storage_complete and cloud_copy_deleted_bytes_complete
+                storage_billing_provenance = (
+                    ["metadata_ledgers"] if storage_billing_complete else ["metadata_ledgers_incomplete"]
+                )
+
+            payload: dict[str, Any] = {
+                "debug_queries": debug_queries,
+                "live_bytes": live_bytes,
+                "live_files": live_files,
+                "deleted_bytes": deleted_bytes,
+                "deleted_bytes_complete": archive_storage_complete and cloud_copy_deleted_bytes_complete,
+                "deleted_bytes_provenance": (
+                    "metadata_ledgers"
+                    if archive_storage_complete and cloud_copy_deleted_bytes_complete
+                    else "metadata_ledgers_incomplete"
+                ),
+                "quarantine_bytes": quarantine_bytes,
+                "total_billed_bytes": billed_bytes,
+                "total_billed_gb_hours": gb_hours,
+                "storage_billing_complete": storage_billing_complete,
+                "storage_billing_provenance": storage_billing_provenance,
+                "live_billed_gb_hours": live_billed_gb_hours,
+                "deleted_billed_gb_hours": deleted_billed_gb_hours,
+                "minimum_billed_gb_hours": minimum_billed_gb_hours,
+                "storage_intervals": storage_intervals,
+                "observed_at": observed_at,
+                "archive_bytes": archive_bytes,
+                "archive_objects": archive_objects,
+                "archive_expired_bytes": archive_expired_bytes,
+                "cloud_copy_deleted_bytes": cloud_copy_deleted_bytes,
+                "total_files": total_files,
+                "total_bytes": total_bytes,
+                "rum_bytes": rum_bytes,
+                "regular_log_bytes": regular_log_bytes,
+                "processed_request_bytes": archive_bytes - archive_rum_bytes,
+                "processed_rum_bytes": archive_rum_bytes,
+                "processed_objects": archive_objects,
+                "raw_logs_deleted": bool(delete_after),
+                "start": start_str,
+                "end": end_str,
+            }
+            if storage_billing_complete:
+                _USAGE_RESPONSE_MEMO.put(storage_memo_key, payload)
+            return payload
+
+        result_payload = _USAGE_RESPONSE_MEMO.coalesce(f"usage_current_storage:{storage_memo_key}", _compute_storage)
+        resp: CurrentStorageResponse = CurrentStorageResponse.with_telemetry(**result_payload)
         return resp
     except Exception as e:
         raise_internal(logger, e, code="usage_storage_failed")
@@ -1018,37 +1068,62 @@ def usage_operations(
     service_id = str(src.get("service_id") or src["name"])
     start_str, end_str = parse_date_window(start, end)
 
-    try:
-        local = get_usage_operation_buckets(service_id, start_str, end_str, cast(Literal["hour", "day"], granularity))
-    except Exception:
-        logger.debug("usage_operations: local usage_log query failed", exc_info=True)
-        resp_incomplete: UsageOperationsResponse = UsageOperationsResponse.with_telemetry(
-            data=[],
-            total_class_a=0,
-            total_class_b=0,
-            granularity=granularity,
-            source="local",
-            complete=False,
-            provenance=[],
-            note="Local Object Storage operation ledger is unavailable for this service.",
-            fos_fields_found=[],
-        )
-        return resp_incomplete
-
-    note = "Measured from this service's local Object Storage operation ledger."
-    if clamped_from_sub_hour:
-        note += f" Granularity '{requested_by}' normalized to '{granularity}'."
-    resp: UsageOperationsResponse = UsageOperationsResponse.with_telemetry(
-        data=local["data"],
-        total_class_a=local["total_class_a"],
-        total_class_b=local["total_class_b"],
-        granularity=granularity,
-        source="local",
-        complete=True,
-        provenance=["high-scale:usage_log"],
-        note=note,
-        fos_fields_found=["usage_log.class_a", "usage_log.class_b"],
+    ops_digest = digest_cache_key(
+        {
+            "ep": "usage_operations",
+            "s": bucket_time_to_minute(start_str),
+            "e": bucket_time_to_minute(end_str),
+            "g": granularity,
+            "clamped": clamped_from_sub_hour,
+            "req_by": requested_by if clamped_from_sub_hour else granularity,
+        },
+        {"service_id": service_id},
     )
+    ops_memo_key = f"{service_id}:{ops_digest}"
+    cached_ops = _USAGE_RESPONSE_MEMO.get_with_telemetry(ops_memo_key)
+    if cached_ops is not None:
+        return UsageOperationsResponse.with_telemetry(**cached_ops)
+
+    def _compute_ops() -> dict[str, Any]:
+        if (cached_inner := _USAGE_RESPONSE_MEMO.get_with_telemetry(ops_memo_key)) is not None:
+            return dict(cached_inner)
+        try:
+            local = get_usage_operation_buckets(
+                service_id, start_str, end_str, cast(Literal["hour", "day"], granularity)
+            )
+        except Exception:
+            logger.debug("usage_operations: local usage_log query failed", exc_info=True)
+            return {
+                "data": [],
+                "total_class_a": 0,
+                "total_class_b": 0,
+                "granularity": granularity,
+                "source": "local",
+                "complete": False,
+                "provenance": [],
+                "note": "Local Object Storage operation ledger is unavailable for this service.",
+                "fos_fields_found": [],
+            }
+
+        note = "Measured from this service's local Object Storage operation ledger."
+        if clamped_from_sub_hour:
+            note += f" Granularity '{requested_by}' normalized to '{granularity}'."
+        payload = {
+            "data": local["data"],
+            "total_class_a": local["total_class_a"],
+            "total_class_b": local["total_class_b"],
+            "granularity": granularity,
+            "source": "local",
+            "complete": True,
+            "provenance": ["high-scale:usage_log"],
+            "note": note,
+            "fos_fields_found": ["usage_log.class_a", "usage_log.class_b"],
+        }
+        _USAGE_RESPONSE_MEMO.put(ops_memo_key, payload)
+        return payload
+
+    ops_payload = _USAGE_RESPONSE_MEMO.coalesce(f"usage_operations:{ops_memo_key}", _compute_ops)
+    resp: UsageOperationsResponse = UsageOperationsResponse.with_telemetry(**ops_payload)
     return resp
 
 
@@ -1123,88 +1198,115 @@ def usage_log_activity(
 
     start_str, end_str = parse_date_window(start, end)
 
+    service_id = str(source.get("service_id") or source.get("name") or "")
     api_key = api_key_or_mock(get_fastly_api_key(source.get("logging_service_id", "")))
     logging_svc = source.get("logging_service_id", "").strip()
     can_fetch_fastly = bool(api_key and logging_svc and by in ("minute", "hour", "day"))
+    token_scope = sha256(str(api_key).encode()).hexdigest()[:16] if api_key else ""
 
-    payload: dict[str, Any] | None = None
-    if can_fetch_fastly:
-        import concurrent.futures
-        import contextvars
+    act_digest = digest_cache_key(
+        {
+            "ep": "usage_log_activity",
+            "name": source.get("name"),
+            "log_svc": logging_svc,
+            "s": bucket_time_to_minute(start_str),
+            "e": bucket_time_to_minute(end_str),
+            "by": by,
+            "tok": token_scope,
+        },
+        {"service_id": service_id},
+    )
+    act_memo_key = f"{service_id}:{act_digest}"
+    cached_act = _USAGE_RESPONSE_MEMO.get_with_telemetry(act_memo_key)
+    if cached_act is not None:
+        return UsageLogActivityResponse.with_telemetry(**cached_act)
 
-        from backend.utils.date_utils import parse_window_str_to_dt
+    def _compute_activity() -> dict[str, Any]:
+        if (cached_inner := _USAGE_RESPONSE_MEMO.get_with_telemetry(act_memo_key)) is not None:
+            return dict(cached_inner)
 
-        start_dt = parse_window_str_to_dt(start_str)
-        end_dt = parse_window_str_to_dt(end_str)
-        from_ts = int(start_dt.timestamp())
-        to_ts = int(end_dt.timestamp())
-        ctx_repo = contextvars.copy_context()
-        ctx_api = contextvars.copy_context()
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-            fut_repo = pool.submit(ctx_repo.run, _get_log_activity, source, start_str, end_str, by)
-            fut_api = pool.submit(
-                ctx_api.run,
-                _fastly_api,
-                logging_svc,
-                by,
-                from_ts,
-                to_ts,
-                ("requests", *FASTLY_LOG_FIELDS),
-                str(api_key),
-            )
-            res = fut_repo.result()
+        payload: dict[str, Any] | None = None
+        if can_fetch_fastly:
+            import concurrent.futures
+            import contextvars
+
+            from backend.utils.date_utils import parse_window_str_to_dt
+
+            start_dt = parse_window_str_to_dt(start_str)
+            end_dt = parse_window_str_to_dt(end_str)
+            from_ts = int(start_dt.timestamp())
+            to_ts = int(end_dt.timestamp())
+            ctx_repo = contextvars.copy_context()
+            ctx_api = contextvars.copy_context()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                fut_repo = pool.submit(ctx_repo.run, _get_log_activity, source, start_str, end_str, by)
+                fut_api = pool.submit(
+                    ctx_api.run,
+                    _fastly_api,
+                    logging_svc,
+                    by,
+                    from_ts,
+                    to_ts,
+                    ("requests", *FASTLY_LOG_FIELDS),
+                    str(api_key),
+                )
+                res = fut_repo.result()
+                try:
+                    payload = fut_api.result()
+                except Exception:
+                    logger.debug("usage_log_activity: step failed (ignored)", exc_info=True)
+                    payload = None
+        else:
+            res = _get_log_activity(source, start_str, end_str, by)
+
+        if payload is not None:
             try:
-                payload = fut_api.result()
+                fmt = "%Y-%m-%dT%H:00" if by == "hour" else "%Y-%m-%dT%H:%M" if by == "minute" else "%Y-%m-%d"
+                stats_lookup: dict[str, int] = {}
+                log_records_lookup: dict[str, int] = {}
+                for record in payload.get("data", []):
+                    ts = record.get("start_time")
+                    if ts is None:
+                        continue
+                    time_key = datetime.fromtimestamp(ts, tz=UTC).strftime(fmt)
+                    stats_lookup[time_key] = stats_lookup.get(time_key, 0) + int(record.get("requests") or 0)
+                    log_count = 0
+                    for fname in FASTLY_LOG_FIELDS:
+                        v = record.get(fname)
+                        if v:
+                            log_count = int(v)
+                            break
+                    if log_count:
+                        log_records_lookup[time_key] = log_records_lookup.get(time_key, 0) + log_count
+
+                total_api_requests = 0
+                total_log_records = 0
+                existing_points = {p["time"]: p for p in res["data"]}
+                all_times = sorted(set(existing_points.keys()) | set(stats_lookup.keys()))
+
+                new_data = []
+                for t in all_times:
+                    p = existing_points.get(t, {"time": t, "row_count": 0, "bytes": 0})
+                    api_reqs = stats_lookup.get(t, 0)
+                    p["api_requests"] = api_reqs
+                    total_api_requests += api_reqs
+                    log_recs = log_records_lookup.get(t, 0)
+                    p["fastly_log_records"] = log_recs
+                    total_log_records += log_recs
+                    new_data.append(p)
+
+                res["data"] = new_data
+                res["total_api_requests"] = total_api_requests
+                res["total_fastly_log_records"] = total_log_records
+
             except Exception:
                 logger.debug("usage_log_activity: step failed (ignored)", exc_info=True)
-                payload = None
-    else:
-        res = _get_log_activity(source, start_str, end_str, by)
 
-    if payload is not None:
-        try:
-            fmt = "%Y-%m-%dT%H:00" if by == "hour" else "%Y-%m-%dT%H:%M" if by == "minute" else "%Y-%m-%d"
-            stats_lookup: dict[str, int] = {}
-            log_records_lookup: dict[str, int] = {}
-            for record in payload.get("data", []):
-                ts = record.get("start_time")
-                if ts is None:
-                    continue
-                time_key = datetime.fromtimestamp(ts, tz=UTC).strftime(fmt)
-                stats_lookup[time_key] = stats_lookup.get(time_key, 0) + int(record.get("requests") or 0)
-                log_count = 0
-                for fname in FASTLY_LOG_FIELDS:
-                    v = record.get(fname)
-                    if v:
-                        log_count = int(v)
-                        break
-                if log_count:
-                    log_records_lookup[time_key] = log_records_lookup.get(time_key, 0) + log_count
+        _USAGE_RESPONSE_MEMO.put(act_memo_key, res)
+        return res
 
-            total_api_requests = 0
-            total_log_records = 0
-            existing_points = {p["time"]: p for p in res["data"]}
-            all_times = sorted(set(existing_points.keys()) | set(stats_lookup.keys()))
-
-            new_data = []
-            for t in all_times:
-                p = existing_points.get(t, {"time": t, "row_count": 0, "bytes": 0})
-                api_reqs = stats_lookup.get(t, 0)
-                p["api_requests"] = api_reqs
-                total_api_requests += api_reqs
-                log_recs = log_records_lookup.get(t, 0)
-                p["fastly_log_records"] = log_recs
-                total_log_records += log_recs
-                new_data.append(p)
-
-            res["data"] = new_data
-            res["total_api_requests"] = total_api_requests
-            res["total_fastly_log_records"] = total_log_records
-
-        except Exception:
-            logger.debug("usage_log_activity: step failed (ignored)", exc_info=True)
-
-    resp: UsageLogActivityResponse = UsageLogActivityResponse.with_telemetry(**res)
+    act_payload = _USAGE_RESPONSE_MEMO.coalesce(f"usage_log_activity:{act_memo_key}", _compute_activity)
+    resp: UsageLogActivityResponse = UsageLogActivityResponse.with_telemetry(**act_payload)
     return resp
 
 
@@ -1251,7 +1353,7 @@ def usage_rum_breakdown(
         # High-scale ingest records RUM in ClickHouse facts only; it never writes ``ingested_files``.
         from backend.high_scale.rum import rum_beacons_by_date
 
-        hs_cache_key = ("high_scale", service_id, start_str, end_str)
+        hs_cache_key = ("high_scale", service_id, bucket_time_to_minute(start_str), bucket_time_to_minute(end_str))
         cached_hs = _RUM_BREAKDOWN_CACHE.get(hs_cache_key)
         if cached_hs is not None:
             beacons_by_date = dict(cached_hs)
