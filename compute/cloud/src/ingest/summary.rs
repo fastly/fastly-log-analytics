@@ -1083,7 +1083,10 @@ impl<'a> NetCols<'a> {
                     ("tcpi_rtt_var", 1.0),
                 ],
             ),
-            retrans: Num::new(batch, &[("client_tcpi_delta_retrans", 1.0)]),
+            retrans: Num::new(
+                batch,
+                &[("client_tcpi_delta_retrans", 1.0), ("retrans", 1.0)],
+            ),
             lat: Num::new(batch, &[("lat", 1.0)]),
             lon: Num::new(batch, &[("lon", 1.0)]),
             header: Num::new(batch, &[("req_header_bytes", 1.0)]),

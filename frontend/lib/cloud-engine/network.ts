@@ -292,7 +292,7 @@ export const NETWORK_SCAN_COLUMNS = [
   "ttfb", "ttfb_ms", "ottfb", "country", "geo_country", "city", "geo_city", "region", "geo_region",
   "lat", "lon", "asn", "client_asn", "as_name", "tcp_rtt", "tcpi_rtt", "client_rtt_us", "client_tcpi_rtt",
   "ploss", "client_ploss", "client_cwnd", "rtt_var", "tcpi_rtt_var", "client_tcpi_rttvar",
-  "client_tcpi_delta_retrans", "delivery_rate", "tcpi_delivery_rate",
+  "retrans", "client_tcpi_delta_retrans", "delivery_rate", "tcpi_delivery_rate",
 ] as const;
 
 const RTT_COLUMNS = ["tcp_rtt", "tcpi_rtt", "client_rtt_us", "client_tcpi_rtt"];
@@ -836,9 +836,9 @@ export async function queryNetworkQuality(params: NetworkQueryParams = {}) {
         CASE WHEN COALESCE(geo_country, country) = ${regionCountrySql}
           THEN COALESCE(geo_region, region, 'Unknown') END AS region_key,
         COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt) AS rtt_us,
-        client_cwnd, client_tcpi_rttvar, client_ploss,
+        client_cwnd, client_tcpi_rttvar, COALESCE(client_ploss, ploss) AS ploss_value,
         COALESCE(client_tcpi_rttvar, rtt_var, tcpi_rtt_var) AS rttvar_us,
-        COALESCE(client_tcpi_delta_retrans, 0) AS retrans_value,
+        COALESCE(client_tcpi_delta_retrans, retrans, 0) AS retrans_value,
         CASE WHEN COALESCE(time_elapsed_usec, elapsed) > 0 THEN (COALESCE(resp_body_size, resp_bytes, 0) * 8.0) / COALESCE(time_elapsed_usec, elapsed) ELSE NULL END AS throughput_mbps
       FROM requests
       WHERE ${where}
@@ -860,7 +860,7 @@ export async function queryNetworkQuality(params: NetworkQueryParams = {}) {
         AVG(rtt_us) / 1000.0 AS rtt_ms,
         AVG(rttvar_us)::DOUBLE AS avg_any_rttvar_us,
         AVG(client_tcpi_rttvar)::DOUBLE AS avg_rttvar_us,
-        AVG(client_ploss)::DOUBLE AS avg_ploss,
+        AVG(ploss_value)::DOUBLE AS avg_ploss,
         (COUNT(*) FILTER (WHERE retrans_value > 0) * 100.0 / NULLIF(COUNT(*), 0))::DOUBLE AS retrans_rate_pct,
         AVG(throughput_mbps)::DOUBLE AS avg_throughput_mbps
       FROM scoped
