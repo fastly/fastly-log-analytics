@@ -55,7 +55,6 @@ from backend.provision.declarative.vcl_builder import (
     _format_field_names,
     _is_managed_endpoint,
     _is_managed_snippet,
-    adopt_live_endpoint_types,
     desired_backends,
     desired_dictionaries,
     desired_logging_endpoints,
@@ -149,9 +148,7 @@ def reconcile_vcl_state(
             if status_cb:
                 status_cb("⏳ Computing VCL configuration difference...")
             desired_snippets_list = desired_snippets(desired_state)
-            desired_endpoints_list = adopt_live_endpoint_types(
-                desired_logging_endpoints(desired_state), current_endpoints
-            )
+            desired_endpoints_list = desired_logging_endpoints(desired_state)
             desired_backends_list = desired_backends(desired_state)
             desired_dictionaries_list = desired_dictionaries(desired_state)
             for ep in desired_endpoints_list:

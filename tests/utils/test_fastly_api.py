@@ -398,38 +398,40 @@ def _run_remove_endpoint_scenario(
 @pytest.mark.usefixtures("_isolate_configs_dir")
 def test_remove_logging_endpoint_absent_vs_present_and_404_tolerance():
     """Absent endpoint skips endpoint DELETE; present endpoint deletes endpoint+snippets; 404 on snippet is swallowed."""
-    absent_calls = _run_remove_endpoint_scenario({"OtherEndpoint": "s3"})
+    absent_calls = _run_remove_endpoint_scenario({"OtherEndpoint": "fos"})
     assert any("clone" in p for _, p in absent_calls)
-    assert not any("logging/s3/MyEndpoint" in p for m, p in absent_calls if m == "DELETE")
+    assert not any("logging/fos/MyEndpoint" in p for m, p in absent_calls if m == "DELETE")
+    assert not any("logging/s3" in p for _, p in absent_calls)
     assert any("validate" in p for _, p in absent_calls)
 
     present_calls = _run_remove_endpoint_scenario(
-        {"MyEndpoint": "s3"},
+        {"MyEndpoint": "fos"},
         snippets=[{"name": "Fastly Log Analytics - vcl_recv"}, {"name": "Fastly Log Analytics - vcl_deliver"}],
     )
-    assert any("logging/s3/MyEndpoint" in p for m, p in present_calls if m == "DELETE")
+    assert any("logging/fos/MyEndpoint" in p for m, p in present_calls if m == "DELETE")
+    assert not any("logging/s3" in p for _, p in present_calls)
     assert any("snippet/" in p for m, p in present_calls if m == "DELETE")
     assert any("activate" in p for m, p in present_calls if m == "PUT")
 
-    _run_remove_endpoint_scenario({"MyEndpoint": "s3"}, snippet_delete_404=True)
+    _run_remove_endpoint_scenario({"MyEndpoint": "fos"}, snippet_delete_404=True)
 
 
 @pytest.mark.usefixtures("_isolate_configs_dir")
-def test_remove_logging_endpoint_deletes_each_managed_endpoint_through_its_type():
+def test_remove_logging_endpoint_deletes_each_managed_fos_endpoint():
     calls = _run_remove_endpoint_scenario(
         {
             "MyEndpoint": "fos",
-            "Fastly RUM Logs": "s3",
+            "Fastly RUM Logs": "fos",
             "Fastly Object Storage Logs": "fos",
             "MyEndpoint (copy)": "fos",
-            "Customer Archive": "s3",
+            "Customer Archive": "fos",
         }
     )
     deleted = sorted(p.split("/version/6/", 1)[1] for m, p in calls if m == "DELETE" and "/logging/" in p)
     assert deleted == [
         "logging/fos/Fastly%20Object%20Storage%20Logs",
+        "logging/fos/Fastly%20RUM%20Logs",
         "logging/fos/MyEndpoint",
-        "logging/s3/Fastly%20RUM%20Logs",
     ]
 
 
@@ -449,7 +451,7 @@ def test_remove_logging_endpoint_rolls_back_on_validation_failure():
 
     with (
         patch("backend.provision.fastly_api.get_active_version", return_value=5),
-        patch("backend.provision.fastly_api.list_log_endpoints", return_value={"MyEndpoint": "s3"}),
+        patch("backend.provision.fastly_api.list_log_endpoints", return_value={"MyEndpoint": "fos"}),
         patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly),
     ):
         with pytest.raises(RuntimeError, match="Validation failed"):
@@ -938,7 +940,7 @@ def _run_remove(snippet_names, deleted_sink):
     with (
         patch.object(fastly_api, "fastly", side_effect=fake_fastly),
         patch.object(fastly_api, "get_active_version", return_value=98),
-        patch.object(fastly_api, "list_log_endpoints", return_value={"Fastly Object Storage Logs": "s3"}),
+        patch.object(fastly_api, "list_log_endpoints", return_value={"Fastly Object Storage Logs": "fos"}),
     ):
         fastly_api.remove_logging_endpoint("svc-td", "Fastly Object Storage Logs", "tok")
 

@@ -837,7 +837,7 @@ def remove_logging_endpoint(
 
         for ep in endpoints_to_delete:
             info(f"Removing '{_c(BOLD, ep)}' from draft…")
-            if _delete_draft_resource(f"logging/{existing[ep]}", ep):
+            if _delete_draft_resource("logging/fos", ep):
                 ok(f"Logging endpoint '{ep}' removed from draft")
 
         info("Removing VCL snippets…")

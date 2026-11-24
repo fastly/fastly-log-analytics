@@ -654,14 +654,14 @@ fn preflight(
     let mut snippets = Vec::new();
     let mut conditions = Vec::new();
     let mut endpoint_cmcd = false;
-    for resource in ["snippet", "logging/s3", "logging/fos", "condition"] {
+    for resource in ["snippet", "logging/fos", "condition"] {
         let current = context.api(
             "GET",
             &format!("/service/{sid}/version/{version}/{resource}"),
             token,
             None,
         )?;
-        if resource == "logging/s3" || resource == "logging/fos" {
+        if resource == "logging/fos" {
             endpoint_cmcd = endpoint_cmcd
                 || list(&current)?.iter().any(|value| {
                     value["format"]

@@ -14,7 +14,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from backend.core.fastly.client import LOG_ENDPOINT_TYPES, fastly
+from backend.core.fastly.client import fastly
 from backend.provision.declarative.models import (
     _AUTO_INJECTED_NAMES,
     MANAGED_BACKEND_NAMES,
@@ -199,7 +199,7 @@ def _upsert_version_resource(
     except RuntimeError:
         return fastly("POST", collection_url, body, token=token)
     if (
-        resource_path in ("logging/s3", "logging/fos")
+        resource_path == "logging/fos"
         and body.get("compression_codec")
         and isinstance(existing, dict)
         and int(existing.get("gzip_level") or 0) > 0
@@ -226,18 +226,9 @@ def fetch_snippets(service_id: str, version: int, token: str) -> list[VCLSnippet
 
 
 def fetch_logging_endpoints(service_id: str, version: int, token: str) -> list[LoggingEndpoint]:
-    """Fetch the native FOS and legacy S3 logging endpoints for a service version."""
-    endpoints: list[LoggingEndpoint] = []
-    for endpoint_type in LOG_ENDPOINT_TYPES:
-        endpoints.extend(_fetch_logging_endpoints_of_type(service_id, version, endpoint_type, token))
-    return endpoints
-
-
-def _fetch_logging_endpoints_of_type(
-    service_id: str, version: int, endpoint_type: str, token: str
-) -> list[LoggingEndpoint]:
+    """Fetch the native FOS logging endpoints for a service version."""
     try:
-        resp = fastly("GET", f"/service/{service_id}/version/{version}/logging/{endpoint_type}", token=token)
+        resp = fastly("GET", f"/service/{service_id}/version/{version}/logging/fos", token=token)
         endpoints: list[LoggingEndpoint] = []
         for item in _unwrap_fastly_list(resp):
             raw_codec = item.get("compression_codec")
@@ -250,7 +241,7 @@ def _fetch_logging_endpoints_of_type(
             endpoints.append(
                 LoggingEndpoint(
                     name=item.get("name", ""),
-                    endpoint_type=endpoint_type,
+                    endpoint_type="fos",
                     path=item.get("path", ""),
                     period=int(item.get("period", 3600)),
                     response_condition=item.get("response_condition", "true"),
@@ -353,10 +344,8 @@ def create_or_update_snippet(service_id: str, version: int, snippet: VCLSnippet,
     _upsert_version_resource(service_id, version, "snippet", snippet.name, body, token)
 
 
-def delete_logging_endpoint(
-    service_id: str, version: int, endpoint_name: str, token: str, endpoint_type: str = "s3"
-) -> None:
-    _delete_version_resource(service_id, version, f"logging/{endpoint_type}", endpoint_name, token)
+def delete_logging_endpoint(service_id: str, version: int, endpoint_name: str, token: str) -> None:
+    _delete_version_resource(service_id, version, "logging/fos", endpoint_name, token)
 
 
 def create_or_update_logging_endpoint(
@@ -365,12 +354,9 @@ def create_or_update_logging_endpoint(
     endpoint: LoggingEndpoint,
     token: str,
     bucket_name: str | None = None,
-    domain: str | None = None,
-    access_key: str | None = None,
-    secret_key: str | None = None,
     region: str | None = None,
 ) -> None:
-    """Create or update a native FOS logging endpoint, or a legacy S3 one (domain and keys apply to S3 only)."""
+    """Create or update a native FOS logging endpoint."""
     body: dict[str, Any] = {
         "name": endpoint.name,
         "path": endpoint.path,
@@ -380,26 +366,14 @@ def create_or_update_logging_endpoint(
         "format_version": 2,
         "compression_codec": endpoint.compression_codec,
     }
-    optional: tuple[tuple[str, str | None], ...]
-    if endpoint.endpoint_type == "fos":
-        optional = (
-            ("response_condition", endpoint.response_condition),
-            ("bucket_name", bucket_name),
-            ("region", region),
-        )
-    else:
-        body["response_object_name"] = endpoint.response_object_name
-        optional = (
-            ("response_condition", endpoint.response_condition),
-            ("bucket_name", bucket_name),
-            ("domain", domain),
-            ("access_key", access_key),
-            ("secret_key", secret_key),
-        )
-    for k, v in optional:
+    for k, v in (
+        ("response_condition", endpoint.response_condition),
+        ("bucket_name", bucket_name),
+        ("region", region),
+    ):
         if v:
             body[k] = v
-    _upsert_version_resource(service_id, version, f"logging/{endpoint.endpoint_type}", endpoint.name, body, token)
+    _upsert_version_resource(service_id, version, "logging/fos", endpoint.name, body, token)
 
 
 def delete_backend(service_id: str, version: int, backend_name: str, token: str) -> None:
@@ -610,7 +584,7 @@ def _apply_diff(
 ) -> None:
     """Apply diff mutations on the draft version (Step 6)."""
     from backend.config import config_path as _config_path
-    from backend.core.fastly.client import ensure_condition, region_endpoint
+    from backend.core.fastly.client import ensure_condition
 
     desired_endpoints = desired_endpoints or []
     unmanaged_snippets = [s for s in (current_snippets or []) if not _is_managed_snippet(s.name)]
@@ -644,16 +618,13 @@ def _apply_diff(
                     f"# declare local var.{var_name} STRING; (omitted to prevent collision with unmanaged snippet)",
                 )
         snippet.body = body
-    bucket_name = region = domain = access_key = secret_key = None
+    bucket_name = region = None
     config_path = _config_path(service_id)
     if config_path.exists():
         try:
             cfg = json.loads(config_path.read_text())
             bucket_name = cfg.get("fos_bucket") or cfg.get("fos_bucket_name")
             region = cfg.get("fos_region") or "us-east-1"
-            domain = region_endpoint(region)
-            access_key = cfg.get("fos_access_key_id") or cfg.get("fos_access_key")
-            secret_key = cfg.get("fos_secret_access_key") or cfg.get("fos_secret_key")
         except Exception:
             pass
 
@@ -686,13 +657,10 @@ def _apply_diff(
         fastly_integration.delete_snippet,
         skip_fn=lambda n: not _is_managed_snippet(n),
     )
-    endpoint_types = {e.name: e.endpoint_type for e in current_endpoints or []}
     _purge_outdated(
         diff.endpoints_to_remove,
         "logging endpoint",
-        lambda sid, ver, name, tok: fastly_integration.delete_logging_endpoint(
-            sid, ver, name, tok, endpoint_type=endpoint_types.get(name, "s3")
-        ),
+        fastly_integration.delete_logging_endpoint,
         skip_fn=lambda n: not _is_managed_endpoint(n, desired_state),
     )
     _purge_outdated(
@@ -776,12 +744,10 @@ def _apply_diff(
     for endpoint in diff.endpoints_to_add + diff.endpoints_to_update:
         if status_cb:
             status_cb(f"➕ Installing logging endpoint '{endpoint.name}'...")
-        if endpoint.endpoint_type == "fos":
-            target: dict[str, Any] = {"bucket_name": bucket_name, "region": region}
-        else:
-            target = {"bucket_name": bucket_name, "domain": domain, "access_key": access_key, "secret_key": secret_key}
         try:
-            fastly_integration.create_or_update_logging_endpoint(service_id, draft_version, endpoint, token, **target)
+            fastly_integration.create_or_update_logging_endpoint(
+                service_id, draft_version, endpoint, token, bucket_name=bucket_name, region=region
+            )
         except Exception as e:
             logger.exception(f"Failed to install/update logging endpoint '{endpoint.name}': {e}")
             if status_cb:

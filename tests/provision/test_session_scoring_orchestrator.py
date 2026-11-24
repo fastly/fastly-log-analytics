@@ -374,7 +374,7 @@ def test_disable_and_teardown_scoring():
             return {"number": 201}
         if (method, path) == ("GET", f"/service/{LOG_SVC}/version/201/snippet"):
             return [{"name": SCORING_RECV_NAME}, {"name": SCORING_FETCH_NAME}, {"name": SCORING_DELIVER_NAME}]
-        if (method, path) == ("GET", f"/service/{LOG_SVC}/version/201/logging/s3"):
+        if (method, path) == ("GET", f"/service/{LOG_SVC}/version/201/logging/fos"):
             return [{"name": "Fastly Object Storage Logs"}]
         if (method, path) == ("GET", f"/service/{LOG_SVC}/version/201/validate"):
             return {"status": "ok"}
@@ -612,7 +612,7 @@ def _order(calls: list[tuple[str, str]]) -> list[str]:
             out.append("comment")
         elif method == "PUT" and path.endswith("/package"):
             out.append("package")
-        elif method == "POST" and path.endswith("/logging/s3"):
+        elif method == "POST" and path.endswith("/logging/fos"):
             out.append("post-endpoint")
         elif method == "DELETE":
             out.append("delete")
@@ -644,7 +644,7 @@ class _Fastly:
             return [{"number": self.active, "active": True}]
         if method == "GET" and path.endswith("/snippet"):
             return []
-        if method == "GET" and path.endswith("/logging/s3"):
+        if method == "GET" and path.endswith("/logging/fos"):
             return [{"name": "Fastly Object Storage Logs"}]
         return {}
 
@@ -693,7 +693,7 @@ def test_disable_call_order_and_rollback(caplog):
     del_mock.assert_not_called()
 
     fake_edit_fail = _Fastly(
-        fail_on=lambda m, p: m == "PUT" and p.endswith("/logging/s3/Fastly%20Object%20Storage%20Logs")
+        fail_on=lambda m, p: m == "PUT" and p.endswith("/logging/fos/Fastly%20Object%20Storage%20Logs")
     )
     with pytest.raises(RuntimeError, match="edit rejected"):
         _run_disable(fake_edit_fail)
@@ -708,22 +708,10 @@ def test_disable_call_order_and_rollback(caplog):
     assert any("rollback activation of version 200 failed" in r.getMessage() for r in caplog.records)
 
 
-class _FastlyNativeFos(_Fastly):
-    def __call__(self, method, path, body=None, **kwargs):
-        if method == "GET" and path.endswith("/logging/s3"):
-            self.calls.append((method, path))
-            self.kwargs.append(kwargs)
-            return []
-        if method == "GET" and path.endswith("/logging/fos"):
-            self.calls.append((method, path))
-            self.kwargs.append(kwargs)
-            return [{"name": "Fastly Object Storage Logs"}]
-        return super().__call__(method, path, body, **kwargs)
-
-
 def test_disable_updates_the_format_on_a_native_fos_endpoint():
-    fake = _FastlyNativeFos()
+    fake = _Fastly()
     _run_disable(fake)
+    assert not any("/logging/s3" in p for _, p in fake.calls)
     puts = [p for m, p in fake.calls if m == "PUT" and "/logging/" in p]
     assert puts == [f"/service/{LOG_SVC}/version/201/logging/fos/Fastly%20Object%20Storage%20Logs"]
 
@@ -872,7 +860,7 @@ def test_remove_endpoint_call_order(caplog):
     def _run_rm(fake):
         with (
             patch("backend.provision.fastly_api.get_active_version", return_value=10),
-            patch("backend.provision.fastly_api.list_log_endpoints", return_value={"MyEndpoint": "s3"}),
+            patch("backend.provision.fastly_api.list_log_endpoints", return_value={"MyEndpoint": "fos"}),
             patch("backend.provision.fastly_api.fastly", side_effect=fake),
         ):
             return fastly_api.remove_logging_endpoint(SID, "MyEndpoint", "tok")
@@ -889,7 +877,7 @@ def test_remove_endpoint_call_order(caplog):
         _run_rm(fake_val)
     assert _order(fake_val.calls) == ["clone", "delete", "validate", "activate:10"]
 
-    fake_edit = _Fastly(active=10, clone_number=11, fail_on=lambda m, p: m == "DELETE" and "/logging/s3/" in p)
+    fake_edit = _Fastly(active=10, clone_number=11, fail_on=lambda m, p: m == "DELETE" and "/logging/fos/" in p)
     with pytest.raises(RuntimeError, match="edit rejected"):
         _run_rm(fake_edit)
     assert _order(fake_edit.calls) == ["clone", "delete", "activate:10"]

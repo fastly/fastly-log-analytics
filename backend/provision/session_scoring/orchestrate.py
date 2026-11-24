@@ -416,12 +416,12 @@ def disable_scoring(logging_service_id: str, token: str, *, status_cb=None) -> N
             )
         endpoint_name = cfg.get("provisioning", {}).get("endpoint_name", "Fastly Object Storage Logs")
         existing_endpoints = list_log_endpoints(logging_service_id, new_ver, token)
-        if endpoint_type := existing_endpoints.get(endpoint_name):
+        if endpoint_name in existing_endpoints:
             new_format = load_log_format(cfg.get("log_fields"))
             encoded = urllib.parse.quote(endpoint_name, safe="")
             fastly(
                 "PUT",
-                f"/service/{logging_service_id}/version/{new_ver}/logging/{endpoint_type}/{encoded}",
+                f"/service/{logging_service_id}/version/{new_ver}/logging/fos/{encoded}",
                 {"format": new_format, "format_version": 2},
                 token=token,
             )

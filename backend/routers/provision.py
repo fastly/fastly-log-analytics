@@ -1530,7 +1530,7 @@ def provision_check_config(
     """Verify that both services are correctly configured for log analysis."""
     token = _require_bearer_token(authorization)
     service_id = require_service_id(service_id)
-    from backend.core.fastly.client import LOG_ENDPOINT_TYPES, fastly
+    from backend.core.fastly.client import fastly
 
     results = {
         "logging_service": {"ok": False, "details": ""},
@@ -1540,13 +1540,7 @@ def provision_check_config(
     try:
         try:
             active_ver = fastly("GET", f"/service/{service_id}/version/active", token=token).get("number")
-            endpoints = [
-                ep
-                for endpoint_type in LOG_ENDPOINT_TYPES
-                for ep in fastly(
-                    "GET", f"/service/{service_id}/version/{active_ver}/logging/{endpoint_type}", token=token
-                )
-            ]
+            endpoints = fastly("GET", f"/service/{service_id}/version/{active_ver}/logging/fos", token=token)
             endpoint = next((ep for ep in endpoints if ep.get("bucket_name") == bucket), None)
 
             if not endpoint:

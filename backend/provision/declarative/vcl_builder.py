@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import re
 from typing import Any
 
@@ -456,17 +455,6 @@ def desired_dictionaries(state: FeatureState) -> list[ServiceDictionary]:
 _LEGACY_ENDPOINT_NAMES = frozenset(
     {"Fastly Log Analytics", "Fastly Object Storage Logs", "Fastly RUM Logs", "Fastly RUM Object Storage Logs"}
 )
-
-
-def adopt_live_endpoint_types(desired: list[LoggingEndpoint], current: list[LoggingEndpoint]) -> list[LoggingEndpoint]:
-    # A managed endpoint already live as legacy S3 stays S3: reconcile never converts, duplicates or deletes it.
-    live_types = {e.name: e.endpoint_type for e in current}
-    return [
-        dataclasses.replace(ep, endpoint_type=live_types[ep.name])
-        if live_types.get(ep.name, ep.endpoint_type) != ep.endpoint_type
-        else ep
-        for ep in desired
-    ]
 
 
 def _is_managed_endpoint(name: str, state: FeatureState | None) -> bool:

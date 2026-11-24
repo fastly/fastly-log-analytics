@@ -37,8 +37,8 @@ pub(super) fn endpoint_path_matches_scope(path: &str, scope: &str) -> bool {
     }
 }
 
-pub(super) fn has_attach_endpoint_marker(s3_items: &[Value], fos_items: &[Value]) -> bool {
-    s3_items.iter().chain(fos_items).any(|v| {
+pub(super) fn has_attach_endpoint_marker(fos_items: &[Value]) -> bool {
+    fos_items.iter().any(|v| {
         matches!(
             v["name"].as_str(),
             Some(ATTACH_ENDPOINT | ATTACH_RUM_ENDPOINT)
@@ -70,9 +70,7 @@ fn primary_endpoint_expected_condition(name: &str, cond: &str) -> Option<&'stati
 pub(super) fn has_foreign_primary_endpoint(
     service: &Service,
     scope: &str,
-    s3_items: &[Value],
     fos_items: &[Value],
-    allow_owned_legacy_s3: bool,
 ) -> bool {
     for item in fos_items {
         let name = item["name"].as_str().unwrap_or("");
@@ -80,23 +78,6 @@ pub(super) fn has_foreign_primary_endpoint(
         let Some(expected_cond) = primary_endpoint_expected_condition(name, cond) else {
             continue;
         };
-        let path = item["path"].as_str().unwrap_or("");
-        if item["bucket_name"].as_str() != Some(service.fos_bucket.as_str())
-            || !endpoint_path_matches_scope(path, scope)
-            || cond != expected_cond
-        {
-            return true;
-        }
-    }
-    for item in s3_items {
-        let name = item["name"].as_str().unwrap_or("");
-        let cond = item["response_condition"].as_str().unwrap_or("");
-        let Some(expected_cond) = primary_endpoint_expected_condition(name, cond) else {
-            continue;
-        };
-        if !allow_owned_legacy_s3 || !service.owned_endpoint_names.iter().any(|n| n == name) {
-            return true;
-        }
         let path = item["path"].as_str().unwrap_or("");
         if item["bucket_name"].as_str() != Some(service.fos_bucket.as_str())
             || !endpoint_path_matches_scope(path, scope)
@@ -118,7 +99,7 @@ pub(super) fn verify_managed_customer_vcl_ownership(
     }
     let version = active_version(context, &service.service_id, token)?;
     let mut current = BTreeMap::new();
-    for resource in ["snippet", "logging/s3", "logging/fos", "condition"] {
+    for resource in ["snippet", "logging/fos", "condition"] {
         let value = context.api(
             "GET",
             &format!(
@@ -146,15 +127,9 @@ pub(super) fn verify_managed_customer_vcl_ownership(
     let scope = crate::ingest::scope(service);
     if !own_marker
         || has_attach_condition_marker(&current["condition"])
-        || has_attach_endpoint_marker(&current["logging/s3"], &current["logging/fos"])
+        || has_attach_endpoint_marker(&current["logging/fos"])
         || (capture_present(snippets)
-            && has_foreign_primary_endpoint(
-                service,
-                &scope,
-                &current["logging/s3"],
-                &current["logging/fos"],
-                true,
-            ))
+            && has_foreign_primary_endpoint(service, &scope, &current["logging/fos"]))
     {
         return Err(Error::new(409, "managed_resources_not_owned"));
     }
@@ -381,18 +356,6 @@ fn normalized(resource: &str, value: &Value) -> Value {
             "content":value["content"].as_str().or_else(||value["body"].as_str()).unwrap_or(""),
             "dynamic":number(&value["dynamic"],0),
         }),
-        "logging/s3" => {
-            let codec = value["compression_codec"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .unwrap_or("zstd");
-            json!({
-                "name":value["name"],"path":value["path"],"period":number(&value["period"],60),"format":value["format"],
-                "response_condition":value["response_condition"],"format_version":number(&value["format_version"],2),
-                "bucket_name":value["bucket_name"],"domain":value["domain"],"message_type":value["message_type"],
-                "compression_codec":codec,
-            })
-        }
         "logging/fos" => {
             let codec = value["compression_codec"]
                 .as_str()
@@ -449,14 +412,6 @@ fn boolean(value: &Value, default: bool) -> bool {
 fn resource_body(resource: &str, value: &Value, service: &Service) -> Value {
     match resource {
         "snippet" => normalized(resource, value),
-        "logging/s3" => {
-            let connection =
-                json!({"bucket_name":service.fos_bucket,"domain":service.fos_endpoint});
-            let mut body = crate::logging::logging_endpoint_body(value, &connection);
-            // NDJSON lines must reach FOS without a syslog-style prefix.
-            body["message_type"] = "blank".into();
-            body
-        }
         "logging/fos" => {
             let mut body = crate::logging::fos_logging_endpoint_body(
                 value,
@@ -590,7 +545,7 @@ fn discover(
         }
     }
     let mut current = BTreeMap::new();
-    for resource in ["snippet", "logging/s3", "logging/fos", "condition"] {
+    for resource in ["snippet", "logging/fos", "condition"] {
         let value = context.api(
             "GET",
             &format!(
@@ -725,40 +680,20 @@ fn discover(
     let scope = crate::ingest::scope(service);
     if !attached
         && (has_attach_condition_marker(&current["condition"])
-            || has_attach_endpoint_marker(&current["logging/s3"], &current["logging/fos"])
+            || has_attach_endpoint_marker(&current["logging/fos"])
             || (capture_present(snippets)
-                && has_foreign_primary_endpoint(
-                    service,
-                    &scope,
-                    &current["logging/s3"],
-                    &current["logging/fos"],
-                    true,
-                )))
+                && has_foreign_primary_endpoint(service, &scope, &current["logging/fos"])))
     {
         return Err(Error::new(409, "managed_resources_not_owned"));
     }
     if !attached
         && !own_marker
-        && current["logging/s3"]
+        && current["logging/fos"]
             .iter()
-            .chain(&current["logging/fos"])
             .any(|v| v["name"].as_str().is_some_and(managed_name))
     {
         return Err(Error::new(409, "managed_resources_not_owned"));
     }
-    // An endpoint that already exists as legacy S3 stays S3, so the bucket never
-    // gets a second endpoint writing the same objects.
-    let legacy: BTreeSet<String> = current["logging/s3"]
-        .iter()
-        .filter_map(|v| v["name"].as_str().map(str::to_owned))
-        .collect();
-    let (kept, native): (Vec<Value>, Vec<Value>) = target
-        .remove("logging/fos")
-        .unwrap_or_default()
-        .into_iter()
-        .partition(|v| v["name"].as_str().is_some_and(|n| legacy.contains(n)));
-    target.insert("logging/s3".into(), kept);
-    target.insert("logging/fos".into(), native);
     let managed_names: BTreeSet<_> = target["snippet"]
         .iter()
         .filter_map(|s| s["name"].as_str().map(str::to_owned))
@@ -819,26 +754,19 @@ fn discover(
     }
     let mut changes = Vec::new();
     let resources: &[&str] = if job.kind == "teardown" && !job.options.remove_snippets {
-        &["logging/s3", "logging/fos", "condition"]
+        &["logging/fos", "condition"]
     } else if rum_involved {
         &[
             "snippet",
-            "logging/s3",
             "logging/fos",
             "condition",
             "backend",
             "dictionary",
         ]
     } else if scoring_involved {
-        &[
-            "snippet",
-            "logging/s3",
-            "logging/fos",
-            "condition",
-            "backend",
-        ]
+        &["snippet", "logging/fos", "condition", "backend"]
     } else {
-        &["snippet", "logging/s3", "logging/fos", "condition"]
+        &["snippet", "logging/fos", "condition"]
     };
     for &resource in resources {
         let wanted = &target[resource];
@@ -981,10 +909,10 @@ fn discover(
             (_, "dictionary") if change.action != "delete" => 2,
             (_, "dictionary_item") if change.action != "delete" => 3,
             (_, "backend") if change.action != "delete" => 4,
-            (_, "logging/s3" | "logging/fos") if change.action != "delete" => 5,
+            (_, "logging/fos") if change.action != "delete" => 5,
             (_, "fos_object") if change.action != "delete" => 6,
             ("delete", "snippet") => 7,
-            ("delete", "logging/s3" | "logging/fos") => 8,
+            ("delete", "logging/fos") => 8,
             ("delete", "backend") => 9,
             ("delete", "dictionary") => 10,
             ("delete", "condition") => 11,
@@ -1150,11 +1078,7 @@ fn apply(
         sync_rum_fos_objects(context, service, change.action == "delete")?;
     } else {
         let mut body = change.body.clone();
-        if change.resource == "logging/s3" && change.action != "delete" {
-            let (ak, sk) = fos::credentials(context, service)?;
-            body["access_key"] = ak.into();
-            body["secret_key"] = sk.into();
-        } else if change.resource == "snippet"
+        if change.resource == "snippet"
             && change.name == super::scoring::SCORING_PASS_NAME
             && change.action != "delete"
         {

@@ -1815,8 +1815,8 @@ fn recover_overwrites_poisoned_owned_endpoint_names_and_scoring_protects_foreign
             json!({"name": "FLP Cloud Logs", "bucket_name": "fos-fixture-logs", "region": "us-east-1", "path": "raw/", "response_condition": "flp_cloud_log_condition"}),
         ),
         (
-            "logging/s3",
-            json!({"name": "Customer Production SIEM", "bucket_name": "siem-bucket"}),
+            "logging/fos",
+            json!({"name": "Customer Production SIEM", "bucket_name": "siem-bucket", "region": "us-east-1"}),
         ),
     ] {
         platform
@@ -1881,16 +1881,10 @@ fn recover_overwrites_poisoned_owned_endpoint_names_and_scoring_protects_foreign
         .into_iter()
         .filter_map(|v| v["name"].as_str().map(str::to_owned))
         .collect();
-    let s3_names: Vec<String> = platform
-        .adapter
-        .resources("fixtureService", "logging/s3")
-        .into_iter()
-        .filter_map(|v| v["name"].as_str().map(str::to_owned))
-        .collect();
     assert!(fos_names.iter().any(|n| n == "Fastly Object Storage Logs"));
     assert!(fos_names.iter().any(|n| n == "Fastly RUM Logs"));
     assert!(fos_names.iter().any(|n| n == "FLP Cloud Logs"));
-    assert!(s3_names.iter().any(|n| n == "Customer Production SIEM"));
+    assert!(fos_names.iter().any(|n| n == "Customer Production SIEM"));
 
     // 2. Defense-in-depth in scoring.rs: tampered scoring_config_store_id path traversal & foreign scoring_service_id rejected
     let p2 = Platform::new();
@@ -2486,8 +2480,8 @@ fn recover_and_scoring_close_foreign_store_siem_attached_rum_and_view_id_confuse
     );
     p_siem.adapter.seed_resource(
         "fixtureService",
-        "logging/s3",
-        json!({"name": "Customer S3 SIEM", "bucket_name": "customer-s3-siem-bucket"}),
+        "logging/fos",
+        json!({"name": "Customer RUM FOS SIEM", "bucket_name": "customer-rum-siem-bucket", "region": "us-east-1"}),
     );
     for (label, svc_json) in [
         (
@@ -2506,20 +2500,20 @@ fn recover_and_scoring_close_foreign_store_siem_attached_rum_and_view_id_confuse
             }),
         ),
         (
-            "attached_poisoned_rum_s3_siem",
+            "attached_poisoned_rum_fos_siem",
             json!({
                 "capture": "attached",
                 "logging_enabled": true,
                 "logging_endpoint_name": "FLP Cloud Logs",
-                "rum": {"enabled": true, "endpoint_name": "Customer S3 SIEM", "log_period": 60}
+                "rum": {"enabled": true, "endpoint_name": "Customer RUM FOS SIEM", "log_period": 60}
             }),
         ),
         (
-            "managed_poisoned_rum_s3_siem",
+            "managed_poisoned_rum_fos_siem",
             json!({
                 "logging_enabled": true,
                 "logging_endpoint_name": "Fastly Object Storage Logs",
-                "rum": {"enabled": true, "endpoint_name": "Customer S3 SIEM", "log_period": 60}
+                "rum": {"enabled": true, "endpoint_name": "Customer RUM FOS SIEM", "log_period": 60}
             }),
         ),
     ] {
@@ -2874,12 +2868,9 @@ fn bug_cloud_dr_07_fail_closed_endpoint_verification_protects_shared_bucket_abse
         .collect();
     assert_eq!(remaining_2a, vec!["Customer Audit FOS"]);
 
-    // PROBE_2B: Non-2xx logging/s3 or logging/fos must fail closed (RT-D2-PERSISTENT: 502 with 0 KV writes)
+    // PROBE_2B: Non-2xx logging/fos must fail closed (RT-D2-PERSISTENT: 502 with 0 KV writes)
     // and deactivated service (409 active_version_required) leaves owned_endpoint_names == [] so customer SIEM survives teardown!
-    for fault_path in [
-        "/service/fixtureService/version/1/logging/s3",
-        "/service/fixtureService/version/1/logging/fos",
-    ] {
+    for fault_path in ["/service/fixtureService/version/1/logging/fos"] {
         let p_2b = Platform::new();
         p_2b.adapter.seed_resource(
             "fixtureService",
@@ -2888,8 +2879,8 @@ fn bug_cloud_dr_07_fail_closed_endpoint_verification_protects_shared_bucket_abse
         );
         p_2b.adapter.seed_resource(
             "fixtureService",
-            "logging/s3",
-            json!({"name": "Customer S3 SIEM", "bucket_name": "customer-siem-bucket"}),
+            "logging/fos",
+            json!({"name": "Customer FOS SIEM", "bucket_name": "customer-siem-bucket", "region": "us-east-1"}),
         );
         p_2b.api_faults.lock().unwrap().push(ApiFault {
             method: "GET",
@@ -2907,7 +2898,7 @@ fn bug_cloud_dr_07_fail_closed_endpoint_verification_protects_shared_bucket_abse
                 service_id: "fixtureService".into(),
                 service: json!({
                     "logging_enabled": true,
-                    "logging_endpoint_name": "Customer S3 SIEM"
+                    "logging_endpoint_name": "Customer FOS SIEM"
                 }),
                 views: vec![],
                 catalog_head: None,
@@ -2935,7 +2926,7 @@ fn bug_cloud_dr_07_fail_closed_endpoint_verification_protects_shared_bucket_abse
             "PROBE_2B ({fault_path}): non-2xx endpoint listing must do 0 KV writes"
         );
         // Also verify deactivated service (409 active_version_required) recovers with empty
-        // owned_endpoint_names so Customer S3 SIEM survives teardown after reactivation:
+        // owned_endpoint_names so Customer FOS SIEM survives teardown after reactivation:
         p_2b.adapter
             .api(fastly_log_analytics::admin::ApiRequest {
                 method: "PUT",
@@ -2984,21 +2975,21 @@ fn bug_cloud_dr_07_fail_closed_endpoint_verification_protects_shared_bucket_abse
         )["job"]
             .clone();
         p_2b.drain(td_2b);
-        let s3_rem: Vec<String> = p_2b
+        let fos_rem: Vec<String> = p_2b
             .adapter
-            .resources("fixtureService", "logging/s3")
+            .resources("fixtureService", "logging/fos")
             .into_iter()
             .filter_map(|v| v["name"].as_str().map(str::to_owned))
             .collect();
         assert_eq!(
-            s3_rem,
-            vec!["Customer S3 SIEM"],
-            "PROBE_2B ({fault_path}): Customer S3 SIEM must survive teardown"
+            fos_rem,
+            vec!["Customer FOS SIEM"],
+            "PROBE_2B ({fault_path}): Customer FOS SIEM must survive teardown"
         );
     }
 
     // PROBE_2C: Absent endpoint at DR time must NOT be pre-claimed in owned_endpoint_names,
-    // so if customer adds an S3 SIEM with that name before reconcile, reconcile fails 409 instead of overwriting!
+    // so if customer adds a FOS SIEM with that name before reconcile, reconcile fails 409 instead of overwriting!
     let p_2c = Platform::new();
     p_2c.adapter.seed_resource(
         "fixtureService",
@@ -3044,8 +3035,8 @@ fn bug_cloud_dr_07_fail_closed_endpoint_verification_protects_shared_bucket_abse
     );
     p_2c.adapter.seed_resource(
         "fixtureService",
-        "logging/s3",
-        json!({"name": "Customer Future SIEM", "bucket_name": "customer-s3-siem-bucket"}),
+        "logging/fos",
+        json!({"name": "Customer Future SIEM", "bucket_name": "customer-fos-siem-bucket", "region": "us-east-1"}),
     );
     let gen_2c = p_2c.service()["generation"].clone();
     let rec_2c_start = p_2c.json(
@@ -3068,20 +3059,20 @@ fn bug_cloud_dr_07_fail_closed_endpoint_verification_protects_shared_bucket_abse
     }
     assert_eq!(
         job_2c["status"], "failed",
-        "PROBE_2C: reconcile must fail closed on newly added customer S3 SIEM"
+        "PROBE_2C: reconcile must fail closed on newly added customer FOS SIEM"
     );
     assert_eq!(job_2c["error"], "resource_name_collision");
-    let s3_2c = p_2c.adapter.resources("fixtureService", "logging/s3");
-    assert_eq!(s3_2c.len(), 1);
-    assert_eq!(s3_2c[0]["bucket_name"], "customer-s3-siem-bucket");
+    let fos_2c = p_2c.adapter.resources("fixtureService", "logging/fos");
+    assert_eq!(fos_2c.len(), 1);
+    assert_eq!(fos_2c[0]["bucket_name"], "customer-fos-siem-bucket");
 
     // PROBE_2D: Active version HTTP error (404) fails closed 502 (0 KV writes), while genuinely
     // deactivated service (409 active_version_required) leaves owned_endpoint_names empty!
     let p_2d = Platform::new();
     p_2d.adapter.seed_resource(
         "fixtureService",
-        "logging/s3",
-        json!({"name": "Customer S3 SIEM", "bucket_name": "customer-s3-siem-bucket"}),
+        "logging/fos",
+        json!({"name": "Customer FOS SIEM", "bucket_name": "customer-fos-siem-bucket", "region": "us-east-1"}),
     );
     p_2d.api_faults.lock().unwrap().push(ApiFault {
         method: "GET",
@@ -3099,8 +3090,8 @@ fn bug_cloud_dr_07_fail_closed_endpoint_verification_protects_shared_bucket_abse
             service_id: "fixtureService".into(),
             service: json!({
                 "logging_enabled": true,
-                "logging_endpoint_name": "Customer S3 SIEM",
-                "owned_endpoint_names": ["Customer S3 SIEM"]
+                "logging_endpoint_name": "Customer FOS SIEM",
+                "owned_endpoint_names": ["Customer FOS SIEM"]
             }),
             views: vec![],
             catalog_head: None,
@@ -3315,7 +3306,7 @@ fn bug_cloud_dr_08_cold_start_scoring_fits_24_call_budget_and_heals_partial_svc_
     );
 
     // Realistic Compute budget (CALLS=3 -> 29 calls, under 30 call_cap and 32-call cap) with mandatory
-    // 4-call [V-2C] active-version inspection, [STRICT-2B] catalog verification, [M4a] legacy manifest
+    // 3-call [V-2C] active-version inspection, [STRICT-2B] catalog verification, [M4a] legacy manifest
     // JSON ownership GET, and zero-partial-write upserts.
     ELAPSED_MS.with(|e| e.set(0));
     CALLS.with(|c| c.set(3));
@@ -3357,7 +3348,7 @@ fn bug_cloud_dr_08_cold_start_scoring_fits_24_call_budget_and_heals_partial_svc_
         json!(["Fastly Object Storage Logs"]),
         "BUG-CLOUD-DR-11: single-shot cold-start DR with scoring + 1 FOS key + views + head + rum_stats must verify owned_endpoint_names (16 + 3 + 5 = 24 <= 24)"
     );
-    assert_eq!(full_body["front_synced"], false);
+    assert_eq!(full_body["front_synced"], true);
 
     // Subsequent duplicate recover when install is already active must reject 409 service_already_configured!
     let r_dup = p.call(
@@ -13366,7 +13357,6 @@ fn rt_d1_d2_d3_d4_cloud_dr_monotonic_fail_closed_catalog_and_outbox() {
     // === 2. [RT-D2-PERSISTENT]: inspect_active_version_for_dr fails closed on 404/429/500/503 ===
     for fault_path in [
         "/service/fixtureService/version",
-        "/service/fixtureService/version/1/logging/s3",
         "/service/fixtureService/version/1/logging/fos",
         "/service/fixtureService/version/1/snippet",
         "/service/fixtureService/version/1/condition",

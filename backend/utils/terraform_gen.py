@@ -245,7 +245,7 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
         "log_fields": cfg.get("log_fields") or {"schema_version": 2, "custom_fields": []},
     }
     state = FeatureState.from_config(fs_cfg)
-    desired_endpoints = adopt_live_endpoint_types(desired_logging_endpoints(state), _live_logging_endpoints(cfg))
+    desired_endpoints = desired_logging_endpoints(state)
     desired_backends_list = desired_backends(state)
     cdn_vcl = load_vcl(rate_limiting=True)
     cond_parts = ["!segmented_caching.is_inner_req"]
@@ -361,7 +361,7 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
                 "content": f'${{file("${{path.module}}/{snip_filename}")}}',
             }
         )
-    logging_blocks: dict[str, list[dict]] = {"logging_fos": [], "logging_s3": []}
+    logging_fos_blocks: list[dict] = []
     condition_blocks: list[dict] = []
     for endpoint in desired_endpoints:
         if endpoint.name == "Fastly Log Analytics":
@@ -378,6 +378,7 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
         block: dict[str, Any] = {
             "name": _terraform_template_escape(endpoint.name),
             "bucket_name": "${aws_s3_bucket.fos_bucket.bucket}",
+            "region": _terraform_template_escape(region),
             "path": _terraform_template_escape(endpoint.path),
             "period": endpoint.period,
             "compression_codec": getattr(endpoint, "compression_codec", None) or "zstd",
@@ -386,19 +387,7 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
             "format_version": 2,
             "format": f'${{file("${{path.module}}/{format_filename}")}}',
         }
-        if endpoint.endpoint_type == "s3":
-            block.update(
-                {
-                    "domain": _terraform_template_escape(fos_host),
-                    "timestamp_format": "%Y-%m-%dT%H:%M:%S.000",
-                    "s3_access_key": _terraform_template_escape(fos_access_key),
-                    "s3_secret_key": _terraform_template_escape(fos_secret_key),
-                }
-            )
-            logging_blocks["logging_s3"].append(block)
-        else:
-            block["region"] = _terraform_template_escape(region)
-            logging_blocks["logging_fos"].append(block)
+        logging_fos_blocks.append(block)
     logging_backends: list[dict[str, Any]] = []
     for backend in desired_backends_list:
         address = backend.address
@@ -434,7 +423,7 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
     logging_service_block: dict[str, Any] = {
         "name": _terraform_template_escape(cfg.get("service_name", "Logging Service")),
         "domain": [{"name": "example.com"}],
-        **{kind: blocks for kind, blocks in logging_blocks.items() if blocks},
+        **({"logging_fos": logging_fos_blocks} if logging_fos_blocks else {}),
         "snippet": logging_snippet_blocks,
     }
     if condition_blocks:
@@ -459,7 +448,7 @@ Configuration is emitted as Terraform's JSON syntax (`.tf.json`). All Terraform 
 - `versions.tf.json`: Terraform CLI floor + pinned versions for the `aws` and `fastly` providers (`fastly` 10.3 or later in 10.x, the first release with `logging_fos`).
 - `fos.tf.json`: The Fastly Object Storage bucket resource (created via the AWS S3-compatible provider).
 - `cdn_proxy.tf.json`: A NEW Fastly Delivery service that fronts the FOS bucket for fast dashboard access.
-- `logging_service.tf.json`: The logging endpoint and capture snippets for your existing service. The endpoint is a native Fastly Object Storage endpoint (`logging_fos`): Fastly creates an access key limited to the bucket for it, so no keys are written here. A service that already logs through the S3-compatible endpoint keeps it as `logging_s3`, signed with your FOS access key.
+- `logging_service.tf.json`: The logging endpoint and capture snippets for your existing service. The endpoint is a native Fastly Object Storage endpoint (`logging_fos`): Fastly creates an access key limited to the bucket for it, so no keys are written here.
 - `cdn_proxy.vcl`: The main VCL for the CDN proxy service (loaded by `cdn_proxy.tf.json`).
 - `log_format.vcl`: The JSON log format string (loaded by `logging_service.tf.json`).
 - `cdn_snippets/`: VCL snippets for the CDN proxy service (loaded by `cdn_proxy.tf.json`).
@@ -484,7 +473,7 @@ provider "aws" {{
 ## Instructions
 1. Review `fos.tf.json` and ensure the `aws` provider above is correctly configured.
 2. `cdn_proxy.tf.json` creates a NEW Fastly service to accelerate your log reads.
-3. `logging_service.tf.json` contains the configuration for your ACTIVE service. You should copy the `logging_fos` (or `logging_s3`), `condition`, and `snippet` blocks into your existing `fastly_service_vcl` resource for service ID `{safe_service_id}`. Applying a `logging_fos` block needs a Fastly token with the Engineer role and access to all services, or Superuser.
+3. `logging_service.tf.json` contains the configuration for your ACTIVE service. You should copy the `logging_fos`, `condition`, and `snippet` blocks into your existing `fastly_service_vcl` resource for service ID `{safe_service_id}`. Applying a `logging_fos` block needs a Fastly token with the Engineer role and access to all services, or Superuser.
 4. Run `terraform init` and `terraform apply` to deploy the changes.
 """
     if cfg.get("deployment_mode") == "cloud":
@@ -528,27 +517,15 @@ provider "aws" {{
     return files
 
 
-def _live_logging_endpoints(cfg: dict[str, Any]) -> list[LoggingEndpoint]:
-    """The service's live logging endpoints, so an existing legacy S3 endpoint is exported as S3, as reconcile keeps it."""
-    token = cfg.get("token")
-    service_id = cfg.get("logging_service_id")
-    if not token or not service_id:
-        return []
-    return _fetch_logging_endpoints(str(service_id), str(token))
-
-
 def generate_cloud_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key: str) -> dict[str, str]:
     """Generate Terraform .tf.json including Cloud flp-front + flp/flp-worker resources."""
     return generate_terraform({**cfg, "deployment_mode": "cloud"}, fos_access_key, fos_secret_key)
 
 
-from backend.provision.declarative.models import LoggingEndpoint  # noqa: E402
 from backend.provision.declarative.reconciler import (  # noqa: E402
     FeatureState,
-    _fetch_logging_endpoints,
     desired_backends,
     desired_logging_endpoints,
     logging_service_snippets,
 )
-from backend.provision.declarative.vcl_builder import adopt_live_endpoint_types  # noqa: E402
 from backend.provision.fastly_api import _CDN_SNIPPETS  # noqa: E402

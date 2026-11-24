@@ -410,9 +410,9 @@ def make_happy_path_fastly_mock(log_svc: str = "TestLogSvc123") -> MagicMock:
                 }
             )
             return snippets[-1]
-        if (method, path) == ("GET", f"/service/{log_svc}/version/101/logging/s3"):
+        if (method, path) == ("GET", f"/service/{log_svc}/version/101/logging/fos"):
             return s3_endpoints
-        if method == "PUT" and "/logging/s3/" in path:
+        if method == "PUT" and "/logging/fos/" in path:
             return {}
         if (method, path) == ("GET", f"/service/{log_svc}/version/101/validate"):
             return {"status": "ok"}

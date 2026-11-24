@@ -6,11 +6,9 @@ Cloud owns a resource when its name is in the service's owner marker snippet (`f
 
 ## Logging endpoint type
 
-New endpoints use Fastly's native Object Storage endpoint (`logging/fos`). Cloud sends the bucket name and region with the same path, period, format, `zstd` compression and `blank` message type as before. It sends no access key, secret key or domain: Fastly mints an access key limited to the bucket and keeps its secret. The output layout is unchanged, so ingest reads both endpoint types the same way.
+Endpoints use Fastly's native Object Storage endpoint (`logging/fos`). Cloud sends the bucket name and region with the path, period, format, `zstd` compression and `blank` message type. It sends no access key, secret key or domain: Fastly mints an access key limited to the bucket and keeps its secret.
 
-An install provisioned before this change has a Fastly S3 endpoint (`logging/s3`) signed with Cloud's own Object Storage key. Reconcile keeps managing an endpoint that already exists as `logging/s3` as S3. It never converts it, and never adds a `logging/fos` endpoint beside it, which would write every log line twice. Renaming the endpoint deletes the old name and creates the new one as `logging/fos`.
-
-Ownership checks, the preflight and teardown read both endpoint types and act only on Cloud's exact names. Teardown deletes the endpoint but not the key Fastly minted for it, since Fastly doesn't delete it either; revoke it under Object Storage access keys in the Fastly control panel if you no longer need it.
+Ownership checks, preflight, reconcile, DR recovery and teardown operate on `logging/fos` and act only on Cloud's exact names. Teardown deletes the endpoint but not the key Fastly minted for it, since Fastly doesn't delete it either; revoke it under Object Storage access keys in the Fastly control panel if you no longer need it.
 
 Cloud still creates its own bucket-scoped Object Storage key: ingest, the RUM assets and the CDN front service use it. The provisioning token needs the Engineer role with access to all services, or Superuser; Fastly requires one of those to create a `logging/fos` endpoint.
 

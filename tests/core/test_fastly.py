@@ -1339,18 +1339,20 @@ def test_ensure_condition_url_encodes_condition_name():
     assert put_path.endswith("Path%20%2F%20With%20%25%20Spaces")
 
 
-def test_list_log_endpoints_maps_names_to_their_endpoint_type():
+def test_list_log_endpoints_reads_only_fos():
+    calls: list[str] = []
+
     def fake(method, path, **_kw):
-        if path.endswith("/logging/s3"):
-            return [{"name": "logs-fos"}, {"name": "audit-logs"}]
-        return [{"name": "native-logs"}]
+        calls.append(path)
+        assert "/logging/s3" not in path
+        return [{"name": "native-logs"}, {"name": "rum-logs"}]
 
     with patch("backend.core.fastly.client.fastly", side_effect=fake):
         assert service.list_log_endpoints("svc", 5, "tkn") == {
-            "logs-fos": "s3",
-            "audit-logs": "s3",
             "native-logs": "fos",
+            "rum-logs": "fos",
         }
+    assert calls == ["/service/svc/version/5/logging/fos"]
 
 
 def test_list_log_endpoints_returns_empty_on_error():
@@ -1387,27 +1389,31 @@ def test_logging_endpoint_role_error(token_info, extra, allowed):
         assert "Engineer" in error and "Superuser" in error
 
 
-def test_get_log_endpoint_falls_back_to_the_legacy_s3_endpoint():
+def test_get_log_endpoint_reads_fos_without_s3_fallback():
     calls: list[str] = []
 
     def fake(method, path, **_kw):
         calls.append(path)
-        if "/logging/fos/" in path:
-            raise RuntimeError("HTTP 404: not found")
+        assert "/logging/s3" not in path
         return {"name": "Fastly Log Analytics", "period": "60"}
 
     with patch("backend.core.fastly.client.fastly", side_effect=fake):
         assert service.get_log_endpoint("svc", 5, "Fastly Log Analytics", "tkn")["period"] == "60"
-    assert calls == [
-        "/service/svc/version/5/logging/fos/Fastly%20Log%20Analytics",
-        "/service/svc/version/5/logging/s3/Fastly%20Log%20Analytics",
-    ]
+    assert calls == ["/service/svc/version/5/logging/fos/Fastly%20Log%20Analytics"]
 
+    calls.clear()
     with (
-        patch("backend.core.fastly.client.fastly", side_effect=RuntimeError("HTTP 500: boom")),
-        pytest.raises(RuntimeError, match="500"),
+        patch(
+            "backend.core.fastly.client.fastly",
+            side_effect=lambda _m, p, **_kw: (
+                calls.append(p),
+                (_ for _ in ()).throw(RuntimeError("HTTP 404: not found")),
+            ),
+        ),
+        pytest.raises(RuntimeError, match="404"),
     ):
         service.get_log_endpoint("svc", 5, "Fastly Log Analytics", "tkn")
+    assert calls == ["/service/svc/version/5/logging/fos/Fastly%20Log%20Analytics"]
 
 
 def test_list_vcl_snippets_returns_names_list():

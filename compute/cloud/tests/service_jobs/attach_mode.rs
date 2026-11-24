@@ -16,7 +16,6 @@ fn other_install_resources(
     let mut seeded = Vec::new();
     for resource in [
         "snippet",
-        "logging/s3",
         "logging/fos",
         "condition",
         "backend",
@@ -234,7 +233,6 @@ fn attach_alongside(other_has_rum: bool) {
     );
     for resource in [
         "snippet",
-        "logging/s3",
         "logging/fos",
         "condition",
         "backend",
@@ -259,8 +257,7 @@ fn attach_detects_cmcd_from_existing_logging_endpoint_format() {
     let endpoint = seeded
         .iter()
         .find(|(resource, value)| {
-            ["logging/s3", "logging/fos"].contains(resource)
-                && value["name"] == "Fastly Object Storage Logs"
+            *resource == "logging/fos" && value["name"] == "Fastly Object Storage Logs"
         })
         .unwrap()
         .1
@@ -561,11 +558,6 @@ fn attach_mode_accepts_partial_log_fields_with_cmcd_rum_and_teardown_preserves_o
         .adapter
         .seed_resource("fixtureService", "snippet", cmcd_snippet.clone());
     seeded.push(("snippet", cmcd_snippet));
-    let rum_s3 = json!({"name":"Fastly RUM Logs","bucket_name":"other-logs","response_condition":"rum_log_condition"});
-    platform
-        .adapter
-        .seed_resource("fixtureService", "logging/s3", rum_s3.clone());
-    seeded.push(("logging/s3", rum_s3));
 
     // Wizard's applyAttach sends log_fields as a JSON string without custom_fields.
     let job = platform.json(
@@ -625,7 +617,6 @@ fn attach_mode_accepts_partial_log_fields_with_cmcd_rum_and_teardown_preserves_o
     );
     for resource in [
         "snippet",
-        "logging/s3",
         "logging/fos",
         "condition",
         "backend",

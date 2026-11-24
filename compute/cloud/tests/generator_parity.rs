@@ -14,11 +14,10 @@ fn endpoint_from_template(template: &Value, format: &Value) -> Value {
 fn expected_endpoint_body(endpoint: &Value) -> Value {
     let mut body = endpoint.as_object().unwrap().clone();
     body.remove("type");
+    body.remove("response_object_name");
     body.insert("format_version".into(), json!(2));
     body.insert("bucket_name".into(), json!("fixture-bucket"));
-    body.insert("domain".into(), json!("us-east-1.object.fastlystorage.app"));
-    body.insert("access_key".into(), json!("fixture-access"));
-    body.insert("secret_key".into(), json!("fixture-secret"));
+    body.insert("region".into(), json!("us-east-1"));
     Value::Object(body)
 }
 
@@ -148,13 +147,7 @@ fn routed_adapter_resources_match_pinned_python_for_every_case() {
 
 fn assert_endpoint_body_bytes(endpoints: &Value) {
     for endpoint in endpoints.as_array().unwrap() {
-        let actual = logging::logging_endpoint_body(
-            endpoint,
-            &json!({
-                "bucket_name":"fixture-bucket","domain":"us-east-1.object.fastlystorage.app",
-                "access_key":"fixture-access","secret_key":"fixture-secret"
-            }),
-        );
+        let actual = logging::fos_logging_endpoint_body(endpoint, "fixture-bucket", "us-east-1");
         let expected = expected_endpoint_body(endpoint);
         assert_eq!(actual, expected);
         assert_eq!(
@@ -249,49 +242,40 @@ fn rejects_format_over_reconcile_cap_without_truncating_it() {
 fn endpoint_body_retains_null_placement_and_omits_empty_optional_values() {
     let endpoints =
         logging::desired_logging_endpoints(&json!({"log_period": 60, "log_fields": {}})).unwrap();
-    let body = logging::logging_endpoint_body(
-        &endpoints[0],
-        &json!({
-            "bucket_name": "example-bucket", "domain": "us-east-1.object.fastlystorage.app",
-            "access_key": "fixture-access", "secret_key": "fixture-secret"
-        }),
-    );
+    let body = logging::fos_logging_endpoint_body(&endpoints[0], "example-bucket", "us-east-1");
     assert_eq!(body["compression_codec"], "zstd");
     assert!(body.get("gzip_level").is_none());
     assert_eq!(body["format_version"], 2);
     assert_eq!(body["placement"], Value::Null);
+    assert_eq!(body["bucket_name"], "example-bucket");
+    assert_eq!(body["region"], "us-east-1");
     assert_eq!(
         body["path"],
         "raw/request/year=%Y/month=%m/day=%d/hour=%H/minute=%M/"
     );
-    assert_eq!(body["secret_key"], "fixture-secret");
-    assert!(logging::logging_endpoint_body(&endpoints[0], &json!({}))
-        .get("secret_key")
-        .is_none());
+    for forbidden in ["domain", "access_key", "secret_key", "response_object_name"] {
+        assert!(body.get(forbidden).is_none(), "unexpected {forbidden}");
+    }
 }
 
 #[test]
-fn fos_endpoint_body_matches_the_s3_body_without_credentials_or_domain() {
+fn fos_endpoint_body_for_primary_and_rum_omits_s3_credentials_and_domain() {
     let endpoints = logging::desired_logging_endpoints(
         &json!({"log_period": 60, "log_fields": {}, "rum": {"enabled": true}}),
     )
     .unwrap();
     assert_eq!(endpoints.as_array().unwrap().len(), 2);
     for endpoint in endpoints.as_array().unwrap() {
-        let s3 = logging::logging_endpoint_body(
-            endpoint,
-            &json!({
-                "bucket_name": "example-bucket", "domain": "us-east-1.object.fastlystorage.app",
-                "access_key": "fixture-access", "secret_key": "fixture-secret"
-            }),
-        );
         let fos = logging::fos_logging_endpoint_body(endpoint, "example-bucket", "us-east-1");
-        let mut expected = s3.as_object().unwrap().clone();
-        for key in ["domain", "access_key", "secret_key", "response_object_name"] {
-            expected.remove(key);
+        assert_eq!(fos["bucket_name"], "example-bucket");
+        assert_eq!(fos["region"], "us-east-1");
+        for forbidden in ["domain", "access_key", "secret_key", "response_object_name"] {
+            assert!(
+                fos.get(forbidden).is_none(),
+                "{}: unexpected {forbidden}",
+                endpoint["name"]
+            );
         }
-        expected.insert("region".into(), "us-east-1".into());
-        assert_eq!(fos, Value::Object(expected), "{}", endpoint["name"]);
     }
 }
 
@@ -546,7 +530,7 @@ fn rum_generator_parity_covers_shared_and_rum_only_vcl_endpoints_and_tracker_js(
     for ep in compact_endpoints.as_array().unwrap() {
         assert_eq!(ep["compression_codec"], "zstd");
         assert!(ep["format"].as_str().unwrap().starts_with('['));
-        let body = logging::logging_endpoint_body(ep, &json!({}));
+        let body = logging::fos_logging_endpoint_body(ep, "example-bucket", "us-east-1");
         assert_eq!(body["compression_codec"], "zstd");
         assert!(body.get("gzip_level").is_none());
     }

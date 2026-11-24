@@ -1722,17 +1722,10 @@ fn verify_candidate_endpoints(
     service: &Service,
     scope: &str,
     candidate_names: &[String],
-    s3_items: &[Value],
     fos_items: &[Value],
 ) -> Result<Vec<String>, Error> {
     let mut verified_owned = Vec::new();
     for ep_name in candidate_names {
-        if s3_items
-            .iter()
-            .any(|v| v["name"].as_str() == Some(ep_name.as_str()))
-        {
-            return Err(Error::new(409, "resource_name_collision"));
-        }
         if let Some(found) = fos_items
             .iter()
             .find(|v| v["name"].as_str() == Some(ep_name.as_str()))
@@ -1798,23 +1791,16 @@ fn inspect_active_version_for_dr(
         Err(err) => return Err(err),
     };
     let encoded_sid = encode(&service.service_id);
-    let s3_items = dr_api_list(
-        context,
-        &format!("/service/{encoded_sid}/version/{ver}/logging/s3"),
-        token,
-    )?;
     let fos_items = dr_api_list(
         context,
         &format!("/service/{encoded_sid}/version/{ver}/logging/fos"),
         token,
     )?;
 
-    let mut coexist = super::reconcile::has_attach_endpoint_marker(&s3_items, &fos_items);
+    let mut coexist = super::reconcile::has_attach_endpoint_marker(&fos_items);
     if !coexist
         && (minimal_fallback || service.capture == Capture::Managed)
-        && super::reconcile::has_foreign_primary_endpoint(
-            service, &scope, &s3_items, &fos_items, false,
-        )
+        && super::reconcile::has_foreign_primary_endpoint(service, &scope, &fos_items)
     {
         if context.remaining_calls() == 0 {
             return Err(Error::new(503, "backend_budget"));
@@ -1849,22 +1835,12 @@ fn inspect_active_version_for_dr(
             service.rum.endpoint_name = ATTACH_RUM_ENDPOINT.into();
             let attach_candidates =
                 vec![ATTACH_ENDPOINT.to_owned(), ATTACH_RUM_ENDPOINT.to_owned()];
-            service.owned_endpoint_names = verify_candidate_endpoints(
-                service,
-                &scope,
-                &attach_candidates,
-                &s3_items,
-                &fos_items,
-            )?;
+            service.owned_endpoint_names =
+                verify_candidate_endpoints(service, &scope, &attach_candidates, &fos_items)?;
         } else {
             let managed_candidates = vec![service.logging_endpoint_name.clone()];
-            service.owned_endpoint_names = verify_candidate_endpoints(
-                service,
-                &scope,
-                &managed_candidates,
-                &s3_items,
-                &fos_items,
-            )?;
+            service.owned_endpoint_names =
+                verify_candidate_endpoints(service, &scope, &managed_candidates, &fos_items)?;
         }
         return Ok(());
     }
@@ -1873,7 +1849,7 @@ fn inspect_active_version_for_dr(
         return Err(Error::new(409, "resource_name_collision"));
     }
     service.owned_endpoint_names =
-        verify_candidate_endpoints(service, &scope, candidate_names, &s3_items, &fos_items)?;
+        verify_candidate_endpoints(service, &scope, candidate_names, &fos_items)?;
     Ok(())
 }
 

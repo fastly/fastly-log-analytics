@@ -703,7 +703,7 @@ def mock_response(method: str, path: str, body: dict | None = None) -> Any:
         return {"number": 1, "active": True}
 
     if method == "GET" and "/version/" in path:
-        if path.endswith(("/logging/s3", "/logging/fos", "/snippet", "/condition", "/domain", "/backend", "/vcl")):
+        if path.endswith(("/logging/fos", "/snippet", "/condition", "/domain", "/backend", "/vcl")):
             return []
 
     if "/version/" in path and "/activate" in path:
@@ -1257,32 +1257,25 @@ def ensure_condition(name: str, statement: str, type: str, service_id: str, vers
     return fastly("POST", f"/service/{service_id}/version/{version}/condition", payload, token=token)
 
 
-# New installs use the native "fos" endpoint; "s3" is the legacy S3-compatible endpoint older installs still run.
-LOG_ENDPOINT_TYPES = ("s3", "fos")
+LOG_ENDPOINT_TYPES = ("fos",)
 
 
 def list_log_endpoints(service_id: str, version: int, token: str) -> dict[str, str]:
-    """Map each FOS-capable logging endpoint name on a version to its endpoint type."""
+    """Map each native FOS logging endpoint name on a version to its endpoint type."""
     found: dict[str, str] = {}
-    for endpoint_type in LOG_ENDPOINT_TYPES:
-        try:
-            items = fastly("GET", f"/service/{service_id}/version/{version}/logging/{endpoint_type}", token=token)
-        except RuntimeError:
-            continue
-        for item in items if isinstance(items, list) else []:
-            found.setdefault(item["name"], endpoint_type)
+    try:
+        items = fastly("GET", f"/service/{service_id}/version/{version}/logging/fos", token=token)
+    except RuntimeError:
+        return found
+    for item in items if isinstance(items, list) else []:
+        found.setdefault(item["name"], "fos")
     return found
 
 
 def get_log_endpoint(service_id: str, version: int, name: str, token: str) -> dict:
-    """Read a logging endpoint by name, native FOS first, then the legacy S3 endpoint."""
+    """Read a native FOS logging endpoint by name."""
     encoded = urllib.parse.quote(name, safe="")
-    try:
-        return fastly("GET", f"/service/{service_id}/version/{version}/logging/fos/{encoded}", token=token)
-    except RuntimeError as exc:
-        if "404" not in str(exc):
-            raise
-    return fastly("GET", f"/service/{service_id}/version/{version}/logging/s3/{encoded}", token=token)
+    return fastly("GET", f"/service/{service_id}/version/{version}/logging/fos/{encoded}", token=token)
 
 
 def logging_endpoint_role_error(token: str) -> str | None:

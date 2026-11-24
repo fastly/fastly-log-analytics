@@ -528,7 +528,7 @@ def test_disable_failure_restores_scoring_block_and_fields_and_keeps_concurrent_
 def _endpoint(fmt: str) -> LoggingEndpoint:
     return LoggingEndpoint(
         name="Fastly Log Analytics - FOS",
-        endpoint_type="s3",
+        endpoint_type="fos",
         path="/",
         period=5,
         response_condition="",
@@ -1061,7 +1061,7 @@ class TestDictionaryFiltering:
 def _s3(name: str) -> LoggingEndpoint:
     return LoggingEndpoint(
         name=name,
-        endpoint_type="s3",
+        endpoint_type="fos",
         path="/elsewhere/",
         period=300,
         response_condition="",
@@ -1119,13 +1119,13 @@ class TestNativeFosEndpoint:
         diff = m["apply"].call_args.args[3]
         assert [(e.name, e.endpoint_type) for e in diff.endpoints_to_add] == [("Fastly Log Analytics", "fos")]
 
-    def test_reconcile_keeps_a_legacy_s3_endpoint_as_s3(self):
-        endpoints = [_s3("Fastly Log Analytics")]
+    def test_reconcile_updates_existing_fos_endpoint(self):
+        endpoints = [_typed("Fastly Log Analytics", "fos")]
         with _reconcile_env(endpoints=endpoints) as m, _mock_cfg_file():
             reconcile_vcl_state("srv_test", "token", dry_run=False)
         diff = m["apply"].call_args.args[3]
         assert diff.endpoints_to_add == [] and diff.endpoints_to_remove == []
-        assert [(e.name, e.endpoint_type) for e in diff.endpoints_to_update] == [("Fastly Log Analytics", "s3")]
+        assert [(e.name, e.endpoint_type) for e in diff.endpoints_to_update] == [("Fastly Log Analytics", "fos")]
         assert m["apply"].call_args.kwargs["current_endpoints"] == endpoints
 
     def test_reconcile_leaves_foreign_fos_endpoints_alone(self):
@@ -1136,11 +1136,11 @@ class TestNativeFosEndpoint:
         assert diff.endpoints_to_remove == []
         assert [e.name for e in diff.endpoints_to_add] == ["Fastly Log Analytics"]
 
-    def test_apply_diff_deletes_each_endpoint_through_its_own_type(self):
+    def test_apply_diff_deletes_managed_endpoints_via_fos(self):
         diff = DiffResult(endpoints_to_remove=["Fastly Log Analytics", "Fastly RUM Logs", "Customer FOS Archive"])
         current = [
             _typed("Fastly Log Analytics", "fos"),
-            _typed("Fastly RUM Logs", "s3"),
+            _typed("Fastly RUM Logs", "fos"),
             _typed("Customer FOS Archive", "fos"),
         ]
         with patch("backend.provision.declarative.reconciler.fastly_integration") as fi_mock:
@@ -1152,12 +1152,12 @@ class TestNativeFosEndpoint:
                 desired_state=_state(logging_enabled=False),
                 current_endpoints=current,
             )
-        deleted = [(c.args[2], c.kwargs["endpoint_type"]) for c in fi_mock.delete_logging_endpoint.call_args_list]
-        assert deleted == [("Fastly Log Analytics", "fos"), ("Fastly RUM Logs", "s3")]
+        deleted = [c.args[2] for c in fi_mock.delete_logging_endpoint.call_args_list]
+        assert deleted == ["Fastly Log Analytics", "Fastly RUM Logs"]
 
-    def test_apply_diff_sends_keys_only_to_legacy_s3_endpoints(self):
-        fos_ep, s3_ep = _typed("Fastly Log Analytics", "fos"), _typed("Fastly RUM Logs", "s3")
-        diff = DiffResult(endpoints_to_add=[fos_ep], endpoints_to_update=[s3_ep])
+    def test_apply_diff_sends_only_bucket_and_region_to_fos_endpoints(self):
+        fos_ep, rum_ep = _typed("Fastly Log Analytics", "fos"), _typed("Fastly RUM Logs", "fos")
+        diff = DiffResult(endpoints_to_add=[fos_ep], endpoints_to_update=[rum_ep])
         with (
             patch("backend.provision.declarative.reconciler.fastly_integration") as fi_mock,
             _mock_cfg_file(
@@ -1169,12 +1169,9 @@ class TestNativeFosEndpoint:
         ):
             _apply_diff("srv_test", "token", 2, diff, desired_state=_state())
         calls = {c.args[2].name: c.kwargs for c in fi_mock.create_or_update_logging_endpoint.call_args_list}
-        assert calls["Fastly Log Analytics"] == {"bucket_name": "bkt", "region": "eu-central-1"}
-        assert calls["Fastly RUM Logs"] == {
-            "bucket_name": "bkt",
-            "domain": "eu-central-1.object.fastlystorage.app",
-            "access_key": "AKID",
-            "secret_key": "SECRET",
+        assert calls == {
+            "Fastly Log Analytics": {"bucket_name": "bkt", "region": "eu-central-1"},
+            "Fastly RUM Logs": {"bucket_name": "bkt", "region": "eu-central-1"},
         }
 
     def test_fos_create_request_shape(self):
@@ -1197,9 +1194,6 @@ class TestNativeFosEndpoint:
                 "tok",
                 bucket_name="bkt",
                 region="us-east-1",
-                domain="ignored.example",
-                access_key="AKID",
-                secret_key="SECRET",
             )
         assert calls == [
             ("GET", "/service/svc1/version/3/logging/fos/Fastly%20Log%20Analytics", None),
@@ -1221,43 +1215,6 @@ class TestNativeFosEndpoint:
             ),
         ]
 
-    def test_fos_body_matches_s3_body_except_for_credentials_and_domain(self):
-        bodies: dict[str, dict] = {}
-
-        def _fake(m, p, b=None, **kw):
-            if m == "GET":
-                raise RuntimeError("HTTP 404")
-            bodies[p.rsplit("/", 1)[-1]] = b
-            return {}
-
-        kwargs = {
-            "bucket_name": "bkt",
-            "region": "us-east-1",
-            "domain": "us-east-1.object.fastlystorage.app",
-            "access_key": "AKID",
-            "secret_key": "SECRET",
-        }
-        with patch.object(fi, "fastly", _fake):
-            for kind in ("s3", "fos"):
-                ep = LoggingEndpoint("ep", kind, "raw/request/", 300, "cond", "%h", None, "")
-                fi.create_or_update_logging_endpoint("svc1", 3, ep, "tok", **kwargs)
-        s3_body, fos_body = bodies["s3"], bodies["fos"]
-        shared = s3_body.keys() & fos_body.keys()
-        assert shared == {
-            "name",
-            "path",
-            "period",
-            "format",
-            "format_version",
-            "placement",
-            "compression_codec",
-            "response_condition",
-            "bucket_name",
-        }
-        assert all(s3_body[k] == fos_body[k] for k in shared)
-        assert s3_body.keys() - shared == {"domain", "access_key", "secret_key", "response_object_name"}
-        assert fos_body.keys() - shared == {"region"}
-
     def test_fos_update_clears_gzip_level_before_setting_codec(self):
         calls: list[tuple[str, str, Any]] = []
         ep = LoggingEndpoint("ep", "fos", "raw/request/", 60, "", "%h", None, "")
@@ -1270,29 +1227,30 @@ class TestNativeFosEndpoint:
         ] * 2
         assert calls[1][2] == {"gzip_level": 0}
 
-    def test_fetch_returns_both_endpoint_types(self):
+    def test_fetch_reads_only_fos_endpoints(self):
         raw = {"path": "raw/", "period": 60, "response_condition": "c", "format": "%h", "placement": "none"}
-        responses = {
-            ("GET", "/service/svc1/version/3/logging/s3"): [{**raw, "name": "legacy"}],
-            ("GET", "/service/svc1/version/3/logging/fos"): [{**raw, "name": "native", "access_key": "minted-id"}],
-        }
-        with patch.object(fi, "fastly", _fastly_mock(responses)):
+        calls: list[tuple[str, str]] = []
+
+        def _fake(method, path, *_a, **_kw):
+            calls.append((method, path))
+            assert "/logging/s3" not in path
+            return [{**raw, "name": "native", "access_key": "minted-id"}]
+
+        with patch.object(fi, "fastly", _fake):
             fetched = fi.fetch_logging_endpoints("svc1", 3, "tok")
-        assert [(e.name, e.endpoint_type) for e in fetched] == [("legacy", "s3"), ("native", "fos")]
+        assert [(e.name, e.endpoint_type) for e in fetched] == [("native", "fos")]
+        assert calls == [("GET", "/service/svc1/version/3/logging/fos")]
 
-        responses[("GET", "/service/svc1/version/3/logging/fos")] = RuntimeError("HTTP 500")
-        with patch.object(fi, "fastly", _fastly_mock(responses)):
-            assert [e.name for e in fi.fetch_logging_endpoints("svc1", 3, "tok")] == ["legacy"]
+        with patch.object(
+            fi, "fastly", _fastly_mock({("GET", "/service/svc1/version/3/logging/fos"): RuntimeError("HTTP 500")})
+        ):
+            assert fi.fetch_logging_endpoints("svc1", 3, "tok") == []
 
-    def test_delete_uses_the_endpoint_type_path(self):
+    def test_delete_uses_fos_path(self):
         calls: list[tuple[str, str]] = []
         with patch.object(fi, "fastly", lambda m, p, b=None, **kw: (calls.append((m, p)), {})[1]):
-            fi.delete_logging_endpoint("svc1", 3, "My Endpoint", "tok", endpoint_type="fos")
-            fi.delete_logging_endpoint("svc1", 3, "My Endpoint", "tok", endpoint_type="s3")
-        assert calls == [
-            ("DELETE", "/service/svc1/version/3/logging/fos/My%20Endpoint"),
-            ("DELETE", "/service/svc1/version/3/logging/s3/My%20Endpoint"),
-        ]
+            fi.delete_logging_endpoint("svc1", 3, "My Endpoint", "tok")
+        assert calls == [("DELETE", "/service/svc1/version/3/logging/fos/My%20Endpoint")]
 
 
 class TestBootstrapFeatureState:
@@ -1918,12 +1876,12 @@ def test_fetch_snippets_logging_backends_and_dictionaries():
         "placement": "none",
         "response_object_name": "",
     }
-    with patch.object(fi, "fastly", _fastly_mock({("GET", "/service/svc1/version/3/logging/s3"): [ep_raw]})):
+    with patch.object(fi, "fastly", _fastly_mock({("GET", "/service/svc1/version/3/logging/fos"): [ep_raw]})):
         assert fi.fetch_logging_endpoints("svc1", 3, "tok") == [
-            LoggingEndpoint("ep1", "s3", "/raw/", 60, "cond1", "%h", "none", "")
+            LoggingEndpoint("ep1", "fos", "/raw/", 60, "cond1", "%h", "none", "")
         ]
     with patch.object(
-        fi, "fastly", _fastly_mock({("GET", "/service/svc1/version/3/logging/s3"): RuntimeError("boom")})
+        fi, "fastly", _fastly_mock({("GET", "/service/svc1/version/3/logging/fos"): RuntimeError("boom")})
     ):
         assert fi.fetch_logging_endpoints("svc1", 3, "tok") == []
 
@@ -2015,7 +1973,7 @@ def test_clone_delete_validate_and_activate_mutations():
         fi.delete_dictionary("svc1", 3, "my dict", "tok")
     assert del_calls == [
         ("DELETE", "/service/svc1/version/3/snippet/weird%20name%2Fslash", True),
-        ("DELETE", "/service/svc1/version/3/logging/s3/My%20Endpoint", True),
+        ("DELETE", "/service/svc1/version/3/logging/fos/My%20Endpoint", True),
         ("DELETE", "/service/svc1/version/3/backend/origin%2F1", True),
         ("DELETE", "/service/svc1/version/3/dictionary/my%20dict", True),
     ]
@@ -2070,29 +2028,24 @@ def test_create_or_update_snippet_logging_backend_and_dictionary():
         fi.create_or_update_logging_endpoint(
             "svc1",
             3,
-            LoggingEndpoint("ep1", "s3", "/raw/", 60, "", "%h", "none", ""),
+            LoggingEndpoint("ep1", "fos", "/raw/", 60, "", "%h", "none", ""),
             "tok",
             bucket_name="my-bucket",
-            domain="s3.example.test",
-            access_key="AKIA",
-            secret_key="shh",
+            region="us-east-1",
         )
     assert [c[0] for c in ep_calls] == ["GET", "POST"]
+    assert all("/logging/fos" in c[1] for c in ep_calls)
     post_ep = ep_calls[1][2]
-    assert (post_ep["bucket_name"], post_ep["domain"], post_ep["access_key"], post_ep["secret_key"]) == (
-        "my-bucket",
-        "s3.example.test",
-        "AKIA",
-        "shh",
-    )
+    assert (post_ep["bucket_name"], post_ep["region"]) == ("my-bucket", "us-east-1")
     assert "response_condition" not in post_ep
 
     ep_upd: list[tuple[str, str, Any]] = []
     with patch.object(fi, "fastly", lambda m, p, b=None, **kw: (ep_upd.append((m, p, b)), {"name": "ep1"})[1]):
         fi.create_or_update_logging_endpoint(
-            "svc1", 3, LoggingEndpoint("ep1", "s3", "/raw/", 60, "always_true", "%h", "none", ""), "tok"
+            "svc1", 3, LoggingEndpoint("ep1", "fos", "/raw/", 60, "always_true", "%h", "none", ""), "tok"
         )
     assert [c[0] for c in ep_upd] == ["GET", "PUT"]
+    assert all("/logging/fos" in c[1] for c in ep_upd)
     assert ep_upd[1][2]["response_condition"] == "always_true" and "bucket_name" not in ep_upd[1][2]
 
     be_calls: list[tuple[str, str, Any]] = []

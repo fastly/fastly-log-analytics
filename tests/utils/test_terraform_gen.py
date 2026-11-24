@@ -260,28 +260,14 @@ def test_new_install_exports_native_fos_endpoint_without_keys():
     assert "AKIA_EXPORT_KEY" not in out["logging_service.tf.json"]
     assert "export-secret-value" not in out["logging_service.tf.json"]
     assert "logging_fos" in out["instructions"]
+    assert "logging_s3" not in out["instructions"]
 
 
-def test_legacy_s3_endpoint_stays_s3_in_export(monkeypatch):
-    from backend.provision.declarative.models import LoggingEndpoint
-    from backend.utils import terraform_gen
-
-    seen: list[tuple] = []
-    monkeypatch.setattr(
-        terraform_gen,
-        "_fetch_logging_endpoints",
-        lambda sid, tok: (
-            seen.append((sid, tok))
-            or [LoggingEndpoint("Fastly Log Analytics", "s3", "/raw/", 60, "c", "%h", "none", "")]
-        ),
-    )
+def test_rum_enabled_exports_both_endpoints_as_logging_fos():
     cfg = {**_baseline_cfg(), "token": "tok", "rum_enabled": True}
     block = _logging_service_block(generate_terraform(cfg, "AKIA_EXPORT_KEY", "export-secret-value"))
-    assert seen == [("SU3xxxxxxxxxxxxxx0000", "tok")]
-    [legacy] = block["logging_s3"]
-    assert legacy["name"] == "Fastly Log Analytics"
-    assert legacy["s3_access_key"] == "AKIA_EXPORT_KEY"
-    assert [e["name"] for e in block["logging_fos"]] == ["Fastly RUM Logs"]
+    assert "logging_s3" not in block
+    assert [e["name"] for e in block["logging_fos"]] == ["Fastly Log Analytics", "Fastly RUM Logs"]
 
 
 # ── Custom field round trip ──────────────────────────────────────────────────

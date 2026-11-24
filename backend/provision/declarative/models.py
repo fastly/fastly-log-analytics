@@ -552,7 +552,7 @@ class VCLSnippet:
 
 @dataclass
 class LoggingEndpoint:
-    """A single logging endpoint: native FOS ("fos") or legacy S3-compatible ("s3")."""
+    """A single native Fastly Object Storage logging endpoint ("fos")."""
 
     name: str
     endpoint_type: str

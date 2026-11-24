@@ -952,7 +952,7 @@ fn api(state: &mut State, request: &ApiRequest<'_>) -> Result<(u16, Value), Stri
                             return Ok((400,json!({"msg":"Bad request","detail":format!("Condition '{cond}' does not exist")})));
                         }
                     }
-                } else if matches!(resource,"logging/fos"|"logging/s3") {
+                } else if resource == "logging/fos" {
                     if let Some(cond)=body["response_condition"].as_str().filter(|s|!s.is_empty()) {
                         if version.resources.get("condition").is_none_or(|c|!c.contains_key(cond)) {
                             return Ok((400,json!({"msg":"Bad request","detail":format!("Condition '{cond}' does not exist")})));
@@ -965,10 +965,8 @@ fn api(state: &mut State, request: &ApiRequest<'_>) -> Result<(u16, Value), Stri
                     let referenced_by_backend=version.resources.get("backend").is_some_and(|bmap|{
                         bmap.values().any(|b|b["request_condition"].as_str()==Some(cond_name))
                     });
-                    let referenced_by_logging=["logging/fos","logging/s3"].iter().any(|lkind|{
-                        version.resources.get(*lkind).is_some_and(|lmap|{
-                            lmap.values().any(|ep|ep["response_condition"].as_str()==Some(cond_name))
-                        })
+                    let referenced_by_logging=version.resources.get("logging/fos").is_some_and(|lmap|{
+                        lmap.values().any(|ep|ep["response_condition"].as_str()==Some(cond_name))
                     });
                     if referenced_by_backend || referenced_by_logging {
                         return Ok((409,json!({"msg":"Conflict","detail":format!("Condition '{cond_name}' is still referenced")})));

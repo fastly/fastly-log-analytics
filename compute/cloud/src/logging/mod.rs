@@ -1341,49 +1341,30 @@ pub fn desired_logging_endpoints(state: &Value) -> Result<Value, String> {
     Ok(json!(endpoints))
 }
 
-/// Body for the legacy `logging/s3` endpoint, which signs with our access key and
-/// storage domain. Installs that already have one keep it; new endpoints use
-/// [`fos_logging_endpoint_body`].
-pub fn logging_endpoint_body(endpoint: &Value, connection: &Value) -> Value {
+/// Body for Fastly's native Object Storage endpoint (`logging/fos`): Fastly mints
+/// and holds a bucket-scoped write key itself, so no domain or credentials are sent.
+pub fn fos_logging_endpoint_body(endpoint: &Value, bucket: &str, region: &str) -> Value {
     let codec = endpoint["compression_codec"]
         .as_str()
         .filter(|s| !s.is_empty())
         .unwrap_or("zstd");
     let mut body = json!({
-        "name":endpoint["name"],"path":endpoint["path"],"period":endpoint["period"],
-        "format":endpoint["format"],"placement":endpoint["placement"],
-        "response_object_name":endpoint["response_object_name"], "format_version":2,
-        "compression_codec":codec
+        "name": endpoint["name"],
+        "path": endpoint["path"],
+        "period": endpoint["period"],
+        "format": endpoint["format"],
+        "placement": endpoint["placement"],
+        "format_version": 2,
+        "compression_codec": codec,
+        "bucket_name": bucket,
+        "region": region,
     });
-    for key in [
-        "response_condition",
-        "bucket_name",
-        "domain",
-        "access_key",
-        "secret_key",
-    ] {
-        let value = if key == "response_condition" {
-            &endpoint[key]
-        } else {
-            &connection[key]
-        };
-        if value.as_str().is_some_and(|s| !s.is_empty()) {
-            body[key] = value.clone();
-        }
+    if endpoint["response_condition"]
+        .as_str()
+        .is_some_and(|s| !s.is_empty())
+    {
+        body["response_condition"] = endpoint["response_condition"].clone();
     }
-    body
-}
-
-/// Body for Fastly's native Object Storage endpoint (`logging/fos`): the same
-/// settings as the S3 body, but Fastly mints and holds a bucket-scoped key itself,
-/// so no domain or credentials are sent.
-pub fn fos_logging_endpoint_body(endpoint: &Value, bucket: &str, region: &str) -> Value {
-    let mut body = logging_endpoint_body(endpoint, &json!({}));
-    if let Some(object) = body.as_object_mut() {
-        object.remove("response_object_name");
-    }
-    body["bucket_name"] = bucket.into();
-    body["region"] = region.into();
     body
 }
 
