@@ -621,7 +621,7 @@ def _is_sse_route(path: str) -> bool:
 
 _HTML_CSP_DEFAULT = (
     "default-src 'self'; "
-    "script-src 'self' 'unsafe-inline' blob:; "
+    "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob:; "
     "worker-src 'self' blob:; "
     "style-src 'self' 'unsafe-inline'; "
     "img-src 'self' data: blob:; "

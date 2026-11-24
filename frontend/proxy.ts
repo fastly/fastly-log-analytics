@@ -236,8 +236,8 @@ const DEV_BACKEND_ORIGIN = (() => {
 
 function buildCsp(nonce: string): string {
   const scriptSrc = IS_DEV
-    ? `script-src 'self' 'nonce-${nonce}' 'strict-dynamic' 'unsafe-inline' 'unsafe-eval' blob:`
-    : `script-src 'self' 'nonce-${nonce}' 'strict-dynamic' 'unsafe-inline' blob:`
+    ? `script-src 'self' 'nonce-${nonce}' 'strict-dynamic' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:`
+    : `script-src 'self' 'nonce-${nonce}' 'strict-dynamic' 'unsafe-inline' 'wasm-unsafe-eval' blob:`
   // Same-origin everywhere in prod: lib/api.ts:getApiBase() returns ""
   // for the browser path so admin SSH-tunnel and public deploys both
   // route via Caddy. Dev keeps its escape hatch for ws:// HMR and the

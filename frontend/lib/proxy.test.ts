@@ -466,4 +466,11 @@ describe('SEC-02 & SEC-10.3 frontend proxy gating and cookie hardening', () => {
       expect(val.toLowerCase()).not.toContain('.edgecompute.app')
     }
   })
+
+  it('allows WebAssembly compilation via wasm-unsafe-eval in script-src CSP', () => {
+    const req = new NextRequest('https://fastly-log-analytics.global.ssl.fastly.net/dashboard')
+    const res = proxy(req)
+    const csp = res.headers.get('content-security-policy') || ''
+    expect(csp).toContain("'wasm-unsafe-eval'")
+  })
 })
