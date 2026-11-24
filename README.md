@@ -1,13 +1,13 @@
 # Fastly Log Analytics
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-![Version: 3.0.0-rc4](https://img.shields.io/badge/version-3.0.0--rc4-blue.svg)
+![Version: 3.0.0-beta1](https://img.shields.io/badge/version-3.0.0--beta1-blue.svg)
 
 A self-hosted dashboard for searching, filtering, and visualizing request-level Fastly logs streamed to [Fastly Object Storage](https://www.fastly.com/documentation/guides/platform/object-storage/working-with-object-storage/).
 
 Fastly's [historical stats](https://www.fastly.com/documentation/reference/api/metrics-stats/historical-stats/) give you aggregates. When you need to drill into individual requests — by IP, URL, status, WAF signal, or any field you log — Fastly's [real-time log streaming](https://www.fastly.com/documentation/guides/integrations/streaming-logs/about-fastlys-realtime-log-streaming-features/) makes the raw data available, but you still need somewhere to put it and something to query it with. This project fills that gap using only Fastly products. Costs are limited to Fastly Object Storage [class operations](https://www.fastly.com/documentation/guides/platform/object-storage/working-with-object-storage/#using-the-s3-compatible-api) and [storage](https://docs.fastly.com/products/object-storage#billing) — no third-party logging vendor required.
 
-> **Coming from v2?** There is no upgrade path. Tear down your services on v2, install v3 fresh, and re-provision (see [docs/MIGRATION_v3.0.0_GUIDE.md](docs/MIGRATION_v3.0.0_GUIDE.md)). This is a release candidate (3.0.0-rc4).
+> **Coming from v2?** There is no upgrade path. Tear down your services on v2, install v3 fresh, and re-provision (see [docs/MIGRATION_v3.0.0_GUIDE.md](docs/MIGRATION_v3.0.0_GUIDE.md)). This is a public beta release (`3.0.0-beta1`).
 
 ### 📺 Watch the install walkthrough
 

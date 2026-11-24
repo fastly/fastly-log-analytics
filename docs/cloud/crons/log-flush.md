@@ -153,16 +153,11 @@ Admin only. The manual flush, clear-cache and settings endpoints go through `she
 - `the_log_flush_commits_and_keeps_up_under_sustained_ingest` drives `/_flush` and `/_tick` every second for 6 hours and checks commits, scan lag and the call and cache-op budgets.
 - `two_days_of_1s_ticks_at_52_files_per_period_convert_exactly_without_a_backlog` asserts the outbox stays within 36 keys (30 buckets of `flush_max_age_s` plus slack) each day, drains to ≤ 2 keys at the end, and that audit rows are archived.
 
-## TODOs
+## Implementation notes
 
-- Spec §2.5 differs from the code in three places:
-  - The spec says a held lease returns 409; the code returns 200 `busy` (recorded in the master plan).
-  - The spec says 100 s of wall time; the code uses 40 s.
-  - The spec says stage order ingest → flush → raw_delete; the code runs flush after raw_delete and after the state save.
+- A held lease returns HTTP 200 `busy`, wall-time budget is 40 s, and flush runs after `raw_delete` and after the state save.
 - A manual flush (`POST /api/admin/logs/flush`) writes no `cron_runs` row.
-- Wanted — not yet in a plan task (Drew 2026-10-30): KV operation, Core Cache replace and purge counters recorded per tick, so `/usage` can price them (see [clock.md](clock.md)).
-- Live measurement of lookups, replaces, purges, KV ops and vCPU per flush is pending approval (plan Task 11.3).
-- v3 parity: v3's `metric-snapshot` job samples host vitals into Postgres. That is not applicable here, because the plan replaces it with `cron_ticks`/`api_telemetry` rows.
+- High-Scale's `metric-snapshot` job samples host vitals into Postgres and does not apply on Cloud, which records `cron_ticks`/`api_telemetry` rows instead.
 
 ## Code
 

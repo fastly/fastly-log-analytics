@@ -186,7 +186,6 @@ Chromium, Firefox and WebKit run in CI. A mock backend boots from `frontend/e2e/
 
 - **Perf gate:** `PERF_NUM_ROWS` selects a scale in [tests/perf/baseline.json](tests/perf/baseline.json): `smoke_100k` (default, PR-blocking), `mid_500k` (opt-in), `nightly_1m` ([.github/workflows/perf-nightly.yml](.github/workflows/perf-nightly.yml)). Refresh: `PERF_NUM_ROWS=500000 uv run python scripts/emit_perf_latest.py && bash scripts/perf_gate.sh`.
 - **Synthetic data:** `uv run python scripts/load_test/generate_synthetic_traffic.py` with `--target fos` (gzipped NDJSON to FOS, exercising discovery/ledger/worker ingest) or `--target clickhouse` / `--with-clickhouse` (seeds `request_facts` + publication batches). Scenarios: `diurnal` (default), `ddos-spike`, `origin-5xx-outage`, `bot-scrape`, `slow-network`.
-- **Live deploy and load tests:** `~/Projects/fastly-log-analytics-deploy-testing` owns the combined `fdt` workflow for Cloud and High-Scale environments (see that repo's `AGENTS.md` for environment names). Run `uv run fdt run <envs...>` there; without `--approve` it remains read-only. Both a combined run and any billed `fdt.load` campaign require explicit approval. FLA keeps only the hooks: the `X-FLA-Harness` tag in `backend/routers/root_system.py` and `frontend/lib/apiSsrProxy.ts`, plus `priceQuantities` in the cost calculator model.
 - **Section-level budgets:** `scripts/lib/performance_budgets.json` defines per-page section-level performance budgets.
 
 ## Shared Helpers

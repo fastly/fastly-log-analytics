@@ -382,7 +382,7 @@ try:
 
     _APP_VERSION = _pkg_version("fastly-log-analytics")
 except Exception:
-    _APP_VERSION = "3.0.0-rc4"
+    _APP_VERSION = "3.0.0-beta1"
 
 
 # Documents the canonical error codes this probe can surface — notably the

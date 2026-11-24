@@ -2,8 +2,6 @@
 
 How this install reports and estimates cost. Admins see it on `/usage`, which also embeds the calculator as the Cost Estimator; there is no separate public calculator page. **Usage is not an invoice.** Fastly bills by contract, and nothing here calls a Fastly billing API.
 
-Spec: [specs/2026-10-30-operational-logging-and-telemetry-design.md](specs/2026-10-30-operational-logging-and-telemetry-design.md) §7.
-
 ## Measured vs. estimated
 
 Every figure on `/usage` is labelled.

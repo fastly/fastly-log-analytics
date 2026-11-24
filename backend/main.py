@@ -110,7 +110,7 @@ from backend.utils.module_shim import install_shim_module  # noqa: E402
 
 app = FastAPI(
     title="Fastly Log Analytics API",
-    version="3.0.0-rc4",
+    version="3.0.0-beta1",
     description=(
         "FastAPI backend for the Fastly Log Analytics tool. "
         "Serves the Next.js frontend and exposes an OpenAPI spec at /openapi.json."

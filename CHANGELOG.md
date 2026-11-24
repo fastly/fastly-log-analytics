@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0-beta1] - 2026-11-24
+
+> **Upgrading from v2:** there is no upgrade path. Tear down your services on v2, install v3 fresh, and re-provision. All v2 data is discarded. See [the migration guide](docs/MIGRATION_v3.0.0_GUIDE.md).
+
+### Highlights
+
+- **Two deployment editions in one codebase** — **High-Scale** (ClickHouse + PostgreSQL 16 + stateless ingest workers on Docker Compose or Kubernetes) and **Cloud** (serverless Fastly Compute + Fastly Object Storage + browser DuckDB-WASM analytical engine) share one frontend and response contract.
+- **Unified local storage and usage billing** — `/usage` computes incurred Fastly Object Storage GB-hours (including 30-day minimum billing on deleted objects) and Class A/B operations directly from service-local telemetry on both editions, keeping Fastly Platform stats informational.
+- **Cross-edition parity across all analytics pages** — `/network` (DMA polygons, health score, request-weighted summaries), `/streaming` (CMCD), `/insights`, `/assets-shield`, `/fastly-value`, `/security`, `/performance`, `/sessions`, and `/admin/session-scoring` share consistent metrics and contracts across Cloud and High-Scale.
+- **Query and bandwidth optimizations** — High-Scale batches 40 insight detectors into 13 single-pass ClickHouse queries and adds 60 s bucketed warm caching on `/usage` and `/streaming`; Cloud deduplicates in-flight telemetry reads, reuses recent catalog manifests across sub-ranges, caps projected wire-byte scans, and uses narrow two-pass projections for `/admin/session-scoring`.
+- **Hardened ingest, recovery, and security gates** — archive replay, receipt fencing, stale-owner/epoch protection, offline access lifecycle, DR parity, SQL validation, secret redaction, and multi-browser Playwright E2E coverage.
+
 ## [3.0.0-rc4] - 2026-11-21
 
 > This release candidate consolidates the rc3 hardening and verification work into the final pre-release branch.

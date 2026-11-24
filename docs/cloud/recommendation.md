@@ -1,12 +1,9 @@
 # Recommendation: Fastly logs → Parquet in Fastly Object Storage
 
 > **Superseded prototype record.** The current system differs (each window file is written with one PUT inside the tick, with no worker fan-out or multipart; operational logs; retention). The capacity and monthly dollar figures below are benchmark-era
-> prototype scenarios, not this deployment's bill; [What it costs per month](#what-it-costs-per-month) prices the current code. Current usage is on the hosted
-> [`/usage`](https://flp-dpbk03nn.edgecompute.app/usage) page and the method is in
+> prototype scenarios, not a deployment's bill; [What it costs per month](#what-it-costs-per-month) prices the current code. Current usage is shown on the `/usage` page and the method is in
 > [`cost-methodology.md`](cost-methodology.md). Operational-logging overhead
-> (flush, compaction, retention) is **estimated** in
-> [Spec §7.1](specs/2026-10-30-operational-logging-and-telemetry-design.md#71-steady-state-overhead-of-this-system-quiet-install-defaults)
-> (about $0.00030/day in FOS operations for a quiet install at list price) until measured live.
+> (flush, compaction, retention) is **estimated** at about $0.00030/day in FOS operations for a quiet install at list price.
 > Its evidence (the `research/` notes, `architecture-options.md`, `PLAN.md`, `runbook.md`, the
 > compute-limits audit and `experiments/`) stayed in the former fastly-logs-parquet repository, so those
 > references are plain text here.
@@ -109,10 +106,10 @@ The operation counts come from running the real tick (`admin::record_tick`) agai
 
 The tables below price the 2-minute tick that ran when they were simulated; the 2-minute bucket in [In short](#in-short) item 2 and the latency note under [How it works](#how-it-works) are historical too. The clock now runs a 1 s dispatcher (`compute/cloud/src/admin/schedule.rs`, [clock](crons/clock.md)): the health checks probe `/_tick` and `/_flush` from every POP every 30 s on Cloud (half the log period, clamped to 1–30 s; with about 53 probing POPs that still reaches the shield about once a second), and VCL caches each answer at the IAD shield with no grace or stale serving. The TTL is 1 s by default, but a 200 that carries `x-flp-tick-ttl` is cached for that many seconds (less the response's `Age`). Compute sets that header to 1 s while work is due or a run holds the lease, and otherwise to the seconds until its next scheduled wake, capped at 60 s (`schedule::next_ttl_s`). So at most one probe a second of each reaches Compute, and far fewer while nothing is due: an idle `/_flush` wakes about once a minute, and an idle `/_tick` sleeps until the next ingest, maintenance or compaction job is due. A turn that ends with work left starts the next one itself instead of waiting for a probe.
 
-- Upper bound: `/_tick` at one execution a second is 86,400 a day, about **2.59M a month** ($1.30 at $0.50 per million). That matches Drew's estimate of about 2.6M.
-- `/_flush` at one a second doubles the bound to about **5.18M a month** ($2.59). The sleep TTL keeps real counts below these bounds; how far below depends on the log period and backlog, and is not yet measured live.
-- An idle probe makes 0 backend calls and 0 KV writes, and 1 Core Cache operation, so the idle KV figure below falls; the cost moves to Compute requests. Idle vCPU is reported per run as `idle_vcpu_ms` on `cron_runs` and is not yet measured live.
-- Decided (Drew, 2026-10-31): keep `/_flush` at 1 s. A 10 s bucket (about 2.85M in total, $1.43) was considered; the extra ~$1.16 a month isn't worth the added flush delay.
+- Upper bound: `/_tick` at one execution a second is 86,400 a day, about **2.59M a month** ($1.30 at $0.50 per million).
+- `/_flush` at one a second doubles the bound to about **5.18M a month** ($2.59). The sleep TTL keeps real counts below these bounds; how far below depends on the log period and backlog.
+- An idle probe makes 0 backend calls and 0 KV writes, and 1 Core Cache operation, so the idle KV figure below falls; the cost moves to Compute requests. Idle vCPU is reported per run as `idle_vcpu_ms` on `cron_runs`.
+- `/_flush` stays at a 1 s bucket rather than 10 s: the ~$1.16/month upper-bound savings isn't worth the added flush delay.
 
 ### What one tick does
 
@@ -201,7 +198,7 @@ Window size changes only the Parquet PUT count. At 0.1 req/s a tick writes one f
 
 ### Operational logging overhead
 
-The spec's quiet-install estimate ([§7.1](specs/2026-10-30-operational-logging-and-telemetry-design.md#71-steady-state-overhead-of-this-system-quiet-install-defaults)) is about 93 Class A and 168 Class B FOS operations a day, about **$0.00030 a day** at list (93 × $0.0000025 + 168 × $0.0000004). In the simulation the scheduled flush never commits (see above), so those flush and compaction operations don't happen today. What does happen is already in the totals: the `logq:` outbox writes (about 22k–43k KV Class A a month, $0.14–0.28), the flush cursor reads and outbox list each tick, and, at idle only, retention and compaction LISTs over `processed/ops/` (about 12 a day per kind). Core Cache lookups (up to 480 a tick) and appends aren't priced.
+The quiet-install estimate is about 93 Class A and 168 Class B FOS operations a day, about **$0.00030 a day** at list (93 × $0.0000025 + 168 × $0.0000004). In the simulation the scheduled flush never commits (see above), so those flush and compaction operations don't happen today. What does happen is already in the totals: the `logq:` outbox writes (about 22k–43k KV Class A a month, $0.14–0.28), the flush cursor reads and outbox list each tick, and, at idle only, retention and compaction LISTs over `processed/ops/` (about 12 a day per kind). Core Cache lookups (up to 480 a tick) and appends aren't priced.
 
 ### Assumptions
 
@@ -213,7 +210,7 @@ The spec's quiet-install estimate ([§7.1](specs/2026-10-30-operational-logging-
 
 ## Rolling up into hourly or daily files
 
-**Current status:** the app has no request rollup. Request and RUM window files are never merged on the server (master-plan D1); readers combine them in the browser. The only server compaction is `log_compact`, for operational logs: once a UTC day has been closed for 2 hours, it merges that day's window files for each kind into chunks of at most 24 files (at most 2 MiB of compressed input and 10,000 rows per chunk), then deletes the sources with `DeleteObjects` ([logging spec §4](specs/2026-10-30-operational-logging-and-telemetry-design.md)). It cuts files to LIST and open, not storage; see [Operational logging overhead](#operational-logging-overhead). The minute-summary rollup benchmark failed its larger case and stays out of the query path (10).
+**Current status:** the app has no request rollup. Request and RUM window files are never merged on the server; readers combine them in the browser. The only server compaction is `log_compact`, for operational logs: once a UTC day has been closed for 2 hours, it merges that day's window files for each kind into chunks of at most 24 files (at most 2 MiB of compressed input and 10,000 rows per chunk), then deletes the sources with `DeleteObjects`. It cuts files to LIST and open, not storage; see [Operational logging overhead](#operational-logging-overhead). The minute-summary rollup benchmark failed its larger case and stays out of the query path (10).
 
 ### Prototype stitch experiments (archived)
 

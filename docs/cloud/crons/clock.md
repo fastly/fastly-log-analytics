@@ -143,29 +143,17 @@ Native tests only; none is live evidence.
 - **Code, spec and plan disagreements**
   - `grace_s` and `run_interval_s` are required at setup but never read (see Cadence above).
 
-**Plan and docs housekeeping**
-- Every checkbox in the logging plan (in the former fastly-logs-parquet repository; its design is [specs/2026-10-30-operational-logging-and-telemetry-design.md](../specs/2026-10-30-operational-logging-and-telemetry-design.md)) is unchecked.
-  - Tasks 1–10 and the Task 11.1 docs have landed.
-  - Task 11.3 (live deploy and measurement) needs approval.
-
 **Resource limits**
-- The compute-limits audit (in the former fastly-logs-parquet repository) listed limits that were not yet guarded: a per-object window cap for ingest, a cumulative decompressed cap, a cap on `pending.nonempty`, reconcile `by_kind` cardinality and heap measurement. The code now has `MAX_WINDOWS_PER_OBJECT` (12, `ingest/mod.rs:161`), `MAX_DECOMPRESSED_BYTES` (48 MiB, `ingest/convert.rs:35`), `MAX_PENDING_ENTRIES` (1,000, `telemetry/flush.rs:74`), `MAX_RECONCILE_KINDS` (32, `ingest/retention.rs:914`) and a heap snapshot (`heap_mib`, `sdk.rs:1763-1765`); the audit has not been rechecked against them.
+- Guarded limits enforced in Compute: `MAX_WINDOWS_PER_OBJECT` (12, `ingest/mod.rs`), `MAX_DECOMPRESSED_BYTES` (48 MiB, `ingest/convert.rs`), `MAX_PENDING_ENTRIES` (1,000, `telemetry/flush.rs`), `MAX_RECONCILE_KINDS` (32, `ingest/retention.rs`), and heap snapshots (`heap_mib`, `sdk.rs`).
 
-**Wanted — not yet in a plan task (Drew 2026-10-30)**
-- KV operation, Core Cache replace and purge counters per tick are now built: every `cron_runs` row carries `kv_ops`, `cache_replaces` and `purges` (`StageRow::json`, `admin/mod.rs:1983-2010`). The `/usage` loader still returns `counters: {kv_ops: null, cache_replaces: null, purges: null}` (`frontend/lib/cloud-engine/usage/summary.ts:1284`), so `/usage` sums the logged values instead (`1033-1037`).
-- The other wanted items, log accounting/gap-heal and full_sync, are listed in [request-ingest.md](request-ingest.md). (The FLP `/admin/tick` per-tick budget and stage-health page was not carried into the shared frontend: `frontend/app/admin/` has no `tick` page, and the Cloud shell does not list `/admin/tick` in `ANALYTICS_SITE_ROUTES` or its admin-path match (`shell.rs`), so the path gets the 404 page. Clock health is the "Ingestion clock" system check on `/admin` and the Cron Runs tab on `/logs`. Quarantine inspection and purge is the `QuarantineSection` on `/admin`, `frontend/app/admin/page.tsx:45`.)
+**Operational telemetry & admin surfaces**
+- KV operation, Core Cache replace, and purge counters per tick are recorded on every `cron_runs` row (`kv_ops`, `cache_replaces`, `purges`, `StageRow::json`) and summed by `/usage`.
+- Clock health is surfaced as the "Ingestion clock" system check on `/admin` and the Cron Runs tab on `/logs`. Quarantine inspection and purge live in `QuarantineSection` on `/admin` (`frontend/app/admin/page.tsx`).
 
-**v3 parity**
-- Cadence: ingest follows v3's `sync_interval = max(5, log_period)` (`backend/provision/orchestrator.py:286`) on a 1 s clock; with `log_period` held to at least 60 s, the 5 s floor never applies. A separate configurable `run_interval_s` (from the FLP master plan's "Clock and pipeline settings") is not implemented: the Config Store key exists but is ignored.
-- SSE run progress: we keep polling (FLP master plan). This is a note only.
-- Out of scope (Drew 2026-10-30):
-  - the dev "no crons" switch;
-  - [insights-prewarmer](../../cron/jobs/insights-prewarmer.md);
-  - [alerts-evaluation](../../cron/jobs/alerts-evaluation.md).
-- Out of scope per the FLP master plan:
-  - `bot-data-refresh`, `ngwaf-sync` and `rdns-enrichment`;
-  - `share-audit-purge`.
-- Not applicable: `duckdb-recycle`, a server-only job.
+**Edition scope & parity**
+- Cadence: ingest follows `sync_interval = max(5, log_period)` on a 1 s clock; with `log_period` held to at least 60 s, the 5 s floor never applies.
+- Progress updates use polling on Cloud rather than SSE.
+- High-Scale-only jobs not applicable on Cloud: `insights-prewarmer`, `alerts-evaluation`, `bot-data-refresh`, `ngwaf-sync`, `rdns-enrichment`, `share-audit-purge`.
 
 ## Code
 

@@ -47,14 +47,5 @@ from env vars or config, never hard-coded infra.
 | `dev/verify_observability.py` | Diagnostic CLI verifying OTel traces, Prometheus metrics, and structured log delivery. |
 | `load_test/generate_synthetic_traffic.py` | Unified multi-tier synthetic traffic and log generator for FOS and ClickHouse. |
 
-### Live deploy and load tests
-
-`~/Projects/fastly-log-analytics-deploy-testing` owns the combined `fdt`
-workflow (see that repo's `AGENTS.md` for private environment names). Run it
-there with `uv run fdt run <envs...>`; the command is read-only unless the
-explicit `--approve` flag is added. Billed load campaigns also require explicit
-approval. FLA keeps only the hooks fdt reads: `X-FLA-Harness`, the SSR
-forwarding header, and the page-sweep `DEBUG_RESPONSES` envelope.
-
 > Local-only artifacts (e.g. a deployed-`restart.sh` snapshot) are gitignored and
 > not listed here.

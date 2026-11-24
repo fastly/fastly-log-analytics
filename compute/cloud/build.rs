@@ -146,8 +146,8 @@ fn asset_entry(root: &Path, path: &Path, cache_dir: &Path) -> AssetEntry {
         // Large binary/tabular assets (DuckDB wasm, ASN lookup table) would bloat the Compute
         // package if shipped uncompressed, so ship only Brotli/gzip variants (front VCL always
         // negotiates br/gzip and caches the compressed response).
-        let omit_identity = mime == "application/wasm"
-            || relative == Path::new("geo/asn-names.tsv");
+        let omit_identity =
+            mime == "application/wasm" || relative == Path::new("geo/asn-names.tsv");
         if omit_identity && (gzip.is_some() || br.is_some()) {
             keep_identity = false;
         }

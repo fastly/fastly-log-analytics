@@ -181,13 +181,13 @@ There are no direct public endpoints. The stage runs from `/_tick` or from the a
 - **Capacity:** worker fan-out (up to 176 objects per tick) and relayed fan-out are tested only in the fake runtime. Live throughput, heap use, worker wall time and the worker → main relay hop (Task 25.4) are unmeasured.
 - F4: a tick budget for later stages, `/_internal/stage` for log_flush and maintenance, and round-robin across services.
 - No `rum_ingest` stage exists yet. `Options` keeps `stream`/`table` so RUM can reuse the coordinator (plan section 9C).
-- Wanted — not yet in a plan task (Drew 2026-10-30): a quarantine inspection view and purge. Failed and quarantined raw objects are never put on the delete queue, so they accumulate in `raw/request/`.
+- Failed and quarantined raw objects are never put on the delete queue; inspect and purge them via the Quarantine section on `/admin`.
 - `bytes_read` is never populated.
-- A single object spanning more windows than a worker's budget allows fails its shard, because a one-key shard cannot split, until the plan is abandoned. The heap use of a 48 MiB decode has not been measured.
+- A single object spanning more windows than a worker's budget allows fails its shard, because a one-key shard cannot split, until the plan is abandoned.
 - `ingest:deleteq:*` records are never removed when `delete_after` is false.
-- v3 parity, Wanted — not yet in a plan task (Drew 2026-10-30):
-  - `full-sync.md`: a deep re-LIST of `raw/request/**` behind the watermark.
-  - `gap-heal.md`: log accounting that compares the Fastly stats API with ingested rows.
+- Future parity items:
+  - `full-sync`: a deep re-LIST of `raw/request/**` behind the watermark.
+  - `gap-heal`: log accounting that compares the Fastly stats API with ingested rows.
 
 ## Code
 

@@ -398,11 +398,11 @@ describe('ServerFooter', () => {
     const fetchSpy = vi.fn().mockResolvedValue({ ok: true, text: async () => 'gke-node-1' })
     vi.stubGlobal('fetch', fetchSpy)
     process.env.KUBERNETES_SERVICE_HOST = '10.0.0.1'
-    process.env.POD_NAME = 'fla-se-demo-frontend-abc'
+    process.env.POD_NAME = 'fla-frontend-abc'
     const el = await ServerFooter()
     const serialized = JSON.stringify(el)
     expect(serialized).toContain('k8s')
-    expect(serialized).toContain('fla-se-demo-frontend-abc')
+    expect(serialized).toContain('fla-frontend-abc')
     expect(serialized).not.toContain('gce')
     expect(fetchSpy).not.toHaveBeenCalled()
   })
