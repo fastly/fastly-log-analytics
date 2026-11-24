@@ -448,7 +448,7 @@ _EMBEDDED_IPV6_RE = re.compile(
     r"[A-Fa-f0-9]{1,4}(?::[A-Fa-f0-9]{1,4}){2,7}"
     r"|(?:[A-Fa-f0-9]{1,4}:){1,6}:(?:[A-Fa-f0-9]{1,4}(?::[A-Fa-f0-9]{1,4}){0,5})?"
     r"|::(?:[A-Fa-f0-9]{1,4}(?::[A-Fa-f0-9]{1,4}){0,6})"
-    r")(?![A-Fa-f0-9:])"
+    r")(?![A-Fa-f0-9]|:(?!(?:[1-9]\d{1,4})(?![A-Fa-f0-9:]))[A-Fa-f0-9:])"
 )
 _SAVED_VIEW_STRUCTURAL_KEYS = frozenset(
     {
@@ -926,10 +926,16 @@ def scrub_ip_text(val: str) -> str:
                         k -= 1
                     before_dcolon = out[k : start - 2]
                     if not before_dcolon or (
-                        1 <= len(before_dcolon) <= 4 and all(ch in "0123456789abcdefABCDEF" for ch in before_dcolon)
+                        1 <= len(before_dcolon) <= 4
+                        and not before_dcolon.isalpha()
+                        and all(ch in "0123456789abcdefABCDEF" for ch in before_dcolon)
                     ):
                         return cand
-            elif 1 <= len(prefix_tok) <= 4 and all(ch in "0123456789abcdefABCDEF" for ch in prefix_tok):
+            elif (
+                1 <= len(prefix_tok) <= 4
+                and not prefix_tok.isalpha()
+                and all(ch in "0123456789abcdefABCDEF" for ch in prefix_tok)
+            ):
                 return cand
         try:
             ipaddress.IPv6Address(cand)

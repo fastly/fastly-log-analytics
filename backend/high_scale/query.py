@@ -1944,7 +1944,9 @@ def _reject_unsafe_functions(sql: str, *, parse_tree: Any | None = None) -> None
                 or prev_k in ("DQUOTE", "STR", "NUM")
                 or (prev_k == "IDENT" and prev_t.upper() not in _APPLY_PREV_NON_TARGET_WORDS)
                 or (
-                    idx >= 2 and sig[idx - 2][0] == "IDENT" and sig[idx - 2][1].upper() in ("EXCEPT", "APPLY", "STRICT")
+                    idx >= 2
+                    and sig[idx - 2][0] == "IDENT"
+                    and sig[idx - 2][1].upper() in ("EXCEPT", "APPLY", "STRICT", "AS")
                 )
             )
             if preceded_by_target:
@@ -3628,6 +3630,76 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 ):
                     p = kw_sp - 1
                     continue
+                if (
+                    pk in ("IDENT", "DQUOTE")
+                    and p >= 3
+                    and tokens[sig_list[p - 1]][0] == "IDENT"
+                    and tokens[sig_list[p - 1]][1].upper() == "AS"
+                ):
+                    q = p - 2
+                    bdepth = 0
+                    found_rep = -1
+                    while q >= 0:
+                        qk, qt = tokens[sig_list[q]]
+                        if (qk, qt) == ("OP", ")"):
+                            open_sp = match_by_s.get(q, -1)
+                            if open_sp < 0:
+                                break
+                            q = open_sp - 1
+                            continue
+                        if (qk, qt) == ("OP", "]"):
+                            bdepth += 1
+                            q -= 1
+                            continue
+                        if (qk, qt) == ("OP", "["):
+                            if bdepth == 0:
+                                break
+                            bdepth -= 1
+                            q -= 1
+                            continue
+                        if bdepth > 0:
+                            q -= 1
+                            continue
+                        if qk == "OP" and qt in ("(", ",", ";"):
+                            break
+                        if qk == "IDENT":
+                            qu = qt.upper()
+                            if qu == "REPLACE":
+                                if q + 1 < len(sig_list) and tokens[sig_list[q + 1]] == ("OP", "("):
+                                    q -= 1
+                                    continue
+                                expr_sp = q + 1
+                                if (
+                                    expr_sp < p - 1
+                                    and tokens[sig_list[expr_sp]][0] == "IDENT"
+                                    and tokens[sig_list[expr_sp]][1].upper() == "STRICT"
+                                ):
+                                    expr_sp += 1
+                                if expr_sp <= p - 2:
+                                    found_rep = q
+                                break
+                            if qu in (
+                                "SELECT",
+                                "FROM",
+                                "WHERE",
+                                "GROUP",
+                                "HAVING",
+                                "ORDER",
+                                "LIMIT",
+                                "UNION",
+                                "INTERSECT",
+                                "EXCEPT",
+                                "PREWHERE",
+                                "QUALIFY",
+                                "WINDOW",
+                                "SETTINGS",
+                                "FORMAT",
+                            ):
+                                break
+                        q -= 1
+                    if found_rep >= 0:
+                        p = found_rep - 1
+                        continue
                 break
             break
         if not anchored:
@@ -6266,6 +6338,51 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                 if cur_item:
                     proj_items.append(cur_item)
 
+            def _advance_star_replace(it_idxs: list[int], rep_off: int) -> int | None:
+                if processed[it_idxs[rep_off]] == ("OP", "("):
+                    rp_r = _find_matching_paren(processed, it_idxs[rep_off])
+                    nxt_off = rep_off + 1
+                    while nxt_off < len(it_idxs) and it_idxs[nxt_off] < rp_r:
+                        nxt_off += 1
+                    if nxt_off < len(it_idxs) and it_idxs[nxt_off] == rp_r:
+                        nxt_off += 1
+                    if (
+                        nxt_off + 1 < len(it_idxs)
+                        and processed[it_idxs[nxt_off]][0] == "IDENT"
+                        and processed[it_idxs[nxt_off]][1].upper() == "AS"
+                        and processed[it_idxs[nxt_off + 1]][0] in ("IDENT", "DQUOTE")
+                    ):
+                        return nxt_off + 2
+                    return nxt_off
+                scan = rep_off
+                p_dep = 0
+                b_dep = 0
+                while scan < len(it_idxs):
+                    sk, st = processed[it_idxs[scan]]
+                    if sk == "OP":
+                        if st == "(":
+                            p_dep += 1
+                        elif st == ")":
+                            if p_dep == 0:
+                                return None
+                            p_dep -= 1
+                        elif st == "[":
+                            b_dep += 1
+                        elif st == "]":
+                            if b_dep == 0:
+                                return None
+                            b_dep -= 1
+                    elif p_dep == 0 and b_dep == 0 and sk == "IDENT" and st.upper() == "AS":
+                        if (
+                            scan > rep_off
+                            and scan + 1 < len(it_idxs)
+                            and processed[it_idxs[scan + 1]][0] in ("IDENT", "DQUOTE")
+                        ):
+                            return scan + 2
+                        return None
+                    scan += 1
+                return None
+
             def _is_star_transformer_suffix(it_idxs: list[int], start_off: int) -> bool:
                 if start_off == len(it_idxs):
                     return True
@@ -6307,13 +6424,9 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                             and processed[it_idxs[rep_off]][1].upper() == "STRICT"
                         ):
                             rep_off += 1
-                        if processed[it_idxs[rep_off]] == ("OP", "("):
-                            rp_r = _find_matching_paren(processed, it_idxs[rep_off])
-                            t_off = rep_off + 1
-                            while t_off < len(it_idxs) and it_idxs[t_off] < rp_r:
-                                t_off += 1
-                            if t_off < len(it_idxs) and it_idxs[t_off] == rp_r:
-                                t_off += 1
+                        nxt_off = _advance_star_replace(it_idxs, rep_off)
+                        if nxt_off is not None:
+                            t_off = nxt_off
                             matched_any = True
                             continue
                         return False
@@ -6358,13 +6471,9 @@ def _rewrite_console_sql_with_canonicals(sql: str, *, svc_table: str, names: Map
                             and processed[it_idxs[rep_off]][1].upper() == "STRICT"
                         ):
                             rep_off += 1
-                        if processed[it_idxs[rep_off]] == ("OP", "("):
-                            rp_r = _find_matching_paren(processed, it_idxs[rep_off])
-                            t_off = rep_off + 1
-                            while t_off < len(it_idxs) and it_idxs[t_off] < rp_r:
-                                t_off += 1
-                            if t_off < len(it_idxs) and it_idxs[t_off] == rp_r:
-                                t_off += 1
+                        nxt_off = _advance_star_replace(it_idxs, rep_off)
+                        if nxt_off is not None:
+                            t_off = nxt_off
                             continue
                         break
                     break

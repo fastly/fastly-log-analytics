@@ -133,7 +133,7 @@ it("reports a bounded, redacted error message so a failed query can be diagnosed
       // BUG-T5-ITER27-01 (tightened in Iter32 closed-vocab): Unicode possessives, plural possessives, trailing SQL backslashes, N'/R' prefixes, unspaced keyword quotes, and raw IPv4:
       ["Binder Error: café's owner '198.51.100.42' in filter", ["198.51.100.42", "café"], "Error: Binder Error: [redacted]"],
       ["Binder Error: users' 'SecAfterPlural' in filter", ["SecAfterPlural", "users"], "Error: Binder Error: [redacted]"],
-      ["Binder Error: invalid pattern LIKE '%\\' for client '198.51.100.42'", ["198.51.100.42", "%\\"], "Error: Binder Error: invalid pattern LIKE [redacted] for client [redacted]"],
+      ["Binder Error: invalid pattern LIKE '%\\' for client '198.51.100.42'", ["198.51.100.42", "%\\"], "Error: Binder Error: invalid pattern LIKE [redacted]"],
       ["Binder Error: invalid pattern LIKE '%\\\\' for client '198.51.100.42'", ["198.51.100.42", "%\\\\"], "Error: Binder Error: invalid pattern LIKE [redacted] for client [redacted]"],
       ["Parser Error: invalid literal N'198.51.100.42' or n'SecNat88' or R'SecRaw77'", ["198.51.100.42", "SecNat88", "SecRaw77"], "Error: Parser Error: invalid literal [redacted] or [redacted] or [redacted]"],
       ["Parser Error: syntax error near SELECT'198.51.100.42' or LIKE'SecNoSpace' or WHERE'SecPhrase With Spaces'", ["198.51.100.42", "SecNoSpace", "SecPhrase"], "Error: Parser Error: syntax error near SELECT[redacted] or LIKE[redacted] or WHERE[redacted]"],
@@ -2502,12 +2502,12 @@ it("SEC-T5-ITER37-FE-03: handles non-E backslash-escaped single quotes in Stage 
       [
         "Error parsing 'foo\\' table ' and 'bar'",
         ["foo", "table", "bar"],
-        "Error: Error parsing [redacted] and [redacted]",
+        "Error: Error parsing [redacted]",
       ],
       [
         "Runtime Error: parsing 'foo\\' table ' rejected",
         ["foo", "table"],
-        "Error: Runtime Error: parsing [redacted] rejected",
+        "Error: Runtime Error: parsing [redacted]",
       ],
       [
         "Runtime Error: parsing 'foo\\\\' and 'bar' rejected",
@@ -2517,7 +2517,7 @@ it("SEC-T5-ITER37-FE-03: handles non-E backslash-escaped single quotes in Stage 
       [
         "Runtime Error: parsing 'foo\\\\\\' table ' and 'bar' rejected",
         ["foo", "table", "bar"],
-        "Error: Runtime Error: parsing [redacted] and [redacted] rejected",
+        "Error: Runtime Error: parsing [redacted]",
       ],
       [
         "Runtime Error: parsing 'foo''bar' and 'baz' rejected",
@@ -2532,7 +2532,7 @@ it("SEC-T5-ITER37-FE-03: handles non-E backslash-escaped single quotes in Stage 
       [
         "Binder Error: invalid pattern LIKE '%\\' for client 'memory'",
         ["memory", "%\\"],
-        "Error: Binder Error: invalid pattern LIKE [redacted] for client [redacted]",
+        "Error: Binder Error: invalid pattern LIKE [redacted]",
       ],
     ];
     for (const [msg, forbidden, expectedExact] of cases) {
@@ -2645,12 +2645,12 @@ it("SEC-T5-ITER39-FE-01: prevents non-E backslash-quote phase inversion with tra
       [
         "error: 'a\\'memory' in user's query",
         ["memory", "user", "query"],
-        "Error: error: [redacted] in [redacted]",
+        "Error: error: [redacted]",
       ],
       [
         "error: 'a\\'select' for O'Brien",
         ["select", "Brien"],
-        "Error: error: [redacted] for [redacted]",
+        "Error: error: [redacted]",
       ],
       [
         "error: 'a\\'memory' 'truncated",
@@ -2660,12 +2660,12 @@ it("SEC-T5-ITER39-FE-01: prevents non-E backslash-quote phase inversion with tra
       [
         "error: 'a\\' memory ' in user's query",
         ["memory", "user", "query"],
-        "Error: error: [redacted] in [redacted]",
+        "Error: error: [redacted]",
       ],
       [
         "error: 'a\\' select ' for O'Brien",
         ["select", "Brien"],
-        "Error: error: [redacted] for [redacted]",
+        "Error: error: [redacted]",
       ],
     ];
     for (const [msg, forbidden, expectedExact] of cases) {
@@ -2692,12 +2692,12 @@ it("SEC-T5-ITER39-FE-02: prevents double-quote and backtick trailing-backslash q
       [
         'Parser Error: near "a\\" and "select update delete session 500ms"',
         ["select", "update", "delete", "session", "500ms"],
-        "Error: Parser Error: near [redacted] and [redacted]",
+        "Error: Parser Error: near [redacted]",
       ],
       [
         "Parser Error: near `a\\` and `session 500ms 404 B`",
         ["session", "500ms", "404"],
-        "Error: Parser Error: near [redacted] and [redacted]",
+        "Error: Parser Error: near [redacted]",
       ],
       [
         'Parser Error: near "a\\\\" and "select update delete"',
@@ -2707,12 +2707,12 @@ it("SEC-T5-ITER39-FE-02: prevents double-quote and backtick trailing-backslash q
       [
         'JSON Error: bad value "foo\\"bar" and "select"',
         ["foo", "bar", "select"],
-        "Error: JSON Error: bad value [redacted] and [redacted]",
+        "Error: JSON Error: bad value [redacted]",
       ],
       [
         'JSON Error: bad value "foo\\" bar " and "select"',
         ["foo", "bar", "select"],
-        "Error: JSON Error: bad value [redacted] and [redacted]",
+        "Error: JSON Error: bad value [redacted]",
       ],
     ];
     for (const [msg, forbidden, expectedExact] of cases) {
@@ -2741,6 +2741,171 @@ it("SEC-T5-ITER39-FE-03: maintains strict O(N) performance (<10ms median, <150ms
       `Parser Error: near \`${"a\\`".repeat(21000)}\` and \`session 500ms 404 B\``,
       `Parser Error: ${'"a\\" '.repeat(12800)}"select"`,
       `Parser Error: ${"`a\\` ".repeat(12800)}\`session\``,
+    ];
+    for (const payload of perfPayloads64k) {
+      const err = new Error(payload);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const trials: number[] = [];
+      for (let k = 0; k < 5; k += 1) {
+        const t0 = performance.now();
+        await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+        trials.push(performance.now() - t0);
+      }
+      const sorted = [...trials].sort((a, b) => a - b);
+      const median = sorted[Math.floor(sorted.length / 2)]!;
+      const max = sorted.at(-1)!;
+      expect(median, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(10);
+      expect(max, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(150);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+}, 30000);
+
+it("SEC-T5-ITER40-FE-01: prevents multi-trailing-backslash quote parity inversion across double, backtick, and single quotes", async () => {
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const cases: readonly [string, readonly string[], string][] = [
+      [
+        'Parser Error: near "a\\" and "b\\" and "select update delete session 500ms"',
+        ["select", "update", "delete", "session", "500ms"],
+        "Error: Parser Error: near [redacted]",
+      ],
+      [
+        "Parser Error: near `a\\` and `b\\` and `session 500ms 404 B`",
+        ["session", "500ms", "404"],
+        "Error: Parser Error: near [redacted]",
+      ],
+      [
+        "Parser Error: near 'a\\' and 'b\\' and 'select update delete session 500ms'",
+        ["select", "update", "delete", "session", "500ms"],
+        "Error: Parser Error: near [redacted]",
+      ],
+      [
+        'Parser Error: near "a\\" and "select update delete" and "b\\"',
+        ["select", "update", "delete"],
+        "Error: Parser Error: near [redacted]",
+      ],
+      [
+        'Parser Error: near "a\\\\\\" and "b\\\\\\" and "select update delete"',
+        ["select", "update", "delete"],
+        "Error: Parser Error: near [redacted]",
+      ],
+    ];
+    for (const [msg, forbidden, expectedExact] of cases) {
+      const err = new Error(msg);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const got = events.at(-1)?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got, `msg=${msg} got=${got}`).not.toContain(frag);
+      }
+      expect(got, `msg=${msg}`).toBe(expectedExact);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+});
+
+it("SEC-T5-ITER40-FE-02: prevents dot and colon delimiter bypasses after trailing-backslash quotes", async () => {
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const cases: readonly [string, readonly string[], string][] = [
+      [
+        'Binder Error: column "a\\"."select update delete session 500ms" not found',
+        ["select", "update", "delete", "session", "500ms"],
+        "Error: Binder Error: column [redacted]",
+      ],
+      [
+        'Parser Error: near "a\\": "select update delete session 500ms"',
+        ["select", "update", "delete", "session", "500ms"],
+        "Error: Parser Error: near [redacted]",
+      ],
+      [
+        "Parser Error: near 'a\\': 'select update delete session 500ms'",
+        ["select", "update", "delete", "session", "500ms"],
+        "Error: Parser Error: near [redacted]",
+      ],
+      [
+        "Parser Error: near `a\\`. `session 500ms 404 B`",
+        ["session", "500ms", "404"],
+        "Error: Parser Error: near [redacted]",
+      ],
+    ];
+    for (const [msg, forbidden, expectedExact] of cases) {
+      const err = new Error(msg);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const got = events.at(-1)?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got, `msg=${msg} got=${got}`).not.toContain(frag);
+      }
+      expect(got, `msg=${msg}`).toBe(expectedExact);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+});
+
+it("SEC-T5-ITER40-FE-03: prevents non-contraction apostrophe mismatch and cross-quote parity inversion", async () => {
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const cases: readonly [string, readonly string[], string][] = [
+      [
+        "Error: 'a\\' b'c 'HTTP 403 100 MB session valid'",
+        ["HTTP", "403", "100", "MB", "session", "valid"],
+        "Error: Error: [redacted]",
+      ],
+      [
+        "Error: 'a\\' user's '1234ms 500 GiB DB::Exception'",
+        ["1234ms", "500", "GiB", "DB::Exception", "user"],
+        "Error: Error: [redacted]",
+      ],
+      [
+        "Error: \"a\\\" HTTP 403 100 MB session valid\" 'foo\"bar'",
+        ["HTTP", "403", "100", "MB", "session", "valid", "foo", "bar"],
+        "Error: Error: [redacted]",
+      ],
+      [
+        "Error: `a\\` HTTP 403 100 MB session valid` 'foo`bar'",
+        ["HTTP", "403", "100", "MB", "session", "valid", "foo", "bar"],
+        "Error: Error: [redacted]",
+      ],
+    ];
+    for (const [msg, forbidden, expectedExact] of cases) {
+      const err = new Error(msg);
+      await expect(measureCloudQuery("dashboard.bundle", async () => { throw err; })).rejects.toBe(err);
+      const got = events.at(-1)?.error ?? "";
+      for (const frag of forbidden) {
+        expect(got, `msg=${msg} got=${got}`).not.toContain(frag);
+      }
+      expect(got, `msg=${msg}`).toBe(expectedExact);
+    }
+  } finally {
+    window.removeEventListener("fla:cloud-query", listener);
+  }
+});
+
+it("SEC-T5-ITER40-FE-04: maintains strict O(N) performance (<10ms median, <150ms max) on 64 KiB Wave 40 adversarial union payloads", async () => {
+  setCloudModeRuntime(true);
+  const events: { state?: string; error?: string }[] = [];
+  const listener = (event: Event) => events.push((event as CustomEvent).detail);
+  window.addEventListener("fla:cloud-query", listener);
+  try {
+    const perfPayloads64k = [
+      `Parser Error: near ${'"a\\" and '.repeat(7000)}"select update delete session 500ms"`,
+      `Parser Error: near ${"`a\\` and ".repeat(7000)}\`session 500ms 404 B\``,
+      `Binder Error: column ${'"a\\".'.repeat(12000)}"select update delete session 500ms" not found`,
+      `Error: 'a\\' ${"user's ".repeat(9000)}'1234ms 500 GiB DB::Exception'`,
+      `Error: "${"a".repeat(64000)}\\" HTTP 403 100 MB session valid" 'foo"bar'`,
+      `Error: "${"\\".repeat(63999)}" and "select"`,
     ];
     for (const payload of perfPayloads64k) {
       const err = new Error(payload);

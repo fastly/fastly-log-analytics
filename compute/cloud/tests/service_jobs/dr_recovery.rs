@@ -17355,3 +17355,484 @@ fn iter37_minimal_recovery_recovers_own_days_when_only_foreign_manifests_exist()
         "iter37: recovered catalog_head must include the own Day object! wm={wm}"
     );
 }
+
+#[test]
+fn iter40_manifest_version_and_generation_bound_in_scan_loop() {
+    use fastly_log_analytics::ingest;
+
+    struct RichGuard;
+    impl Drop for RichGuard {
+        fn drop(&mut self) {
+            RICH_FOS.with(|r| r.set(false));
+            MTIMES.with(|m| m.borrow_mut().clear());
+        }
+    }
+    let _guard = RichGuard;
+    RICH_FOS.with(|r| r.set(true));
+    MTIMES.with(|m| m.borrow_mut().clear());
+
+    let p = Platform::new();
+    let day_ts = 1_799_971_200i64;
+    let poison_day_ts = day_ts + 86_400;
+    let d5_key =
+        "processed/_catalog/00000000000000000000000000000000000000000000000000000000000000d5.json";
+    let poison_day_key =
+        "processed/_catalog/00000000000000000000000000000000000000000000000000000000000000ff.json";
+
+    let own_m5_key = format!(
+        "processed/_catalog/manifest-s-fixtureService-rev-{:020}-ok.json",
+        u64::MAX - 5
+    );
+    let own_m5 = json!({
+        "version": VERSION,
+        "service_id": "fixtureService",
+        "generation": 5u64,
+        "batch": "ingest",
+        "schema": "v2",
+        "committed_at": "2027-01-15T01:00:00Z",
+        "previous": null,
+        "files": [], "summaries": [], "sources": [], "replaces": [],
+        "bytes": 0, "rows": 0, "parents": {},
+        "head_days": { day_ts.to_string(): d5_key }
+    });
+    let bad_ver99_key = format!(
+        "processed/_catalog/manifest-s-fixtureService-rev-{:020}-v99.json",
+        u64::MAX - 50
+    );
+    let bad_ver99 = json!({
+        "version": 99u32,
+        "service_id": "fixtureService",
+        "generation": 50u64,
+        "batch": "ingest",
+        "schema": "v2",
+        "committed_at": "2027-01-15T02:00:00Z",
+        "previous": null,
+        "files": [], "summaries": [], "sources": [], "replaces": [],
+        "bytes": 0, "rows": 0, "parents": {},
+        "head_days": { poison_day_ts.to_string(): poison_day_key }
+    });
+    let bad_ver1_reset_key = format!(
+        "processed/_catalog/manifest-s-fixtureService-rev-{:020}-v1rst.json",
+        u64::MAX - 40
+    );
+    let bad_ver1_reset = json!({
+        "version": 1u32,
+        "service_id": "fixtureService",
+        "generation": 40u64,
+        "batch": "reset",
+        "schema": "v2",
+        "committed_at": "2027-01-15T03:00:00Z",
+        "previous": null,
+        "files": [], "summaries": [], "sources": [], "replaces": [],
+        "bytes": 0, "rows": 0, "parents": {}
+    });
+    let bad_gen_oob_key = format!(
+        "processed/_catalog/manifest-s-fixtureService-rev-{:020}-oob.json",
+        u64::MAX - 9_007_199_254_740_992u64
+    );
+    let bad_gen_oob = json!({
+        "version": VERSION,
+        "service_id": "fixtureService",
+        "generation": 9_007_199_254_740_992u64,
+        "batch": "ingest",
+        "schema": "v2",
+        "committed_at": "2027-01-15T04:00:00Z",
+        "previous": null,
+        "files": [], "summaries": [], "sources": [], "replaces": [],
+        "bytes": 0, "rows": 0, "parents": {},
+        "head_days": { poison_day_ts.to_string(): poison_day_key }
+    });
+
+    for (k, v) in [
+        (&own_m5_key, &own_m5),
+        (&bad_ver99_key, &bad_ver99),
+        (&bad_ver1_reset_key, &bad_ver1_reset),
+        (&bad_gen_oob_key, &bad_gen_oob),
+    ] {
+        p.adapter
+            .seed_object_bytes("fos-fixture-logs", k, serde_json::to_vec(v).unwrap());
+    }
+
+    let res = p.json(
+        "POST",
+        "/api/admin/provision/recover",
+        json!({
+            "token": "fixture-token",
+            "service_id": "fixtureService",
+            "fos_bucket": "fos-fixture-logs",
+            "fos_region": "us-east-1"
+        }),
+    );
+    assert_eq!(res["ok"], true);
+    assert_eq!(res["source"], "catalog_scan");
+    assert_eq!(
+        res["catalog_generation"], 5,
+        "iter40: invalid manifest version/generation must not displace legitimate v2 manifest! res={res}"
+    );
+    let wm = &p.adapter.records()[ingest::WATERMARK_KEY].value;
+    assert_eq!(wm["catalog"]["manifest"], json!(own_m5_key));
+    assert_eq!(wm["catalog"]["days"][day_ts.to_string()], json!(d5_key));
+    assert!(
+        wm["catalog"]["days"]
+            .get(poison_day_ts.to_string())
+            .is_none(),
+        "iter40: invalid manifest head_days must not be imported! wm={wm}"
+    );
+}
+
+#[test]
+fn iter40_expected_manifest_rejects_bad_version_on_page_and_direct_get() {
+    struct RichGuard;
+    impl Drop for RichGuard {
+        fn drop(&mut self) {
+            RICH_FOS.with(|r| r.set(false));
+            MTIMES.with(|m| m.borrow_mut().clear());
+        }
+    }
+    let _guard = RichGuard;
+    RICH_FOS.with(|r| r.set(true));
+    MTIMES.with(|m| m.borrow_mut().clear());
+
+    let day_ts = 1_799_971_200i64;
+    let d5_key =
+        "processed/_catalog/00000000000000000000000000000000000000000000000000000000000000d5.json";
+    let own_m5_key = format!(
+        "processed/_catalog/manifest-s-fixtureService-rev-{:020}-ok.json",
+        u64::MAX - 5
+    );
+    let own_m5 = json!({
+        "version": VERSION,
+        "service_id": "fixtureService",
+        "generation": 5u64,
+        "batch": "ingest",
+        "schema": "v2",
+        "committed_at": "2027-01-15T01:00:00Z",
+        "previous": null,
+        "files": [], "summaries": [], "sources": [], "replaces": [],
+        "bytes": 0, "rows": 0, "parents": {},
+        "head_days": { day_ts.to_string(): d5_key }
+    });
+
+    // Cases cover both on-page (m_tier == 3 scanned in main loop) and direct-GET fallback
+    // (m_tier == 0 skipped after `own_m5` sets `best_manifest_days` and breaks, then fetched via
+    // `expected_manifest` direct GET at dr.rs:1349).
+    let cases = [
+        (
+            "on_page_version_99",
+            format!(
+                "processed/_catalog/manifest-s-fixtureService-rev-{:020}-exp99.json",
+                u64::MAX - 5
+            ),
+            99u32,
+            false,
+        ),
+        (
+            "on_page_version_1",
+            format!(
+                "processed/_catalog/manifest-s-fixtureService-rev-{:020}-exp1.json",
+                u64::MAX - 5
+            ),
+            1u32,
+            false,
+        ),
+        (
+            "direct_get_version_99",
+            "processed/_catalog/custom-expected-v99.json".to_owned(),
+            99u32,
+            true,
+        ),
+        (
+            "direct_get_version_1",
+            "processed/_catalog/custom-expected-v1.json".to_owned(),
+            1u32,
+            true,
+        ),
+    ];
+
+    for (label, exp_key, bad_ver, seed_own_m5) in cases {
+        let p = Platform::new();
+        let dr_state = CloudDrState {
+            schema_version: SCHEMA_VERSION,
+            updated_at: 1_800_000_000,
+            service_id: "fixtureService".into(),
+            service: json!({"log_period": 60}),
+            views: vec![],
+            catalog_head: Some(Head {
+                version: VERSION,
+                generation: 5,
+                manifest: Some(exp_key.clone()),
+                recent: vec![Event {
+                    cursor: "fixtureService:5".into(),
+                    generation: 5,
+                    committed_at: Some("2027-01-15T01:00:00Z".into()),
+                    manifest: Some(exp_key.clone()),
+                }],
+                days: BTreeMap::from([(day_ts, d5_key.into())]),
+                ..Head::default()
+            }),
+            floor_key: None,
+            rum_stats: None,
+        };
+        let bad_expected = json!({
+            "version": bad_ver,
+            "service_id": "fixtureService",
+            "generation": 5u64,
+            "batch": "ingest",
+            "schema": "v2",
+            "committed_at": "2027-01-15T01:00:00Z",
+            "previous": null,
+            "files": [], "summaries": [], "sources": [], "replaces": [],
+            "bytes": 0, "rows": 0, "parents": {}
+        });
+        p.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            "meta/cloud_dr_state.json",
+            serde_json::to_vec(&dr_state).unwrap(),
+        );
+        if seed_own_m5 {
+            p.adapter.seed_object_bytes(
+                "fos-fixture-logs",
+                &own_m5_key,
+                serde_json::to_vec(&own_m5).unwrap(),
+            );
+        }
+        p.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            &exp_key,
+            serde_json::to_vec(&bad_expected).unwrap(),
+        );
+
+        let resp = p.call(
+            "POST",
+            "/api/admin/provision/recover",
+            json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            }),
+        );
+        assert_eq!(
+            resp.status,
+            400,
+            "iter40 ({label}): expected_manifest with version={bad_ver} must be rejected with 400! got {}: {}",
+            resp.status,
+            String::from_utf8_lossy(&resp.body)
+        );
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["error"], "invalid_dr_catalog_head", "iter40 ({label})");
+    }
+}
+
+#[test]
+fn iter40_legacy_day_rejects_unsupported_block_version_all_three_sites() {
+    use fastly_log_analytics::ingest;
+
+    struct RichGuard;
+    impl Drop for RichGuard {
+        fn drop(&mut self) {
+            RICH_FOS.with(|r| r.set(false));
+            MTIMES.with(|m| m.borrow_mut().clear());
+        }
+    }
+    let _guard = RichGuard;
+    RICH_FOS.with(|r| r.set(true));
+    MTIMES.with(|m| m.borrow_mut().clear());
+
+    let hour = 1_800_000_000i64;
+    let day_ts = 1_799_971_200i64;
+    let day_key =
+        "processed/_catalog/00000000000000000000000000000000000000000000000000000000000000d7.json";
+
+    // Site 1: main scan loop (`dr.rs:1131`) — block is listed as `.json` in `_catalog/`.
+    {
+        let p = Platform::new();
+        let blk_key = "processed/_catalog/00000000000000000000000000000000000000000000000000000000000000b7.json";
+        let legacy_day = Day {
+            version: VERSION,
+            service_id: None,
+            hours: BTreeMap::from([(
+                hour,
+                Reference {
+                    key: blk_key.into(),
+                    generation: 7,
+                },
+            )]),
+            ..Day::default()
+        };
+        let bad_block = fastly_log_analytics::ingest::catalog::Block {
+            version: 99,
+            service_id: "fixtureService".into(),
+            generation: 7,
+            hour,
+            previous: None,
+            files: vec![],
+            summaries: vec![],
+            replaces: vec![],
+            committed_at: BTreeMap::new(),
+        };
+        p.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            day_key,
+            serde_json::to_vec(&legacy_day).unwrap(),
+        );
+        p.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            blk_key,
+            serde_json::to_vec(&bad_block).unwrap(),
+        );
+
+        let res = p.json(
+            "POST",
+            "/api/admin/provision/recover",
+            json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            }),
+        );
+        assert_eq!(res["ok"], true);
+        assert_eq!(
+            res["source"], "minimal",
+            "iter40 (site1): legacy Day backed by v99 Block must not be promoted! res={res}"
+        );
+        assert!(res["catalog_generation"].is_null());
+        assert!(!p.adapter.records().contains_key(ingest::WATERMARK_KEY));
+    }
+
+    // Site 2: M2 fallback `_catalog/` scan (`dr.rs:1269`) — manifest lacks `head_days`, so M2
+    // lists `_catalog/` and reads the v99 `.json` block.
+    {
+        let p = Platform::new();
+        let blk_key = "processed/_catalog/00000000000000000000000000000000000000000000000000000000000000b7.json";
+        let own_m7_key = format!(
+            "processed/_catalog/manifest-s-fixtureService-rev-{:020}-m2.json",
+            u64::MAX - 7
+        );
+        let own_m7 = json!({
+            "version": VERSION,
+            "service_id": "fixtureService",
+            "generation": 7u64,
+            "batch": "ingest",
+            "schema": "v2",
+            "committed_at": "2027-01-15T01:00:00Z",
+            "previous": null,
+            "files": [], "summaries": [], "sources": [], "replaces": [],
+            "bytes": 0, "rows": 0, "parents": {}
+        });
+        let legacy_day = Day {
+            version: VERSION,
+            service_id: None,
+            hours: BTreeMap::from([(
+                hour,
+                Reference {
+                    key: blk_key.into(),
+                    generation: 7,
+                },
+            )]),
+            ..Day::default()
+        };
+        let bad_block = fastly_log_analytics::ingest::catalog::Block {
+            version: 99,
+            service_id: "fixtureService".into(),
+            generation: 7,
+            hour,
+            previous: None,
+            files: vec![],
+            summaries: vec![],
+            replaces: vec![],
+            committed_at: BTreeMap::new(),
+        };
+        p.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            &own_m7_key,
+            serde_json::to_vec(&own_m7).unwrap(),
+        );
+        p.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            day_key,
+            serde_json::to_vec(&legacy_day).unwrap(),
+        );
+        p.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            blk_key,
+            serde_json::to_vec(&bad_block).unwrap(),
+        );
+
+        let res = p.json(
+            "POST",
+            "/api/admin/provision/recover",
+            json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            }),
+        );
+        assert_eq!(res["ok"], true);
+        let wm = &p.adapter.records()[ingest::WATERMARK_KEY].value;
+        assert!(
+            wm["catalog"]["days"].get(day_ts.to_string()).is_none(),
+            "iter40 (site2 M2 fallback): legacy Day backed by v99 Block must not be promoted into Head! wm={wm}"
+        );
+    }
+
+    // Site 3: on-demand `get_object(bk)` (`dr.rs:1498`) — block key has non-`.json` suffix so
+    // the listing scan skips it and only on-demand legacy Day verification fetches it.
+    {
+        let p = Platform::new();
+        let blk_key = "processed/_catalog/block-v99-ondemand.blk";
+        let legacy_day = Day {
+            version: VERSION,
+            service_id: None,
+            hours: BTreeMap::from([(
+                hour,
+                Reference {
+                    key: blk_key.into(),
+                    generation: 7,
+                },
+            )]),
+            ..Day::default()
+        };
+        let bad_block = fastly_log_analytics::ingest::catalog::Block {
+            version: 99,
+            service_id: "fixtureService".into(),
+            generation: 7,
+            hour,
+            previous: None,
+            files: vec![],
+            summaries: vec![],
+            replaces: vec![],
+            committed_at: BTreeMap::new(),
+        };
+        p.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            day_key,
+            serde_json::to_vec(&legacy_day).unwrap(),
+        );
+        p.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            blk_key,
+            serde_json::to_vec(&bad_block).unwrap(),
+        );
+
+        let res = p.json(
+            "POST",
+            "/api/admin/provision/recover",
+            json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            }),
+        );
+        assert_eq!(res["ok"], true);
+        assert_eq!(
+            res["source"], "minimal",
+            "iter40 (site3 on-demand): legacy Day backed by v99 Block must not be promoted! res={res}"
+        );
+        assert!(res["catalog_generation"].is_null());
+        assert!(!p.adapter.records().contains_key(ingest::WATERMARK_KEY));
+    }
+}

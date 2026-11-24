@@ -1034,6 +1034,14 @@ fn scan_catalog_head(
             Err(_) => continue,
         };
         if let Ok(manifest) = serde_json::from_slice::<crate::ingest::catalog::Manifest>(&bytes) {
+            if manifest.version != crate::ingest::catalog::VERSION
+                || manifest.generation > 9_007_199_254_740_991
+            {
+                if is_expected {
+                    return Err(Error::new(400, "invalid_dr_catalog_head"));
+                }
+                continue;
+            }
             if manifest.committed_at.chars().any(char::is_control) {
                 saw_foreign_manifest = true;
                 if is_expected {
@@ -1129,6 +1137,10 @@ fn scan_catalog_head(
             return Err(Error::new(400, "invalid_dr_catalog_head"));
         }
         if let Ok(block) = serde_json::from_slice::<crate::ingest::catalog::Block>(&bytes) {
+            if block.version != crate::ingest::catalog::VERSION {
+                known_bad_blocks.insert(obj.key.clone());
+                continue;
+            }
             if block.service_id == service.service_id {
                 verified_own_blocks.insert(obj.key.clone());
             } else {
@@ -1267,6 +1279,10 @@ fn scan_catalog_head(
                     continue;
                 };
                 if let Ok(block) = serde_json::from_slice::<crate::ingest::catalog::Block>(&bytes) {
+                    if block.version != crate::ingest::catalog::VERSION {
+                        known_bad_blocks.insert(obj.key);
+                        continue;
+                    }
                     if block.service_id == service.service_id {
                         verified_own_blocks.insert(obj.key);
                     } else {
@@ -1354,7 +1370,9 @@ fn scan_catalog_head(
                         else {
                             return Err(Error::new(400, "invalid_dr_catalog_head"));
                         };
-                        if m.committed_at.chars().any(char::is_control)
+                        if m.version != crate::ingest::catalog::VERSION
+                            || m.generation > 9_007_199_254_740_991
+                            || m.committed_at.chars().any(char::is_control)
                             || m.service_id != service.service_id
                             || dr_head_gen.is_some_and(|dg| m.generation != dg)
                         {
@@ -1499,7 +1517,9 @@ fn scan_catalog_head(
                                     crate::ingest::catalog::Block,
                                 >(&blk_bytes)
                                 {
-                                    if blk.service_id == service.service_id {
+                                    if blk.version == crate::ingest::catalog::VERSION
+                                        && blk.service_id == service.service_id
+                                    {
                                         verified_own_blocks.insert(bk.clone());
                                     } else {
                                         known_bad_blocks.insert(bk.clone());

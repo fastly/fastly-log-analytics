@@ -1997,6 +1997,76 @@ def _preceded_by_star_transformer(tokens: list[_Tok], idx: int) -> bool:
             if kw_i >= 0 and tokens[kw_i].kind == "WORD" and tokens[kw_i].val.upper() == "EXCEPT":
                 p = kw_i - 1
                 continue
+            if (
+                tok.kind in ("WORD", "QIDENT")
+                and p >= 3
+                and tokens[p - 1].kind == "WORD"
+                and tokens[p - 1].val.upper() == "AS"
+            ):
+                q = p - 2
+                bdepth = 0
+                found_rep = -1
+                while q >= 0:
+                    qtok = tokens[q]
+                    if qtok.kind == "RPAREN":
+                        open_i = match_map.get(q, -1)
+                        if open_i < 0:
+                            break
+                        q = open_i - 1
+                        continue
+                    if qtok.kind == "RBRACK":
+                        bdepth += 1
+                        q -= 1
+                        continue
+                    if qtok.kind == "LBRACK":
+                        if bdepth == 0:
+                            break
+                        bdepth -= 1
+                        q -= 1
+                        continue
+                    if bdepth > 0:
+                        q -= 1
+                        continue
+                    if qtok.kind in ("LPAREN", "COMMA", "SEMI"):
+                        break
+                    if qtok.kind == "WORD":
+                        qu = qtok.val.upper()
+                        if qu == "REPLACE":
+                            if q + 1 < len(tokens) and tokens[q + 1].kind == "LPAREN":
+                                q -= 1
+                                continue
+                            expr_start = q + 1
+                            if (
+                                expr_start < p - 1
+                                and tokens[expr_start].kind == "WORD"
+                                and tokens[expr_start].val.upper() == "STRICT"
+                            ):
+                                expr_start += 1
+                            if expr_start <= p - 2:
+                                found_rep = q
+                            break
+                        if qu in (
+                            "SELECT",
+                            "FROM",
+                            "WHERE",
+                            "GROUP",
+                            "HAVING",
+                            "ORDER",
+                            "LIMIT",
+                            "UNION",
+                            "INTERSECT",
+                            "EXCEPT",
+                            "PREWHERE",
+                            "QUALIFY",
+                            "WINDOW",
+                            "SETTINGS",
+                            "FORMAT",
+                        ):
+                            break
+                    q -= 1
+                if found_rep >= 0:
+                    p = found_rep - 1
+                    continue
             return False
         return False
     return False
@@ -2039,7 +2109,9 @@ def _is_apply_column_transformer(tokens: list[_Tok], idx: int) -> bool:
         or prev.kind in ("RPAREN", "RBRACK", "QIDENT", "STRING")
         or (prev.kind == "WORD" and prev.val.upper() not in _APPLY_PREV_NON_TARGET_WORDS)
         or (
-            idx >= 2 and tokens[idx - 2].kind == "WORD" and tokens[idx - 2].val.upper() in ("EXCEPT", "APPLY", "STRICT")
+            idx >= 2
+            and tokens[idx - 2].kind == "WORD"
+            and tokens[idx - 2].val.upper() in ("EXCEPT", "APPLY", "STRICT", "AS")
         )
     )
     if not preceded_by_target:

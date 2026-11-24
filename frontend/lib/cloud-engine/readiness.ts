@@ -1199,110 +1199,59 @@ function consumeJsonSecretValueAfterQuote(line1: string, pos: number, keyCandida
   return matchedScheme ? valStart : pos;
 }
 
-function isQuoteCloseDelimiter(ch: string | undefined): boolean {
-  return ch === undefined
-    || isInlineWs(ch)
-    || ch === ","
-    || ch === ")"
-    || ch === "]"
-    || ch === "}"
-    || ch === ";";
-}
+type QuoteRedactSpan = {
+  start: number;
+  end: number;
+  replacement: "[redacted]" | "[url]";
+};
 
-function buildRemainingSingleQuoteCounts(line1: string): Int32Array {
-  const len = line1.length;
-  const isUnescapedQuote = new Uint8Array(len);
-  let p = 0;
-  while (p < len) {
-    const cLen = matchSafeContractionLen(line1, p);
-    if (cLen > 0) {
-      p += cLen;
-      continue;
-    }
-    if (line1[p] === "\\" && (line1[p + 1] === "\\" || line1[p + 1] === "'")) {
-      p += 2;
-      continue;
-    }
-    if (line1[p] === "'") {
-      if (!(p > 0 && isAsciiAlpha(line1[p - 1]) && isAsciiAlpha(line1[p + 1]))) {
-        isUnescapedQuote[p] = 1;
-      }
-    }
-    p += 1;
-  }
-  const suffix = new Int32Array(len + 1);
-  for (let j = len - 1; j >= 0; j -= 1) {
-    suffix[j] = suffix[j + 1]! + isUnescapedQuote[j]!;
-  }
-  return suffix;
-}
+type QuoteScanResult = {
+  spans: QuoteRedactSpan[];
+  scanEnd: number;
+  sawAmbiguousBackslashQuote: boolean;
+};
 
-function buildRemainingQuoteCounts(line1: string, quote: '"' | "`"): Int32Array {
-  const len = line1.length;
-  const isUnescapedQuote = new Uint8Array(len);
-  let p = 0;
-  while (p < len) {
-    if (line1[p] === "\\" && (line1[p + 1] === "\\" || line1[p + 1] === quote)) {
-      p += 2;
-      continue;
-    }
-    if (line1[p] === quote) {
-      isUnescapedQuote[p] = 1;
-    }
-    p += 1;
-  }
-  const suffix = new Int32Array(len + 1);
-  for (let j = len - 1; j >= 0; j -= 1) {
-    suffix[j] = suffix[j + 1]! + isUnescapedQuote[j]!;
-  }
-  return suffix;
-}
-
-// Stage 2A: O(N) strict pair-by-pair quote & URL scanner (closed contraction allowlist only).
-function redactQuotesAndUrlsLine(line1: string): string {
-  const parts: string[] = [];
+function scanQuotesAndUrlsPass(
+  line1: string,
+  limit: number,
+  backslashEscapesQuotes: boolean,
+): QuoteScanResult {
+  const spans: QuoteRedactSpan[] = [];
   let outChars = 0;
   let i = 0;
-  const len = line1.length;
-  let remainingSingleQuotes: Int32Array | null = null;
-  let remainingDoubleQuotes: Int32Array | null = null;
-  let remainingBacktickQuotes: Int32Array | null = null;
-  while (i < len) {
+  let sawAmbiguousBackslashQuote = false;
+  while (i < limit) {
     if (outChars >= MESSAGE_LIMIT + 128) break;
     if (line1.startsWith("[redacted]", i)) {
-      parts.push("[redacted]");
       outChars += 10;
       i += 10;
       continue;
     }
     if (line1.startsWith("[url]", i)) {
-      parts.push("[url]");
       outChars += 5;
       i += 5;
       continue;
     }
     const contractionLen = matchSafeContractionLen(line1, i);
     if (contractionLen > 0) {
-      const tok = line1.slice(i, i + contractionLen);
-      parts.push(tok);
       outChars += contractionLen;
       i += contractionLen;
       continue;
     }
     if (isAsciiAlpha(line1[i]) && (i === 0 || !WORD_CHAR_RE.test(line1[i - 1]!))) {
       let j = i + 1;
-      const schemeLimit = Math.min(len, i + MAX_URL_SCHEME_LEN);
+      const schemeLimit = Math.min(limit, i + MAX_URL_SCHEME_LEN);
       while (
         j < schemeLimit
         && (isAsciiAlpha(line1[j]) || isAsciiDigit(line1[j]) || line1[j] === "+" || line1[j] === "." || line1[j] === "-")
       ) {
         j += 1;
       }
-      if (line1.startsWith("://", j)) {
+      if (j + 2 < limit && line1.startsWith("://", j)) {
         let k = j + 3;
-        while (k < len && !/[\s'"`]/.test(line1[k]!)) k += 1;
+        while (k < limit && !/[\s'"`]/.test(line1[k]!)) k += 1;
         while (k > j + 3 && (line1[k - 1] === "," || line1[k - 1] === ";")) k -= 1;
-        parts.push("[url]");
+        spans.push({ start: i, end: k, replacement: "[url]" });
         outChars += 5;
         i = k;
         continue;
@@ -1311,111 +1260,229 @@ function redactQuotesAndUrlsLine(line1: string): string {
     const prevWord = i > 0 && WORD_CHAR_RE.test(line1[i - 1]!);
     const typedLen = prevWord
       ? 0
-      : (line1[i] === "U" || line1[i] === "u") && line1[i + 1] === "&" && line1[i + 2] === "'"
+      : (line1[i] === "U" || line1[i] === "u") && line1[i + 1] === "&" && line1[i + 2] === "'" && i + 2 < limit
         ? 3
-        : isSqlPrefixChar(line1[i]) && line1[i + 1] === "'"
+        : isSqlPrefixChar(line1[i]) && line1[i + 1] === "'" && i + 1 < limit
           ? 2
           : 0;
     if (typedLen > 0 || line1[i] === "'") {
+      const spanStart = i;
       const firstCh = line1[i];
       const isEscapeSingle = typedLen > 0 && (firstCh === "E" || firstCh === "e" || firstCh === "U" || firstCh === "u");
-      parts.push("[redacted]");
-      outChars += 10;
+      const useBackslashEscape = isEscapeSingle || backslashEscapesQuotes;
       i += typedLen > 0 ? typedLen : 1;
       const contentStart = i;
       let contentEnd = -1;
-      while (i < len) {
-        if (line1[i] === "\\" && line1[i + 1] === "\\") {
-          i += 2;
-          continue;
-        }
-        if (isEscapeSingle && line1[i] === "\\") {
-          i += 2;
-          continue;
-        }
-        if (!isEscapeSingle && line1[i] === "\\" && line1[i + 1] === "'") {
-          if (!isQuoteCloseDelimiter(line1[i + 2])) {
+      let consecutiveBackslashes = 0;
+      while (i < limit) {
+        const ch = line1[i];
+        if (useBackslashEscape) {
+          if (ch === "\\") {
             i += 2;
             continue;
           }
-          if (remainingSingleQuotes === null) {
-            remainingSingleQuotes = buildRemainingSingleQuoteCounts(line1);
+          if (ch === "'") {
+            if (isEscapeSingle && i + 1 < limit && line1[i + 1] === "'") {
+              i += 2;
+              continue;
+            }
+            contentEnd = i;
+            i += 1;
+            break;
           }
-          const rem = remainingSingleQuotes[i + 2]!;
-          if (rem === 0 || (rem & 1) === 1) {
-            i += 2;
-            continue;
-          }
-        }
-        if (line1[i] === "'") {
-          if (line1[i + 1] === "'") {
-            i += 2;
-            continue;
-          }
-          contentEnd = i;
           i += 1;
-          break;
+        } else {
+          if (ch === "\\") {
+            consecutiveBackslashes += 1;
+            i += 1;
+            continue;
+          }
+          if (ch === "'") {
+            if ((consecutiveBackslashes & 1) === 1) {
+              sawAmbiguousBackslashQuote = true;
+            }
+            consecutiveBackslashes = 0;
+            if (i + 1 < limit && line1[i + 1] === "'") {
+              i += 2;
+              continue;
+            }
+            contentEnd = i;
+            i += 1;
+            break;
+          }
+          consecutiveBackslashes = 0;
+          i += 1;
         }
-        i += 1;
       }
-      if (typedLen === 0 && contentEnd > contentStart) {
-        i = consumeJsonSecretValueAfterQuote(line1, i, line1.slice(contentStart, contentEnd));
+      if (i > limit) i = limit;
+      if (typedLen === 0 && contentEnd > contentStart && i < limit) {
+        i = Math.min(limit, consumeJsonSecretValueAfterQuote(line1, i, line1.slice(contentStart, contentEnd)));
       }
+      spans.push({ start: spanStart, end: i, replacement: "[redacted]" });
+      outChars += 10;
       continue;
     }
     if (line1[i] === '"' || line1[i] === "`") {
-      const q = line1[i];
-      parts.push("[redacted]");
-      outChars += 10;
+      const spanStart = i;
+      const q = line1[i]!;
       i += 1;
       const contentStart = i;
       let contentEnd = -1;
-      while (i < len) {
-        if (line1[i] === "\\" && line1[i + 1] === "\\") {
-          i += 2;
-          continue;
-        }
-        if (line1[i] === "\\" && line1[i + 1] === q) {
-          if (!isQuoteCloseDelimiter(line1[i + 2])) {
+      let consecutiveBackslashes = 0;
+      while (i < limit) {
+        const ch = line1[i];
+        if (backslashEscapesQuotes) {
+          if (ch === "\\") {
             i += 2;
             continue;
           }
-          const remainingQuotes = q === '"'
-            ? (remainingDoubleQuotes ??= buildRemainingQuoteCounts(line1, '"'))
-            : (remainingBacktickQuotes ??= buildRemainingQuoteCounts(line1, "`"));
-          const rem = remainingQuotes[i + 2]!;
-          if (rem === 0 || (rem & 1) === 1) {
-            i += 2;
-            continue;
+          if (ch === q) {
+            contentEnd = i;
+            i += 1;
+            break;
           }
           i += 1;
-          continue;
-        }
-        if (line1[i] === "\\") {
-          i += 2;
-          continue;
-        }
-        if (line1[i] === q) {
-          if (line1[i + 1] === q) {
-            i += 2;
+        } else {
+          if (ch === "\\") {
+            consecutiveBackslashes += 1;
+            i += 1;
             continue;
           }
-          contentEnd = i;
+          if (ch === q) {
+            if ((consecutiveBackslashes & 1) === 1) {
+              sawAmbiguousBackslashQuote = true;
+            }
+            consecutiveBackslashes = 0;
+            if (i + 1 < limit && line1[i + 1] === q) {
+              i += 2;
+              continue;
+            }
+            contentEnd = i;
+            i += 1;
+            break;
+          }
+          consecutiveBackslashes = 0;
           i += 1;
-          break;
         }
-        i += 1;
       }
-      if ((q === '"' || q === "`") && contentEnd > contentStart) {
-        i = consumeJsonSecretValueAfterQuote(line1, i, line1.slice(contentStart, contentEnd));
+      if (i > limit) i = limit;
+      if (contentEnd > contentStart && i < limit) {
+        i = Math.min(limit, consumeJsonSecretValueAfterQuote(line1, i, line1.slice(contentStart, contentEnd)));
       }
+      spans.push({ start: spanStart, end: i, replacement: "[redacted]" });
+      outChars += 10;
       continue;
     }
-    parts.push(line1[i]!);
     outChars += 1;
     i += 1;
   }
+  return { spans, scanEnd: Math.min(i, limit), sawAmbiguousBackslashQuote };
+}
+
+function mergeQuoteScanSpans(
+  spansA: readonly QuoteRedactSpan[],
+  spansB: readonly QuoteRedactSpan[],
+  scanEnd: number,
+): QuoteRedactSpan[] {
+  const mergedRedacted: QuoteRedactSpan[] = [];
+  let ia = 0;
+  let ib = 0;
+  while (ia < spansA.length || ib < spansB.length) {
+    while (ia < spansA.length && (spansA[ia]!.replacement !== "[redacted]" || spansA[ia]!.start >= scanEnd)) ia += 1;
+    while (ib < spansB.length && (spansB[ib]!.replacement !== "[redacted]" || spansB[ib]!.start >= scanEnd)) ib += 1;
+    if (ia >= spansA.length && ib >= spansB.length) break;
+    const takeA = ib >= spansB.length || (ia < spansA.length && spansA[ia]!.start <= spansB[ib]!.start);
+    const src = takeA ? spansA[ia++]! : spansB[ib++]!;
+    const end = Math.min(src.end, scanEnd);
+    const prev = mergedRedacted.at(-1);
+    if (prev && src.start <= prev.end) {
+      if (end > prev.end) prev.end = end;
+    } else {
+      mergedRedacted.push({ start: src.start, end, replacement: "[redacted]" });
+    }
+  }
+
+  const keptUrls: QuoteRedactSpan[] = [];
+  let ua = 0;
+  let ub = 0;
+  let ri = 0;
+  while (ua < spansA.length || ub < spansB.length) {
+    while (ua < spansA.length && (spansA[ua]!.replacement !== "[url]" || spansA[ua]!.start >= scanEnd)) ua += 1;
+    while (ub < spansB.length && (spansB[ub]!.replacement !== "[url]" || spansB[ub]!.start >= scanEnd)) ub += 1;
+    if (ua >= spansA.length && ub >= spansB.length) break;
+    const takeA = ub >= spansB.length || (ua < spansA.length && spansA[ua]!.start <= spansB[ub]!.start);
+    const src = takeA ? spansA[ua++]! : spansB[ub++]!;
+    const end = Math.min(src.end, scanEnd);
+    while (ri < mergedRedacted.length && mergedRedacted[ri]!.end <= src.start) ri += 1;
+    if (ri < mergedRedacted.length && mergedRedacted[ri]!.start < end) continue;
+    const prevUrl = keptUrls.at(-1);
+    if (prevUrl && src.start <= prevUrl.end) {
+      if (end > prevUrl.end) prevUrl.end = end;
+    } else {
+      keptUrls.push({ start: src.start, end, replacement: "[url]" });
+    }
+  }
+
+  if (keptUrls.length === 0) return mergedRedacted;
+  const combined: QuoteRedactSpan[] = [];
+  let rIdx = 0;
+  let uIdx = 0;
+  while (rIdx < mergedRedacted.length || uIdx < keptUrls.length) {
+    if (uIdx >= keptUrls.length || (rIdx < mergedRedacted.length && mergedRedacted[rIdx]!.start <= keptUrls[uIdx]!.start)) {
+      combined.push(mergedRedacted[rIdx++]!);
+    } else {
+      combined.push(keptUrls[uIdx++]!);
+    }
+  }
+  return combined;
+}
+
+function emitSpansForLine(line1: string, spans: readonly QuoteRedactSpan[], scanEnd: number): string {
+  const truncated = scanEnd < line1.length;
+  let emitEnd = scanEnd;
+  const lastSpan = spans.at(-1);
+  let needTailRedacted = false;
+  if (truncated && (!lastSpan || lastSpan.end < scanEnd)) {
+    const floor = lastSpan ? lastSpan.end : 0;
+    if (scanEnd > floor && !/\s/.test(line1[scanEnd - 1]!) && !/\s/.test(line1[scanEnd]!)) {
+      while (emitEnd > floor && !/\s/.test(line1[emitEnd - 1]!)) emitEnd -= 1;
+    }
+    needTailRedacted = true;
+  }
+  if (spans.length === 0 && !needTailRedacted) {
+    return emitEnd === line1.length ? line1 : line1.slice(0, emitEnd);
+  }
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const span of spans) {
+    if (span.start > cursor) {
+      parts.push(line1.slice(cursor, span.start));
+    }
+    parts.push(span.replacement);
+    cursor = span.end;
+  }
+  if (cursor < emitEnd) {
+    parts.push(line1.slice(cursor, emitEnd));
+  }
+  if (needTailRedacted) {
+    parts.push("[redacted]");
+  }
   return parts.join("");
+}
+
+// Stage 2A: O(N) strict pair-by-pair quote & URL scanner (closed contraction allowlist only).
+// When a non-E quoted literal contains an odd run of backslashes before its closing quote,
+// union the SQL-doubling pass and the C/JSON backslash-escape pass so neither dialect can leak.
+function redactQuotesAndUrlsLine(line1: string): string {
+  const len = line1.length;
+  const passA = scanQuotesAndUrlsPass(line1, len, false);
+  if (!passA.sawAmbiguousBackslashQuote) {
+    return emitSpansForLine(line1, passA.spans, passA.scanEnd);
+  }
+  const passB = scanQuotesAndUrlsPass(line1, passA.scanEnd, true);
+  const scanEnd = Math.min(passA.scanEnd, passB.scanEnd);
+  const merged = mergeQuoteScanSpans(passA.spans, passB.spans, scanEnd);
+  return emitSpansForLine(line1, merged, scanEnd);
 }
 
 function tryScanIpv4(s: string, pos: number): number {
