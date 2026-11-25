@@ -351,6 +351,10 @@ def rum_environment(row: Mapping[str, Any]) -> dict[str, Any]:
     """Text environment fields plus ``ttfb`` (None when absent or not finite)."""
     env: dict[str, Any] = {name: _first_text(row, keys) for name, keys in _TEXT_ALIASES.items()}
     env["ttfb"] = next((val for key in _TTFB_KEYS if (val := _finite(row.get(key))) is not None), None)
+    env["resource_url"] = _text(row.get("resource_url"))
+    env["asn"] = _text(row.get("asn"))
+    sample_rate = _finite(row.get("sample_rate"))
+    env["sample_rate"] = sample_rate if sample_rate is not None and 0.0 < sample_rate <= 1.0 else 1.0
     return env
 
 
@@ -387,7 +391,19 @@ _COMMON_FACT_COLUMNS = (
     "batch_id",
     "publication_state",
 )
-_RUM_ENV_TAIL_COLUMNS = ("browser", "os", "device", "city", "region", "pop", "tls", "ttfb")
+_RUM_ENV_TAIL_COLUMNS = (
+    "browser",
+    "os",
+    "device",
+    "city",
+    "region",
+    "pop",
+    "tls",
+    "ttfb",
+    "resource_url",
+    "asn",
+    "sample_rate",
+)
 _DOMAIN_COLUMNS = {
     "request": (*_COMMON_FACT_COLUMNS, "country", "client_ip", "url", "custom_fields", "cmcd"),
     "rum_vitals": (

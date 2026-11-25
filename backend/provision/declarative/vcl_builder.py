@@ -10,6 +10,7 @@ from backend.core.fastly.client import (
     RUM_ASSET_FETCH_NAME,
     RUM_FARO_FETCH_NAME,
     generate_rum_asset_fetch_vcl,
+    generate_rum_log_format,
     generate_rum_recv_parts,
     generate_rum_vcl,
 )
@@ -297,7 +298,9 @@ def _generate_rum_section_vcl(state: FeatureState, subroutine: str) -> str:
         return ""
     from backend.core.fastly.client import SHIELD_MAP
 
-    rum_vcl_dict = generate_rum_vcl(state.service_id, state.faro_version)
+    rum_vcl_dict = generate_rum_vcl(
+        state.service_id, state.faro_version, timing_allow_origins=state.rum_timing_allow_origins
+    )
     shield_pop = state.cdn_shield or SHIELD_MAP.get(state.fos_region, "iad-va-us")
     asset_fetch_dict = generate_rum_asset_fetch_vcl(shield_pop, state.faro_version)
     if subroutine == "vcl_recv":
@@ -306,7 +309,11 @@ def _generate_rum_section_vcl(state: FeatureState, subroutine: str) -> str:
         ]
         return f"# Section 5: RUM ({subroutine})\n" + "\n\n".join(sections)
     if subroutine == "vcl_deliver":
-        return f"# Section 5: RUM ({subroutine})\n{rum_vcl_dict['RUM - Set cookies']}" if state.scoring.enabled else ""
+        # The cookie reads the session scorer's ID; the request-timing header stands alone.
+        parts = [rum_vcl_dict["RUM - Request timing"]]
+        if state.scoring.enabled:
+            parts.insert(0, rum_vcl_dict["RUM - Set cookies"])
+        return f"# Section 5: RUM ({subroutine})\n" + "\n\n".join(parts)
     if subroutine == "vcl_miss":
         return f"# Section 5: RUM ({subroutine})\n{asset_fetch_dict['RUM - Asset fetch SigV4 signing']}"
     if subroutine == "vcl_error":
@@ -366,28 +373,6 @@ def desired_logging_endpoints(state: FeatureState) -> list[LoggingEndpoint]:
             )
         )
     if state.rum_enabled:
-        from backend.provision.fastly_api import load_log_format
-        from backend.provision.rum_orchestrator import _RUM_CUSTOM_FIELDS, _RUM_FIELD_NAMES
-
-        existing_rum = {
-            f["name"]: f
-            for f in state.log_fields.custom_fields
-            if isinstance(f, dict) and f.get("name") in _RUM_FIELD_NAMES
-        }
-        rum_fields = [
-            {
-                **df,
-                **existing_rum[df["name"]],
-                "byte_limit": max(
-                    int(existing_rum[df["name"]].get("byte_limit") or 0),
-                    int(df.get("byte_limit") or 0),
-                )
-                or df.get("byte_limit"),
-            }
-            if df["name"] in existing_rum
-            else df
-            for df in _RUM_CUSTOM_FIELDS
-        ]
         endpoints.append(
             LoggingEndpoint(
                 name=state.rum_endpoint_name,
@@ -395,7 +380,7 @@ def desired_logging_endpoints(state: FeatureState) -> list[LoggingEndpoint]:
                 path=log_paths.rum_log_path(),
                 period=state.rum_log_period if state.rum_log_period is not None else state.log_period,
                 response_condition="rum_log_condition",
-                format_string=load_log_format({"custom_fields": rum_fields, "field_limits": {"url": 3000}}),
+                format_string=generate_rum_log_format(),
                 placement=None,
                 response_object_name="",
             )

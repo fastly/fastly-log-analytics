@@ -77965,6 +77965,32 @@
             "title": "Capture Events",
             "default": true
           },
+          "capture_resources": {
+            "type": "boolean",
+            "title": "Capture Resources",
+            "default": true
+          },
+          "sample_rate": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.01,
+            "title": "Sample Rate",
+            "default": 1.0
+          },
+          "error_sample_rate": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.01,
+            "title": "Error Sample Rate",
+            "default": 1.0
+          },
+          "resource_sample_rate": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.01,
+            "title": "Resource Sample Rate",
+            "default": 0.1
+          },
           "custom_condition": {
             "type": "string",
             "title": "Custom Condition",
@@ -78116,6 +78142,50 @@
               }
             ],
             "title": "Capture Events"
+          },
+          "capture_resources": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capture Resources"
+          },
+          "sample_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sample Rate"
+          },
+          "error_sample_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Sample Rate"
+          },
+          "resource_sample_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resource Sample Rate"
           },
           "custom_condition": {
             "anyOf": [
@@ -78354,6 +78424,9 @@
               },
               {
                 "type": "number"
+              },
+              {
+                "type": "null"
               }
             ],
             "title": "Avg Load Time"

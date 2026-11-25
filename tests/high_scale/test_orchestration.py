@@ -1755,9 +1755,12 @@ def test_rum_vitals_rows_persist_environment_columns_after_country() -> None:
 
     (row,) = _rows_for_domain(batch, "00000000-0000-0000-0000-000000000001")
     columns = _DOMAIN_COLUMNS["rum_vitals"]
-    assert columns[-9:] == ("country", "browser", "os", "device", "city", "region", "pop", "tls", "ttfb")
+    assert columns[-12:-3] == ("country", "browser", "os", "device", "city", "region", "pop", "tls", "ttfb")
+    assert columns[-3:] == ("resource_url", "asn", "sample_rate")
     assert len(row) == len(columns)
-    assert row[-9:] == ("DE", "Firefox", "Linux", "Desktop", "Berlin", "BE", "FRA", "1.3", 0.04)
+    assert row[-12:-3] == ("DE", "Firefox", "Linux", "Desktop", "Berlin", "BE", "FRA", "1.3", 0.04)
+    # A page vital measures no single request and came from an unsampled beacon.
+    assert row[-3:] == ("", "", 1.0)
 
 
 def test_rum_error_rows_persist_error_position_and_environment() -> None:
@@ -1775,7 +1778,7 @@ def test_rum_error_rows_persist_error_position_and_environment() -> None:
 
     (row,) = _rows_for_domain(batch, "00000000-0000-0000-0000-000000000001")
     columns = _DOMAIN_COLUMNS["rum_errors"]
-    assert columns[-11:] == (
+    assert columns[-14:-3] == (
         "country",
         "error_line",
         "error_col",
@@ -1789,7 +1792,7 @@ def test_rum_error_rows_persist_error_position_and_environment() -> None:
         "ttfb",
     )
     assert len(row) == len(columns)
-    assert row[-11:] == ("US", 12, 34, "Chrome", "", "", "", "", "", "", None)
+    assert row[-14:-3] == ("US", 12, 34, "Chrome", "", "", "", "", "", "", None)
 
 
 def test_rum_rows_without_environment_keep_empty_columns_not_defaults() -> None:
@@ -1797,7 +1800,7 @@ def test_rum_rows_without_environment_keep_empty_columns_not_defaults() -> None:
         _rum_batch("rum_vitals", {"metric_name": "CLS", "metric_value": 0.1}),
         "00000000-0000-0000-0000-000000000001",
     )
-    assert row[-9:] == ("", "", "", "", "", "", "", "", None)
+    assert row[-12:] == ("", "", "", "", "", "", "", "", None, "", "", 1.0)
 
 
 # ── Merged from test_archive_publication.py ──

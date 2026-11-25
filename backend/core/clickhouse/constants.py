@@ -123,6 +123,8 @@ CLICKHOUSE_HIGH_SCALE_COLUMNS = frozenset(
         "pop",
         "tls",
         "ttfb",
+        "resource_url",
+        "sample_rate",
         "error_line",
         "error_col",
         "latency_sum_ms",

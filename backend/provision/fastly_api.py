@@ -206,7 +206,8 @@ def get_capture_vcl_statements(log_fields_config: dict | None) -> list[str]:
     for cf in custom_edge:
         lines.append(f"set req.http.x-fos-edge-data:{cf['name']} = {cf['vcl_log_expression']};")
 
-    if group_l:
+    # The request ID is also wanted on its own: RUM turns on `rid` without the rest of group L.
+    if group_l or "rid" in lf.resolve_enabled_fields(log_fields_config):
         lines.append("set req.http.x-req-id = randomstr(8);")
 
     return lines

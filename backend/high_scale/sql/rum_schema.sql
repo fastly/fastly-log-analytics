@@ -87,3 +87,10 @@ ALTER TABLE rum_error_facts ADD COLUMN IF NOT EXISTS region LowCardinality(Strin
 ALTER TABLE rum_error_facts ADD COLUMN IF NOT EXISTS pop LowCardinality(String);
 ALTER TABLE rum_error_facts ADD COLUMN IF NOT EXISTS tls LowCardinality(String);
 ALTER TABLE rum_error_facts ADD COLUMN IF NOT EXISTS ttfb Nullable(Float64);
+
+ALTER TABLE rum_vitals_facts ADD COLUMN IF NOT EXISTS resource_url String;
+ALTER TABLE rum_vitals_facts ADD COLUMN IF NOT EXISTS asn LowCardinality(String);
+ALTER TABLE rum_vitals_facts ADD COLUMN IF NOT EXISTS sample_rate Float64 DEFAULT 1;
+ALTER TABLE rum_error_facts ADD COLUMN IF NOT EXISTS resource_url String;
+ALTER TABLE rum_error_facts ADD COLUMN IF NOT EXISTS asn LowCardinality(String);
+ALTER TABLE rum_error_facts ADD COLUMN IF NOT EXISTS sample_rate Float64 DEFAULT 1;

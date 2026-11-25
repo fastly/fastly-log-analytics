@@ -17,6 +17,7 @@ from backend.core.fastly.client import (
 )
 from backend.provision.cli import BOLD, _c, fail, info, ok, warn
 from backend.provision.declarative.reconciler import reconcile_vcl_state
+from backend.provision.feature_fields import claim_feature_fields, release_feature_fields
 from backend.provision.rum_assets import (
     cleanup_old_faro_versions,
     download_and_upload_faro,
@@ -277,7 +278,7 @@ def rum_vcl_fingerprint(logging_service_id: str, cfg: dict[str, Any] | None = No
 
     shield_pop = cfg.get("cdn_shield") or SHIELD_MAP.get(cfg.get("fos_region", "us-east-1"), "iad-va-us")
     snippets = {
-        **generate_rum_vcl(logging_service_id, faro_version),
+        **generate_rum_vcl(logging_service_id, faro_version, timing_allow_origins=rum_cfg.get("timing_allow_origins")),
         **generate_rum_asset_fetch_vcl(shield_pop, faro_version),
     }
     return hashlib.sha256(json.dumps(snippets, sort_keys=True).encode()).hexdigest()
@@ -456,6 +457,8 @@ def enable_rum(
     def _apply_enable(target: dict[str, Any]) -> None:
         target["rum_enabled"] = True
         target["rum_enabled_at"] = enabled_at
+        # Client timings are matched to request logs by `rid`, so RUM turns that field on.
+        claim_feature_fields(target, "rum")
         _set_faro_version(target, resolved_faro_version)
         # Computed AFTER faro_version is set above: rum_vcl_fingerprint's hash
         # depends on the pinned version (F-4 fix), so it must be derived from
@@ -469,6 +472,7 @@ def enable_rum(
         def _undo(target: dict[str, Any]) -> None:
             target["rum_enabled"] = False
             target.pop("rum_vcl_sha", None)
+            release_feature_fields(target, "rum")
             _restore_faro_pin(target, previous_rum_cfg)
 
         if svcconfig.mutate_config(logging_service_id, _undo) is None:
@@ -744,6 +748,8 @@ def disable_rum(
     def _apply_disable(target: dict[str, Any]) -> None:
         target["rum_enabled"] = False
         target.pop("rum_vcl_sha", None)
+        # Only fields RUM itself turned on, and only if no other enabled feature needs them.
+        release_feature_fields(target, "rum")
 
     if svcconfig.mutate_config(logging_service_id, _apply_disable) is None:
         raise RuntimeError(f"No config found for logging service {logging_service_id}")
@@ -760,6 +766,7 @@ def disable_rum(
         # Rollback only the keys _apply_disable wrote
         def _undo_disable(target: dict[str, Any]) -> None:
             target["rum_enabled"] = True
+            claim_feature_fields(target, "rum")
             target["rum_vcl_sha"] = rum_vcl_fingerprint(logging_service_id, target)
 
         if svcconfig.mutate_config(logging_service_id, _undo_disable) is None:
@@ -772,6 +779,7 @@ def disable_rum(
 
         def _restore_live_state(target: dict[str, Any]) -> None:
             target["rum_enabled"] = True
+            claim_feature_fields(target, "rum")
             if cfg.get("rum_vcl_sha") is not None:
                 target["rum_vcl_sha"] = cfg["rum_vcl_sha"]
             else:

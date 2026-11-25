@@ -1606,147 +1606,134 @@ def test_generate_rum_tracker_js_invariants():
     assert "script.src = '/js/faro-sdk.js';" in js and not re.search(r"https?://", js)
 
 
-@pytest.mark.parametrize("transport", ["fetch", "xhr"])
-def test_generated_rum_flush_keeps_fetches_alive(monkeypatch, transport: str) -> None:
+def test_generate_rum_tracker_js_matches_cloud_generator(monkeypatch) -> None:
+    """Both editions ship one tracker: the Cloud generator is pinned to this same fixture."""
     monkeypatch.setattr(svcconfig, "load_config", lambda _sid: {})
-    program = r"""
+    fixture = Path(__file__).resolve().parents[2] / "compute/cloud/tests/rum_tracker_parity.js"
+    assert generate_rum_tracker_js("svc1") == fixture.read_text(encoding="utf-8")
+
+
+_RUM_TRACKER_HARNESS = r"""
 const fs = require('node:fs');
 const vm = require('node:vm');
-const calls = [];
+const fetchCalls = [];
+const beaconCalls = [];
+const timers = [];
+const winListeners = {};
+const docListeners = {};
+const perfObservers = {};
 let config;
-function XMLHttpRequest() {}
-XMLHttpRequest.prototype.open = function() {};
-XMLHttpRequest.prototype.send = function() { throw new Error('Unexpected Faro transport'); };
+function PerformanceObserver(callback) { this.callback = callback; }
+PerformanceObserver.prototype.observe = function(options) {
+  (perfObservers[options.type] = perfObservers[options.type] || []).push(this.callback);
+};
+function perf(type, entries) {
+  (perfObservers[type] || []).forEach(callback => callback({ getEntries: () => entries }));
+}
+function runTimers() { timers.splice(0).forEach(fn => fn()); }
+const document = {
+  cookie: 'rum_cid=fixture-client',
+  visibilityState: 'visible',
+  addEventListener: (evt, fn) => { docListeners[evt] = fn; },
+};
 const window = {
-  location: { pathname: '/dashboard' },
-  addEventListener: function() {},
-  fetch: async (url, options) => { calls.push({ url, options }); },
+  location: { pathname: '/dashboard', href: 'https://shop.example/dashboard' },
+  addEventListener: (evt, fn) => { winListeners[evt] = fn; },
+  fetch: (url, options) => { fetchCalls.push({ url, options }); return Promise.resolve({}); },
   Faro: {
+    WebVitalsInstrumentation: class {},
     ErrorsInstrumentation: class {},
     initializeFaro: value => { config = value; },
   },
 };
 const sandbox = {
-  window, XMLHttpRequest, console, Response, setTimeout,
-  document: { cookie: 'rum_cid=fixture-client', addEventListener: function() {} },
-  navigator: { sendBeacon() { throw new Error('Unexpected beacon transport'); } },
+  window, document, console, Response, URL, PerformanceObserver,
+  Math: Object.assign(Object.create(Math), { random: () => RESOURCE_DRAW }),
+  setTimeout: fn => { timers.push(fn); return timers.length; },
+  clearTimeout: () => { timers.length = 0; },
+  navigator: { sendBeacon(url, data) { beaconCalls.push({ url, data }); return true; } },
 };
 vm.runInNewContext(fs.readFileSync(0, 'utf8'), sandbox);
+"""
+
+
+def _run_rum_tracker(js: str, scenario: str, *, resource_draw: float = 0.99) -> dict:
+    program = f"const RESOURCE_DRAW = {resource_draw};\n{_RUM_TRACKER_HARNESS}\n{scenario}\n"
+    program += "process.stdout.write(JSON.stringify({ batching: config.batching, fetchCalls, beaconCalls }));"
+    result = subprocess.run(["node", "-e", program], input=js, capture_output=True, text=True, check=True, timeout=10)
+    return json.loads(result.stdout)
+
+
+def test_generated_rum_tracker_batches_a_pageview_into_one_compact_beacon(monkeypatch) -> None:
+    monkeypatch.setattr(svcconfig, "load_config", lambda _sid: {})
+    out = _run_rum_tracker(
+        generate_rum_tracker_js("svc_test"),
+        r"""
 config.beforeSend({
   type: 'measurement',
-  payload: { type: 'web-vitals', values: { LCP: 1200, FCP: 800, CLS: 0.1, INP: 50, TTFB: 25 }, context: { rating: 'good' } },
-});
-config.beforeSend({
-  type: 'event',
-  payload: { name: 'faro.performance.navigation', attributes: { domComplete: 950 } },
+  payload: { type: 'web-vitals', values: { LCP: 1200, CLS: 0.1 }, context: { rating: 'good' } },
 });
 config.beforeSend({
   type: 'exception',
-  payload: {
-    value: 'ReferenceError: boom',
-    stacktrace: { frames: [{ filename: 'app.js', lineno: 12, colno: 4 }] },
-  },
+  payload: { value: 'ReferenceError: boom', stacktrace: { frames: [{ filename: 'app.js', lineno: 12, colno: 4 }] } },
 });
-if (process.argv[1] === 'fetch') {
-  window.fetch('/rum-beacon', { method: 'POST' });
-} else {
-  const xhr = new XMLHttpRequest();
-  xhr.open('POST', '/rum-beacon');
-  xhr.send('');
-}
-process.stdout.write(JSON.stringify({ batching: config.batching, calls }));
-"""
-    result = subprocess.run(
-        ["node", "-e", program, transport],
-        input=generate_rum_tracker_js("svc_test"),
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=10,
+// Faro's own transport is swallowed: only the batched beacon goes out.
+window.fetch('/rum-beacon?service_id=svc_test', { method: 'POST' });
+if (fetchCalls.length !== 0) throw new Error('sent before the debounce');
+runTimers();
+""",
     )
-    out = json.loads(result.stdout)
-    assert out["batching"] == {"enabled": True, "sendTimeout": 1000, "itemLimit": 25}
-    calls = out["calls"]
-    assert len(calls) == 1
-    assert calls[0]["options"]["method"] == "POST" and calls[0]["options"]["body"] == ""
-    assert calls[0]["options"].get("keepalive") is True
-    from urllib.parse import parse_qs, urlparse
-
-    qparams = parse_qs(urlparse(calls[0]["url"]).query, keep_blank_values=True)
-    assert qparams["service_id"] == ["svc_test"]
-    assert qparams["rum_metric_name"] == ["LCP", "FCP", "CLS", "INP", "TTFB", "domComplete"]
-    assert qparams["rum_metric_value"] == ["1200", "800", "0.1", "50", "25", "950"]
-    assert qparams["rum_metric_rating"] == ["good", "good", "good", "good", "good", ""]
-    assert qparams["rum_error_message"] == ["ReferenceError: boom"]
-    assert qparams["rum_error_file"] == ["app.js"]
-    assert qparams["rum_error_line"] == ["12"]
-    assert qparams["rum_error_col"] == ["4"]
-    assert qparams["cid"] == ["fixture-client"]
-    assert qparams["rum_pathname"] == ["/dashboard"]
+    assert out["batching"] == {"enabled": True, "sendTimeout": 10, "itemLimit": 1}
+    assert out["beaconCalls"] == []
+    assert len(out["fetchCalls"]) == 1
+    call = out["fetchCalls"][0]
+    assert call["options"] == {"method": "POST", "body": "", "keepalive": True}
+    assert call["url"] == (
+        "/rum-beacon?service_id=svc_test&cid=fixture-client&p=%2Fdashboard&sr=1&esr=1"
+        "&m=LCP:1200:good,CLS:0.1:good&e=ReferenceError%3A%20boom|app.js|12|4"
+    )
 
 
 @pytest.mark.parametrize("lifecycle_event", ["visibilitychange", "pagehide"])
 def test_generated_rum_flushes_single_beacon_on_unload(monkeypatch, lifecycle_event: str) -> None:
     monkeypatch.setattr(svcconfig, "load_config", lambda _sid: {})
-    program = r"""
-const fs = require('node:fs');
-const vm = require('node:vm');
-const beaconCalls = [];
-const fetchCalls = [];
-const winListeners = {};
-const docListeners = {};
-let config;
-const document = {
-  cookie: 'rum_cid=unload-client',
-  visibilityState: 'visible',
-  addEventListener: (evt, fn) => { docListeners[evt] = fn; },
-};
-const window = {
-  location: { pathname: '/checkout' },
-  addEventListener: (evt, fn) => { winListeners[evt] = fn; },
-  fetch: async (url, options) => { fetchCalls.push({ url, options }); },
-  Faro: {
-    ErrorsInstrumentation: class {},
-    initializeFaro: value => { config = value; },
-  },
-};
-const sandbox = {
-  window, document, console, Response, setTimeout,
-  navigator: { sendBeacon(url, data) { beaconCalls.push({ url, data }); return true; } },
-};
-vm.runInNewContext(fs.readFileSync(0, 'utf8'), sandbox);
-config.beforeSend({
-  type: 'measurement',
-  payload: { type: 'web-vitals', values: { LCP: 1500, CLS: 0.04 } },
-});
-if (process.argv[1] === 'visibilitychange') {
-  document.visibilityState = 'hidden';
-  docListeners.visibilitychange();
-} else {
-  winListeners.pagehide();
-}
-// Subsequent Faro flush should be a no-op because pendingBeacons was already drained
-window.fetch('/rum-beacon', { method: 'POST' });
-process.stdout.write(JSON.stringify({ beaconCalls, fetchCalls }));
-"""
-    result = subprocess.run(
-        ["node", "-e", program, lifecycle_event],
-        input=generate_rum_tracker_js("svc_test"),
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=10,
+    trigger = (
+        "document.visibilityState = 'hidden'; docListeners.visibilitychange();"
+        if lifecycle_event == "visibilitychange"
+        else "winListeners.pagehide();"
     )
-    out = json.loads(result.stdout)
-    assert len(out["beaconCalls"]) == 1
+    out = _run_rum_tracker(
+        generate_rum_tracker_js("svc_test"),
+        "config.beforeSend({ type: 'measurement', payload: { type: 'web-vitals', values: { LCP: 1500, CLS: 0.04 } } });\n"
+        + trigger
+        + "\nrunTimers();",
+    )
     assert out["fetchCalls"] == []
-    from urllib.parse import parse_qs, urlparse
+    assert [call["url"].split("&m=")[1] for call in out["beaconCalls"]] == ["LCP:1500:,CLS:0.04:"]
 
-    qparams = parse_qs(urlparse(out["beaconCalls"][0]["url"]).query, keep_blank_values=True)
-    assert qparams["rum_metric_name"] == ["LCP", "CLS"]
-    assert qparams["rum_metric_value"] == ["1500", "0.04"]
-    assert qparams["cid"] == ["unload-client"]
-    assert qparams["rum_pathname"] == ["/checkout"]
+
+def test_generated_rum_tracker_reports_client_ttlb_only_for_requests_that_reached_the_edge(monkeypatch) -> None:
+    monkeypatch.setattr(svcconfig, "load_config", lambda _sid: {"rum": {"resource_sample_rate": 0.5}})
+    scenario = r"""
+const entry = (name, rid, timing) => Object.assign(
+  { name, serverTiming: rid ? [{ name: 'rid', description: rid }] : [] }, timing);
+perf('resource', [
+  entry('https://cdn.shop.example/video/seg1.ts', 'rid00002', { requestStart: 200, responseEnd: 2200, transferSize: 900000 }),
+  entry('https://shop.example/app.js', 'ridstale', { requestStart: 10, responseEnd: 11, transferSize: 0 }),
+  entry('https://other.example/pixel.gif', null, { requestStart: 10, responseEnd: 40, transferSize: 300 }),
+  entry('https://shop.example/rum-beacon?service_id=svc_test', 'ridbeacn', { requestStart: 10, responseEnd: 40, transferSize: 300 }),
+]);
+runTimers();
+"""
+    js = generate_rum_tracker_js("svc_test")
+    sampled = _run_rum_tracker(js, scenario, resource_draw=0.2)
+    # Browser-cache hits (zero transfer size), files without this service's request ID and the
+    # beacon itself never reached the edge as a loggable request, so they are not reported.
+    assert [call["url"].split("&p=%2Fdashboard")[1] for call in sampled["fetchCalls"]] == [
+        "&sr=1&esr=1&rsr=0.5&r=rid00002:%2Fvideo%2Fseg1.ts:2000"
+    ]
+    unsampled = _run_rum_tracker(js, scenario, resource_draw=0.9)
+    assert unsampled["fetchCalls"] == [] and unsampled["beaconCalls"] == []
 
 
 def test_faro_tracker_readiness_and_upload_gates(monkeypatch, mock_fos, caplog):
@@ -2384,6 +2371,7 @@ def test_sec14_rum_tracker_js_escapes_script_and_string_breakout(monkeypatch) ->
 const fs = require('node:fs');
 const vm = require('node:vm');
 let calls = [];
+const timers = [];
 let config;
 const window = {
   location: { pathname: '/home' },
@@ -2400,7 +2388,8 @@ const sandbox = {
   window,
   console,
   Response,
-  setTimeout,
+  setTimeout: fn => { timers.push(fn); return timers.length; },
+  clearTimeout: () => { timers.length = 0; },
   encodeURIComponent,
   document: { cookie: 'rum_cid=c1', addEventListener: function() {} },
   navigator: {},
@@ -2410,7 +2399,7 @@ config.beforeSend({
   type: 'measurement',
   payload: { type: 'web-vitals', values: { LCP: 100 } },
 });
-window.fetch(config.url, { method: 'POST' });
+timers.splice(0).forEach(fn => fn());
 process.stdout.write(JSON.stringify({ pwned: sandbox.pwned, calls }));
 """
     result = subprocess.run(

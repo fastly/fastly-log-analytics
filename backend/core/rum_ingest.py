@@ -149,6 +149,89 @@ def extract_metrics_from_faro_payload(payload: dict, log_data: dict) -> list[dic
     return extracted
 
 
+def _compact_beacon_query(log_data: dict) -> str:
+    for key in ("url", "rum_raw_query"):
+        value = log_data.get(key)
+        if not isinstance(value, str) or not value:
+            continue
+        head = value.split("#", 1)[0]
+        if "?" in head:
+            query = head.split("?", 1)[1]
+            if query:
+                return query
+        elif key == "rum_raw_query" and "=" in value:
+            return value
+    return ""
+
+
+def extract_metrics_from_compact_beacon(log_data: dict) -> list[dict] | None:
+    """Expand the batched beacon both editions' tracker sends (``m=``, ``r=`` and ``e=`` lists).
+
+    A port of the Cloud ingester's ``batch_metrics``. Returns ``None`` when the line is not a
+    compact beacon, so older formats keep their own parsers. Separators are split before
+    percent-decoding because every part is encoded on its own.
+    """
+    query = _compact_beacon_query(log_data)
+    if not query:
+        return None
+    params = [tuple(pair.split("=", 1)) for pair in query.split("&") if "=" in pair]
+    if not any(key in ("m", "r", "e") for key, _ in params):
+        return None
+
+    def param(name: str) -> str:
+        return next((unquote(value) for key, value in params if key == name and value), "")
+
+    def rate(name: str) -> float | None:
+        value = safe_float(param(name))
+        return value if value is not None and 0.0 < value <= 1.0 else None
+
+    pathname = param("p") or "/"
+    cid = param("cid")
+    sample_rate, error_sample_rate, resource_sample_rate = rate("sr"), rate("esr"), rate("rsr")
+
+    def entry(name: str, value: float | None, rating: str, row_rate: float | None) -> dict:
+        return {
+            "metric_name": name,
+            "metric_value": value,
+            "metric_rating": rating,
+            "pathname": pathname,
+            "cid": cid,
+            "sample_rate": row_rate,
+        }
+
+    extracted: list[dict] = []
+    for key, value in params:
+        if key == "m":
+            for metric in filter(None, value.split(",")):
+                parts = [unquote(part) for part in metric.split(":")]
+                number = safe_float(parts[1]) if len(parts) > 1 else None
+                if not parts[0] or number is None or not math.isfinite(number):
+                    continue
+                extracted.append(entry(parts[0], number, parts[2] if len(parts) > 2 else "", sample_rate))
+        elif key == "r":
+            # ``rid:path:ms``: the client time-to-last-byte of one request that reached the edge.
+            for resource in filter(None, value.split(",")):
+                parts = [unquote(part) for part in resource.split(":")]
+                ttlb = safe_float(parts[2]) if len(parts) > 2 else None
+                if not parts[0] or ttlb is None or not math.isfinite(ttlb) or ttlb < 0:
+                    continue
+                row = entry("ttlb", ttlb, "", resource_sample_rate)
+                row["req_id"] = parts[0]
+                row["resource_url"] = parts[1]
+                extracted.append(row)
+        elif key == "e":
+            parts = [unquote(part) for part in value.split("|")]
+            if not parts[0]:
+                continue
+            row = entry("exception", None, "", error_sample_rate)
+            row["error_message"] = parts[0]
+            row["error_file"] = (parts[1] if len(parts) > 1 else "") or "unknown.js"
+            row["error_line"] = safe_int(parts[2]) if len(parts) > 2 else 0
+            row["error_col"] = safe_int(parts[3]) if len(parts) > 3 else 0
+            extracted.append(row)
+    return extracted
+
+
 def extract_metrics_from_query_params(qparams: dict[str, list[str]], log_data: dict) -> list[dict]:
     """Extract batched metrics and exceptions from repeated URL query parameters.
 

@@ -20,9 +20,20 @@ pub const STREAM: &str = "rum";
 pub const VITALS: &str = "client_vitals";
 pub const ERRORS: &str = "client_errors";
 const SCHEMA_VERSION: &str = "rum-v1";
-const TAIL: [&str; 11] = [
-    "pathname", "browser", "os", "device", "cid", "req_id", "city", "region", "country", "pop",
+const TAIL: [&str; 13] = [
+    "pathname",
+    "browser",
+    "os",
+    "device",
+    "cid",
+    "req_id",
+    "city",
+    "region",
+    "country",
+    "pop",
     "tls",
+    "resource_url",
+    "asn",
 ];
 
 fn timestamp() -> Field {
@@ -183,6 +194,9 @@ struct Metric {
     device: Option<String>,
     error: Option<(String, String, i32, i32)>,
     sample_rate: Option<f64>,
+    /// Set on a resource timing: the edge request ID of the measured request and its path.
+    req_id: Option<String>,
+    resource_url: Option<String>,
 }
 
 fn faro_metrics(payload: &Map<String, Value>, line: &Map<String, Value>) -> Vec<Metric> {
@@ -226,6 +240,8 @@ fn faro_metrics(payload: &Map<String, Value>, line: &Map<String, Value>) -> Vec<
         device: Some(device.to_owned()),
         error: None,
         sample_rate: None,
+        req_id: None,
+        resource_url: None,
     };
     let list = |key: &str| {
         payload
@@ -404,6 +420,8 @@ fn query_metric(line: &Map<String, Value>) -> Metric {
         device: first(line, &["device"]),
         error,
         sample_rate: None,
+        req_id: None,
+        resource_url: None,
     }
 }
 
@@ -484,6 +502,8 @@ fn vcl_query_metrics(line: &Map<String, Value>) -> Option<Vec<Metric>> {
             device: device.clone(),
             error: None,
             sample_rate: None,
+            req_id: None,
+            resource_url: None,
         });
     }
     if !raw_err_msgs.is_empty() {
@@ -513,6 +533,8 @@ fn vcl_query_metrics(line: &Map<String, Value>) -> Option<Vec<Metric>> {
                 device: device.clone(),
                 error: Some((err_msg.clone(), err_file, err_line, err_col)),
                 sample_rate: None,
+                req_id: None,
+                resource_url: None,
             });
         }
     } else if let Some(err_msg) = first(line, &["rum_error_message"]).map(decode_if_encoded) {
@@ -534,6 +556,8 @@ fn vcl_query_metrics(line: &Map<String, Value>) -> Option<Vec<Metric>> {
                 int(line.get("rum_error_col")),
             )),
             sample_rate: None,
+            req_id: None,
+            resource_url: None,
         });
     }
     Some(out)
@@ -548,7 +572,10 @@ fn batch_metrics(line: &Map<String, Value>) -> Option<Vec<Metric>> {
         .split('&')
         .filter_map(|pair| pair.split_once('='))
         .collect();
-    if !params.iter().any(|(key, _)| matches!(*key, "m" | "e")) {
+    if !params
+        .iter()
+        .any(|(key, _)| matches!(*key, "m" | "r" | "e"))
+    {
         return None;
     }
     let param = |name: &str| {
@@ -565,6 +592,7 @@ fn batch_metrics(line: &Map<String, Value>) -> Option<Vec<Metric>> {
             .filter(|rate| *rate > 0.0 && *rate <= 1.0)
     };
     let (sample_rate, error_sample_rate) = (rate("sr"), rate("esr"));
+    let resource_sample_rate = rate("rsr");
     let entry = |name: String, value: Option<Value>, rating: String| Metric {
         name: Some(name),
         value,
@@ -583,6 +611,25 @@ fn batch_metrics(line: &Map<String, Value>) -> Option<Vec<Metric>> {
                     let name = parts.next().unwrap_or_default();
                     let value = parts.next().map(Value::String);
                     out.push(entry(name, value, parts.next().unwrap_or_default()));
+                }
+            }
+            "r" => {
+                // `rid:path:ms`, the client time-to-last-byte of one request that reached the edge.
+                for resource in value.split(',').filter(|r| !r.is_empty()) {
+                    let mut parts = resource.split(':').map(decode);
+                    let (rid, path) = (parts.next(), parts.next());
+                    let ttlb = parts.next().and_then(|ms| ms.parse::<f64>().ok());
+                    let (Some(rid), Some(path), Some(ttlb)) = (rid, path, ttlb) else {
+                        continue;
+                    };
+                    if rid.is_empty() || !ttlb.is_finite() || ttlb < 0.0 {
+                        continue;
+                    }
+                    let mut metric = entry("ttlb".into(), Some(Value::from(ttlb)), String::new());
+                    metric.sample_rate = resource_sample_rate;
+                    metric.req_id = Some(rid);
+                    metric.resource_url = Some(path);
+                    out.push(metric);
                 }
             }
             "e" => {
@@ -609,7 +656,7 @@ fn batch_metrics(line: &Map<String, Value>) -> Option<Vec<Metric>> {
 }
 
 struct Tail {
-    strings: [StringBuilder; 11],
+    strings: [StringBuilder; 13],
     ttfb: Float64Builder,
     sample_rate: Float64Builder,
 }
@@ -623,7 +670,7 @@ impl Tail {
         }
     }
     /// Unsampled (legacy) beacons count as a 1.0 sample rate.
-    fn push(&mut self, values: &[String; 11], ttfb: Option<f64>, sample_rate: Option<f64>) {
+    fn push(&mut self, values: &[String; 13], ttfb: Option<f64>, sample_rate: Option<f64>) {
         for (builder, value) in self.strings.iter_mut().zip(values) {
             builder.append_value(value);
         }
@@ -709,7 +756,7 @@ impl Errors {
 
 struct Row {
     metric: Metric,
-    tail: [String; 11],
+    tail: [String; 13],
 }
 
 enum Parsed {
@@ -718,7 +765,7 @@ enum Parsed {
     Bad,
 }
 
-const COMPACT_RUM_KEYS: [&str; 10] = [
+const COMPACT_RUM_KEYS: [&str; 11] = [
     "ts_ms",
     "service_id",
     "fastly_req_id",
@@ -729,6 +776,7 @@ const COMPACT_RUM_KEYS: [&str; 10] = [
     "pop",
     "tls",
     "ttfb",
+    "asn",
 ];
 
 fn parse_line(bytes: &[u8], service_id: &str) -> Parsed {
@@ -795,12 +843,18 @@ fn parse_line(bytes: &[u8], service_id: &str) -> Parsed {
                 or(&metric.os, "os", "macOS"),
                 or(&metric.device, "device", "Desktop"),
                 metric.cid.clone().unwrap_or_default(),
-                first(&line, &["fastly_req_id"]).unwrap_or_default(),
+                metric
+                    .req_id
+                    .clone()
+                    .or_else(|| first(&line, &["fastly_req_id"]))
+                    .unwrap_or_default(),
                 first(&line, &["city", "geo_city"]).unwrap_or_default(),
                 first(&line, &["region", "geo_region"]).unwrap_or_default(),
                 first(&line, &["country", "geo_country_code"]).unwrap_or_default(),
                 first(&line, &["pop", "server_pop"]).unwrap_or_default(),
                 first(&line, &["tls", "tls_version"]).unwrap_or_default(),
+                metric.resource_url.clone().unwrap_or_default(),
+                first(&line, &["asn"]).unwrap_or_default(),
             ];
             Row { metric, tail }
         })

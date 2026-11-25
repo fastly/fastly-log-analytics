@@ -29,7 +29,9 @@ from backend.models.common import (
     RumUpgradeRequest,
     RumVersionsResponse,
 )
+from backend.provision.feature_fields import claim_feature_fields
 from backend.provision.orchestrator import run_with_events
+from backend.provision.rum_assets import DEFAULT_RESOURCE_SAMPLE_RATE
 from backend.provision.rum_orchestrator import (
     disable_rum,
     enable_rum,
@@ -48,7 +50,17 @@ from backend.utils.sse import sse_response
 
 logger = logging.getLogger(__name__)
 
-_RUM_SETTING_KEYS = ("capture_vitals", "capture_performance", "capture_errors", "capture_events", "custom_condition")
+_RUM_SETTING_KEYS = (
+    "capture_vitals",
+    "capture_performance",
+    "capture_errors",
+    "capture_events",
+    "capture_resources",
+    "sample_rate",
+    "error_sample_rate",
+    "resource_sample_rate",
+    "custom_condition",
+)
 
 rum_provisioning_router = APIRouter()
 
@@ -227,6 +239,10 @@ def _rum_status_sync(request: Request, service_id: str) -> dict[str, Any]:
         "capture_performance": rum_cfg.get("capture_performance", True),
         "capture_errors": rum_cfg.get("capture_errors", True),
         "capture_events": rum_cfg.get("capture_events", True),
+        "capture_resources": rum_cfg.get("capture_resources", True),
+        "sample_rate": rum_cfg.get("sample_rate", 1.0),
+        "error_sample_rate": rum_cfg.get("error_sample_rate", 1.0),
+        "resource_sample_rate": rum_cfg.get("resource_sample_rate", DEFAULT_RESOURCE_SAMPLE_RATE),
         "custom_condition": rum_cfg.get("custom_condition", ""),
     }
 
@@ -367,7 +383,14 @@ def update_rum_settings(
         rum_block["capture_performance"] = body.capture_performance
         rum_block["capture_errors"] = body.capture_errors
         rum_block["capture_events"] = body.capture_events
+        rum_block["capture_resources"] = body.capture_resources
+        rum_block["sample_rate"] = body.sample_rate
+        rum_block["error_sample_rate"] = body.error_sample_rate
+        rum_block["resource_sample_rate"] = body.resource_sample_rate
         rum_block["custom_condition"] = body.custom_condition
+        if svcconfig.is_rum_enabled(c):
+            # Client timings are matched to request logs by `rid`, so RUM keeps that field on.
+            claim_feature_fields(c, "rum")
 
     def _roll_back_settings(c: dict) -> None:
         original_rum = original_cfg.get("rum") or {}
@@ -396,33 +419,29 @@ def update_rum_settings(
             message="Failed to upload RUM tracker wrapper to FOS",
         )
 
-    orig_rum = original_cfg.get("rum") or {}
-    rum_was_enabled = svcconfig.is_rum_enabled(original_cfg)
-    condition_changed = orig_rum.get("custom_condition") != body.custom_condition
+    # Saving settings is also the redeploy path: reconcile every time so the edge VCL follows the
+    # config and the generator (a reconcile with nothing to change makes no Fastly version).
+    from backend.provision.declarative.reconciler import reconcile_vcl_state
 
-    needs_reconciliation = not rum_was_enabled or condition_changed
-
-    if needs_reconciliation:
-        from backend.provision.declarative.reconciler import reconcile_vcl_state
-
+    try:
+        reconcile_vcl_state(service_id, token, dry_run=False, activate=True)
+    except Exception as e:
         try:
-            reconcile_vcl_state(service_id, token, dry_run=False, activate=True)
-        except Exception as e:
-            try:
-                svcconfig.mutate_config(service_id, _roll_back_settings)
-            except Exception as rollback_err:
-                logger.error(f"Failed to rollback service config for {service_id}: {rollback_err}")
-            raise_internal(
-                logger,
-                e,
-                code="rum_reconcile_failed",
-                message="Failed to reconcile and deploy updated RUM conditions to Fastly",
-            )
-    else:
-        logger.info(
-            f"[rum] Bypassing Fastly VCL reconciliation for service {service_id} "
-            "because RUM is already enabled and custom_condition is unchanged."
+            svcconfig.mutate_config(service_id, _roll_back_settings)
+        except Exception as rollback_err:
+            logger.error(f"Failed to rollback service config for {service_id}: {rollback_err}")
+        raise_internal(
+            logger,
+            e,
+            code="rum_reconcile_failed",
+            message="Failed to reconcile and deploy updated RUM conditions to Fastly",
         )
+
+    def _refresh_vcl_sha(c: dict) -> None:
+        if svcconfig.is_rum_enabled(c):
+            c["rum_vcl_sha"] = rum_vcl_fingerprint(service_id, c)
+
+    svcconfig.mutate_config(service_id, _refresh_vcl_sha)
 
     return {
         "ok": True,

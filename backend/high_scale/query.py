@@ -241,6 +241,9 @@ _VCL_ENUM_DECODE: tuple[tuple[str, dict[str, str]], ...] = (
 
 def _normalize_serving_fields(event: dict[str, Any], domain: str) -> None:
     if domain in {"rum_vitals", "rum_errors"}:
+        ts_ms = event.get("ts_ms")
+        if not event.get("timestamp") and isinstance(ts_ms, (int, float)) and not isinstance(ts_ms, bool):
+            event["timestamp"] = datetime.fromtimestamp(ts_ms / 1000, UTC).isoformat()
         event["req_id"] = (
             event.get("req_id")
             or event.get("fastly_req_id")
@@ -381,9 +384,13 @@ def _is_faro_exception_metric(metric: dict[str, Any]) -> bool:
 
 
 def _expand_faro_rum_events(log_data: dict[str, Any], domain: str) -> list[dict[str, Any]]:
+    from backend.core.rum_ingest import extract_metrics_from_compact_beacon
+
     raw_body = log_data.get("rum_body")
-    extracted: list[dict[str, Any]] = []
-    if raw_body:
+    extracted: list[dict[str, Any]] = extract_metrics_from_compact_beacon(log_data) or []
+    if extracted:
+        pass
+    elif raw_body:
         from backend.core.rum_ingest import (
             extract_metrics_from_faro_payload,
             extract_metrics_from_query_params,
@@ -451,7 +458,12 @@ def _expand_faro_rum_events(log_data: dict[str, Any], domain: str) -> list[dict[
             "browser": browser_val,
             "os": os_val,
             "device": device_val,
+            "resource_url": metric.get("resource_url") or "",
         }
+        if metric.get("req_id"):
+            base_fields["req_id"] = metric["req_id"]
+        if metric.get("sample_rate") is not None:
+            base_fields["sample_rate"] = metric["sample_rate"]
         if is_exc:
             raw_line = metric.get("error_line")
             raw_col = metric.get("error_col")

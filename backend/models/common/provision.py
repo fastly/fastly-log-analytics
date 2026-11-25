@@ -197,6 +197,10 @@ class RumSettingsUpdateRequest(BaseModel):
     capture_performance: bool = True
     capture_errors: bool = True
     capture_events: bool = True
+    capture_resources: bool = True
+    sample_rate: float = Field(default=1.0, ge=0.01, le=1.0)
+    error_sample_rate: float = Field(default=1.0, ge=0.01, le=1.0)
+    resource_sample_rate: float = Field(default=0.1, ge=0.01, le=1.0)
     custom_condition: str = ""
     token: str = ""
 

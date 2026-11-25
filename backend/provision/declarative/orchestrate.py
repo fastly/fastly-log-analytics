@@ -9,7 +9,7 @@ import logging
 import sys
 import time
 from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Any
 
 from backend.core.fastly.client import fastly, find_service_by_name
@@ -23,6 +23,7 @@ from backend.provision.declarative.fastly_ops import (
     _fetch_active_version,
     _fetch_backends,
     _fetch_dictionaries,
+    _fetch_domains,
     _fetch_highest_version,
     _fetch_logging_endpoints,
     _fetch_snippets,
@@ -50,6 +51,7 @@ from backend.provision.declarative.models import (
     VCLSnippet,
     VclValidationError,
     compute_diff,
+    service_timing_origins,
 )
 from backend.provision.declarative.vcl_builder import (
     _format_field_names,
@@ -122,6 +124,26 @@ def _load_or_bootstrap_feature_state(service_id: str, token: str, *, persist_boo
     return FeatureState.from_config(json.loads(config_path.read_text()))
 
 
+def _with_service_timing_origins(service_id: str, token: str, state: FeatureState, *, persist: bool) -> FeatureState:
+    """Scope RUM cross-host timing to the hostnames attached to the Fastly service itself.
+
+    The list is stored in the service config so ``/rum/status`` drift detection sees the same
+    VCL. A failed lookup keeps the stored list instead of silently dropping the header.
+    """
+    try:
+        origins = service_timing_origins(_fetch_domains(service_id, token))
+    except Exception:
+        logger.warning("Could not read service hostnames for %s; keeping stored timing origins", service_id)
+        return state
+    if origins == state.rum_timing_allow_origins:
+        return state
+    if persist:
+        _update_local_config(
+            service_id, lambda cfg: cfg.setdefault("rum", {}).__setitem__("timing_allow_origins", origins)
+        )
+    return replace(state, rum_timing_allow_origins=origins)
+
+
 def reconcile_vcl_state(
     service_id: str,
     token: str,
@@ -137,6 +159,8 @@ def reconcile_vcl_state(
             desired_state = _load_or_bootstrap_feature_state(service_id, token, persist_bootstrap=True)
             if status_cb:
                 status_cb("⏳ Fetching active configuration from Fastly...")
+            if desired_state.rum_enabled:
+                desired_state = _with_service_timing_origins(service_id, token, desired_state, persist=not dry_run)
             current_snippets = _fetch_snippets(service_id, token)
             current_endpoints = [
                 e for e in _fetch_logging_endpoints(service_id, token) if _is_managed_endpoint(e.name, desired_state)

@@ -15,6 +15,7 @@ from backend.core.catalog import (
     validate_vcl_custom_condition,
     validate_vcl_log_expression,
 )
+from backend.core.fastly.client import validate_timing_allow_origins
 
 _AUTO_INJECTED_NAMES: set[str] = {
     "service_id",
@@ -132,6 +133,20 @@ def _cfg_int(val: Any, field_name: str) -> int:
         raise ValueError(f"{field_name} must be an integer, got {val!r}") from exc
 
 
+_SERVICE_HOSTNAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$")
+MAX_TIMING_ALLOW_ORIGINS = 20
+
+
+def service_timing_origins(domains: list[str]) -> list[str]:
+    """Page origins for the hostnames attached to the Fastly service, for ``Timing-Allow-Origin``.
+
+    Wildcard and malformed entries are skipped; the list is sorted, de-duplicated and capped.
+    """
+    hosts = sorted({d.strip().lower() for d in domains if isinstance(d, str)})
+    valid = [h for h in hosts if ".." not in h and _SERVICE_HOSTNAME_RE.fullmatch(h)]
+    return [f"https://{host}" for host in valid[:MAX_TIMING_ALLOW_ORIGINS]]
+
+
 @dataclass(frozen=True)
 class FeatureState:
     """Immutable representation of the desired configuration of a Fastly service."""
@@ -155,6 +170,7 @@ class FeatureState:
     rum_log_period: int | None = None
     faro_version: str | None = None
     rum_custom_condition: str = ""
+    rum_timing_allow_origins: list[str] = field(default_factory=list)
     cmcd: CmcdConfig = field(default_factory=CmcdConfig)
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     log_fields: LogFieldsConfig = field(default_factory=LogFieldsConfig)
@@ -513,6 +529,7 @@ class FeatureState:
             rum_log_period=rum_log_period,
             faro_version=faro_version,
             rum_custom_condition=rum_custom_condition,
+            rum_timing_allow_origins=validate_timing_allow_origins(rum_dict.get("timing_allow_origins")),
             cmcd=cmcd_config,
             scoring=scoring_config,
             log_fields=log_fields_config,

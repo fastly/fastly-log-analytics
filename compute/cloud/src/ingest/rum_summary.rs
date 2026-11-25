@@ -275,6 +275,10 @@ pub fn write_summary(
         let cid = col_str(batch, "cid");
 
         for row in 0..batch.num_rows() {
+            // A resource timing measures one request, not the page view: it is read raw.
+            if get_str(name, row) == Some("ttlb") {
+                continue;
+            }
             let row_ts = get_ts(ts, row).unwrap_or(default_bucket);
             let bucket5 = row_ts - row_ts.rem_euclid(BUCKET_MS);
             let vt = vitals_totals.entry(bucket5).or_default();

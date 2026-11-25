@@ -15908,6 +15908,26 @@ export interface components {
              */
             capture_events: boolean;
             /**
+             * Capture Resources
+             * @default true
+             */
+            capture_resources: boolean;
+            /**
+             * Sample Rate
+             * @default 1
+             */
+            sample_rate: number;
+            /**
+             * Error Sample Rate
+             * @default 1
+             */
+            error_sample_rate: number;
+            /**
+             * Resource Sample Rate
+             * @default 0.1
+             */
+            resource_sample_rate: number;
+            /**
              * Custom Condition
              * @default
              */
@@ -15949,6 +15969,14 @@ export interface components {
             capture_errors?: boolean | null;
             /** Capture Events */
             capture_events?: boolean | null;
+            /** Capture Resources */
+            capture_resources?: boolean | null;
+            /** Sample Rate */
+            sample_rate?: number | null;
+            /** Error Sample Rate */
+            error_sample_rate?: number | null;
+            /** Resource Sample Rate */
+            resource_sample_rate?: number | null;
             /** Custom Condition */
             custom_condition?: string | null;
         } & {
@@ -16026,7 +16054,7 @@ export interface components {
             /** Views */
             views: number;
             /** Avg Load Time */
-            avg_load_time: number;
+            avg_load_time: number | null;
             /** Lcp P75 */
             lcp_p75: number | null;
             /** Cls P75 */

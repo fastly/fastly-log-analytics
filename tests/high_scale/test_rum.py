@@ -173,7 +173,10 @@ def test_errors_only_and_null_metric_rows_remain_honest() -> None:
 def test_flat_beacon_keys_and_edge_aliases_are_extracted() -> None:
     keys = ("browser", "os", "device", "country", "city", "region", "pop", "tls", "ttfb")
     flat = dict(zip(keys, ("Firefox", "Linux", "Desktop", "DE", "Berlin", "BE", "FRA", "1.3", 0.042), strict=True))
-    assert rum_environment(flat) == flat
+    assert rum_environment(flat) == {**flat, "resource_url": "", "asn": "", "sample_rate": 1.0}
+    resource = rum_environment({"resource_url": "/img/hero.jpg", "asn": 7922, "sample_rate": 0.5})
+    assert (resource["resource_url"], resource["asn"], resource["sample_rate"]) == ("/img/hero.jpg", "7922", 0.5)
+    assert rum_environment({"sample_rate": 7})["sample_rate"] == 1.0
 
     alias_keys = ("geo_country_code", "geo_city", "geo_region", "server_pop", "tls_version", "time_to_first_byte")
     aliased = rum_environment(dict(zip(alias_keys, ("FR", "Paris", "IDF", "CDG", "1.2", "88"), strict=True)))
@@ -224,6 +227,33 @@ def high_scale():
     with patch("backend.core.request_context.RequestContext.high_scale", new_callable=PropertyMock) as hs:
         hs.return_value = _Service()
         yield hs
+
+
+def test_page_level_queries_exclude_resource_timings_and_avg_load_is_real_page_load() -> None:
+    """A resource timing measures one request, not a page view, so it never counts as one."""
+
+    class PagesClient(ChartClient):
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            if "rum_analytics_pages" in sql:
+                self.calls.append((sql, params or {}))
+                page = {"views": 4, "lcp": 2500.0, "cls": 0.1, "error_rate": 0.0}
+                return [{"path": "/timed", "avg_load": 1503.0, **page}, {"path": "/untimed", "avg_load": None, **page}]
+            return super().execute(sql, params)
+
+    client = PagesClient()
+    window = ("2026-09-01T00:00:00Z", "2026-09-01T02:00:00Z")
+    result = rum_analytics(service_for(client), *window)
+    rum_beacons_by_date(service_for(client), *window)
+    rum_live_events(service_for(client), *window, 10)
+    vitals_queries = [sql for sql, _ in client.calls if "FROM rum_vitals_facts" in sql]
+    assert len(vitals_queries) == 7
+    assert all("metric_name != 'ttlb'" in sql for sql in vitals_queries)
+
+    pages_sql = next(sql for sql, _ in client.calls if "rum_analytics_pages" in sql)
+    assert "avgOrNullIf(metric_value, metric_name = 'page_load') AS avg_load" in pages_sql
+    assert "'ttfb'" not in pages_sql and "'duration'" not in pages_sql
+    # A page with no load timing reports none; it is not shown as a zero-second load.
+    assert [(p["path"], p["avg_load_time"]) for p in result["worst_pages"]] == [("/timed", 1.5), ("/untimed", None)]
 
 
 def test_parse_rum_filters_accepts_objects_and_rejects_everything_else() -> None:
@@ -1219,6 +1249,7 @@ import pytest
 from backend.core.fastly.client import (
     RUM_ASSET_FETCH_NAME,
     RUM_DELIVER_SET_COOKIE_NAME,
+    RUM_DELIVER_TIMING_NAME,
     RUM_FARO_FETCH_NAME,
     RUM_RECV_NAME,
     RUM_SIGV4_SIGN_NAME,
@@ -1555,10 +1586,52 @@ def test_parse_and_convert_zstd_rum_beacon_file(tmp_path):
 # ── Section 4: RUM VCL Provisioning & Falco Validation ──
 
 
+def test_rum_log_format_and_beacon_extraction_match_the_cloud_generators() -> None:
+    """Both editions log beacons identically; the Cloud generators are pinned to these same files."""
+    from backend.core.fastly.client import generate_rum_log_format, generate_rum_recv_parts
+
+    fixtures = Path(__file__).resolve().parents[2] / "compute/cloud/tests"
+    assert generate_rum_log_format() == (fixtures / "rum_log_format_parity.txt").read_text(encoding="utf-8").rstrip()
+    extraction, _response = generate_rum_recv_parts()
+    assert extraction == (fixtures / "rum_beacon_extraction_parity.vcl").read_text(encoding="utf-8").rstrip()
+    assert "req.body" not in extraction and "rum_raw_query" not in extraction
+
+
+def test_rum_deliver_hands_the_browser_its_request_id_and_scopes_timing_access() -> None:
+    deliver = generate_rum_vcl("srv_test")[RUM_DELIVER_TIMING_NAME]
+    # Only an ID this POP generated is echoed, never a client-supplied header, and never on a beacon.
+    assert (
+        'if (fastly.ff.visits_this_service == 0 && req.url.path != "/rum-beacon" '
+        '&& req.http.x-req-id ~ "^[A-Za-z0-9_-]{8}$") {'
+    ) in deliver
+    assert 'add resp.http.Server-Timing = "rid;desc=" + req.http.x-req-id;' in deliver
+    assert "Timing-Allow-Origin" not in deliver
+
+    scoped = generate_rum_vcl(
+        "srv_test", timing_allow_origins=["https://www.example.com", "https://shop.example.com:8443"]
+    )[RUM_DELIVER_TIMING_NAME]
+    # An origin that already sets its own policy is left alone.
+    assert "&& !resp.http.Timing-Allow-Origin) {" in scoped
+    assert ('set resp.http.Timing-Allow-Origin = "https://www.example.com, https://shop.example.com:8443";') in scoped
+    for unsafe in ("*", "www.example.com", "https://a.example/path", 'https://a.example"; set resp.status = 500; #'):
+        with pytest.raises(ValueError, match="timing_allow_origins"):
+            generate_rum_vcl("srv_test", timing_allow_origins=[unsafe])
+
+
+def test_request_id_is_generated_for_the_rid_field_without_the_rest_of_group_l() -> None:
+    from backend.provision.fastly_api import get_capture_vcl_statements, load_log_format
+
+    rid_only = {"groups": [], "field_overrides": {"rid": True}}
+    assert "set req.http.x-req-id = randomstr(8);" in get_capture_vcl_statements(rid_only)
+    assert '"rid":"%{req.http.x-req-id}V"' in load_log_format(rid_only)
+    assert '"prid"' not in load_log_format(rid_only)
+    assert "set req.http.x-req-id = randomstr(8);" not in get_capture_vcl_statements({"groups": []})
+
+
 def test_generate_rum_vcl_and_asset_fetch_without_faro():
     v_default = generate_rum_vcl("srv_test")
     assert v_default == generate_rum_vcl("srv_test", faro_version=None)
-    assert set(v_default.keys()) == {RUM_RECV_NAME, RUM_DELIVER_SET_COOKIE_NAME}
+    assert set(v_default.keys()) == {RUM_RECV_NAME, RUM_DELIVER_SET_COOKIE_NAME, RUM_DELIVER_TIMING_NAME}
     assert "faro" not in "\n".join(v_default.values()).lower()
     assert "faro" not in "\n".join(generate_rum_vcl("srv_test", faro_version="2.9.0").values()).lower()
 

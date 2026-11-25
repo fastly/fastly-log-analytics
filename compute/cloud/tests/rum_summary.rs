@@ -31,6 +31,8 @@ fn make_vitals(rows: &[(&str, f64, &str, Option<&str>)]) -> RecordBatch {
     let mut country = StringBuilder::new();
     let mut pop = StringBuilder::new();
     let mut tls = StringBuilder::new();
+    let mut resource_url = StringBuilder::new();
+    let mut asn = StringBuilder::new();
     let mut ttfb = Float64Builder::new();
     let mut sample_rate = Float64Builder::new();
 
@@ -53,6 +55,8 @@ fn make_vitals(rows: &[(&str, f64, &str, Option<&str>)]) -> RecordBatch {
         country.append_value("US");
         pop.append_null();
         tls.append_null();
+        resource_url.append_null();
+        asn.append_null();
         ttfb.append_null();
         sample_rate.append_value(1.0);
     }
@@ -75,6 +79,8 @@ fn make_vitals(rows: &[(&str, f64, &str, Option<&str>)]) -> RecordBatch {
             Arc::new(country.finish()),
             Arc::new(pop.finish()),
             Arc::new(tls.finish()),
+            Arc::new(resource_url.finish()),
+            Arc::new(asn.finish()),
             Arc::new(ttfb.finish()),
             Arc::new(sample_rate.finish()),
         ],
@@ -99,6 +105,8 @@ fn make_errors(rows: &[(&str, &str, i32, i32, Option<&str>)]) -> RecordBatch {
     let mut country = StringBuilder::new();
     let mut pop = StringBuilder::new();
     let mut tls = StringBuilder::new();
+    let mut resource_url = StringBuilder::new();
+    let mut asn = StringBuilder::new();
     let mut ttfb = Float64Builder::new();
     let mut sample_rate = Float64Builder::new();
 
@@ -122,6 +130,8 @@ fn make_errors(rows: &[(&str, &str, i32, i32, Option<&str>)]) -> RecordBatch {
         country.append_value("US");
         pop.append_null();
         tls.append_null();
+        resource_url.append_null();
+        asn.append_null();
         ttfb.append_null();
         sample_rate.append_value(1.0);
     }
@@ -145,6 +155,8 @@ fn make_errors(rows: &[(&str, &str, i32, i32, Option<&str>)]) -> RecordBatch {
             Arc::new(country.finish()),
             Arc::new(pop.finish()),
             Arc::new(tls.finish()),
+            Arc::new(resource_url.finish()),
+            Arc::new(asn.finish()),
             Arc::new(ttfb.finish()),
             Arc::new(sample_rate.finish()),
         ],
@@ -311,4 +323,18 @@ fn rum_summary_counts_metrics_and_ratings_like_rum_ts() {
     assert_eq!(vitals_total, Some((12, 4)));
     assert_eq!(errors_total, Some((3, 2, 2)));
     assert_eq!(top_error, Some((2, 10, 3, 2)));
+}
+
+#[test]
+fn resource_timings_do_not_count_as_page_vitals() {
+    let page = [("LCP", 1200.0, "/home", Some("c1"))];
+    let with_resource = [
+        ("LCP", 1200.0, "/home", Some("c1")),
+        ("ttlb", 850.0, "/home", Some("c1")),
+    ];
+    let errors = make_errors(&[]);
+    let plain = rum_summary::write_summary(&[&make_vitals(&page)], &[&errors], BASE_S).unwrap();
+    let mixed =
+        rum_summary::write_summary(&[&make_vitals(&with_resource)], &[&errors], BASE_S).unwrap();
+    assert_eq!(plain, mixed);
 }

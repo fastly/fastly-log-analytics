@@ -66,11 +66,25 @@ export function RumSettingsDialog(props: RumSettingsDialogProps) {
   return <RumSettingsDialogBody key={generation} {...props} />
 }
 
+/** A stored sample rate (0.01–1) as a whole percentage, or the default when unset. */
+const ratePercent = (rate: number | null | undefined, fallback: number) =>
+  rate == null ? fallback : Math.min(100, Math.max(1, Math.round(rate * 100)))
+
+const SAMPLE_RATE_FIELDS = [
+  ['sample_percent', 'rum-sample-percent', 'Sessions', 'Share of browser sessions that report vitals, performance and events.'],
+  ['error_sample_percent', 'rum-error-sample-percent', 'Errors', 'Share of browser sessions that report JavaScript errors.'],
+  ['resource_sample_percent', 'rum-resource-sample-percent', 'Resource timing', 'Share of page views that report per-request timings.'],
+] as const
+
 const rumSettingsSchema = z.object({
   capture_vitals: z.boolean(),
   capture_performance: z.boolean(),
   capture_errors: z.boolean(),
   capture_events: z.boolean(),
+  capture_resources: z.boolean(),
+  sample_percent: z.number().min(1).max(100),
+  error_sample_percent: z.number().min(1).max(100),
+  resource_sample_percent: z.number().min(1).max(100),
   custom_condition: z.string(),
   selected_version: z.string(),
 })
@@ -93,6 +107,10 @@ function RumSettingsDialogBody({
       capture_performance: true,
       capture_errors: true,
       capture_events: true,
+      capture_resources: true,
+      sample_percent: 100,
+      error_sample_percent: 100,
+      resource_sample_percent: 10,
       custom_condition: '',
       selected_version: currentVersion ?? latestVersion ?? availableVersions[0] ?? '',
     },
@@ -102,6 +120,10 @@ function RumSettingsDialogBody({
     capture_performance: capturePerformance,
     capture_errors: captureErrors,
     capture_events: captureEvents,
+    capture_resources: captureResources,
+    sample_percent: samplePercent,
+    error_sample_percent: errorSamplePercent,
+    resource_sample_percent: resourceSamplePercent,
     custom_condition: customCondition,
     selected_version: selectedVersion,
   } = useWatch({ control: form.control }) as z.infer<typeof rumSettingsSchema>
@@ -146,6 +168,10 @@ function RumSettingsDialogBody({
         capture_performance: statusData.capture_performance ?? true,
         capture_errors: statusData.capture_errors ?? true,
         capture_events: statusData.capture_events ?? true,
+        capture_resources: statusData.capture_resources ?? true,
+        sample_percent: ratePercent(statusData.sample_rate, 100),
+        error_sample_percent: ratePercent(statusData.error_sample_rate, 100),
+        resource_sample_percent: ratePercent(statusData.resource_sample_rate, 10),
         custom_condition: statusData.custom_condition ?? '',
         selected_version: currentVersion ?? latestVersion ?? availableVersions[0] ?? '',
       })
@@ -171,6 +197,9 @@ function RumSettingsDialogBody({
   if (!serviceId) return null
 
   const noVersions = availableVersions.length === 0
+  const sampleRatesValid = [samplePercent, errorSamplePercent, resourceSamplePercent].every(
+    (percent) => Number.isFinite(percent) && percent >= 1 && percent <= 100,
+  )
   const isNoOp = !selectedVersion
 
   const handleExecute = async () => {
@@ -187,6 +216,10 @@ function RumSettingsDialogBody({
         capture_performance: capturePerformance,
         capture_errors: captureErrors,
         capture_events: captureEvents,
+        capture_resources: captureResources,
+        sample_rate: samplePercent / 100,
+        error_sample_rate: errorSamplePercent / 100,
+        resource_sample_rate: resourceSamplePercent / 100,
         custom_condition: customCondition,
       }
       const settingsRes = await adminFetch(`/api/services/${serviceId}/rum/settings`, {
@@ -288,7 +321,7 @@ function RumSettingsDialogBody({
           variant="default"
           className="h-10 px-8 font-bold bg-primary hover:bg-primary/90"
           onClick={handleExecute}
-          disabled={noVersions || isNoOp || isStatusLoading}
+          disabled={noVersions || isNoOp || isStatusLoading || !sampleRatesValid}
         >
           Apply Settings
         </Button>
@@ -351,6 +384,40 @@ function RumSettingsDialogBody({
                 <Controller control={form.control} name="capture_events" render={({ field }) => (
                   <Switch id="toggle-events" checked={field.value} onCheckedChange={field.onChange} size="default" />
                 )} />
+              </div>
+
+              <div className="flex items-start justify-between gap-4 border-t pt-4">
+                <div className="space-y-1">
+                  <Label htmlFor="toggle-resources" className="text-sm font-semibold leading-none cursor-pointer">Resource Timing</Label>
+                  <p className="text-xs text-muted-foreground">
+                    Report how long each request served by this service took to reach the browser, matched to its
+                    request log line. Sampled per page view below, because every page loads many files.
+                  </p>
+                </div>
+                <Controller control={form.control} name="capture_resources" render={({ field }) => (
+                  <Switch id="toggle-resources" checked={field.value} onCheckedChange={field.onChange} size="default" />
+                )} />
+              </div>
+
+              <div className="grid gap-4 border-t pt-4 sm:grid-cols-3">
+                {SAMPLE_RATE_FIELDS.map(([name, id, label, help]) => (
+                  <div key={name} className="space-y-1">
+                    <Label htmlFor={id} className="text-sm font-semibold leading-none">{label} sampled (%)</Label>
+                    <Controller control={form.control} name={name} render={({ field }) => (
+                      <Input
+                        id={id}
+                        type="number"
+                        min={1}
+                        max={100}
+                        step={1}
+                        className="h-9 text-xs"
+                        value={field.value}
+                        onChange={(event) => field.onChange(event.target.valueAsNumber)}
+                      />
+                    )} />
+                    <p className="text-xs text-muted-foreground">{help}</p>
+                  </div>
+                ))}
               </div>
             </div>
           )}

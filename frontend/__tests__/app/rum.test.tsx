@@ -844,6 +844,10 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
           capture_performance: true,
           capture_errors: true,
           capture_events: true,
+          capture_resources: true,
+          sample_rate: 1,
+          error_sample_rate: 1,
+          resource_sample_rate: 0.1,
           custom_condition: '',
         }),
       })
@@ -865,6 +869,10 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
           capture_performance: true,
           capture_errors: true,
           capture_events: true,
+          capture_resources: true,
+          sample_rate: 1,
+          error_sample_rate: 1,
+          resource_sample_rate: 0.1,
           custom_condition: '',
         }),
       })
@@ -926,6 +934,10 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
           capture_performance: false,
           capture_errors: false,
           capture_events: false,
+          capture_resources: true,
+          sample_rate: 1,
+          error_sample_rate: 1,
+          resource_sample_rate: 0.1,
           custom_condition: '',
         }),
       }))

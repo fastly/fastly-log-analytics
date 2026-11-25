@@ -35,7 +35,10 @@ export async function cloudRumMutation(request: Request, runJob: RunJob): Promis
   if (action === "enable" || action === "disable") rum.enabled = action === "enable";
   if (action === "upgrade") rum.faro_version = input.version;
   if (action === "settings") {
-    for (const key of ["capture_vitals", "capture_performance", "capture_errors", "capture_events", "custom_condition"]) {
+    for (const key of [
+      "capture_vitals", "capture_performance", "capture_errors", "capture_events", "capture_resources",
+      "sample_rate", "error_sample_rate", "resource_sample_rate", "custom_condition",
+    ]) {
       if (key in input) rum[key] = input[key];
     }
   }

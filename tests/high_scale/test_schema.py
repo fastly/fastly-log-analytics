@@ -563,6 +563,56 @@ def test_decode_normalizes_rum_fields_and_querystring_fallback(
         assert res.events[0][k] == v
 
 
+@pytest.mark.no_postgres
+def test_compact_beacon_decodes_page_vitals_resource_timings_and_errors() -> None:
+    """The tracker both editions ship batches a page view into `m=`, `r=` and `e=` lists."""
+    from backend.high_scale.archive.clickhouse_batch import _DOMAIN_COLUMNS
+
+    record = {
+        "ts_ms": 1794052800123,
+        "service_id": "svc",
+        "fastly_req_id": "beaconid",
+        "url": (
+            "/rum-beacon?cid=c%2C1&p=%2Fshop%2Fa%3Ab&sr=1&esr=0.5&rsr=0.5"
+            "&m=lcp:1234.5:needs-improvement,page_load:1503:,broken::"
+            "&r=rid00001:%2Fimg%2Fhero.jpg:850,rid00002:%2Fvideo%2Fseg1.ts:2000,:%2Fno-id.js:5"
+            "&e=Boom%3A%20x%7Cy|app.js|10|5"
+        ),
+        "asn": 7922,
+        "pop": "CDG",
+        "country": "FR",
+    }
+    payload = gzip.compress(json.dumps(record, separators=(",", ":")).encode())
+
+    def rows_for(domain: str) -> list[dict[str, Any]]:
+        result = decode_source_object(_source(domain, "raw/rum/compact.gz"), payload, transform_version="normalize.v1")
+        assert result.quarantined_rows == 0
+        batch = HighScaleBatch("compact", "svc", domain, "1", result.events)
+        return [
+            dict(zip(_DOMAIN_COLUMNS[domain], row, strict=True))
+            for row in _rows_for_domain(batch, "00000000-0000-0000-0000-000000000001")
+        ]
+
+    vitals = rows_for("rum_vitals")
+    assert [row["metric_name"] for row in vitals] == ["lcp", "page_load", "ttlb", "ttlb"]
+    assert [row["metric_value"] for row in vitals] == [1234.5, 1503.0, 850.0, 2000.0]
+    assert [row["metric_rating"] for row in vitals] == ["needs-improvement", "", "", ""]
+    # A resource timing carries the edge request ID of the request it measured, not the beacon's.
+    assert [row["req_id"] for row in vitals] == ["beaconid", "beaconid", "rid00001", "rid00002"]
+    assert [row["resource_url"] for row in vitals] == ["", "", "/img/hero.jpg", "/video/seg1.ts"]
+    assert [row["sample_rate"] for row in vitals] == [1.0, 1.0, 0.5, 0.5]
+    assert all(row["pathname"] == "/shop/a:b" and row["client_id"] == "c,1" for row in vitals)
+    assert all(row["asn"] == "7922" and row["pop"] == "CDG" and row["country"] == "FR" for row in vitals)
+    assert all(row["event_timestamp"] == datetime(2026, 11, 7, 12, 0, 0, 123000, tzinfo=UTC) for row in vitals)
+    assert len({row["event_id"] for row in vitals}) == 4
+
+    errors = rows_for("rum_errors")
+    assert [(row["error_message"], row["error_file"], row["error_line"], row["error_col"]) for row in errors] == [
+        ("Boom: x|y", "app.js", 10, 5)
+    ]
+    assert errors[0]["sample_rate"] == 0.5 and errors[0]["req_id"] == "beaconid"
+
+
 @pytest.mark.parametrize("domain", ["rum_vitals", "rum_errors"])
 @pytest.mark.parametrize(
     ("encoding", "identity_source"),

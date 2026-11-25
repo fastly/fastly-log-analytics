@@ -164,8 +164,30 @@ def faro_tracker_ready(cfg: dict) -> tuple[bool, str]:
 
 
 def _js_json_literal(value: str) -> str:
-    """Serialize *value* as an HTML-safe JS string literal."""
-    return json.dumps(str(value)).replace("</", "<\\/")
+    """Serialize *value* as an HTML-safe JS string literal, byte-identical to the Cloud generator."""
+    return (
+        json.dumps(str(value), ensure_ascii=False)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
+
+
+DEFAULT_RESOURCE_SAMPLE_RATE = 0.1
+MIN_RUM_SAMPLE_RATE = 0.01
+
+
+def _js_rate_literal(value: object, *, default: float) -> str:
+    """Coerce *value* to a JS number literal in [0.01, 1]; anything else becomes ``default``."""
+    rate = default
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        candidate = float(value)
+        if MIN_RUM_SAMPLE_RATE <= candidate <= 1.0:
+            rate = candidate
+    text = repr(rate)
+    return text[:-2] if text.endswith(".0") else text
 
 
 def _js_bool_literal(value: object, *, default: bool = True) -> str:
@@ -209,20 +231,17 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
     capture_performance_js = _js_bool_literal(rum_cfg.get("capture_performance", True), default=True)
     capture_errors_js = _js_bool_literal(rum_cfg.get("capture_errors", True), default=True)
     capture_events_js = _js_bool_literal(rum_cfg.get("capture_events", True), default=True)
-
-    safe_comment_id = (
-        str(service_id)
-        .replace("*/", "* /")
-        .replace("</", "<\\/")
-        .replace("\r", " ")
-        .replace("\n", " ")
-        .replace("\u2028", " ")
-        .replace("\u2029", " ")
+    capture_resources_js = _js_bool_literal(rum_cfg.get("capture_resources", True), default=True)
+    sample_rate_js = _js_rate_literal(rum_cfg.get("sample_rate"), default=1.0)
+    error_sample_rate_js = _js_rate_literal(rum_cfg.get("error_sample_rate"), default=1.0)
+    resource_sample_rate_js = _js_rate_literal(
+        rum_cfg.get("resource_sample_rate"), default=DEFAULT_RESOURCE_SAMPLE_RATE
     )
+
     service_id_js = _js_json_literal(service_id)
     beacon_url_js = _js_json_literal(beacon_url)
 
-    return f"""/* Faro Web SDK wrapper for service {safe_comment_id} */
+    return f"""/* Faro Web SDK wrapper */
 (function() {{
   var SERVICE_ID = {service_id_js};
   var BEACON_ENDPOINT = {beacon_url_js};
@@ -230,183 +249,245 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
   var CAPTURE_PERFORMANCE = {capture_performance_js};
   var CAPTURE_ERRORS = {capture_errors_js};
   var CAPTURE_EVENTS = {capture_events_js};
-  var pendingBeacons = [];
+  var SAMPLE_RATE = {sample_rate_js};
+  var ERROR_SAMPLE_RATE = {error_sample_rate_js};
+  var CAPTURE_RESOURCES = {capture_resources_js};
+  var RESOURCE_SAMPLE_RATE = {resource_sample_rate_js};
+  var MAX_RESOURCES = 50;
+  var RESOURCE_REFILL_MS = 5000;
+  var FLUSH_DELAY_MS = 1500;
+  var MAX_URL_CHARS = 7500;
 
-  // Helper to synchronously unroll individual Faro transport items and queue them
-  function queueUnrolledBeacons(item) {{
-    if (!item) return;
+  var draw = NaN;
+  try {{
+    draw = parseFloat(window.sessionStorage.getItem('rum_sample'));
+  }} catch (e) {{}}
+  if (!(draw >= 0 && draw < 1)) {{
+    draw = Math.random();
     try {{
-      var cid = '';
-      var cookieMatch = document.cookie.match(/(?:^|; )rum_cid=([^;]+)/);
-      if (cookieMatch) {{
-        cid = cookieMatch[1];
-      }}
-      var pathname = window.location.pathname;
-      var metrics = [];
-      var errorMessage = '';
-      var errorFile = '';
-      var errorLine = 0;
-      var errorCol = 0;
+      window.sessionStorage.setItem('rum_sample', String(draw));
+    }} catch (e) {{}}
+  }}
+  var SAMPLED = draw < SAMPLE_RATE;
+  var ERRORS_SAMPLED = CAPTURE_ERRORS && draw < ERROR_SAMPLE_RATE;
+  var RESOURCES_SAMPLED = CAPTURE_RESOURCES && typeof PerformanceObserver === 'function' &&
+    Math.random() < RESOURCE_SAMPLE_RATE;
+  if (!SAMPLED && !ERRORS_SAMPLED && !RESOURCES_SAMPLED) return;
 
-      if (item.type === 'measurement' && item.payload) {{
-        if (!CAPTURE_VITALS) return;
+  var batch = {{ path: null, metrics: [], resources: [], errors: [] }};
+  var flushTimer = null;
+
+  function enc(value) {{
+    return encodeURIComponent(String(value));
+  }}
+
+  function queueItem(item) {{
+    if (!item || !item.payload) return;
+    try {{
+      var metrics = [];
+      var error = null;
+      if (item.type === 'measurement') {{
+        if (!SAMPLED || !CAPTURE_VITALS) return;
         var m = item.payload;
         if (m.type === 'web-vitals') {{
           var values = m.values || {{}};
           var rating = (m.context && m.context.rating) || (m.meta && m.meta.rating) || '';
           Object.keys(values).forEach(function(k) {{
             if (k !== 'delta') {{
-              metrics.push({{ name: k, value: values[k], rating: rating }});
+              metrics.push(enc(k) + ':' + enc(values[k]) + ':' + enc(rating));
             }}
           }});
         }}
-      }} else if (item.type === 'event' && item.payload) {{
+      }} else if (item.type === 'event') {{
+        if (!SAMPLED) return;
         var e = item.payload;
         if (e.name === 'faro.performance.navigation') {{
           if (!CAPTURE_PERFORMANCE) return;
           var attrs = e.attributes || e.values || {{}};
           Object.keys(attrs).forEach(function(k) {{
-            metrics.push({{ name: k, value: attrs[k], rating: '' }});
+            metrics.push(enc(k) + ':' + enc(attrs[k]) + ':');
           }});
         }} else if (e.name && e.name.indexOf('faro.') !== 0) {{
           if (!CAPTURE_EVENTS) return;
-          metrics.push({{ name: 'event_' + e.name, value: 1.0, rating: '' }});
+          metrics.push(enc('event_' + e.name) + ':1:');
         }}
-      }} else if (item.type === 'exception' && item.payload) {{
-        if (!CAPTURE_ERRORS) return;
+      }} else if (item.type === 'exception') {{
+        if (!ERRORS_SAMPLED) return;
         var exc = item.payload;
-        errorMessage = exc.value || exc.message || '';
-        if (exc.stacktrace && exc.stacktrace.frames && exc.stacktrace.frames.length > 0) {{
-          var frame = exc.stacktrace.frames[0];
-          errorFile = frame.filename || '';
-          errorLine = frame.lineno || 0;
-          errorCol = frame.colno || 0;
-        }}
+        var message = exc.value || exc.message || '';
+        if (!message) return;
+        var frame = (exc.stacktrace && exc.stacktrace.frames && exc.stacktrace.frames[0]) || {{}};
+        error = [message.slice(0, 500), frame.filename || '', frame.lineno || 0, frame.colno || 0]
+          .map(enc).join('|');
       }}
-
-      if (metrics.length > 0) {{
-        metrics.forEach(function(m) {{
-          pendingBeacons.push({{
-            type: 'metric',
-            name: m.name,
-            value: m.value,
-            rating: m.rating || '',
-            cid: cid,
-            pathname: pathname
-          }});
-        }});
-      }} else if (errorMessage) {{
-        pendingBeacons.push({{
-          type: 'error',
-          message: errorMessage,
-          file: errorFile || '',
-          line: errorLine || 0,
-          col: errorCol || 0,
-          cid: cid,
-          pathname: pathname
-        }});
-      }}
+      if (metrics.length === 0 && !error) return;
+      var path = window.location.pathname;
+      if (batch.path !== null && batch.path !== path) flushBatch(false);
+      batch.path = path;
+      batch.metrics = batch.metrics.concat(metrics);
+      if (error) batch.errors.push(error);
+      scheduleFlush();
     }} catch (e) {{
-      console.error('RUM: failed to queue unrolled beacon:', e);
+      console.error('RUM: failed to queue beacon item:', e);
     }}
   }}
 
-  // Helper to synchronously flush queued beacons as a single batched request per (cid, pathname)
-  function flushPendingBeacons(useBeacon) {{
-    if (pendingBeacons.length === 0) return;
-    var itemsToSend = pendingBeacons.slice();
-    pendingBeacons = [];
+  function queueTiming(metrics, resources) {{
+    if (metrics.length === 0 && resources.length === 0) return;
+    var path = window.location.pathname;
+    if (batch.path !== null && batch.path !== path) flushBatch(false);
+    batch.path = path;
+    batch.metrics = batch.metrics.concat(metrics);
+    batch.resources = batch.resources.concat(resources);
+    scheduleFlush();
+  }}
 
-    var groups = {{}};
-    var groupKeys = [];
-    itemsToSend.forEach(function(entry) {{
-      var gKey = (entry.cid || '') + '\\0' + (entry.pathname || '/');
-      if (!groups[gKey]) {{
-        groups[gKey] = {{ cid: entry.cid || '', pathname: entry.pathname || '/', metrics: [], errors: [] }};
-        groupKeys.push(gKey);
-      }}
-      if (entry.type === 'metric') {{
-        groups[gKey].metrics.push(entry);
-      }} else if (entry.type === 'error') {{
-        groups[gKey].errors.push(entry);
-      }}
+  // One `rid:path:ms` per request that reached the edge: request start to last byte.
+  function resourceTiming(entry) {{
+    if (!(entry.transferSize > 0) || !(entry.responseEnd > 0)) return null;
+    var rid = '';
+    (entry.serverTiming || []).forEach(function(t) {{
+      if (t.name === 'rid' && t.description) rid = t.description;
     }});
+    if (!rid) return null;
+    var path;
+    try {{
+      path = new URL(entry.name, window.location.href).pathname;
+    }} catch (e) {{
+      return null;
+    }}
+    if (path === BEACON_ENDPOINT) return null;
+    var ttlb = entry.responseEnd - (entry.requestStart > 0 ? entry.requestStart : entry.fetchStart || 0);
+    if (!(ttlb >= 0)) return null;
+    return enc(rid) + ':' + enc(path) + ':' + Math.round(ttlb);
+  }}
 
-    groupKeys.forEach(function(gKey) {{
-      var g = groups[gKey];
-      var extra = '?service_id=' + encodeURIComponent(SERVICE_ID);
-      var hasAnyRating = g.metrics.some(function(m) {{ return Boolean(m.rating); }});
-      g.metrics.forEach(function(m) {{
-        extra += '&rum_metric_name=' + encodeURIComponent(m.name) + '&rum_metric_value=' + encodeURIComponent(m.value);
-        if (hasAnyRating) {{
-          extra += '&rum_metric_rating=' + encodeURIComponent(m.rating || '');
-        }}
-      }});
-      var hasAnyErrorLoc = g.errors.some(function(e) {{ return Boolean(e.file || e.line || e.col); }});
-      g.errors.forEach(function(e) {{
-        extra += '&rum_error_message=' + encodeURIComponent(e.message);
-        if (hasAnyErrorLoc) {{
-          extra += '&rum_error_file=' + encodeURIComponent(e.file || '');
-          extra += '&rum_error_line=' + (e.line || 0);
-          extra += '&rum_error_col=' + (e.col || 0);
-        }}
-      }});
-      if (g.cid) extra += '&cid=' + encodeURIComponent(g.cid);
-      extra += '&rum_pathname=' + encodeURIComponent(g.pathname);
+  // A page view may report MAX_RESOURCES requests at once, then one more per RESOURCE_REFILL_MS,
+  // so a long session (video) keeps measuring later downloads at a bounded rate.
+  var resourceBudget = MAX_RESOURCES;
+  var resourceBudgetAt = Date.now();
+  function takeResourceBudget() {{
+    var refill = Math.floor((Date.now() - resourceBudgetAt) / RESOURCE_REFILL_MS);
+    if (refill > 0) {{
+      resourceBudget = Math.min(MAX_RESOURCES, resourceBudget + refill);
+      resourceBudgetAt += refill * RESOURCE_REFILL_MS;
+    }}
+    if (resourceBudget <= 0) return false;
+    resourceBudget--;
+    return true;
+  }}
 
-      var cleanBeaconUrl = BEACON_ENDPOINT.split('?')[0] + extra;
-      if (useBeacon && typeof navigator !== 'undefined' && typeof originalSendBeacon === 'function') {{
-        originalSendBeacon.call(navigator, cleanBeaconUrl, '');
-      }} else if (typeof originalFetch === 'function') {{
-        originalFetch.call(window, cleanBeaconUrl, {{
-          method: 'POST',
-          headers: {{ 'Content-Type': 'text/plain' }},
-          body: '',
-          keepalive: true
-        }}).catch(function() {{}});
+  function observeTiming(type) {{
+    try {{
+      new PerformanceObserver(function(list) {{
+        try {{
+          var metrics = [];
+          var resources = [];
+          list.getEntries().forEach(function(entry) {{
+            if (type === 'navigation' && SAMPLED && CAPTURE_PERFORMANCE && entry.loadEventEnd > 0) {{
+              metrics.push('page_load:' + Math.round(entry.loadEventEnd - (entry.startTime || 0)) + ':');
+            }}
+            if (!RESOURCES_SAMPLED) return;
+            var timing = resourceTiming(entry);
+            if (timing && takeResourceBudget()) resources.push(timing);
+          }});
+          queueTiming(metrics, resources);
+        }} catch (e) {{
+          console.error('RUM: failed to queue timing entries:', e);
+        }}
+      }}).observe({{ type: type, buffered: true }});
+    }} catch (e) {{}}
+  }}
+  if (typeof PerformanceObserver === 'function') {{
+    if (RESOURCES_SAMPLED || (SAMPLED && CAPTURE_PERFORMANCE)) observeTiming('navigation');
+    if (RESOURCES_SAMPLED) observeTiming('resource');
+  }}
+
+  function scheduleFlush() {{
+    if (flushTimer !== null) clearTimeout(flushTimer);
+    var hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
+    flushTimer = setTimeout(function() {{
+      flushTimer = null;
+      flushBatch(hidden);
+    }}, hidden ? 0 : FLUSH_DELAY_MS);
+  }}
+
+  function beaconUrls() {{
+    var cid = '';
+    var cookieMatch = document.cookie.match(/(?:^|; )rum_cid=([^;]+)/);
+    if (cookieMatch) {{
+      try {{
+        cid = decodeURIComponent(cookieMatch[1]);
+      }} catch (e) {{
+        cid = cookieMatch[1];
+      }}
+    }}
+    var head = BEACON_ENDPOINT + '?service_id=' + enc(SERVICE_ID) + (cid ? '&cid=' + enc(cid) : '') +
+      '&p=' + enc(batch.path) + '&sr=' + SAMPLE_RATE + '&esr=' + ERROR_SAMPLE_RATE +
+      (RESOURCES_SAMPLED ? '&rsr=' + RESOURCE_SAMPLE_RATE : '');
+    var urls = [];
+    var url = head;
+    var openList = '';
+    // `m` and `r` are comma-separated lists; every `e` is its own parameter.
+    function append(part, key) {{
+      var isList = key !== 'e';
+      var piece = isList && openList === key ? ',' + part : '&' + key + '=' + part;
+      if (url !== head && url.length + piece.length > MAX_URL_CHARS) {{
+        urls.push(url);
+        url = head;
+        piece = '&' + key + '=' + part;
+      }}
+      url += piece;
+      openList = isList ? key : '';
+    }}
+    batch.metrics.forEach(function(m) {{ append(m, 'm'); }});
+    batch.resources.forEach(function(r) {{ append(r, 'r'); }});
+    batch.errors.forEach(function(e) {{ append(e, 'e'); }});
+    if (url !== head) urls.push(url);
+    return urls;
+  }}
+
+  function flushBatch(useBeacon) {{
+    if (flushTimer !== null) {{
+      clearTimeout(flushTimer);
+      flushTimer = null;
+    }}
+    if (batch.metrics.length === 0 && batch.resources.length === 0 && batch.errors.length === 0) return;
+    var urls = beaconUrls();
+    batch = {{ path: null, metrics: [], resources: [], errors: [] }};
+    urls.forEach(function(url) {{
+      if (useBeacon && originalSendBeacon) {{
+        originalSendBeacon.call(navigator, url, '');
+      }} else if (originalFetch) {{
+        originalFetch.call(window, url, {{ method: 'POST', body: '', keepalive: true }})
+          .catch(function() {{}});
       }}
     }});
   }}
 
-  // 1. Intercept navigator.sendBeacon to flush synchronously on unload
+  // Faro's own transport sends are dropped: the batch above carries the data.
+  var originalSendBeacon = null;
   if (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {{
-    var originalSendBeacon = navigator.sendBeacon;
+    originalSendBeacon = navigator.sendBeacon;
     navigator.sendBeacon = function(url, data) {{
       if (typeof url === 'string' && url.indexOf('/rum-beacon') !== -1) {{
-        flushPendingBeacons(true);
         return true;
       }}
       return originalSendBeacon.call(this, url, data);
     }};
   }}
 
-  // Flush any pending metrics immediately when the page is hidden or unloaded
-  if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {{
-    window.addEventListener('pagehide', function() {{
-      flushPendingBeacons(true);
-    }});
-  }}
-  if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {{
-    document.addEventListener('visibilitychange', function() {{
-      if (document.visibilityState === 'hidden') {{
-        flushPendingBeacons(true);
-      }}
-    }});
-  }}
-
-  // 2. Intercept fetch
+  var originalFetch = null;
   if (typeof window.fetch === 'function') {{
-    var originalFetch = window.fetch;
+    originalFetch = window.fetch;
     window.fetch = function(input, init) {{
       if (typeof input === 'string' && input.indexOf('/rum-beacon') !== -1) {{
-        flushPendingBeacons(false);
         return Promise.resolve(new Response(null, {{ status: 204, statusText: 'No Content' }}));
       }}
       return originalFetch.call(this, input, init);
     }};
   }}
 
-  // 3. Intercept XMLHttpRequest
   if (typeof XMLHttpRequest === 'function') {{
     var originalOpen = XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.open = function(method, url) {{
@@ -419,7 +500,6 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
     var originalSend = XMLHttpRequest.prototype.send;
     XMLHttpRequest.prototype.send = function(body) {{
       if (this._rumBeacon) {{
-        flushPendingBeacons(false);
         var self = this;
         setTimeout(function() {{
           Object.defineProperty(self, 'readyState', {{ value: 4, writable: true }});
@@ -437,10 +517,19 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
     }};
   }}
 
+  document.addEventListener('visibilitychange', function() {{
+    if (document.visibilityState === 'hidden') flushBatch(true);
+  }});
+  window.addEventListener('pagehide', function() {{
+    flushBatch(true);
+  }});
+
   // Check if Faro is present (either via window.Faro or window.GrafanaFaroWebSdk)
   var Faro = window.Faro || window.GrafanaFaroWebSdk;
 
-  if (typeof Faro === 'undefined') {{
+  if (!SAMPLED && !ERRORS_SAMPLED) {{
+    // Resource timing alone reads the browser's own entries and needs no SDK.
+  }} else if (typeof Faro === 'undefined') {{
     var script = document.createElement('script');
     script.src = '/js/faro-sdk.js';
     script.async = true;
@@ -464,22 +553,12 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
 
     var instrumentations = [];
 
-    // Only enable Web Vitals, View, and Error tracking to reduce beacon volume
-    // Default getWebInstrumentations() includes performance resource tracking
-    // which sends one beacon per resource (50-100+ beacons per page load)
-    if (Faro.WebVitalsInstrumentation) {{
+    if (SAMPLED && Faro.WebVitalsInstrumentation) {{
       instrumentations.push(new Faro.WebVitalsInstrumentation());
     }}
-    if (Faro.ViewInstrumentation) {{
+    if (SAMPLED && Faro.ViewInstrumentation) {{
       instrumentations.push(new Faro.ViewInstrumentation());
     }}
-    // Real export is "ErrorsInstrumentation" (plural) in every SDK version
-    // we've checked (1.19.0, 2.9.0), but this probe used to look for the
-    // singular "ErrorInstrumentation" and silently found nothing — no
-    // exception, no warning, just no JS error tracking. Try the plural
-    // first, fall back to the singular in case a future release renames it
-    // back, and warn loudly if neither is found so this class of bug is
-    // visible instead of silent.
     var ErrorInstrumentationCtor = Faro.ErrorsInstrumentation || Faro.ErrorInstrumentation;
     if (ErrorInstrumentationCtor) {{
       instrumentations.push(new ErrorInstrumentationCtor());
@@ -492,68 +571,30 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
         name: 'rum-app',
         version: '1.0.0'
       }},
-      url: BEACON_ENDPOINT + '?service_id=' + encodeURIComponent(SERVICE_ID),
+      url: BEACON_ENDPOINT + '?service_id=' + enc(SERVICE_ID),
       instrumentations: instrumentations,
-      // Sampling: default to 100% (track all sessions)
-      // Can be configured per-service via rum_sampling_rate in config
-      // Examples: 0.1 = 10%, 0.5 = 50%, 1.0 = 100%
-      samplingRate: 1.0,
+      samplingRate: 1,
       batching: {{
         enabled: true,
-        sendTimeout: 1000,
-        itemLimit: 25
+        sendTimeout: 10,
+        itemLimit: 1
       }},
-
-
-      // Filter to only send important events (drop resource tracking, session events)
       beforeSend: function(event) {{
-        if (!event) {{
-          return null;
-        }}
-
-        // Push to our synchronous unrolled queue
-        queueUnrolledBeacons(event);
-
-        // Keep the existing filtering logic to let Faro handle tracking states
-        if (event.events && Array.isArray(event.events)) {{
-          event.events = event.events.filter(function(e) {{
-            var name = e.name || '';
-            return name === 'faro.exception' || name === 'faro.performance.navigation' || name.indexOf('faro.') !== 0;
+        if (!event) return null;
+        if (event.type) {{
+          queueItem(event);
+        }} else {{
+          (event.measurements || []).forEach(function(payload) {{
+            queueItem({{ type: 'measurement', payload: payload }});
+          }});
+          (event.events || []).forEach(function(payload) {{
+            queueItem({{ type: 'event', payload: payload }});
+          }});
+          (event.exceptions || []).forEach(function(payload) {{
+            queueItem({{ type: 'exception', payload: payload }});
           }});
         }}
-        if (event.measurements && Array.isArray(event.measurements)) {{
-          event.measurements = event.measurements.filter(function(m) {{
-            return m.type === 'web-vitals';
-          }});
-        }}
-        if (event.events || event.measurements) {{
-          var hasData = (event.events && event.events.length > 0) || (event.measurements && event.measurements.length > 0);
-          return hasData ? event : null;
-        }}
-
-        // 2. Otherwise, treat as Faro's standard individual transport item (Faro v1/v2 spec)
-        if (event.type === 'event') {{
-          var name = (event.payload && event.payload.name) || '';
-          if (name === 'faro.exception' || name === 'faro.performance.navigation' || name.indexOf('faro.') !== 0) {{
-            return event;
-          }}
-          return null;
-        }}
-
-        if (event.type === 'measurement') {{
-          var mType = (event.payload && event.payload.type) || '';
-          if (mType === 'web-vitals') {{
-            return event;
-          }}
-          return null;
-        }}
-
-        if (event.type === 'exception') {{
-          return event;
-        }}
-
-        // For other types (logs, traces etc.), default to returning event
-        return event;
+        return null;
       }}
     }};
 

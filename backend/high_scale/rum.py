@@ -39,6 +39,8 @@ _BEACON_IDENTITY = (
     "coalesce(nullIf(toString(request_event_id), ''), "
     "concat(client_id, '_', toString(toInt64(round(toUnixTimestamp64Milli(event_timestamp) / 1000.0)))))"
 )
+# A resource timing (`ttlb`) measures one request, not a page view: page-level readers skip it.
+_PAGE_VITALS = "metric_name != 'ttlb'"
 _RUM_FILTERS_ADAPTER: TypeAdapter[dict[str, Any]] = TypeAdapter(dict[str, Any])
 
 
@@ -184,7 +186,7 @@ def rum_analytics(
             ]
         )
 
-    where_vitals, where_errors = scope("rum_vitals"), scope("rum_errors")
+    where_vitals, where_errors = f"{scope('rum_vitals')} AND {_PAGE_VITALS}", scope("rum_errors")
     identity = _BEACON_IDENTITY
     events = (
         f"WITH events AS ("
@@ -228,8 +230,7 @@ def rum_analytics(
     pages_sql = (
         events + "/* rum_analytics_pages */ SELECT pathname AS path, "
         "uniqExactIf(beacon_id, src = 'vitals') AS views, "
-        "avgOrNullIf(metric_value, metric_name IN "
-        "('duration', 'pageLoadTime', 'load_time', 'pageLoad', 'LCP', 'lcp', 'ttfb', 'TTFB', 'fcp', 'FCP')) AS avg_load, "
+        "avgOrNullIf(metric_value, metric_name = 'page_load') AS avg_load, "
         "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'lcp') AS lcp, "
         "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'cls') AS cls, "
         "uniqExactIf(beacon_id, src = 'errors') * 100.0 / nullIf(views + uniqExactIf(beacon_id, src = 'errors'), 0) AS error_rate "
@@ -335,7 +336,7 @@ def rum_analytics(
         {
             "path": _decode_pct(row["path"]),
             "views": row["views"],
-            "avg_load_time": seconds(row["avg_load"] or 0.0),
+            "avg_load_time": seconds(row["avg_load"]),
             "lcp_p75": seconds(row["lcp"]),
             "cls_p75": round(row["cls"], 3) if row["cls"] is not None else None,
             "error_rate": round(row["error_rate"], 2) if row["error_rate"] is not None else 0.0,
@@ -377,7 +378,7 @@ def rum_beacons_by_date(service: HighScaleService, start_time: str | None, end_t
     if end < start:
         raise ValueError("RUM end time precedes start time")
     window = ["event_timestamp >= {start:DateTime64(3, 'UTC')}", "event_timestamp <= {end:DateTime64(3, 'UTC')}"]
-    where_vitals = " AND ".join([*visible_fact_clauses("rum_vitals"), *window])
+    where_vitals = " AND ".join([*visible_fact_clauses("rum_vitals"), *window, _PAGE_VITALS])
     where_errors = " AND ".join([*visible_fact_clauses("rum_errors"), *window])
     rows = service.client.execute(
         f"WITH events AS (SELECT event_timestamp, {_BEACON_IDENTITY} AS beacon_id FROM rum_vitals_facts "
@@ -421,7 +422,8 @@ def rum_live_events(
         f"/* rum_live_events */ SELECT * FROM ("
         f"SELECT * FROM (SELECT event_timestamp AS timestamp, 'pageview' AS type, pathname, metric_name, "
         f"metric_value, metric_rating, browser, os, device, client_id AS cid, toString(request_event_id) AS req_id, "
-        f"'' AS error_message, city, region, country, pop, tls, ttfb FROM rum_vitals_facts WHERE {scope('rum_vitals')} "
+        f"'' AS error_message, city, region, country, pop, tls, ttfb FROM rum_vitals_facts "
+        f"WHERE {scope('rum_vitals')} AND {_PAGE_VITALS} "
         f"ORDER BY event_timestamp DESC LIMIT {{limit:UInt32}}) UNION ALL "
         f"SELECT * FROM (SELECT event_timestamp AS timestamp, 'error' AS type, pathname, '' AS metric_name, "
         f"CAST(NULL AS Nullable(Float64)) AS metric_value, '' AS metric_rating, browser, os, device, "

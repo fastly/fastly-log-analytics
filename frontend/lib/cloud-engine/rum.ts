@@ -172,6 +172,8 @@ export function buildRumWhere(
   table: "client_vitals" | "client_errors" = "client_vitals",
 ): string {
   const clauses: string[] = [rangeServiceSql(params)];
+  // A resource timing (`ttlb`) measures one request, not a page view: page-level readers skip it.
+  if (table === "client_vitals") clauses.push("metric_name IS DISTINCT FROM 'ttlb'");
   if (params.device_type) {
     clauses.push(`LOWER(CAST(device_type AS VARCHAR)) = ${duckSqlString(String(params.device_type).toLowerCase())}`);
   }

@@ -970,11 +970,8 @@ async def test_analyst_can_read_enabled_field(with_config):
 # ── Section 2: RUM Settings, Versions, Enable/Disable/Upgrade & RBAC ─────────
 
 
-@pytest.mark.parametrize(
-    ("custom_condition", "expect_reconcile"),
-    [("", False), ('req.http.Host == "example.com"', True)],
-)
-def test_update_settings_reconcile_and_missing(custom_condition: str, expect_reconcile: bool):
+@pytest.mark.parametrize("custom_condition", ["", 'req.http.Host == "example.com"'])
+def test_update_settings_reconcile_and_missing(custom_condition: str):
     test_client = TestClient(_make_app(analyst=False))
     with patch("backend.config.load_config", return_value=None):
         assert test_client.post(f"/api/services/{SVC}/rum/settings", json={"capture_vitals": True}).status_code == 404
@@ -993,9 +990,11 @@ def test_update_settings_reconcile_and_missing(custom_condition: str, expect_rec
     ):
         res = test_client.post(f"/api/services/{SVC}/rum/settings", json=payload)
     assert res.status_code == 200 and res.json()["ok"] is True
-    mock_save.assert_called_once()
+    # One save for the settings and one for the refreshed VCL fingerprint.
+    assert mock_save.call_count == 2
     mock_upload.assert_called_once_with(SVC, "tok-stored", overwrite=True)
-    assert mock_reconcile.called is expect_reconcile
+    # Saving is the redeploy path, so the VCL is reconciled even when the condition is unchanged.
+    mock_reconcile.assert_called_once_with(SVC, "tok-stored", dry_run=False, activate=True)
 
 
 @pytest.mark.parametrize(

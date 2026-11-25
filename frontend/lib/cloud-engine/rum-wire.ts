@@ -50,8 +50,7 @@ export async function cloudRumAnalytics(params: RumQueryParams) {
     count(DISTINCT beacon_id) FILTER (WHERE is_error) AS errors FROM events`, [], params.signal))[0];
   const pages = await engine.executeSql<Record<string, unknown>>(`${events} SELECT page_url,
     count(DISTINCT beacon_id) FILTER (WHERE NOT is_error) AS views,
-    avg(metric_value) FILTER (WHERE lower(metric_name) IN
-      ('duration', 'pageloadtime', 'load_time', 'pageload', 'lcp', 'ttfb', 'fcp')) AS avg_load_time,
+    avg(metric_value) FILTER (WHERE metric_name = 'page_load') AS avg_load_time,
     quantile_cont(metric_value, 0.75) FILTER (WHERE upper(metric_name) = 'LCP') AS lcp_p75,
     quantile_cont(metric_value, 0.75) FILTER (WHERE upper(metric_name) = 'CLS') AS cls_p75,
     count(DISTINCT beacon_id) FILTER (WHERE is_error) AS errors,

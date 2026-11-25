@@ -419,11 +419,19 @@ sub vcl_log {
 
 RUM_RECV_NAME = "RUM - Recv"
 RUM_DELIVER_SET_COOKIE_NAME = "RUM - Set cookies"
+RUM_DELIVER_TIMING_NAME = "RUM - Request timing"
 RUM_ASSET_FETCH_NAME = "RUM - Asset fetch FOS"
 RUM_SIGV4_SIGN_NAME = "RUM - Asset fetch SigV4 signing"
 RUM_FARO_FETCH_NAME = "RUM - Faro SDK fetch caching"
 RUM_SNIPPET_NAMES = frozenset(
-    {RUM_RECV_NAME, RUM_DELIVER_SET_COOKIE_NAME, RUM_ASSET_FETCH_NAME, RUM_SIGV4_SIGN_NAME, RUM_FARO_FETCH_NAME}
+    {
+        RUM_RECV_NAME,
+        RUM_DELIVER_SET_COOKIE_NAME,
+        RUM_DELIVER_TIMING_NAME,
+        RUM_ASSET_FETCH_NAME,
+        RUM_SIGV4_SIGN_NAME,
+        RUM_FARO_FETCH_NAME,
+    }
 )
 
 _FARO_VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
@@ -459,13 +467,22 @@ def _assert_faro_version_safe(version: str) -> str:
     return version
 
 
-def generate_rum_vcl(logging_service_id: str, faro_version: str | None = None) -> dict[str, str]:
+def generate_rum_vcl(
+    logging_service_id: str,
+    faro_version: str | None = None,
+    *,
+    timing_allow_origins: Any = None,
+) -> dict[str, str]:
     """Generate Phase 1 RUM VCL snippets for the logging service."""
     if faro_version is not None:
         _assert_faro_version_safe(faro_version)
+    timing = _generate_deliver_request_timing_vcl()
+    if origins := validate_timing_allow_origins(timing_allow_origins):
+        timing += _generate_deliver_timing_allow_origin_vcl(origins)
     return {
         RUM_RECV_NAME: _generate_recv_vcl(),
         RUM_DELIVER_SET_COOKIE_NAME: _generate_deliver_set_cookie_vcl(logging_service_id),
+        RUM_DELIVER_TIMING_NAME: timing,
     }
 
 
@@ -494,21 +511,38 @@ if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {
 
 
 def _generate_beacon_field_extraction_vcl() -> str:
-    """Populate RUM headers before the generic capture block runs."""
-    return """# Extract RUM fields before generic log capture promotes them.
-set req.http.x-fos-edge-data:rum_cid = querystring.get(req.url, "cid");
+    """Capture the beacon's request ID; the logged beacon URL carries everything else."""
+    return """# Extract the RUM request ID; the beacon URL carries everything else.
 set req.http.x-fos-edge-data:fastly_req_id = querystring.get(req.url, "req");
 if (req.http.x-fos-edge-data:fastly_req_id == "") {
     set req.http.x-fos-edge-data:fastly_req_id = req.http.Fastly-Request-ID;
 }
-set req.http.x-fos-edge-data:rum_raw_query = querystring.filter(req.url, "service_id" + querystring.filtersep() + "req");
-set req.http.x-fos-edge-data:rum_metric_name = querystring.get(req.url, "rum_metric_name");
-set req.http.x-fos-edge-data:rum_metric_value = querystring.get(req.url, "rum_metric_value");
-set req.http.x-fos-edge-data:rum_metric_rating = querystring.get(req.url, "rum_metric_rating");
-set req.http.x-fos-edge-data:rum_pathname = querystring.get(req.url, "rum_pathname");
-set req.http.x-fos-edge-data:rum_error_message = querystring.get(req.url, "rum_error_message");
-set req.http.x-fos-edge-data:rum_error_file = querystring.get(req.url, "rum_error_file");
-set req.http.x-fos-edge-data:rum_body = req.body;"""
+set req.url = querystring.filter(req.url, "service_id" + querystring.filtersep() + "req");"""
+
+
+_RUM_LOG_EDGE_FIELD_IDS = ("city", "region", "country", "pop", "tls", "ttfb")
+# The beacon's client network, read at the edge so client timings group by ASN without a join.
+_RUM_LOG_ASN_VALUE = '%{if(client.as.number > 0, "" + client.as.number, "null")}V'
+
+
+def generate_rum_log_format() -> str:
+    """The lean RUM log format: the edge fields the RUM decoder reads and the beacon URL once.
+
+    The tracker batches a page view into the beacon's query string, so the URL is logged up to
+    8192 bytes. Byte-identical to the Cloud edition's ``generate_rum_log_format``.
+    """
+    from backend.core.catalog import LOG_FIELD_CATALOG
+
+    catalog_vcl = {field["id"]: field["vcl"] for field in LOG_FIELD_CATALOG}
+    parts = [
+        catalog_vcl["ts_ms"],
+        '"service_id":"%{req.service_id}V"',
+        '"fastly_req_id":"%{json.escape(req.http.x-fos-edge-data:fastly_req_id)}V"',
+        '"url":"%{json.escape(substr(req.url, 0, 8192))}V"',
+        *(catalog_vcl[field_id] for field_id in _RUM_LOG_EDGE_FIELD_IDS),
+        f'"asn":{_RUM_LOG_ASN_VALUE}',
+    ]
+    return "{" + ",".join(parts) + "}"
 
 
 def _generate_beacon_response_vcl() -> str:
@@ -615,6 +649,43 @@ if (req.restarts == 1 && fastly.ff.visits_this_service == 0 && req.url.path != "
         add resp.http.Set-Cookie = "rum_cid=" + req.http.x-edge-score:sid + "; Path=/; SameSite=Lax; Secure";
     }
 }"""
+
+
+def _generate_deliver_request_timing_vcl() -> str:
+    """Tell the browser which edge request it just made, for client time-to-last-byte."""
+    return """# Hand the browser this request's ID so its timing beacon can be matched to this log line.
+# Only an ID this POP generated is echoed, never a client-supplied header.
+if (fastly.ff.visits_this_service == 0 && req.url.path != "/rum-beacon" && req.http.x-req-id ~ "^[A-Za-z0-9_-]{8}$") {
+    add resp.http.Server-Timing = "rid;desc=" + req.http.x-req-id;
+}"""
+
+
+_TIMING_ORIGIN_RE = re.compile(r"^https://[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?(?::[0-9]{1,5})?$")
+
+
+def validate_timing_allow_origins(origins: Any) -> list[str]:
+    """Return the page origins allowed to read cross-host timing, or raise ``ValueError``.
+
+    Each entry is one ``https://host[:port]`` origin. A wildcard is refused on purpose: it would
+    let any site that embeds a file read that file's timing and transfer size.
+    """
+    if origins is None:
+        return []
+    if not isinstance(origins, (list, tuple)) or len(origins) > 20:
+        raise ValueError("rum timing_allow_origins must be a list of at most 20 origins")
+    for origin in origins:
+        if not isinstance(origin, str) or ".." in origin or not _TIMING_ORIGIN_RE.fullmatch(origin):
+            raise ValueError(f"rum timing_allow_origins entries must be https://host[:port] origins; got {origin!r}")
+    return list(dict.fromkeys(origins))
+
+
+def _generate_deliver_timing_allow_origin_vcl(origins: list[str]) -> str:
+    """Let pages on the listed origins read timing for files this service serves on another host."""
+    return f"""
+# Without this the browser hides the request ID and transfer size of cross-host files.
+if (fastly.ff.visits_this_service == 0 && req.url.path != "/rum-beacon" && !resp.http.Timing-Allow-Origin) {{
+    set resp.http.Timing-Allow-Origin = "{", ".join(origins)}";
+}}"""
 
 
 def _generate_vcl_error_handler() -> str:

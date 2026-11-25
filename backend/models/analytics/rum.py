@@ -16,6 +16,10 @@ class RumStatusResponse(WireSafeModel):
     capture_performance: bool | None = None
     capture_errors: bool | None = None
     capture_events: bool | None = None
+    capture_resources: bool | None = None
+    sample_rate: float | None = None
+    error_sample_rate: float | None = None
+    resource_sample_rate: float | None = None
     custom_condition: str | None = None
 
 
@@ -63,7 +67,7 @@ class RumVitals(WireSafeModel):
 class RumWorstPage(WireSafeModel):
     path: str
     views: int
-    avg_load_time: RumNumber
+    avg_load_time: RumNumber | None
     lcp_p75: RumNumber | None
     cls_p75: RumNumber | None
     error_rate: RumNumber

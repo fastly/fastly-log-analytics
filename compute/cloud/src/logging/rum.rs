@@ -66,6 +66,10 @@ pub struct Config {
     pub sample_rate: f64,
     /// Share of browser sessions that send errors, in [0.01, 1].
     pub error_sample_rate: f64,
+    /// Report client time-to-last-byte for the requests a page view made through this service.
+    pub capture_resources: bool,
+    /// Share of page views that report resource timing, in [0.01, 1].
+    pub resource_sample_rate: f64,
 }
 
 impl Default for Config {
@@ -82,6 +86,8 @@ impl Default for Config {
             capture_events: true,
             sample_rate: 1.0,
             error_sample_rate: 1.0,
+            capture_resources: true,
+            resource_sample_rate: 0.1,
         }
     }
 }
@@ -203,9 +209,13 @@ pub fn validate_config(config: &Config) -> Result<(), String> {
     {
         return Err("rum.endpoint_name is invalid".into());
     }
-    if ![config.sample_rate, config.error_sample_rate]
-        .iter()
-        .all(|rate| (0.01..=1.0).contains(rate))
+    if ![
+        config.sample_rate,
+        config.error_sample_rate,
+        config.resource_sample_rate,
+    ]
+    .iter()
+    .all(|rate| (0.01..=1.0).contains(rate))
     {
         return Err("rum sample rates must be in range [0.01, 1]".into());
     }
@@ -247,6 +257,8 @@ pub fn rum_custom_fields() -> Value {
 
 /// Edge fields of the RUM stream, by catalog id: exactly what `ingest::rum` reads besides the
 /// beacon URL.
+/// The beacon's client network, read at the edge so client timings group by ASN without a join.
+const RUM_ASN_VALUE: &str = "%{if(client.as.number > 0, \"\" + client.as.number, \"null\")}V";
 const RUM_EDGE_FIELDS: [&str; 6] = ["city", "region", "country", "pop", "tls", "ttfb"];
 
 /// The lean RUM log format: the edge fields the RUM parser reads and the beacon URL (whose query
@@ -272,6 +284,7 @@ pub fn generate_rum_log_format() -> Result<String, String> {
     for id in RUM_EDGE_FIELDS {
         parts.push(catalog_vcl(id)?);
     }
+    parts.push(format!("\"asn\":{RUM_ASN_VALUE}"));
     Ok(format!("{{{}}}", parts.join(",")))
 }
 
@@ -298,6 +311,7 @@ pub fn generate_compact_rum_log_format() -> Result<String, String> {
     for id in RUM_EDGE_FIELDS {
         parts.push(catalog_val(id)?);
     }
+    parts.push(RUM_ASN_VALUE.to_owned());
     Ok(format!("[{}]", parts.join(",")))
 }
 
@@ -410,6 +424,14 @@ pub fn error_beacon_vcl() -> &'static str {
         .expect("rum_error template must exist in templates.json")
 }
 
+/// Tells the browser which edge request it just made (`Server-Timing: rid`), so the tracker can
+/// report client time-to-last-byte against that request's log line.
+pub fn request_timing_vcl() -> &'static str {
+    super::templates()["rum_deliver_timing"]
+        .as_str()
+        .expect("rum_deliver_timing template must exist in templates.json")
+}
+
 pub fn validate_service_id(service_id: &str) -> Result<(), String> {
     if service_id.is_empty()
         || service_id.len() > 64
@@ -435,7 +457,11 @@ fn js_string_literal(value: &str) -> String {
 /// The browser tracker. Faro collects; this wrapper drops Faro's own sends and batches every
 /// metric and error of a pageview into one `POST /rum-beacon` per flush (debounced, or on
 /// hide/pagehide via `sendBeacon`), split only when a URL would exceed `MAX_URL_CHARS`.
-/// Sampling is decided once per browser session.
+/// Sampling is decided once per browser session. Resource timing is sampled per page view and
+/// read from the browser's own timing entries: only requests that carry this service's request
+/// ID (`Server-Timing: rid`) and a non-zero transfer size, so browser-cache hits, third-party
+/// files and the beacon itself are never reported. A page view reports up to 50 requests at once
+/// and then one more every five seconds.
 pub fn generate_rum_tracker_js(service_id: &str, config: &Config) -> String {
     let service_id_js = js_string_literal(service_id);
     let beacon_endpoint_js = js_string_literal("/rum-beacon");
@@ -445,6 +471,8 @@ pub fn generate_rum_tracker_js(service_id: &str, config: &Config) -> String {
     let events = config.capture_events;
     let sample_rate = config.sample_rate;
     let error_sample_rate = config.error_sample_rate;
+    let resources = config.capture_resources;
+    let resource_sample_rate = config.resource_sample_rate;
     format!(
         r#"/* Faro Web SDK wrapper */
 (function() {{
@@ -456,6 +484,10 @@ pub fn generate_rum_tracker_js(service_id: &str, config: &Config) -> String {
   var CAPTURE_EVENTS = {events};
   var SAMPLE_RATE = {sample_rate};
   var ERROR_SAMPLE_RATE = {error_sample_rate};
+  var CAPTURE_RESOURCES = {resources};
+  var RESOURCE_SAMPLE_RATE = {resource_sample_rate};
+  var MAX_RESOURCES = 50;
+  var RESOURCE_REFILL_MS = 5000;
   var FLUSH_DELAY_MS = 1500;
   var MAX_URL_CHARS = 7500;
 
@@ -471,9 +503,11 @@ pub fn generate_rum_tracker_js(service_id: &str, config: &Config) -> String {
   }}
   var SAMPLED = draw < SAMPLE_RATE;
   var ERRORS_SAMPLED = CAPTURE_ERRORS && draw < ERROR_SAMPLE_RATE;
-  if (!SAMPLED && !ERRORS_SAMPLED) return;
+  var RESOURCES_SAMPLED = CAPTURE_RESOURCES && typeof PerformanceObserver === 'function' &&
+    Math.random() < RESOURCE_SAMPLE_RATE;
+  if (!SAMPLED && !ERRORS_SAMPLED && !RESOURCES_SAMPLED) return;
 
-  var batch = {{ path: null, metrics: [], errors: [] }};
+  var batch = {{ path: null, metrics: [], resources: [], errors: [] }};
   var flushTimer = null;
 
   function enc(value) {{
@@ -531,6 +565,77 @@ pub fn generate_rum_tracker_js(service_id: &str, config: &Config) -> String {
     }}
   }}
 
+  function queueTiming(metrics, resources) {{
+    if (metrics.length === 0 && resources.length === 0) return;
+    var path = window.location.pathname;
+    if (batch.path !== null && batch.path !== path) flushBatch(false);
+    batch.path = path;
+    batch.metrics = batch.metrics.concat(metrics);
+    batch.resources = batch.resources.concat(resources);
+    scheduleFlush();
+  }}
+
+  // One `rid:path:ms` per request that reached the edge: request start to last byte.
+  function resourceTiming(entry) {{
+    if (!(entry.transferSize > 0) || !(entry.responseEnd > 0)) return null;
+    var rid = '';
+    (entry.serverTiming || []).forEach(function(t) {{
+      if (t.name === 'rid' && t.description) rid = t.description;
+    }});
+    if (!rid) return null;
+    var path;
+    try {{
+      path = new URL(entry.name, window.location.href).pathname;
+    }} catch (e) {{
+      return null;
+    }}
+    if (path === BEACON_ENDPOINT) return null;
+    var ttlb = entry.responseEnd - (entry.requestStart > 0 ? entry.requestStart : entry.fetchStart || 0);
+    if (!(ttlb >= 0)) return null;
+    return enc(rid) + ':' + enc(path) + ':' + Math.round(ttlb);
+  }}
+
+  // A page view may report MAX_RESOURCES requests at once, then one more per RESOURCE_REFILL_MS,
+  // so a long session (video) keeps measuring later downloads at a bounded rate.
+  var resourceBudget = MAX_RESOURCES;
+  var resourceBudgetAt = Date.now();
+  function takeResourceBudget() {{
+    var refill = Math.floor((Date.now() - resourceBudgetAt) / RESOURCE_REFILL_MS);
+    if (refill > 0) {{
+      resourceBudget = Math.min(MAX_RESOURCES, resourceBudget + refill);
+      resourceBudgetAt += refill * RESOURCE_REFILL_MS;
+    }}
+    if (resourceBudget <= 0) return false;
+    resourceBudget--;
+    return true;
+  }}
+
+  function observeTiming(type) {{
+    try {{
+      new PerformanceObserver(function(list) {{
+        try {{
+          var metrics = [];
+          var resources = [];
+          list.getEntries().forEach(function(entry) {{
+            if (type === 'navigation' && SAMPLED && CAPTURE_PERFORMANCE && entry.loadEventEnd > 0) {{
+              metrics.push('page_load:' + Math.round(entry.loadEventEnd - (entry.startTime || 0)) + ':');
+            }}
+            if (!RESOURCES_SAMPLED) return;
+            var timing = resourceTiming(entry);
+            if (timing && takeResourceBudget()) resources.push(timing);
+          }});
+          queueTiming(metrics, resources);
+        }} catch (e) {{
+          console.error('RUM: failed to queue timing entries:', e);
+        }}
+      }}).observe({{ type: type, buffered: true }});
+    }} catch (e) {{}}
+  }}
+  if (typeof PerformanceObserver === 'function') {{
+    if (RESOURCES_SAMPLED || (SAMPLED && CAPTURE_PERFORMANCE)) observeTiming('navigation');
+    if (RESOURCES_SAMPLED) observeTiming('resource');
+  }}
+
   function scheduleFlush() {{
     if (flushTimer !== null) clearTimeout(flushTimer);
     var hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
@@ -551,23 +656,26 @@ pub fn generate_rum_tracker_js(service_id: &str, config: &Config) -> String {
       }}
     }}
     var head = BEACON_ENDPOINT + '?service_id=' + enc(SERVICE_ID) + (cid ? '&cid=' + enc(cid) : '') +
-      '&p=' + enc(batch.path) + '&sr=' + SAMPLE_RATE + '&esr=' + ERROR_SAMPLE_RATE;
+      '&p=' + enc(batch.path) + '&sr=' + SAMPLE_RATE + '&esr=' + ERROR_SAMPLE_RATE +
+      (RESOURCES_SAMPLED ? '&rsr=' + RESOURCE_SAMPLE_RATE : '');
     var urls = [];
     var url = head;
-    var openMetrics = false;
-    function append(part, isMetric) {{
-      var piece = isMetric && openMetrics ? ',' + part : (isMetric ? '&m=' : '&e=') + part;
+    var openList = '';
+    // `m` and `r` are comma-separated lists; every `e` is its own parameter.
+    function append(part, key) {{
+      var isList = key !== 'e';
+      var piece = isList && openList === key ? ',' + part : '&' + key + '=' + part;
       if (url !== head && url.length + piece.length > MAX_URL_CHARS) {{
         urls.push(url);
         url = head;
-        openMetrics = false;
-        piece = (isMetric ? '&m=' : '&e=') + part;
+        piece = '&' + key + '=' + part;
       }}
       url += piece;
-      openMetrics = isMetric;
+      openList = isList ? key : '';
     }}
-    batch.metrics.forEach(function(m) {{ append(m, true); }});
-    batch.errors.forEach(function(e) {{ append(e, false); }});
+    batch.metrics.forEach(function(m) {{ append(m, 'm'); }});
+    batch.resources.forEach(function(r) {{ append(r, 'r'); }});
+    batch.errors.forEach(function(e) {{ append(e, 'e'); }});
     if (url !== head) urls.push(url);
     return urls;
   }}
@@ -577,9 +685,9 @@ pub fn generate_rum_tracker_js(service_id: &str, config: &Config) -> String {
       clearTimeout(flushTimer);
       flushTimer = null;
     }}
-    if (batch.metrics.length === 0 && batch.errors.length === 0) return;
+    if (batch.metrics.length === 0 && batch.resources.length === 0 && batch.errors.length === 0) return;
     var urls = beaconUrls();
-    batch = {{ path: null, metrics: [], errors: [] }};
+    batch = {{ path: null, metrics: [], resources: [], errors: [] }};
     urls.forEach(function(url) {{
       if (useBeacon && originalSendBeacon) {{
         originalSendBeacon.call(navigator, url, '');
@@ -652,7 +760,9 @@ pub fn generate_rum_tracker_js(service_id: &str, config: &Config) -> String {
   // Check if Faro is present (either via window.Faro or window.GrafanaFaroWebSdk)
   var Faro = window.Faro || window.GrafanaFaroWebSdk;
 
-  if (typeof Faro === 'undefined') {{
+  if (!SAMPLED && !ERRORS_SAMPLED) {{
+    // Resource timing alone reads the browser's own entries and needs no SDK.
+  }} else if (typeof Faro === 'undefined') {{
     var script = document.createElement('script');
     script.src = '/js/faro-sdk.js';
     script.async = true;

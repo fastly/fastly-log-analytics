@@ -430,6 +430,19 @@ fn rum_generator_parity_covers_shared_and_rum_only_vcl_endpoints_and_tracker_js(
     let miss = snippets[1]["body"].as_str().unwrap();
     assert!(miss.contains("/rum/faro-web-sdk-v2.10.0.iife.js"));
 
+    let deliver = snippets
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["subroutine"] == "vcl_deliver")
+        .and_then(|s| s["body"].as_str())
+        .unwrap();
+    assert!(
+        deliver.contains("add resp.http.Server-Timing = \"rid;desc=\" + req.http.x-req-id;"),
+        "{deliver}"
+    );
+    assert!(deliver.contains("req.http.x-req-id ~ \"^[A-Za-z0-9_-]{8}$\""));
+
     let conditions = logging::desired_conditions(&shared_state).unwrap();
     assert_eq!(conditions.as_array().unwrap().len(), 3);
     assert_eq!(conditions[0]["name"], "log_analytics_condition");
@@ -474,7 +487,8 @@ fn rum_generator_parity_covers_shared_and_rum_only_vcl_endpoints_and_tracker_js(
             "country",
             "pop",
             "tls",
-            "ttfb"
+            "ttfb",
+            "asn"
         ],
         "only what the RUM parser reads: {rum_format}"
     );

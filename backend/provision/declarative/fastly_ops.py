@@ -225,6 +225,12 @@ def fetch_snippets(service_id: str, version: int, token: str) -> list[VCLSnippet
         return []
 
 
+def fetch_domains(service_id: str, version: int, token: str) -> list[str]:
+    """Fetch the hostnames attached to a service version. Raises on an API failure."""
+    resp = fastly("GET", f"/service/{service_id}/version/{version}/domain", token=token)
+    return [str(item["name"]) for item in _unwrap_fastly_list(resp) if item.get("name")]
+
+
 def fetch_logging_endpoints(service_id: str, version: int, token: str) -> list[LoggingEndpoint]:
     """Fetch the native FOS logging endpoints for a service version."""
     try:
@@ -493,6 +499,10 @@ def _fetch_from_active(service_id: str, token: str, fetcher: Callable[[str, int,
 
 def _fetch_snippets(service_id: str, token: str) -> list[VCLSnippet]:
     return _fetch_from_active(service_id, token, fastly_integration.fetch_snippets)
+
+
+def _fetch_domains(service_id: str, token: str) -> list[str]:
+    return _fetch_from_active(service_id, token, fastly_integration.fetch_domains)
 
 
 def _fetch_logging_endpoints(service_id: str, token: str) -> list[LoggingEndpoint]:

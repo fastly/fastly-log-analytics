@@ -330,3 +330,55 @@ def test_sec15_rum_settings_rejects_header_and_setcookie_builtin_functions(bad_c
         mock_mutate.assert_not_called()
         mock_upload.assert_not_called()
         mock_reconcile.assert_not_called()
+
+
+def test_rum_settings_save_sampling_controls_and_always_redeploy_tracker_and_vcl() -> None:
+    """Saving settings is the redeploy path: the tracker and the edge VCL both follow the config."""
+    client = TestClient(_make_rum_app(analyst=False))
+    cfg: dict[str, Any] = {
+        "fastly_api_key": "tok-stored",
+        "rum_enabled": True,
+        "rum": {"enabled": True, "custom_condition": ""},
+        "log_fields": {"groups": ["A"], "field_overrides": {}},
+    }
+
+    def _apply_mutation(_sid: str, fn):
+        fn(cfg)
+        return cfg
+
+    payload = {
+        **_settings_payload(""),
+        "capture_resources": False,
+        "sample_rate": 0.5,
+        "error_sample_rate": 0.25,
+        "resource_sample_rate": 0.2,
+    }
+    with (
+        patch("backend.config.load_config", return_value=cfg),
+        patch("backend.config.mutate_config", side_effect=_apply_mutation),
+        patch("backend.provision.rum_assets.upload_rum_tracker_js", return_value={"skipped": False}) as mock_upload,
+        patch(
+            "backend.provision.declarative.reconciler.reconcile_vcl_state", return_value=MagicMock(error=None)
+        ) as mock_reconcile,
+    ):
+        res = client.post(f"/api/services/{SVC}/rum/settings", json=payload)
+        status = client.get(f"/api/services/{SVC}/rum/status").json()
+        too_low = client.post(f"/api/services/{SVC}/rum/settings", json={**payload, "resource_sample_rate": 0.001})
+
+    assert res.status_code == 200, res.text
+    assert {
+        k: cfg["rum"][k] for k in ("capture_resources", "sample_rate", "error_sample_rate", "resource_sample_rate")
+    } == {
+        "capture_resources": False,
+        "sample_rate": 0.5,
+        "error_sample_rate": 0.25,
+        "resource_sample_rate": 0.2,
+    }
+    # The condition did not change, yet the VCL is still reconciled and its fingerprint refreshed.
+    mock_upload.assert_called_once()
+    mock_reconcile.assert_called_once_with(SVC, "tok-stored", dry_run=False, activate=True)
+    assert status["vcl_drift"] is False and cfg["rum_vcl_sha"] == status["current_vcl_sha"]
+    # RUM matches client timings to request logs by `rid`, so an enabled service gets the field.
+    assert cfg["log_fields"]["field_overrides"] == {"rid": True}
+    assert (status["capture_resources"], status["resource_sample_rate"], status["sample_rate"]) == (False, 0.2, 0.5)
+    assert too_low.status_code == 422

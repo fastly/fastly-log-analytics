@@ -873,13 +873,14 @@ class TestFeatureStateDualFormatBackwardCompat:
 
 
 @contextmanager
-def _reconcile_env(*, snippets=None, endpoints=None, backends=None, dicts=None, validate="", clone=2):
+def _reconcile_env(*, snippets=None, endpoints=None, backends=None, dicts=None, domains=None, validate="", clone=2):
     with (
         patch("backend.provision.declarative.reconciler._fetch_active_version", return_value=1),
         patch("backend.provision.declarative.reconciler._fetch_snippets", return_value=snippets or []),
         patch("backend.provision.declarative.reconciler._fetch_logging_endpoints", return_value=endpoints or []),
         patch("backend.provision.declarative.reconciler._fetch_backends", return_value=backends or []),
         patch("backend.provision.declarative.reconciler._fetch_dictionaries", return_value=dicts or []),
+        patch("backend.provision.declarative.reconciler._fetch_domains", return_value=domains or []),
         patch("backend.provision.declarative.reconciler._validate_draft", return_value=validate) as m_val,
         patch("backend.provision.declarative.reconciler._clone_active_version", return_value=clone) as m_clone,
         patch("backend.provision.declarative.reconciler._apply_diff", return_value=None) as m_apply,
@@ -917,6 +918,31 @@ class TestDryRunSummaryCountsOnlyManagedRemovals:
 
 
 class TestReconciliationFeatures:
+    def test_reconcile_scopes_timing_access_to_the_services_own_hostnames(self):
+        """The hostnames live on the Fastly service, so no admin has to list them."""
+        from backend.provision.declarative.models import service_timing_origins
+
+        hosts = ["WWW.Example.com", "*.wild.example.com", "assets.example.com", "not a host", "www.example.com"]
+        expected = ["https://assets.example.com", "https://www.example.com"]
+        assert service_timing_origins(hosts) == expected
+        with _reconcile_env(domains=hosts) as m, _mock_cfg_file(rum_enabled=True, fos_prefix="raw"):
+            reconcile_vcl_state("srv_test", "token", dry_run=False)
+        state = m["apply"].call_args.kwargs["desired_state"]
+        assert state.rum_timing_allow_origins == expected
+        deliver = generate_consolidated_snippet(state, "vcl_deliver")
+        # The header ships with RUM alone; it does not wait for session scoring to be on.
+        assert not state.scoring.enabled
+        assert 'add resp.http.Server-Timing = "rid;desc=" + req.http.x-req-id;' in deliver
+        assert "rum_cid=" not in deliver
+        assert ('set resp.http.Timing-Allow-Origin = "https://assets.example.com, https://www.example.com";') in deliver
+
+    def test_reconcile_keeps_stored_timing_origins_when_the_domain_lookup_fails(self):
+        stored = {"enabled": True, "timing_allow_origins": ["https://www.example.com"]}
+        with _reconcile_env() as m, _mock_cfg_file(rum=stored, fos_prefix="raw"):
+            with patch("backend.provision.declarative.reconciler._fetch_domains", side_effect=RuntimeError("503")):
+                reconcile_vcl_state("srv_test", "token", dry_run=False)
+        assert m["apply"].call_args.kwargs["desired_state"].rum_timing_allow_origins == ["https://www.example.com"]
+
     def test_reconcile_enables_rum_adds_secondary_endpoint(self):
         with _reconcile_env(), _mock_cfg_file(rum_enabled=True, fos_prefix="raw"):
             result = reconcile_vcl_state("srv_test", "token", dry_run=True)
@@ -1491,13 +1517,11 @@ class TestGeneratorVCLStructure:
 
     def test_rum_beacon_fields_are_extracted_before_capture(self):
         vcl = generate_consolidated_snippet(_state(rum_enabled=True), "vcl_recv")
-        extraction = vcl.index(
-            'set req.http.x-fos-edge-data:rum_metric_name = querystring.get(req.url, "rum_metric_name");'
-        )
+        extraction = vcl.index('set req.http.x-fos-edge-data:fastly_req_id = querystring.get(req.url, "req");')
         capture = vcl.index("# Capture edge data for logging")
         assert extraction < capture
-        assert 'querystring.get(req.url, "rum_metric_value")' in vcl
-        assert 'querystring.get(req.url, "rum_error_message")' in vcl
+        # The beacon URL is logged whole, so no metric is copied into a size-limited header.
+        assert 'querystring.get(req.url, "rum_' not in vcl and "req.body" not in vcl
 
     def test_generator_builds_5_consolidated_snippets(self):
         snippets = desired_snippets(_state())
@@ -1604,6 +1628,18 @@ class TestLoggingEndpointGeneration:
         rum = [e for e in endpoints if e.name == "Fastly RUM Logs"]
         assert len(rum) == 1 and "raw/rum/" in rum[0].path
         assert rum[0].response_condition == "rum_log_condition" and rum[0].period == 60
+
+    def test_generator_rum_endpoint_logs_the_whole_beacon_url_in_the_lean_format(self):
+        from backend.core.fastly.client import generate_rum_log_format
+
+        rum = [e for e in desired_logging_endpoints(_state(rum_enabled=True, fos_prefix="raw")) if "RUM" in e.name]
+        fmt = rum[0].format_string
+        assert fmt == generate_rum_log_format()
+        # The batched beacon carries a page view in its query string: it must not be cut short.
+        assert fmt.count("req.url") == 1 and "substr(req.url, 0, 8192)" in fmt
+        assert [key for key in re.findall(r'"([a-z_]+)":', fmt)] == [
+            "ts_ms", "service_id", "fastly_req_id", "url", "city", "region", "country", "pop", "tls", "ttfb", "asn",
+        ]  # fmt: skip
 
     def test_generator_rum_endpoint_respects_rum_log_period(self):
         endpoints = desired_logging_endpoints(_state(rum_enabled=True, rum_log_period=300, fos_prefix="raw"))

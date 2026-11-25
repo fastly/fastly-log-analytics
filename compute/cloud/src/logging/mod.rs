@@ -819,7 +819,9 @@ fn capture_statements(config: &Value) -> Result<Vec<String>, String> {
             ));
         }
     }
-    if group_enabled(config, "L") {
+    // The request ID is also wanted on its own: RUM turns on `rid` without the rest of group L.
+    if group_enabled(config, "L") || crate::catalog::resolve_enabled_fields(config).contains("rid")
+    {
         lines.push("set req.http.x-req-id = randomstr(8);".into());
     }
     Ok(lines)
@@ -1213,6 +1215,12 @@ pub fn desired_snippets(state: &Value) -> Result<Value, String> {
                         parts.push(format!(
                             "# Section 5: RUM (vcl_error)\n{}",
                             rum::error_beacon_vcl()
+                        ));
+                    }
+                    "vcl_deliver" => {
+                        parts.push(format!(
+                            "# Section 5: RUM (vcl_deliver)\n{}",
+                            rum::request_timing_vcl()
                         ));
                     }
                     _ => {}
