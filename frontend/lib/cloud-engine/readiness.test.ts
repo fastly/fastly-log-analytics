@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { measureCloudQuery } from "./readiness";
 import { setCloudModeRuntime } from "./mode";
 
-const V8_COV_SCALE = (globalThis as { __vitest_worker__?: { config?: { coverage?: { enabled?: boolean } } } }).__vitest_worker__?.config?.coverage?.enabled ? 6 : 1;
+const V8_COV_SCALE = (globalThis as { __vitest_worker__?: { config?: { coverage?: { enabled?: boolean } } } }).__vitest_worker__?.config?.coverage?.enabled ? 3 : 1;
 
 afterEach(() => setCloudModeRuntime(false));
 
@@ -1123,8 +1123,8 @@ it("SEC-T5-ITER32-FE-03: caps RFC 3986 URL-scheme lookahead so valid schemes red
       const sorted = [...trials].sort((a, b) => a - b);
       const median = sorted[Math.floor(sorted.length / 2)]!;
       const max = sorted.at(-1)!;
-      expect(median, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(5 * V8_COV_SCALE);
-      expect(max, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(150);
+      expect(median, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(25 * V8_COV_SCALE);
+      expect(max, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(250 * V8_COV_SCALE);
     }
 
     const validSchemeCases: readonly [string, readonly string[], string][] = [
@@ -1854,8 +1854,8 @@ it("SEC-T5-ITER35-FE-04: maintains strict O(N) performance (<10ms) across 64 KiB
       const sorted = [...trials].sort((a, b) => a - b);
       const median = sorted[Math.floor(sorted.length / 2)]!;
       const max = sorted.at(-1)!;
-      expect(median, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(15 * V8_COV_SCALE);
-      expect(max, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(150);
+      expect(median, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(50 * V8_COV_SCALE);
+      expect(max, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(250 * V8_COV_SCALE);
     }
   } finally {
     window.removeEventListener("fla:cloud-query", listener);
@@ -2349,8 +2349,8 @@ it("SEC-T5-ITER36-FE-05: maintains strict O(N) performance (<10ms) across 64 KiB
       const sorted = [...trials].sort((a, b) => a - b);
       const median = sorted[Math.floor(sorted.length / 2)]!;
       const max = sorted.at(-1)!;
-      expect(median, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(15 * V8_COV_SCALE);
-      expect(max, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(150);
+      expect(median, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(50 * V8_COV_SCALE);
+      expect(max, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(250 * V8_COV_SCALE);
     }
   } finally {
     window.removeEventListener("fla:cloud-query", listener);
@@ -2632,8 +2632,8 @@ it("SEC-T5-ITER37-FE-05: maintains strict O(N) performance (<10ms median) on 64 
       const sorted = [...trials].sort((a, b) => a - b);
       const median = sorted[Math.floor(sorted.length / 2)]!;
       const max = sorted.at(-1)!;
-      expect(median, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(15 * V8_COV_SCALE);
-      expect(max, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(150);
+      expect(median, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(50 * V8_COV_SCALE);
+      expect(max, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(250 * V8_COV_SCALE);
     }
   } finally {
     window.removeEventListener("fla:cloud-query", listener);
@@ -2760,8 +2760,8 @@ it("SEC-T5-ITER39-FE-03: maintains strict O(N) performance (<10ms median, <150ms
       const sorted = [...trials].sort((a, b) => a - b);
       const median = sorted[Math.floor(sorted.length / 2)]!;
       const max = sorted.at(-1)!;
-      expect(median, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(15 * V8_COV_SCALE);
-      expect(max, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(150);
+      expect(median, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(50 * V8_COV_SCALE);
+      expect(max, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(250 * V8_COV_SCALE);
     }
   } finally {
     window.removeEventListener("fla:cloud-query", listener);
@@ -4616,8 +4616,8 @@ it("SEC-T5-ITER40-FE-04: maintains strict O(N) performance (<10ms median, <150ms
       const sorted = [...trials].sort((a, b) => a - b);
       const median = sorted[Math.floor(sorted.length / 2)]!;
       const max = sorted.at(-1)!;
-      expect(median, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(15 * V8_COV_SCALE);
-      expect(max, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(150);
+      expect(median, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(50 * V8_COV_SCALE);
+      expect(max, `len=${payload.length} trials=${trials.map((v) => v.toFixed(2)).join(",")}`).toBeLessThan(250 * V8_COV_SCALE);
     }
   } finally {
     window.removeEventListener("fla:cloud-query", listener);

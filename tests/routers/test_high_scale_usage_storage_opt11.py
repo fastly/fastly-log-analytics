@@ -1,4 +1,4 @@
-"""Focused unit tests for Round 11 Elevation /api/usage/current-storage & log-activity optimizations."""
+"""Focused unit tests for Round 11 High-Scale /api/usage/current-storage & log-activity optimizations."""
 
 from __future__ import annotations
 

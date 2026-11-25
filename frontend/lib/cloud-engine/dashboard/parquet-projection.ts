@@ -5,6 +5,11 @@ import { MAX_REGISTERED_BYTES } from "./budget";
 
 /** One tail read usually covers the whole footer, including 100-column multi-row-group compacts. */
 export const FOOTER_PROBE_BYTES = 256 * 1024;
+/** Smaller tail probe for sub-300 KiB files so footer probes don't download the entire file. */
+export const SMALL_FOOTER_PROBE_BYTES = 64 * 1024;
+export function defaultFooterProbeBytes(size: number): number {
+  return size >= 300 * 1024 ? FOOTER_PROBE_BYTES : SMALL_FOOTER_PROBE_BYTES;
+}
 /**
  * Needed chunks closer than this always share one HTTP range. Compacted files
  * hold many row groups of ~100 columns, so most chunks are a few KiB and a
@@ -122,7 +127,7 @@ const MAGIC = 0x31524150; // "PAR1" little-endian
 export async function readParquetFooter(
   size: number,
   fetchRange: FetchRange,
-  probeBytes = FOOTER_PROBE_BYTES,
+  probeBytes = defaultFooterProbeBytes(size),
 ): Promise<ParquetFooter> {
   if (!Number.isSafeInteger(size) || size < 12) throw new Error("Parquet file is too small");
   const probeStart = Math.max(0, size - probeBytes);
