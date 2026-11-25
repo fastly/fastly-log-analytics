@@ -1223,7 +1223,7 @@ function consumeJsonSecretValueAfterQuote(
 
   let valEnd: number;
   if (valStartsQuotedOrGroup) {
-    const kvEnd = valStartsQuoted && (cookieMode || authParamMode)
+    const kvEnd = (cookieMode || authParamMode)
       ? tryScanKeyValueParamEnd(line1, valStart, cookieMode, true, escapeState)
       : -1;
     valEnd = kvEnd !== -1 ? kvEnd : scanJsonValueEnd(line1, valStart, escapeState);
@@ -1798,7 +1798,11 @@ function scanParamKeyEnd(
       if (line[k] === '"' || line[k] === "'" || line[k] === "`") {
         const q = line[k]!;
         const qEnd = scanQuotedLiteralEnd(line, k, q, escapeState);
-        if (qEnd <= k + 1 || line[qEnd - 1] !== q) return { end: p, keyLower: "" };
+        if (qEnd <= k + 1 || line[qEnd - 1] !== q) {
+          k = qEnd;
+          keySegments += 1;
+          break;
+        }
         if (keySegments === 0) keyLower = line.slice(k + 1, qEnd - 1).toLowerCase();
         k = qEnd;
         keySegments += 1;
