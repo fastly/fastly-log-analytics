@@ -226,6 +226,8 @@ OTEL_ENV = (
 
 def _render_prod_compose(otel_values: dict[str, str] | None = None) -> dict:
     env = os.environ.copy()
+    env.setdefault("POSTGRES_PASSWORD", "placeholder")
+    env.setdefault("CLICKHOUSE_PASSWORD", "placeholder")
     for name in OTEL_ENV:
         env.pop(name, None)
     env.update(otel_values or {})

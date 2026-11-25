@@ -301,6 +301,9 @@ jobs:
         run: bash scripts/check_no_inline_metric_coalesce.sh
 
       - name: Deploy config validation (compose + helm chart)
+        env:
+          POSTGRES_PASSWORD: placeholder
+          CLICKHOUSE_PASSWORD: placeholder
         # Mirrors `make deploy-validate`. All compose configurations are
         # parsed without a daemon; helm lint +
         # template validate deploy/chart/fastly-log-analytics (ubuntu runners

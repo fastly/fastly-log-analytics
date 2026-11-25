@@ -601,11 +601,12 @@ fn fence<R: Runtime>(store: &Store<'_, R>, job: &mut ResetJob) -> Result<bool, S
 /// the new head.
 /// `retention:summary_bundle:cmcd_summary` is left out: it is only a listing resume point, the
 /// reset deletes that folder anyway, and one more delete would push the purge to a second tick.
-const STATE_KEYS: [&str; 8] = [
+/// `bundle::RUM_STATE_KEY` is cleared in `cleanup_step` instead (`rum_bundle` stays paused
+/// across both fencing and cleanup while `service.data_reset` is set).
+const STATE_KEYS: [&str; 7] = [
     compaction::STATE_KEY,
     bundle::STATE_KEY,
     bundle::CMCD_STATE_KEY,
-    bundle::RUM_STATE_KEY,
     "retention:request",
     "retention:rum",
     "retention:summary:request",
@@ -783,6 +784,7 @@ const QUEUES: [(&str, &str); 2] = [
     ("quarantine", QUARANTINE_PREFIX),
 ];
 const RUM_RELEASED: &str = "rum_released";
+const RUM_BUNDLE_STATE_CLEARED: &str = "rum_bundle_state";
 const FINAL_PURGE: &str = "final_purge";
 /// Retryable edge purge failures cleanup records before it stops retrying.
 const PURGE_TRIES: u32 = 3;
@@ -1107,6 +1109,13 @@ pub fn cleanup_step<R: Runtime>(store: &Store<'_, R>, job: &mut ResetJob) -> Res
     }
     if !done {
         return Ok(false);
+    }
+    if !job.steps_done.contains(RUM_BUNDLE_STATE_CLEARED) {
+        if !affordable(1) {
+            return Ok(false);
+        }
+        runtime.kv_delete(bundle::RUM_STATE_KEY)?;
+        job.steps_done.insert(RUM_BUNDLE_STATE_CLEARED.into());
     }
     // Objects read during the grace may be edge-cached; purge once more after the deletes.
     if !job.steps_done.contains(FINAL_PURGE) {

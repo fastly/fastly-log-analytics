@@ -509,13 +509,13 @@ stack-health:
 # Mirrors the "Deploy config validation" step in ci.yml.
 deploy-validate:
 	docker compose -f docker-compose.yml config -q
-	docker compose -f docker-compose.yml -f docker-compose.prod.yml config -q
+	POSTGRES_PASSWORD=$${POSTGRES_PASSWORD:-placeholder} CLICKHOUSE_PASSWORD=$${CLICKHOUSE_PASSWORD:-placeholder} docker compose -f docker-compose.yml -f docker-compose.prod.yml config -q
 	docker compose -f docker-compose.multipod.yml config -q
 	docker compose -f docker-compose.multipod.yml -f docker-compose.observability.yml config -q
 	@if command -v helm >/dev/null 2>&1; then \
-		helm lint deploy/chart/fastly-log-analytics --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/fla && \
-		helm template ci-validate deploy/chart/fastly-log-analytics --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/fla >/dev/null && \
-		helm template ci-validate deploy/chart/fastly-log-analytics --set global.privateObservability.enabled=true --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/fla >/dev/null; \
+		helm lint deploy/chart/fastly-log-analytics --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/fla --set secrets.cursorSecret=ci-cursor-secret && \
+		helm template ci-validate deploy/chart/fastly-log-analytics --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/fla --set secrets.cursorSecret=ci-cursor-secret >/dev/null && \
+		helm template ci-validate deploy/chart/fastly-log-analytics --set global.privateObservability.enabled=true --set secrets.metadataDsn=postgresql://fla:pw@postgres:5432/fla --set secrets.cursorSecret=ci-cursor-secret >/dev/null; \
 	else \
 		echo "helm not installed; skipping chart lint/template"; \
 	fi

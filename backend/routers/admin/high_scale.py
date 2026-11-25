@@ -749,7 +749,10 @@ def submit_query(
             if getattr(exc, "status_code", None) == 429:
                 raise HTTPException(
                     status_code=429,
-                    detail=make_error("historical_job_rate_limited", str(exc)),
+                    detail=make_error(
+                        "historical_job_rate_limited",
+                        "Historical query rate limit or output budget exceeded; wait for active jobs to finish.",
+                    ),
                 ) from None
             raise
         return HighScaleQueryResponse.with_telemetry(

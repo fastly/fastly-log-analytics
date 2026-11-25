@@ -1326,11 +1326,17 @@ fn finish_reconciles_storage_clears_marker_and_audits() {
         &format!("{scope}processed/request/x/old.parquet"),
         cas_at - 1,
     );
+    seed(
+        &platform,
+        fastly_log_analytics::ingest::bundle::RUM_STATE_KEY,
+        json!({"next_hour": 1}),
+    );
     CACHE_PURGES.with(|purges| purges.borrow_mut().clear());
     platform.adapter.clear_calls();
     let job = run_cleanup(&platform);
     assert_eq!(job["status"], "complete");
     let records = platform.adapter.records();
+    assert!(!records.contains_key(fastly_log_analytics::ingest::bundle::RUM_STATE_KEY));
     assert!(records.contains_key("storage:reconcile"));
     let svc = &records["svc:fixtureService"].value;
     assert!(svc.get("data_reset").is_none(), "{svc}");
