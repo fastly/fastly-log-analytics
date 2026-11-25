@@ -28,13 +28,13 @@ export const boundMark = (meta: NetworkRollupMeta | undefined, field: string) =>
 
 export function RollupDataThrough({ meta }: { meta: NetworkRollupMeta }) {
   const timezone = useTimezone()
+  const title = formatDate(meta.data_through, timezone, 'yyyy-MM-dd HH:mm:ss')
   return (
-    <div role="note" className="flex items-center gap-2 rounded-md border bg-muted/30 px-3 py-1.5 text-xs text-muted-foreground">
+    <div role="note" className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 rounded-md border bg-muted/30 px-3 py-1.5 text-xs text-muted-foreground">
       <Info className="h-3.5 w-3.5 shrink-0" />
-      <span title={formatDate(meta.data_through, timezone, 'yyyy-MM-dd HH:mm:ss')}>
-        Data through {formatDate(meta.data_through, timezone, 'HH:mm')}.
-        Values marked ≈ are estimated from summaries and ≥ are lower bounds.
-      </span>
+      <span title={title}>Data through {formatDate(meta.data_through, timezone, 'HH:mm')}.</span>
+      <span>Values marked ≈ are estimated from summaries</span>
+      <span>and ≥ are lower bounds.</span>
     </div>
   )
 }
@@ -68,16 +68,19 @@ export function readRawWindow(data: unknown): RawWindow | undefined {
 export function RawWindowNote({ window, className }: { window: RawWindow | undefined; className?: string }) {
   const timezone = useTimezone()
   if (!window) return null
+  const title = `${formatDate(window.data_from, timezone, 'yyyy-MM-dd HH:mm:ss')} – ${
+    formatDate(window.data_through, timezone, 'yyyy-MM-dd HH:mm:ss')}`
   return (
     <div role="note" data-testid="raw-window-note"
-      className={cn('flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs', className)}>
+      className={cn('flex flex-wrap items-center gap-x-1.5 gap-y-0.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs', className)}>
       <Info className="h-3.5 w-3.5 shrink-0" />
-      <span title={`${formatDate(window.data_from, timezone, 'yyyy-MM-dd HH:mm:ss')} – ${
-        formatDate(window.data_through, timezone, 'yyyy-MM-dd HH:mm:ss')}`}>
+      <span title={title}>
         Showing {formatDate(window.data_from, timezone, 'HH:mm')}–{formatDate(window.data_through, timezone, 'HH:mm')} only:
-        the whole range needs more log data than the browser scan budget allows. Values are exact for this
-        window; choose a shorter range to see all of it.
       </span>
+      <span>the whole range needs more log data</span>
+      <span>than the browser scan budget allows.</span>
+      <span>Values are exact for this window;</span>
+      <span>choose a shorter range to see all of it.</span>
     </div>
   )
 }

@@ -1583,4 +1583,85 @@ describe("Cloud first-page analytical range loading", () => {
     expect(fileCalls).toBe(1);
     expect(rangeCalls).toBe(0);
   });
+
+  it("fails fast without footer probes when over-budget wide-projection compacts exceed byteLimit, and caps large whole concurrency to 2", async () => {
+    Object.assign(wholeReadLimits, DEFAULT_WHOLE_READ_LIMITS);
+    const rgRows = 500;
+    const rowGroups = 6;
+    const totalRows = rgRows * rowGroups;
+    let seed = 23;
+    const randStr = (len: number) => Array.from({ length: len }, () => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return String.fromCharCode(33 + (seed % 90));
+    }).join("");
+    const startMs = Date.parse("2026-11-25T07:00:00Z");
+    const stepMs = 1000;
+    const endMs = startMs + totalRows * stepMs;
+    const bytes = parquetWriteBuffer({
+      codec: "UNCOMPRESSED",
+      rowGroupSize: rgRows,
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: totalRows }, (_, i) => new Date(startMs + i * stepMs)) },
+        { name: "status", type: "INT32", data: Array.from({ length: totalRows }, () => 200) },
+        { name: "url", type: "STRING", data: Array.from({ length: totalRows }, () => randStr(400)) },
+        { name: "ua", type: "STRING", data: Array.from({ length: totalRows }, () => randStr(400)) },
+      ],
+    });
+    expect(bytes.byteLength).toBeGreaterThan(2 * 1024 * 1024);
+
+    const entries: ManifestFile[] = Array.from({ length: 4 }, (_, i) => ({
+      key: `processed/request/year=2026/month=11/day=25/hour=0${i + 7}/compact=c4-n${i}.parquet`,
+      start: new Date(startMs).toISOString(),
+      end: new Date(endMs).toISOString(),
+      rows: totalRows,
+      size: bytes.byteLength,
+      etag: `"etag-wide-${i}"`,
+    }));
+    vi.mocked(fetchManifest).mockResolvedValue({ files: entries, complete: true });
+
+    let rangeCalls = 0;
+    let inFlightLarge = 0;
+    let peakLarge = 0;
+    source.fetchRange.mockImplementation(async (_f: ManifestFile, start: number, end: number) => {
+      rangeCalls++;
+      return bytes.slice(start, end);
+    });
+    source.fetchFile.mockImplementation(async () => {
+      inFlightLarge++;
+      peakLarge = Math.max(peakLarge, inFlightLarge);
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      inFlightLarge--;
+      return { bytes: bytes.slice(0), cached: false };
+    });
+
+    const wideColumns = [
+      "timestamp", "status", "cache", "resp_bytes", "edge", "url",
+      "ua", "referer", "ip", "host",
+    ];
+
+    // Over-budget attempt fails fast before issuing any 206 footer probes.
+    await expect(ensureCloudRange(
+      new Date(startMs - 60_000).toISOString(),
+      new Date(endMs + 60_000).toISOString(),
+      signal,
+      ["request"],
+      { projection: { columns: wideColumns, maxBytes: bytes.byteLength * 2 } },
+    )).rejects.toBeInstanceOf(CloudBudgetError);
+    expect(rangeCalls).toBe(0);
+    expect(source.fetchFile).not.toHaveBeenCalled();
+
+    // In-budget attempt fetches all 4 >2 MiB compacts whole with at most 2 concurrent downloads.
+    const read = await ensureCloudRange(
+      new Date(startMs - 60_000).toISOString(),
+      new Date(endMs + 60_000).toISOString(),
+      signal,
+      ["request"],
+      { projection: { columns: wideColumns } },
+    );
+    read.release?.();
+    expect(rangeCalls).toBe(0);
+    expect(source.fetchFile).toHaveBeenCalledTimes(4);
+    expect(peakLarge).toBeLessThanOrEqual(2);
+    expect(peakLarge).toBe(2);
+  });
 });

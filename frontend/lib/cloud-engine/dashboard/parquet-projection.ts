@@ -37,6 +37,12 @@ export const SOFT_MERGE_MAX_GAP = 128 * 1024;
 /** Maximum fraction of file size Pass 2 may reach while coalescing toward [`TARGET_RANGES_PER_FILE`]. */
 export const SOFT_MERGE_MAX_FILE_RATIO = 0.40;
 /**
+ * Maximum fraction of file size Pass 2 may reach when coalescing below [`TARGET_RANGES_PER_FILE`]
+ * down to a single range (e.g. a row-group-pruned boundary compact where the needed slice is a
+ * small fraction of the file).
+ */
+export const SMALL_FOOTPRINT_MERGE_FILE_RATIO = 0.15;
+/**
  * Hard upper bound on HTTP ranges issued for a single projected Parquet file
  * (4 waves at RANGE_CONCURRENCY = 16). Preserves projected byte savings on
  * heavily compacted files with wide unneeded columns while capping worst-case
@@ -391,10 +397,13 @@ function coalesceRanges(
   }
   let totalBytes = ranges.reduce((sum, r) => sum + (r.end - r.start), 0);
   const maxSoftBytes = Math.floor(fileSize * softMergeMaxFileRatio);
+  const maxSmallFootprintBytes = Math.floor(fileSize * SMALL_FOOTPRINT_MERGE_FILE_RATIO);
   // Pass 2 (soft target): while above targetRanges, merge the smallest
   // remaining gap as long as it stays <= softMergeMaxGap and planned bytes stay
-  // within softMergeMaxFileRatio of the file size.
-  while (ranges.length > targetRanges) {
+  // within softMergeMaxFileRatio of the file size. Below targetRanges, continue
+  // coalescing down to a single range only while total bytes stay within the
+  // small-footprint ratio (e.g. a single pruned row group in a multi-MiB compact).
+  while (ranges.length > 1) {
     let minIndex = 0;
     let minGap = Infinity;
     for (let i = 0; i < ranges.length - 1; i++) {
@@ -404,7 +413,8 @@ function coalesceRanges(
         minIndex = i;
       }
     }
-    if (minGap > softMergeMaxGap || totalBytes + minGap > maxSoftBytes) break;
+    const maxBytes = ranges.length > targetRanges ? maxSoftBytes : maxSmallFootprintBytes;
+    if (minGap > softMergeMaxGap || totalBytes + minGap > maxBytes) break;
     ranges[minIndex].end = ranges[minIndex + 1].end;
     ranges.splice(minIndex + 1, 1);
     totalBytes += minGap;

@@ -231,7 +231,11 @@ describe('AssetsClient on Cloud', () => {
 
     const slot = screen.getByTestId('rollup-data-through-slot')
     expect(await within(slot).findByText(/Data through 09:45/)).toBeInTheDocument()
-    expect(await screen.findByTestId('raw-window-note')).toBeInTheDocument()
+    const rollupNote = within(slot).getByRole('note')
+    expect(rollupNote.querySelectorAll('span').length).toBeGreaterThanOrEqual(3)
+    const rawNote = await screen.findByTestId('raw-window-note')
+    expect(rawNote).toBeInTheDocument()
+    expect(rawNote.querySelectorAll('span').length).toBeGreaterThanOrEqual(4)
     expect(within(slot).queryByTestId('raw-window-note')).not.toBeInTheDocument()
   })
 })

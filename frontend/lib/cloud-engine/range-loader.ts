@@ -9,8 +9,8 @@ import {
 } from "./dashboard/sources";
 import {
   assembleProjectedParquet, fetchProjectedRanges, filterRowGroupFilter, planParquetProjection, readParquetFooter,
-  readsWholeFirst, readWholeParquetFooter, shouldFallbackToWhole, timestampRowGroupFilter, type ParquetFooter,
-  type ParquetProjection, type RowGroupFilterPredicate,
+  readsWholeFirst, readWholeParquetFooter, shouldFallbackToWhole, timestampRowGroupFilter, wholeReadLimits,
+  type ParquetFooter, type ParquetProjection, type RowGroupFilterPredicate,
 } from "./dashboard/parquet-projection";
 import { prefersWholeForWideProjection, wholeFileIdentity } from "./dashboard/projected-read";
 import { beginCloudLoading } from "./loading-progress";
@@ -26,6 +26,9 @@ const MAX_RANGE_BYTES = MAX_REGISTERED_BYTES;
 const PREFETCH_CONCURRENCY = 6;
 // Projected ranges are mostly a few KiB, so their round trips, not bandwidth, bound a cold load.
 const RANGE_CONCURRENCY = 16;
+// Multi-MiB whole-file compacts are bandwidth-bound; capping concurrency prevents HTTP/2
+// contention from stretching each file's request duration past the slow-API threshold.
+const LARGE_WHOLE_CONCURRENCY = 2;
 const source = browserSource("");
 const requestReads = new WeakMap<Request, DuckDBReadContext>();
 const activeRangeDownloads = new Set<AbortController>();
@@ -250,8 +253,24 @@ export async function ensureCloudRange(
         generation.assertCurrent();
         downloads.signal.throwIfAborted();
       }, canPersistDerived);
+    let largeWholeSlots = LARGE_WHOLE_CONCURRENCY;
+    const largeWholeWaiting: (() => void)[] = [];
+    const inLargeWholeSlot = async <T>(read: () => Promise<T>) => {
+      if (largeWholeSlots === 0) await new Promise<void>((resolve) => largeWholeWaiting.push(resolve));
+      else largeWholeSlots--;
+      try {
+        downloads.signal.throwIfAborted();
+        return await read();
+      } finally {
+        const next = largeWholeWaiting.shift();
+        if (next) next();
+        else largeWholeSlots++;
+      }
+    };
     const fetchWhole = async (file: typeof files[number]) => {
-      const fetched = await inSlot(() => fileSource.fetchFile(file.key, downloads.signal, { identity: file.wholeKey }));
+      const doFetch = () => inSlot(() => fileSource.fetchFile(file.key, downloads.signal, { identity: file.wholeKey }));
+      const isLargeWhole = wholeReadLimits.closedHourUpToBytes > 0 && file.size > wholeReadLimits.closedHourUpToBytes;
+      const fetched = isLargeWhole ? await inLargeWholeSlot(doFetch) : await doFetch();
       if (fetched.bytes.byteLength !== file.size) {
         throw new Error(`Whole-file read of ${file.key} returned ${fetched.bytes.byteLength} bytes, not ${file.size}`);
       }
@@ -279,8 +298,11 @@ export async function ensureCloudRange(
         // When `requireAnyColumns` is set, read the footer first so files lacking all required
         // columns are skipped without downloading them whole.
         const candidates = requiredAnyColumns ? [] : unknown.filter((file) => shouldReadWholeFirst(file, now));
-        if (candidates.reduce((total, file) => total + file.size, 0) <= byteLimit) {
+        const candidateBytes = candidates.reduce((total, file) => total + file.size, 0);
+        if (candidateBytes <= byteLimit) {
           for (const file of candidates) wholeFirst.add(file.scopedKey);
+        } else if (candidates.some((file) => prefersWholeForWideProjection(file, projectedColumns.size, rangeWindow))) {
+          throw overBudget({ unit: "bytes", needed: candidateBytes, limit: byteLimit });
         }
         await Promise.all(unknown.map(async (file) => {
           generation.assertCurrent();

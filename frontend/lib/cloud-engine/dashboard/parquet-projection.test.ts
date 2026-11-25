@@ -684,15 +684,43 @@ describe("query schemas from footers", () => {
       .toEqual([{ n: totalRows }]);
   });
 
+  it("coalesces a single pruned row group in a large compact into one HTTP 206 range", async () => {
+    // 10 row groups where only the last row group matches the window; intra-row-group gaps
+    // (~50 KiB) are above baseGap (32 KiB) but below SOFT_MERGE_MAX_GAP (128 KiB), and the
+    // pruned row group is < 15% of the file, so Pass 2 collapses all chunks into 1 range.
+    const rowGroupSize = 500;
+    const rowGroups = 10;
+    const count = rowGroupSize * rowGroups;
+    const bytes = parquetWriteBuffer({
+      codec: "SNAPPY",
+      rowGroupSize,
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: count }, (_, i) => new Date(1700000000000 + i * 1000)) },
+        { name: "gap1", type: "STRING", data: Array.from({ length: count }, () => noise(110)) },
+        { name: "status", type: "INT32", data: Array.from({ length: count }, () => 200) },
+        { name: "gap2", type: "STRING", data: Array.from({ length: count }, () => noise(110)) },
+        { name: "edge", type: "STRING", data: Array.from({ length: count }, () => "1") },
+        { name: "wide_unneeded", type: "STRING", data: Array.from({ length: count }, () => noise(300)) },
+      ],
+    });
+    const footer = await readParquetFooter(bytes.byteLength, ranged(bytes).fetchRange);
+    expect(footer.metadata.row_groups).toHaveLength(rowGroups);
+    const plan = planParquetProjection(footer, new Set(["timestamp", "status", "edge"]), (rg) => rg === rowGroups - 1);
+    expect(plan.rowGroups).toEqual([rowGroups - 1]);
+    expect(plan.ranges).toHaveLength(1);
+    const plannedBytes = plan.ranges[0].end - plan.ranges[0].start;
+    expect(plannedBytes).toBeLessThan(bytes.byteLength * 0.15);
+  });
+
   it("prefersWholeForWideProjection gates on column count, file size, and window overlap", () => {
     const startMs = Date.parse("2026-11-25T04:04:00Z");
     const endMs = Date.parse("2026-11-25T04:32:00Z");
     const compact = { size: 20 * 1024 * 1024, start: new Date(startMs).toISOString(), end: new Date(endMs).toISOString() };
 
     expect(prefersWholeForWideProjection(compact, 20, { fromMs: startMs + 9_000, toMs: endMs + 3_600_000 })).toBe(true);
-    expect(prefersWholeForWideProjection(compact, 12)).toBe(true);
+    expect(prefersWholeForWideProjection(compact, 10)).toBe(true);
     expect(prefersWholeForWideProjection(compact, 20, { fromMs: endMs - 4 * 60_000, toMs: endMs + 3_600_000 })).toBe(false);
-    expect(prefersWholeForWideProjection(compact, 11, { fromMs: startMs + 9_000, toMs: endMs + 3_600_000 })).toBe(false);
+    expect(prefersWholeForWideProjection(compact, 9, { fromMs: startMs + 9_000, toMs: endMs + 3_600_000 })).toBe(false);
     expect(prefersWholeForWideProjection({ ...compact, size: 40 * 1024 * 1024 }, 20)).toBe(false);
     expect(prefersWholeForWideProjection({ ...compact, size: 1024 * 1024 }, 20)).toBe(false);
   });
