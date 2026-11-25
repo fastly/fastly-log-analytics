@@ -1773,6 +1773,7 @@ function tryScanKeyValueParamEnd(
   isCookie: boolean,
   allowQuoted = false,
   escapeState?: QuoteEscapeState,
+  rejectDoubleEq = false,
 ): number {
   const len = line.length;
   let k = p;
@@ -1834,7 +1835,7 @@ function tryScanKeyValueParamEnd(
   const wsLimit = Math.min(len, k + 16);
   while (eqPos < wsLimit && isInlineWs(line[eqPos])) eqPos += 1;
   if (line[eqPos] !== "=") return -1;
-  if (!isCookie && line[eqPos + 1] === "=") {
+  if (rejectDoubleEq && line[eqPos + 1] === "=") {
     return -1;
   }
   let vStart = eqPos + 1;
@@ -2365,7 +2366,7 @@ function emitAllowlistedTokens(line: string): string {
       && (
         rawTok !== rawLower
         || hasExplicitSep
-        || (afterWs < len && tryScanKeyValueParamEnd(line, afterWs, false) !== -1)
+        || (afterWs < len && tryScanKeyValueParamEnd(line, afterWs, false, false, undefined, true) !== -1)
       )
     );
 

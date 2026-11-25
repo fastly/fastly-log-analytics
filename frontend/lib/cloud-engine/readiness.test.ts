@@ -3063,6 +3063,26 @@ it("SEC-T5-ITER40-FE-03: prevents non-contraction apostrophe mismatch and cross-
         ["a.com", "100ms", "mode", "server"],
         "Error: Runtime Error: [redacted]",
       ],
+      [
+        'Runtime Error: "Authorization": Digest user == 100ms, mode = server',
+        ["user", "100ms", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Digest user == 100ms, mode = server",
+        ["user", "100ms", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": Digest $$secret$$ == 100ms, mode = server',
+        ["secret", "100ms", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Digest user = 100ms, param == 100ms, mode = server",
+        ["user", "param", "100ms", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
     ];
     for (const [msg, forbidden, expectedExact] of cases) {
       const err = new Error(msg);
