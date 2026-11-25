@@ -42,7 +42,7 @@ from backend.utils.auth import (
     safe_audit_email,
     set_analyst_session_cookies,
 )
-from backend.utils.remote_access import client_ip, is_request_remote
+from backend.utils.remote_access import client_ip, is_request_remote, validate_analyst_request_binding
 from backend.utils.tunnel import TunnelCapacityError, get_tunnel_manager
 
 logger = logging.getLogger(__name__)
@@ -274,6 +274,10 @@ def _require_analyst_session(request: Request, *, pending_first: bool = True):
         if not pending_first:
             mgr.record_heartbeat_unauth()
         raise HTTPException(status_code=401, detail={"error": "unauthenticated"})
+    binding_err = validate_analyst_request_binding(request, session, mgr=mgr, allow_tos_pending=pending_first)
+    if binding_err is not None:
+        status_code, err_code = binding_err
+        raise HTTPException(status_code=status_code, detail={"error": err_code})
     return mgr, session
 
 
@@ -295,7 +299,7 @@ def share_acknowledge_tos(payload: TosAckPayload, request: Request, response: Re
     if tos and payload.version != tos["version"]:
         raise HTTPException(status_code=400, detail={"error": "invalid_tos_version"})
     share_db.mark_tos_accepted(session.invite_id, payload.version)
-    _audit(None, "TOS_ACCEPTED", session.email, f"version={payload.version}", ip=session.ip_address)
+    _audit(None, "TOS_ACCEPTED", session.email, f"version={payload.version}", ip=client_ip(request))
     new_sid = mgr.rotate_session_id(session.session_id)
     if new_sid is None:
         raise HTTPException(status_code=401, detail={"error": "unauthenticated"})
@@ -355,12 +359,13 @@ def share_claim(token: str, request: Request):
         _audit(None, "CLAIM_FAIL", None, f"token_hash={tok_tag} invalid/expired/claimed", ip=ip)
         raise HTTPException(status_code=404, detail={"error": "invalid_or_used"})
     invite = share_db.get_remote_invite(row["invite_id"])
-    if invite is None or invite.get("revoked"):
+    invite_expired = bool(invite and invite.get("expires_at") and invite["expires_at"] < share_db.iso_z_now())
+    if invite is None or invite.get("revoked") or invite_expired:
         _audit(
             None,
             "CLAIM_FAIL",
             invite.get("email") if invite else None,
-            f"token_hash={tok_tag} invite revoked/deleted",
+            f"token_hash={tok_tag} invite revoked/expired/deleted",
             ip=ip,
         )
         raise HTTPException(status_code=410, detail={"error": "invite_gone"})

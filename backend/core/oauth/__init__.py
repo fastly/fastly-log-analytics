@@ -214,11 +214,12 @@ def _key() -> bytes:
     return hashlib.sha256(f"{raw}|{_AAD.decode()}".encode()).digest()
 
 
-def seal_flow_state(payload: dict[str, Any]) -> str:
-    """Encrypt + authenticate ``payload`` into a URL-safe cookie value."""
+def seal_flow_state(payload: dict[str, Any], *, max_age_s: int = COOKIE_MAX_AGE_S) -> str:
+    """Encrypt + authenticate ``payload`` into a URL-safe cookie value with a server-side expiry."""
     key = _key()
     nonce = os.urandom(12)
-    pt = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    envelope = {**payload, "_exp": int(time.time()) + int(max_age_s)}
+    pt = json.dumps(envelope, separators=(",", ":"), sort_keys=True).encode("utf-8")
     ct = AESGCM(key).encrypt(nonce, pt, _AAD)
     return base64.urlsafe_b64encode(nonce + ct).rstrip(b"=").decode("ascii")
 
@@ -243,6 +244,9 @@ def open_flow_state(cookie_value: str) -> dict[str, Any]:
         raise FlowStateError("flow-state authentication failed") from exc
     if not isinstance(obj, dict):
         raise FlowStateError("flow-state payload is not an object")
+    exp = obj.pop("_exp", None)
+    if not isinstance(exp, int) or isinstance(exp, bool) or time.time() > exp:
+        raise FlowStateError("flow-state cookie expired")
     return obj
 
 
