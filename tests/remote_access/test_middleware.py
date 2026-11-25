@@ -1636,8 +1636,8 @@ def test_login_success_sets_cookie_and_logout_clears_session(share_routes_client
             {"ip_whitelist": "10.0.0.0/8"},
             {"email": "drew@example.com", "passcode": _DEFAULT_PASSCODE},
             {"X-Forwarded-For": "203.0.113.5"},
-            403,
-            "ip_not_whitelisted",
+            401,
+            "invalid_credentials",
         ),
     ],
 )

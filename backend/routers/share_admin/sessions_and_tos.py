@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
@@ -220,8 +221,9 @@ def share_login(payload: ShareLoginPayload, request: Request, response: Response
         _audit(None, "LOGIN_FAIL", _safe_audit_email(payload.email), "invalid credentials", ip=ip)
         raise HTTPException(status_code=401, detail={"error": "invalid_credentials"})
     if not share_db.ip_in_whitelist(ip, invite.get("ip_whitelist")):
+        mgr.record_login_failure(ip, payload.email)
         _audit(None, "LOGIN_FAIL", invite["email"], "IP not in whitelist", ip=ip)
-        raise HTTPException(status_code=403, detail={"error": "ip_not_whitelisted"})
+        raise HTTPException(status_code=401, detail={"error": "invalid_credentials"})
     cap = share_db.get_max_concurrent_sessions()
     try:
         session = mgr.create_session(invite=invite, ip_address=ip, user_agent=user_agent, headers=headers, cap=cap)
@@ -318,6 +320,10 @@ def share_heartbeat(request: Request):
     return ShareHeartbeatResponse(ok=True, last_active=session.last_active_time)
 
 
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:8]
+
+
 @share_auth_router.post("/claim/{token}", response_model=ShareClaimResponse)
 def share_claim(token: str, request: Request):
     ip = client_ip(request)
@@ -333,9 +339,10 @@ def share_claim(token: str, request: Request):
     if (is_request_remote(request) or share_db.get_sharing_enabled() is False) and not mgr.is_sharing_active():
         _audit(None, "CLAIM_FAIL", None, "sharing disabled", ip=ip)
         raise HTTPException(status_code=403, detail={"error": "sharing_disabled"})
+    tok_tag = _token_hash(token)
     row = share_db.claim_token(token, ip)
     if row is None:
-        _audit(None, "CLAIM_FAIL", None, f"token {token[:6]}… invalid/expired/claimed", ip=ip)
+        _audit(None, "CLAIM_FAIL", None, f"token_hash={tok_tag} invalid/expired/claimed", ip=ip)
         raise HTTPException(status_code=404, detail={"error": "invalid_or_used"})
     invite = share_db.get_remote_invite(row["invite_id"])
     if invite is None or invite.get("revoked"):
@@ -343,11 +350,20 @@ def share_claim(token: str, request: Request):
             None,
             "CLAIM_FAIL",
             invite.get("email") if invite else None,
-            f"token {token[:6]}… invite revoked/deleted",
+            f"token_hash={tok_tag} invite revoked/deleted",
             ip=ip,
         )
         raise HTTPException(status_code=410, detail={"error": "invite_gone"})
-    _audit(None, "INVITE_CLAIMED", invite.get("email"), f"token {token[:6]}…", ip=ip)
+    if not share_db.ip_in_whitelist(ip, invite.get("ip_whitelist")):
+        _audit(
+            None,
+            "CLAIM_FAIL",
+            invite.get("email"),
+            f"token_hash={tok_tag} IP not in whitelist",
+            ip=ip,
+        )
+        raise HTTPException(status_code=403, detail={"error": "ip_not_whitelisted"})
+    _audit(None, "INVITE_CLAIMED", invite.get("email"), f"token_hash={tok_tag}", ip=ip)
     return ShareClaimResponse(
         ok=True,
         name=invite.get("name"),

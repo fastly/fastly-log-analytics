@@ -328,6 +328,13 @@ def _redirect_uri() -> str | None:
     return base.rstrip("/") + "/api/share/oauth/callback"
 
 
+def _flow_state_cookie_is_secure(request: Request, public_url: str | None) -> bool:
+    if analyst_cookie_is_secure(request, public_url):
+        return True
+    xfp = request.headers.get("x-forwarded-proto", "")
+    return xfp.split(",", 1)[0].strip().lower() == "https"
+
+
 def _login_redirect(user_code: str) -> RedirectResponse:
     resp = RedirectResponse(url=f"/share-login?oauth_error={user_code}", status_code=302)
     resp.delete_cookie(flow_state.COOKIE_NAME, path=flow_state.COOKIE_PATH)
@@ -433,7 +440,7 @@ def oauth_authorize(
         value=sealed,
         max_age=flow_state.COOKIE_MAX_AGE_S,
         httponly=True,
-        secure=request.url.scheme == "https",
+        secure=_flow_state_cookie_is_secure(request, mgr.public_url()),
         samesite="lax",  # REQUIRED: sent on the top-level redirect back from the IdP
         path=flow_state.COOKIE_PATH,
     )

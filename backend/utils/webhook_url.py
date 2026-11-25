@@ -7,34 +7,92 @@ import socket
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
-
-def restricted_webhook_host(host: str) -> bool:
-    host = host.lower().rstrip(".")
-    if host in {
+_BLOCKED_HOSTNAMES = frozenset(
+    {
         "localhost",
         "localhost.localdomain",
         "metadata.google.internal",
         "metadata",
         "ip6-localhost",
         "ip6-loopback",
-    }:
+    }
+)
+_NAT64_WELL_KNOWN = ipaddress.IPv6Network("64:ff9b::/96")
+_NAT64_LOCAL_USE = ipaddress.IPv6Network("64:ff9b:1::/48")
+_IPV4_TRANSLATED = ipaddress.IPv6Network("::ffff:0:0:0/96")
+_IPV4_COMPATIBLE = ipaddress.IPv6Network("::/96")
+_IPV6_UNSPECIFIED = ipaddress.IPv6Address("::")
+_IPV6_LOOPBACK = ipaddress.IPv6Address("::1")
+_CGNAT_NET = ipaddress.IPv4Network("100.64.0.0/10")
+
+
+def _is_restricted_hostname(host: str) -> bool:
+    return (
+        host in _BLOCKED_HOSTNAMES
+        or host.endswith(".localhost")
+        or host.endswith(".internal")
+        or host.endswith(".local")
+    )
+
+
+def _is_restricted_v4(addr: ipaddress.IPv4Address) -> bool:
+    return (
+        addr in _CGNAT_NET
+        or not addr.is_global
+        or addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_multicast
+        or addr.is_reserved
+        or addr.is_unspecified
+    )
+
+
+def _extract_embedded_ipv4(addr: ipaddress.IPv6Address) -> list[ipaddress.IPv4Address]:
+    embedded: list[ipaddress.IPv4Address] = []
+    if addr.ipv4_mapped is not None:
+        embedded.append(addr.ipv4_mapped)
+    if addr in _IPV4_TRANSLATED:
+        embedded.append(ipaddress.IPv4Address(addr.packed[12:16]))
+    if addr in _IPV4_COMPATIBLE and addr not in (_IPV6_UNSPECIFIED, _IPV6_LOOPBACK):
+        embedded.append(ipaddress.IPv4Address(addr.packed[12:16]))
+    if addr.sixtofour is not None:
+        embedded.append(addr.sixtofour)
+    if addr.teredo is not None:
+        embedded.extend(addr.teredo)
+    return embedded
+
+
+def _is_restricted_ip(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if isinstance(addr, ipaddress.IPv4Address):
+        return _is_restricted_v4(addr)
+    if addr in _NAT64_WELL_KNOWN or addr in _NAT64_LOCAL_USE:
         return True
-    if host.endswith(".internal") or host.endswith(".local"):
+    if any(_is_restricted_v4(v4) for v4 in _extract_embedded_ipv4(addr)):
         return True
+    return (
+        not addr.is_global
+        or addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_multicast
+        or addr.is_reserved
+        or addr.is_unspecified
+    )
+
+
+def restricted_webhook_host(host: str) -> bool:
+    cleaned = (host or "").strip().lower().rstrip(".")
+    if not cleaned:
+        return True
+    if _is_restricted_hostname(cleaned):
+        return True
+    bare = cleaned.split("%", 1)[0]
     try:
-        addresses = [ipaddress.ip_address(host)]
+        address = ipaddress.ip_address(bare)
     except ValueError:
         return False
-    return any(
-        not address.is_global
-        or address.is_private
-        or address.is_loopback
-        or address.is_link_local
-        or address.is_multicast
-        or address.is_reserved
-        or address.is_unspecified
-        for address in addresses
-    )
+    return _is_restricted_ip(address)
 
 
 def validate_webhook_url_syntax(url: str) -> str:
@@ -49,43 +107,16 @@ def validate_webhook_url_syntax(url: str) -> str:
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         raise ValueError("Webhook URL must use http or https scheme with a valid hostname.")
     host = parsed.hostname.lower().rstrip(".")
-    if (
-        host
-        in {
-            "localhost",
-            "localhost.localdomain",
-            "metadata.google.internal",
-            "metadata",
-            "ip6-localhost",
-            "ip6-loopback",
-        }
-        or host.endswith(".internal")
-        or host.endswith(".local")
-    ):
+    if _is_restricted_hostname(host):
         raise ValueError(f"Webhook target hostname '{host}' is not allowed (SSRF protection).")
+    bare = host.split("%", 1)[0]
     try:
-        ip = ipaddress.ip_address(host)
+        ip = ipaddress.ip_address(bare)
     except ValueError:
         ip = None
 
-    if ip is not None:
-        if isinstance(ip, ipaddress.IPv6Address):
-            if ip.ipv4_mapped is not None:
-                ip = ip.ipv4_mapped
-            elif ip.sixtofour is not None:
-                ip = ip.sixtofour
-            elif ip.teredo is not None:
-                ip = ip.teredo[1] if ip.teredo[0].is_global else ip.teredo[0]
-        if (
-            not ip.is_global
-            or ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_multicast
-            or ip.is_reserved
-            or ip.is_unspecified
-        ):
-            raise ValueError(f"Webhook target IP '{host}' is in a restricted range (SSRF protection).")
+    if ip is not None and _is_restricted_ip(ip):
+        raise ValueError(f"Webhook target IP '{host}' is in a restricted range (SSRF protection).")
     return cleaned
 
 

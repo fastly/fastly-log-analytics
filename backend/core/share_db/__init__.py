@@ -1637,7 +1637,7 @@ def gdpr_erase(email: str, reason: str, *, admin_actor: str = "admin", con: Any 
         details = json.dumps(
             {
                 "admin_actor": admin_actor,
-                "erased_email": email_lc,
+                "erased_email_hash": hashlib.sha256(email_lc.encode("utf-8")).hexdigest()[:16],
                 "reason": reason,
                 "deleted_invites": deleted,
                 "redacted_log_rows": redacted,

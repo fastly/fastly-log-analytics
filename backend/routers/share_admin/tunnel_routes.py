@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import time
+from urllib.parse import quote, urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
@@ -229,14 +230,25 @@ def teardown_frontend(payload: SharingTeardownRequest):
 
 # ── In-process mock OIDC provider (E2E/dev ONLY, gated on OAUTH_MOCK_IDP=1) ──
 
-mock_idp_router = APIRouter(prefix="/mock-idp", tags=["mock-idp"])
-
 _KID = "mock-idp-key"
 _key: RSAKey | None = None
+_MOCK_IDP_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
 def mock_idp_enabled() -> bool:
     return mock_mode_enabled("OAUTH_MOCK_IDP")
+
+
+def _require_mock_idp_enabled() -> None:
+    if not mock_idp_enabled():
+        raise HTTPException(status_code=404, detail={"error": "not_found"})
+
+
+mock_idp_router = APIRouter(
+    prefix="/mock-idp",
+    tags=["mock-idp"],
+    dependencies=[Depends(_require_mock_idp_enabled)],
+)
 
 
 def _signing_key() -> RSAKey:
@@ -276,15 +288,67 @@ def jwks():
     return {"keys": [_signing_key().as_dict(private=False)]}
 
 
+def _allowed_mock_idp_origins(request: Request) -> set[tuple[str, str]]:
+    origins: set[tuple[str, str]] = set()
+    candidates = [
+        os.getenv("OAUTH_REDIRECT_BASE", "").strip(),
+        _issuer(),
+        get_tunnel_manager().state.public_endpoint or "",
+        str(request.base_url),
+    ]
+    for raw in candidates:
+        if not raw:
+            continue
+        try:
+            parsed = urlsplit(raw)
+        except ValueError:
+            continue
+        if parsed.scheme in ("http", "https") and parsed.netloc:
+            origins.add((parsed.scheme.lower(), parsed.netloc.lower()))
+    return origins
+
+
+def _validate_mock_idp_redirect_uri(redirect_uri: str, request: Request) -> str:
+    if (
+        not redirect_uri
+        or not isinstance(redirect_uri, str)
+        or "\\" in redirect_uri
+        or any(ord(c) < 0x20 or ord(c) == 0x7F for c in redirect_uri)
+        or any(c.isspace() for c in redirect_uri)
+    ):
+        raise HTTPException(status_code=400, detail={"error": "invalid_redirect_uri"})
+    if redirect_uri.startswith("/"):
+        if redirect_uri.startswith("//") or "://" in redirect_uri:
+            raise HTTPException(status_code=400, detail={"error": "invalid_redirect_uri"})
+        return redirect_uri
+    try:
+        parsed = urlsplit(redirect_uri)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": "invalid_redirect_uri"}) from exc
+    if (
+        parsed.scheme.lower() not in ("http", "https")
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise HTTPException(status_code=400, detail={"error": "invalid_redirect_uri"})
+    host = parsed.hostname.lower().rstrip(".")
+    origin = (parsed.scheme.lower(), parsed.netloc.lower())
+    if host not in _MOCK_IDP_LOOPBACK_HOSTS and origin not in _allowed_mock_idp_origins(request):
+        raise HTTPException(status_code=400, detail={"error": "invalid_redirect_uri"})
+    return redirect_uri
+
+
 @mock_idp_router.get("/authorize")
 def authorize(request: Request, redirect_uri: str, state: str, nonce: str):
     """Auto-approve: bounce straight back to redirect_uri with an authorization
     code that carries the (test-controlled) identity + the request nonce."""
+    safe_redirect = _validate_mock_idp_redirect_uri(redirect_uri, request)
     email = request.cookies.get("mock_idp_email") or os.getenv("OAUTH_MOCK_IDP_EMAIL", "e2e-analyst@example.com")
     email_verified = (request.cookies.get("mock_idp_email_verified") or "true").lower() != "false"
     code = _b64url({"email": email, "nonce": nonce, "sub": f"mock-sub-{email}", "ev": email_verified})
-    sep = "&" if "?" in redirect_uri else "?"
-    return RedirectResponse(f"{redirect_uri}{sep}code={code}&state={state}", status_code=302)
+    sep = "&" if "?" in safe_redirect else "?"
+    return RedirectResponse(f"{safe_redirect}{sep}code={code}&state={quote(state, safe='')}", status_code=302)
 
 
 @mock_idp_router.post("/token")

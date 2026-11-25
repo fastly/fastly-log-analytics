@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import ipaddress
 import logging
 import os
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
-from urllib.parse import urlparse
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
 
@@ -51,6 +49,7 @@ from backend.utils.router_utils import (
     require_service_id,
     sync_admin_state,
 )
+from backend.utils.webhook_url import validate_webhook_url_syntax
 
 logger = logging.getLogger(__name__)
 
@@ -59,74 +58,16 @@ router = alerts_router
 
 AlertStatusFilter = Literal["all", "alerting", "ok", "muted"]
 
-_BLOCKED_HOSTNAMES = frozenset(
-    {
-        "localhost",
-        "localhost.localdomain",
-        "metadata.google.internal",
-        "metadata",
-        "ip6-localhost",
-        "ip6-loopback",
-    }
-)
-
 
 def validate_webhook_url(url: str) -> str:
     """Validate a webhook/notification channel URL to prevent SSRF."""
-    cleaned = (url or "").strip()
-    if not cleaned:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": "invalid_webhook_url", "message": "Webhook URL must not be empty."},
-        )
-    parsed = urlparse(cleaned)
-    if parsed.scheme not in ("http", "https") or not parsed.hostname:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "invalid_webhook_url",
-                "message": "Webhook URL must use http or https scheme with a valid hostname.",
-            },
-        )
-    host = parsed.hostname.lower().rstrip(".")
-    if host in _BLOCKED_HOSTNAMES or host.endswith(".internal") or host.endswith(".local"):
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "invalid_webhook_url",
-                "message": f"Webhook target hostname '{host}' is not allowed (SSRF protection).",
-            },
-        )
     try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        ip = None
-
-    if ip is not None:
-        if isinstance(ip, ipaddress.IPv6Address):
-            if ip.ipv4_mapped is not None:
-                ip = ip.ipv4_mapped
-            elif ip.sixtofour is not None:
-                ip = ip.sixtofour
-            elif ip.teredo is not None:
-                ip = ip.teredo[1] if ip.teredo[0].is_global else ip.teredo[0]
-        if (
-            not ip.is_global
-            or ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_multicast
-            or ip.is_reserved
-            or ip.is_unspecified
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": "invalid_webhook_url",
-                    "message": f"Webhook target IP '{host}' is in a restricted range (SSRF protection).",
-                },
-            )
-    return cleaned
+        return validate_webhook_url_syntax(url)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "invalid_webhook_url", "message": str(exc)},
+        ) from exc
 
 
 def _validate_alert_urls(alert: Alert) -> None:
