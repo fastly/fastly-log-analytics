@@ -152,10 +152,17 @@ pub fn manifest_key(scope: &str, plan_id: &str, shard: &str) -> String {
 }
 
 pub(crate) fn authorized<R: Runtime>(runtime: &R, request: &http::Request) -> bool {
-    let Some(secret) = runtime.secret("worker_secret").ok().flatten() else {
+    let Some(secret) = runtime
+        .secret("worker_secret")
+        .ok()
+        .flatten()
+        .filter(|s| !s.is_empty())
+    else {
         return false;
     };
-    let given = request.header("x-flp-worker-key").unwrap_or("");
+    let Some(given) = request.header("x-flp-worker-key").filter(|v| !v.is_empty()) else {
+        return false;
+    };
     compute_common::crypto::constant_time_secret_eq(given, &secret)
 }
 

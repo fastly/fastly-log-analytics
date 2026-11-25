@@ -1,13 +1,16 @@
 use ciborium::value::Value;
 use fastly_log_analytics::{
+    admin::Record,
     auth::{
         self,
         webauthn::{self, BrowserCredential, BrowserResponse},
-        Error as AuthError,
+        Error as AuthError, Role,
     },
-    http::{self, Request, PUBLIC_BODY_LIMIT},
+    http::{self, Request, INTERNAL_BODY_LIMIT, PUBLIC_BODY_LIMIT},
     ingest,
-    views::{filters_reference_pii, PII_FILTER_KEYS},
+    setup::SetupStores,
+    shell::Runtime,
+    views::{self, filters_reference_pii, SavedView, ViewStore, PII_FILTER_KEYS},
 };
 use p256::ecdsa::{signature::Signer, Signature, SigningKey};
 use serde_json::json;
@@ -18,9 +21,11 @@ fn views_pii_canonicalization_parity_blocks_obfuscated_identifiers() {
     assert_eq!(PII_FILTER_KEYS.len(), 18);
 
     let bypass_keys = [
-        // Percent-encoding (single & double)
+        // Percent-encoding (single, double, and mixed single+double UTF-8)
         "client%5Fip",
         "client%255Fip",
+        "client_%C4%25B0p",
+        "client_%25C4%B0p",
         "%69%70",
         "x%2dforwarded%2dfor",
         "session%255Fid",
@@ -235,4 +240,195 @@ fn bogus_worker_key_header_presence_cannot_amplify_body_limit() {
         };
         assert_eq!(http::body_limit(&req), PUBLIC_BODY_LIMIT);
     }
+}
+
+struct WorkerSecretRuntime {
+    worker_secret: Option<String>,
+}
+
+impl SetupStores for WorkerSecretRuntime {
+    fn config_present(&self, _: &str) -> Result<bool, String> {
+        Ok(true)
+    }
+    fn secret_present(&self, name: &str) -> Result<bool, String> {
+        Ok(name == "worker_secret" && self.worker_secret.is_some())
+    }
+    fn state_linked(&self) -> Result<bool, String> {
+        Ok(true)
+    }
+}
+
+impl Runtime for WorkerSecretRuntime {
+    fn config(&self, _: &str) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+    fn secret(&self, name: &str) -> Result<Option<String>, String> {
+        if name == "worker_secret" {
+            Ok(self.worker_secret.clone())
+        } else {
+            Ok(None)
+        }
+    }
+    fn random(&self) -> Result<[u8; 32], String> {
+        Ok([1u8; 32])
+    }
+    fn now(&self) -> u64 {
+        1_700_000_000
+    }
+    fn checks(&self, _: bool) -> Result<serde_json::Value, String> {
+        Ok(json!({}))
+    }
+    fn versions(&self) -> Result<serde_json::Value, String> {
+        Ok(json!({}))
+    }
+    fn compute_service_id(&self) -> Option<String> {
+        Some("testWorkerSvc".into())
+    }
+    fn compute_service_version(&self) -> Option<String> {
+        Some("1".into())
+    }
+}
+
+#[test]
+fn empty_worker_secret_fails_closed_for_body_limit_and_ingest() {
+    let empty_secret_rt = WorkerSecretRuntime {
+        worker_secret: Some(String::new()),
+    };
+
+    for path in [ingest::worker::PATH, ingest::worker::RANGE_PATH] {
+        for headers in [
+            std::collections::BTreeMap::new(),
+            [("x-flp-worker-key".into(), String::new())].into(),
+            [("x-flp-worker-key".into(), "anything".into())].into(),
+        ] {
+            let req = Request {
+                method: "POST".into(),
+                path: path.into(),
+                headers,
+                body: Vec::new(),
+            };
+            assert_eq!(
+                http::body_limit_for_runtime(&empty_secret_rt, &req),
+                PUBLIC_BODY_LIMIT,
+                "empty worker_secret must never grant INTERNAL_BODY_LIMIT on {path}"
+            );
+            let resp = ingest::worker::handle_worker_ingest(&empty_secret_rt, &req);
+            assert_eq!(
+                resp.status, 403,
+                "empty worker_secret must never authorize {path}"
+            );
+        }
+    }
+
+    // Positive control: a non-empty matching secret still grants INTERNAL_BODY_LIMIT.
+    let valid_rt = WorkerSecretRuntime {
+        worker_secret: Some("real-worker-secret".into()),
+    };
+    let valid_req = Request {
+        method: "POST".into(),
+        path: ingest::worker::PATH.into(),
+        headers: [("x-flp-worker-key".into(), "real-worker-secret".into())].into(),
+        body: Vec::new(),
+    };
+    assert_eq!(
+        http::body_limit_for_runtime(&valid_rt, &valid_req),
+        INTERNAL_BODY_LIMIT
+    );
+}
+
+#[test]
+fn views_column_projection_and_unicode_ws_subtree_keys_block_pii() {
+    let bypass_payloads = [
+        json!({"columns": {"include": ["client_ip"]}}),
+        json!({"columns": {"mode": "include", "values": ["client_ip"]}}),
+        json!({"fields": {"include": ["client_ip"]}}),
+        json!({"dimensions": {"mode": "include", "values": ["oip"]}}),
+        json!({"sort_by": {"include": ["client_ip"]}}),
+        json!({"col": "columns", "values": ["client_ip"]}),
+        json!({"cols": {"include": ["client_ip"]}}),
+        json!({"visible_columns": {"include": ["client_ip"]}}),
+        json!({"selected_columns": {"include": ["client_ip"]}}),
+        json!({"hidden_columns": {"include": ["client_ip"]}}),
+        json!({"display_columns": {"include": ["client_ip"]}}),
+        json!({"group_columns": {"include": ["client_ip"]}}),
+        json!({"sort_columns": {"include": ["client_ip"]}}),
+        json!({"order_columns": {"include": ["client_ip"]}}),
+        json!({"projections": {"include": ["client_ip"]}}),
+        // Zero-width / Unicode SQL whitespace around reserved subtree keys
+        json!({"\u{200b}columns": {"include": ["client_ip"]}}),
+        json!({"\u{feff}sort_by": {"include": ["client_ip"]}}),
+        // Mixed single+double percent-encoding of U+0130 (Turkish dotted I)
+        json!({"filters": [{"column": "client_%C4%25B0p", "mode": "include", "value": "1.2.3.4"}]}),
+    ];
+
+    for payload in bypass_payloads {
+        let raw = payload.to_string();
+        assert!(
+            filters_reference_pii(&raw),
+            "PII payload must be blocked: {raw}"
+        );
+    }
+}
+
+struct StaticViewStore {
+    views: Vec<SavedView>,
+}
+
+impl ViewStore for StaticViewStore {
+    fn get(&self, _key: &str) -> Result<Option<Record>, String> {
+        Ok(Some(Record {
+            generation: "1".into(),
+            value: json!({"views": self.views}),
+        }))
+    }
+    fn cas(
+        &self,
+        _key: &str,
+        _generation: Option<&str>,
+        _value: &serde_json::Value,
+    ) -> Result<bool, String> {
+        Ok(true)
+    }
+    fn random(&self) -> Result<[u8; 32], String> {
+        Ok([2u8; 32])
+    }
+    fn now(&self) -> u64 {
+        1_700_000_000
+    }
+}
+
+#[test]
+fn list_for_role_hides_views_with_pii_in_page_query_string() {
+    let make_view = |id: &str, page: Option<&str>| SavedView {
+        id: id.into(),
+        service_id: "svc1".into(),
+        name: format!("view-{id}"),
+        filters_json: "{}".into(),
+        time_range_type: None,
+        start_time: None,
+        end_time: None,
+        page: page.map(str::to_owned),
+        created_at: None,
+    };
+
+    let store = StaticViewStore {
+        views: vec![
+            make_view("safe-none", None),
+            make_view("safe-path", Some("/logs")),
+            make_view("safe-query", Some("/logs?status=200&method=GET")),
+            make_view("pii-direct", Some("/logs?client_ip=198.51.100.7")),
+            make_view(
+                "pii-encoded",
+                Some("/logs?status=200&client_%C4%25B0p=198.51.100.7"),
+            ),
+            make_view("pii-fragment", Some("/logs?oip=1.2.3.4#top")),
+        ],
+    };
+
+    let analyst = views::list_for_role(&store, "svc1", Role::AnalystNoPii, 50).expect("list");
+    let analyst_ids: Vec<&str> = analyst.iter().map(|v| v.id.as_str()).collect();
+    assert_eq!(analyst_ids, vec!["safe-none", "safe-path", "safe-query"]);
+
+    let admin = views::list_for_role(&store, "svc1", Role::Admin, 50).expect("list");
+    assert_eq!(admin.len(), 6);
 }

@@ -160,11 +160,7 @@ fn hex_nibble(b: u8) -> Option<u8> {
     }
 }
 
-fn decode_pii_url_once(s: &str) -> String {
-    if !s.contains('%') {
-        return s.to_owned();
-    }
-    let bytes = s.as_bytes();
+fn decode_pii_url_bytes_once(bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0usize;
     while i < bytes.len() {
@@ -178,15 +174,20 @@ fn decode_pii_url_once(s: &str) -> String {
         out.push(bytes[i]);
         i += 1;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    out
 }
 
 fn decode_pii_url_twice(s: &str) -> String {
-    let first = decode_pii_url_once(s);
-    if !first.contains('%') {
-        return first;
+    if !s.contains('%') {
+        return s.to_owned();
     }
-    decode_pii_url_once(&first)
+    let first = decode_pii_url_bytes_once(s.as_bytes());
+    let decoded = if first.contains(&b'%') {
+        decode_pii_url_bytes_once(&first)
+    } else {
+        first
+    };
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 fn normalize_pii_unicode(s: &str) -> String {
@@ -3906,6 +3907,19 @@ const QUERY_OR_EXTRAS_SUBTREE_KEYS: &[&str] = &[
     "data",
     "ast",
     "criteria",
+    "columns",
+    "cols",
+    "fields",
+    "dimensions",
+    "visible_columns",
+    "selected_columns",
+    "hidden_columns",
+    "display_columns",
+    "group_columns",
+    "sort_by",
+    "sort_columns",
+    "order_columns",
+    "projections",
 ];
 
 const EXTRA_RESERVED_CONTAINER_KEYS: &[&str] = &[
@@ -3936,7 +3950,7 @@ const EXTRA_RESERVED_CONTAINER_KEYS: &[&str] = &[
 ];
 
 fn normalize_filter_key(raw: &str) -> String {
-    raw.trim()
+    trim_sql_ws(raw)
         .chars()
         .map(|c| {
             if c == '-' {
@@ -4426,6 +4440,23 @@ pub fn filters_reference_pii(filters_json: &str) -> bool {
     value_references_pii(&parsed, FilterSlot::General, false, 0)
 }
 
+fn page_references_pii(page: Option<&str>) -> bool {
+    let Some(page) = page else {
+        return false;
+    };
+    let Some((_, query)) = page.split_once('?') else {
+        return false;
+    };
+    let query = query.split('#').next().unwrap_or(query);
+    query.split('&').any(|pair| {
+        if pair.is_empty() {
+            return false;
+        }
+        let key = pair.split('=').next().unwrap_or(pair);
+        !key.is_empty() && (is_pii_identifier(key) || is_pii_key_exact(key))
+    })
+}
+
 pub fn list_for_role<S: ViewStore>(
     store: &S,
     service_id: &str,
@@ -4434,7 +4465,9 @@ pub fn list_for_role<S: ViewStore>(
 ) -> Result<Vec<SavedView>, Error> {
     let (_, mut views) = load(store, service_id)?;
     if role == Role::AnalystNoPii {
-        views.retain(|view| !filters_reference_pii(&view.filters_json));
+        views.retain(|view| {
+            !filters_reference_pii(&view.filters_json) && !page_references_pii(view.page.as_deref())
+        });
     }
     views.truncate(limit);
     Ok(views)
