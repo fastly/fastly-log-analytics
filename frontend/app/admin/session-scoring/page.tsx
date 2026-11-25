@@ -21,7 +21,7 @@ import {
 } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { StatusPanel } from '@/components/SessionScoring/StatusPanel'
+import { CalloutBanner, StatusPanel } from '@/components/SessionScoring/StatusPanel'
 import {
   ExcludeRegexCard,
   RetrainButton,
@@ -367,13 +367,11 @@ function SessionScoringPageContent() {
                   </div>
                 </div>
               ) : attachedFieldsOff ? (
-                <Alert data-testid="admin-session-scoring-attached-fields-off">
-                  <AlertDescription>
-                    Scoring health, flagged sessions, and distributions will appear here once{' '}
-                    <code>edge_score*</code> log fields are enabled and ingested on this attached
-                    service.
-                  </AlertDescription>
-                </Alert>
+                <CalloutBanner tone="muted" testId="admin-session-scoring-attached-fields-off">
+                  Scoring health, flagged sessions, and distributions will appear here once{' '}
+                  <code>edge_score*</code> log fields are enabled and ingested on this attached
+                  service.
+                </CalloutBanner>
               ) : (
                 <>
                   <ScoringHealthCard serviceId={effectiveServiceId} sinceHours={sinceHours} />

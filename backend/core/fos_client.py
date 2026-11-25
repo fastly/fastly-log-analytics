@@ -531,13 +531,13 @@ def normalize_asn_org_name(name: str | None) -> str:
         return ""
     if " - " in clean:
         head, tail = clean.split(" - ", 1)
-        if _ASN_HANDLE_PREFIX_RE.match(head.strip()):
+        if _ASN_HANDLE_PREFIX_RE.fullmatch(head.strip()):
             clean = tail.strip()
     if " " in clean:
         token, rest = clean.split(" ", 1)
         rest = rest.strip()
         rest_sans_country = _COUNTRY_SUFFIX_RE.sub("", rest).strip()
-        if rest and rest_sans_country and _ASN_HANDLE_PREFIX_RE.match(token) and not _BARE_ASN_RE.match(rest):
+        if rest and rest_sans_country and _ASN_HANDLE_PREFIX_RE.fullmatch(token) and not _BARE_ASN_RE.fullmatch(rest):
             if (
                 token.startswith("AS")
                 and token[2:].isdigit()
@@ -580,7 +580,7 @@ def get_asn_names(service_id: str, asns: list) -> dict:
     except Exception:
         cached = {}
     cached = {k: (normalize_asn_org_name(v) or f"AS{k}") for k, v in cached.items()}
-    need = [a for a in asns_clean if a not in cached or _BARE_ASN_RE.match(cached[a])]
+    need = [a for a in asns_clean if a not in cached or _BARE_ASN_RE.fullmatch(cached[a])]
     resolved: dict[int, str] = {}
     if need:
         bundled = _bundled_asn_names()

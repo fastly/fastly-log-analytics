@@ -176,7 +176,7 @@ export function useWizardEffects(args: WizardEffectsArgs) {
   }, [step, selectedService?.id, token])
 
   const persistNgwafWorkspace = useEffectEvent(() => {
-    if (status === "done" && step === "execute" && config.ngwaf_workspace_id && selectedService?.id) {
+    if (isDone && step === "execute" && config.ngwaf_workspace_id && selectedService?.id) {
       client
         .PATCH("/api/provision/services/{service_id}/ngwaf-workspace", {
           params: { path: { service_id: selectedService.id } },
@@ -191,7 +191,7 @@ export function useWizardEffects(args: WizardEffectsArgs) {
   })
   useEffect(() => {
     persistNgwafWorkspace()
-  }, [status])
+  }, [isDone])
 }
 
 export function useWizardState(open: boolean, onOpenChange: (open: boolean) => void): WizardState {

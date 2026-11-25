@@ -10,7 +10,7 @@ import { getApiBase, queryKeys } from '@/lib/api'
 import { setCloudModeRuntime } from '@/lib/cloud-engine/mode'
 import { NetworkClient } from '@/app/network/_sections/NetworkClient'
 import { PopHealthHeatmap } from '@/components/network/PopHealthHeatmap'
-import { useTimezoneStore } from '@/stores/filterStore'
+import { useServiceStore, useTimezoneStore } from '@/stores/filterStore'
 
 const layout = vi.hoisted(() => ({ filterPayload: {} as Record<string, unknown> }))
 
@@ -78,12 +78,14 @@ function recordNetworkHealth(core: ReturnType<typeof coreResponse>) {
 }
 
 beforeEach(() => {
+  useServiceStore.setState({ activeServiceId: 'svc-1' })
   useTimezoneStore.setState({ timezone: 'UTC' })
   layout.filterPayload = {}
   server.use(http.get(`${getApiBase()}/api/network/pop-health`, () => HttpResponse.json({ data: [] })))
 })
 
 afterEach(() => {
+  useServiceStore.setState({ activeServiceId: null })
   setCloudModeRuntime(false)
   vi.unstubAllGlobals()
   cleanup()
