@@ -1,7 +1,23 @@
 import type { DashboardFilter } from "./dashboard/filters";
 import { Histogram } from "./dashboard/histogram";
-import { fetchManifestWithSummaries } from "./dashboard/manifest";
-import { emptyAgg, queryRollup, rollupGroup, type Rollup, type RollupAgg, type RollupResult } from "./dashboard/rollup-query";
+import {
+  fetchManifest,
+  fetchManifestWithSummaries,
+  filesOverlapping,
+  IncompleteManifestError,
+  type ManifestFile,
+} from "./dashboard/manifest";
+import {
+  emptyAgg,
+  mergeTimeIntervals,
+  planBundleCoverage,
+  queryRollup,
+  rollupGroup,
+  type PrefetchedRollupManifest,
+  type Rollup,
+  type RollupAgg,
+  type RollupResult,
+} from "./dashboard/rollup-query";
 import {
   CLOUD_INSIGHT_DETECTORS,
   handleInsightAvailability,
@@ -451,6 +467,7 @@ const ROLLUP_INSIGHT_COLUMNS = new Set(
  * ranges so the caller falls back to the raw scan.
  */
 const HOUR_MS = 3_600_000;
+const DAY_MS = 24 * HOUR_MS;
 const ALIGN_MIN_WINDOW_HOURS = 6;
 
 export async function insightsFromRollup(
@@ -463,26 +480,106 @@ export async function insightsFromRollup(
   if (filters.length || Array.isArray(body.detectors)) return null;
   const { end, windowStart, start, windowHours, baselineHours } = resolveInsightWindow(body);
   const fetchPair = async (fromStart: number, fromWindow: number, toEnd: number) => {
-    // Pre-fetch one superset manifest covering [fromStart, toEnd] so both queryRollup calls
-    // (and any raw fallback) slice from memory with zero extra /api/files requests, and
-    // CacheStorage persists the full 8-day range rather than letting the shorter 24h window
-    // overwrite the 7d baseline.
-    const [superset] = await Promise.all([
-      fetchManifestWithSummaries(
-        source.fetchJson,
-        new Date(Math.floor(fromStart / 1000) * 1000).toISOString(),
-        new Date(Math.ceil(toEnd / 1000) * 1000).toISOString(),
-        signal,
-      ),
-      loadAsnNames(),
-    ]);
-    if (!superset.raw.complete || !superset.summaries.complete) return [null, null] as const;
+    const isoFloor = (ms: number) => new Date(Math.floor(ms / 1000) * 1000).toISOString();
+    const isoCeil = (ms: number) => new Date(Math.ceil(ms / 1000) * 1000).toISOString();
+    const splitDay = Math.floor(fromWindow / DAY_MS) * DAY_MS;
+    const splitsCoveredDay =
+      fromWindow % DAY_MS !== 0 && fromStart <= splitDay && toEnd >= splitDay + DAY_MS;
+
+    // Fetch view=summary first so multi-day (8d) ranges do not paginate or truncate
+    // raw file listings for days already covered by day_bundle/hour_bundle summaries.
+    let windowSummaries: ManifestFile[];
+    let baselineSummaries: ManifestFile[];
+    try {
+      if (splitsCoveredDay) {
+        const [wSum, bSum] = await Promise.all([
+          fetchManifest(source.fetchJson, isoFloor(fromWindow), isoCeil(toEnd), signal, undefined, "summary"),
+          fetchManifest(source.fetchJson, isoFloor(fromStart), isoCeil(fromWindow), signal, undefined, "summary"),
+          loadAsnNames(),
+        ]);
+        if (!wSum.complete || !bSum.complete) return [null, null] as const;
+        windowSummaries = wSum.files;
+        baselineSummaries = bSum.files;
+      } else {
+        const [supersetSummaries] = await Promise.all([
+          fetchManifest(source.fetchJson, isoFloor(fromStart), isoCeil(toEnd), signal, undefined, "summary"),
+          loadAsnNames(),
+        ]);
+        if (!supersetSummaries.complete) return [null, null] as const;
+        windowSummaries = filesOverlapping(supersetSummaries.files, fromWindow, toEnd);
+        baselineSummaries = filesOverlapping(supersetSummaries.files, fromStart, fromWindow);
+      }
+    } catch (error) {
+      if (error instanceof IncompleteManifestError) return [null, null] as const;
+      throw error;
+    }
+
+    const wCoverage = planBundleCoverage(windowSummaries, fromWindow, toEnd);
+    const bCoverage = planBundleCoverage(baselineSummaries, fromStart, fromWindow);
+    const uncovered = mergeTimeIntervals([...bCoverage.uncovered, ...wCoverage.uncovered]);
+
+    const rawByKey = new Map<string, ManifestFile>();
+    const extraSummariesByKey = new Map<string, ManifestFile>();
+    if (uncovered.length) {
+      try {
+        const parts = await Promise.all(
+          uncovered.map((iv) =>
+            fetchManifestWithSummaries(
+              source.fetchJson,
+              isoFloor(iv.startMs),
+              isoCeil(iv.endMs),
+              signal,
+            ),
+          ),
+        );
+        for (const part of parts) {
+          if (!part.raw.complete || !part.summaries.complete) return [null, null] as const;
+          for (const f of part.raw.files) rawByKey.set(f.key, f);
+          for (const f of part.summaries.files) extraSummariesByKey.set(f.key, f);
+        }
+      } catch (error) {
+        if (error instanceof IncompleteManifestError) return [null, null] as const;
+        throw error;
+      }
+    }
+
+    const allRaw = [...rawByKey.values()];
+    const extraSummaries = [...extraSummariesByKey.values()];
+    const combineSummaries = (base: ManifestFile[], fromMs: number, toMs: number) => {
+      if (!extraSummaries.length) return base;
+      const byKey = new Map<string, ManifestFile>();
+      for (const f of base) byKey.set(f.key, f);
+      for (const f of filesOverlapping(extraSummaries, fromMs, toMs)) byKey.set(f.key, f);
+      return [...byKey.values()];
+    };
+
+    const windowManifest: PrefetchedRollupManifest = {
+      raw: { files: filesOverlapping(allRaw, fromWindow, toEnd), complete: true },
+      summaries: { files: combineSummaries(windowSummaries, fromWindow, toEnd), complete: true },
+      summaryFirst: true,
+    };
+    const baselineManifest: PrefetchedRollupManifest = {
+      raw: { files: filesOverlapping(allRaw, fromStart, fromWindow), complete: true },
+      summaries: { files: combineSummaries(baselineSummaries, fromStart, fromWindow), complete: true },
+      summaryFirst: true,
+    };
+
     return Promise.all([
       queryRollup(source, {
-        fromMs: fromWindow, toMs: toEnd, signal, spec: spec ?? undefined, residual: INSIGHTS_RESIDUAL,
+        fromMs: fromWindow,
+        toMs: toEnd,
+        signal,
+        spec: spec ?? undefined,
+        residual: INSIGHTS_RESIDUAL,
+        manifest: windowManifest,
       }),
       queryRollup(source, {
-        fromMs: fromStart, toMs: fromWindow, signal, spec: spec ?? undefined, residual: INSIGHTS_RESIDUAL,
+        fromMs: fromStart,
+        toMs: fromWindow,
+        signal,
+        spec: spec ?? undefined,
+        residual: INSIGHTS_RESIDUAL,
+        manifest: baselineManifest,
       }),
     ]);
   };

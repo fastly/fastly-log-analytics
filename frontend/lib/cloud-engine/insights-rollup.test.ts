@@ -902,3 +902,250 @@ describe("INSIGHTS_SUMMARY_SPEC column scoping and multi-hour window alignment",
     }
   });
 });
+
+describe("insightsFromRollup summary-first multi-day manifest handling", () => {
+  const DAY = 24 * HOUR;
+  const sampleDayBuf = BUFFERS[fixtureFiles("day")[0].key];
+  const sampleHourBuf = BUFFERS[fixtureFiles("hour", (e) => e.sources === 4)[0].key];
+
+  function makeMultiDayServer(options: {
+    endMs: number;
+    dayCount?: number;
+    missingLastHourBundle?: boolean;
+    rawTruncatedOverMs?: number;
+    summaryIncomplete?: boolean;
+    tailRawIncomplete?: boolean;
+  }) {
+    const dayCount = options.dayCount ?? 8;
+    const startMs = options.endMs - dayCount * DAY;
+    const dayBundles: { key: string; start: string; end: string; size: number; rows: number; kind: "day"; sources: number }[] = [];
+    const hourBundles: { key: string; start: string; end: string; size: number; rows: number; kind: "hour"; sources: number }[] = [];
+    const bufs: Record<string, ArrayBuffer> = {};
+    const tailStartMs = options.endMs - HOUR;
+
+    const firstDay = Math.floor(startMs / DAY) * DAY;
+    const lastDay = Math.floor((options.endMs - 1) / DAY) * DAY;
+    for (let d = firstDay; d <= lastDay; d += DAY) {
+      const dt = new Date(d);
+      const y = dt.getUTCFullYear();
+      const m = String(dt.getUTCMonth() + 1).padStart(2, "0");
+      const day = String(dt.getUTCDate()).padStart(2, "0");
+      const dayKey = `processed/summary_bundle/request/year=${y}/month=${m}/day=${day}/day_bundle=c24-n1600-h0000000000000001.parquet`;
+      dayBundles.push({
+        key: dayKey,
+        start: new Date(d).toISOString(),
+        end: new Date(d + DAY).toISOString(),
+        size: sampleDayBuf.byteLength,
+        rows: 1600,
+        kind: "day",
+        sources: 24,
+      });
+      bufs[dayKey] = sampleDayBuf;
+      for (let h = 0; h < 24; h++) {
+        const hStart = d + h * HOUR;
+        if (options.missingLastHourBundle && hStart >= tailStartMs && hStart < options.endMs) continue;
+        const hh = String(h).padStart(2, "0");
+        const hKey = `processed/summary_bundle/request/year=${y}/month=${m}/day=${day}/hour_bundle=${hh}-c4-n800-h0000000000000002.parquet`;
+        hourBundles.push({
+          key: hKey,
+          start: new Date(hStart).toISOString(),
+          end: new Date(hStart + HOUR).toISOString(),
+          size: sampleHourBuf.byteLength,
+          rows: 800,
+          kind: "hour",
+          sources: 4,
+        });
+        bufs[hKey] = sampleHourBuf;
+      }
+    }
+
+    const tailRawKey = `processed/request/tail-raw.parquet`;
+    const tailRawBuf = parquetWriteBuffer({
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: [new Date(tailStartMs + 60_000), new Date(tailStartMs + 120_000)] },
+        { name: "status", type: "INT64", data: [BigInt(200), BigInt(200)] },
+        { name: "url", type: "STRING", data: ["/ok", "/ok"] },
+        { name: "ip", type: "STRING", data: ["1.1.1.1", "1.1.1.1"] },
+      ],
+    });
+    bufs[tailRawKey] = tailRawBuf;
+    const tailRawFile = {
+      key: tailRawKey,
+      start: new Date(tailStartMs).toISOString(),
+      end: new Date(options.endMs).toISOString(),
+      size: tailRawBuf.byteLength,
+      rows: 2,
+    };
+
+    const rawCalls: string[] = [];
+    const summaryCalls: string[] = [];
+
+    // Simulates compute/cloud discovery.rs `enter_day`: emits a day_bundle whenever
+    // the full UTC day fits inside [from, to], otherwise emits hour_bundles for that day.
+    const summariesForRange = (fromMs: number, toMs: number) => {
+      const coveredDays = new Set<number>();
+      const out = [];
+      for (const db of dayBundles) {
+        const s = Date.parse(db.start);
+        const e = Date.parse(db.end);
+        if (s >= fromMs && e <= toMs && !(options.missingLastHourBundle && tailStartMs >= s && tailStartMs < e)) {
+          out.push(db);
+          coveredDays.add(s);
+        }
+      }
+      for (const hb of hourBundles) {
+        const s = Date.parse(hb.start);
+        const e = Date.parse(hb.end);
+        const dayStart = Math.floor(s / DAY) * DAY;
+        if (coveredDays.has(dayStart)) continue;
+        if (e > fromMs && s < toMs) out.push(hb);
+      }
+      return out;
+    };
+
+    const src = {
+      cacheScope: `multi-day-${Math.random().toString(36).slice(2)}`,
+      async fetchJson(url: string) {
+        const params = new URL(url, "http://x").searchParams;
+        const fromMs = Date.parse(params.get("from")!);
+        const toMs = Date.parse(params.get("to")!);
+        if (params.get("view") === "summary") {
+          summaryCalls.push(url);
+          if (options.summaryIncomplete) {
+            return { files: [], next_cursor: null, complete: false };
+          }
+          return {
+            files: summariesForRange(fromMs, toMs),
+            next_cursor: null,
+            complete: true,
+          };
+        }
+        rawCalls.push(url);
+        if (options.rawTruncatedOverMs !== undefined && toMs - fromMs > options.rawTruncatedOverMs) {
+          return {
+            files: [],
+            summary_files: params.get("summaries") === "1" ? summariesForRange(fromMs, toMs) : undefined,
+            next_cursor: null,
+            complete: false,
+          };
+        }
+        if (options.tailRawIncomplete && toMs > tailStartMs) {
+          return { files: [], next_cursor: null, complete: false };
+        }
+        const files = options.missingLastHourBundle && fromMs < options.endMs && toMs > tailStartMs
+          ? [tailRawFile]
+          : [];
+        return {
+          files,
+          ...(params.get("summaries") === "1" ? { summary_files: summariesForRange(fromMs, toMs) } : {}),
+          next_cursor: null,
+          complete: true,
+        };
+      },
+      async fetchFile(key: string) {
+        return { bytes: bufs[key], cached: false };
+      },
+    };
+    return { src, rawCalls, summaryCalls };
+  }
+
+  it("answers 8-day insights from view=summary without listing 8 days of raw files when raw would truncate", async () => {
+    const END = Date.UTC(2025, 0, 9, 0, 0, 0);
+    const { src, rawCalls, summaryCalls } = makeMultiDayServer({
+      endMs: END,
+      rawTruncatedOverMs: 2 * HOUR,
+    });
+    const result = await insightsFromRollup(
+      withSettings({
+        ...body,
+        clamp_end: new Date(END).toISOString(),
+        window_size_hrs: 24,
+        baseline_hours: 168,
+        earliest_log_at: new Date(END - 14 * DAY).toISOString(),
+      }),
+      [],
+      src,
+      signal,
+    );
+    expect(result).not.toBeNull();
+    expect(result!.window_total_requests).toBeGreaterThan(0);
+    // Single view=summary call for [fromStart, toEnd] when fromWindow is on UTC midnight.
+    expect(summaryCalls).toHaveLength(1);
+    // Zero raw /api/files calls when all hours are covered by complete bundles.
+    expect(rawCalls).toHaveLength(0);
+  });
+
+  it("handles mid-day window/baseline split and fetches raw only for the uncovered residual tail", async () => {
+    const END = Date.UTC(2025, 0, 9, 3, 0, 0);
+    const { src, rawCalls, summaryCalls } = makeMultiDayServer({
+      endMs: END,
+      missingLastHourBundle: true,
+      rawTruncatedOverMs: 2 * HOUR,
+    });
+    const result = await insightsFromRollup(
+      withSettings({
+        ...body,
+        clamp_end: new Date(END).toISOString(),
+        window_size_hrs: 24,
+        baseline_hours: 168,
+        earliest_log_at: new Date(END - 14 * DAY).toISOString(),
+      }),
+      [],
+      src,
+      signal,
+    );
+    expect(result).not.toBeNull();
+    expect(result!.window_total_requests).toBeGreaterThan(0);
+    // Splits [fromStart, fromWindow] and [fromWindow, toEnd] so the split day gets hour_bundles.
+    expect(summaryCalls).toHaveLength(2);
+    // Only fetches raw for the single uncovered tail hour [02:00Z, 03:00Z].
+    expect(rawCalls).toHaveLength(1);
+    const rawParams = new URL(rawCalls[0], "http://x").searchParams;
+    expect(rawParams.get("from")).toBe(new Date(END - HOUR).toISOString());
+    expect(rawParams.get("to")).toBe(new Date(END).toISOString());
+  });
+
+  it("falls back cleanly to null when the uncovered residual tail raw listing is truncated", async () => {
+    const END = Date.UTC(2025, 0, 9, 3, 0, 0);
+    const { src } = makeMultiDayServer({
+      endMs: END,
+      missingLastHourBundle: true,
+      tailRawIncomplete: true,
+    });
+    const result = await insightsFromRollup(
+      withSettings({
+        ...body,
+        clamp_end: new Date(END).toISOString(),
+        window_size_hrs: 24,
+        baseline_hours: 168,
+        earliest_log_at: new Date(END - 14 * DAY).toISOString(),
+      }),
+      [],
+      src,
+      signal,
+    );
+    expect(result).toBeNull();
+  });
+
+  it("falls back cleanly to null when view=summary is incomplete", async () => {
+    const END = Date.UTC(2025, 0, 9, 0, 0, 0);
+    const { src, rawCalls } = makeMultiDayServer({
+      endMs: END,
+      summaryIncomplete: true,
+    });
+    const result = await insightsFromRollup(
+      withSettings({
+        ...body,
+        clamp_end: new Date(END).toISOString(),
+        window_size_hrs: 24,
+        baseline_hours: 168,
+        earliest_log_at: new Date(END - 14 * DAY).toISOString(),
+      }),
+      [],
+      src,
+      signal,
+    );
+    expect(result).toBeNull();
+    expect(rawCalls).toHaveLength(0);
+  });
+});

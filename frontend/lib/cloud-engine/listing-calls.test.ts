@@ -93,8 +93,10 @@ function fakeCacheStorage() {
  */
 const EXPECTED: Record<string, [cold: number, revisit: number, reload: number]> = {
   "/dashboard": [1, 1, 1],
-  // Availability reads the log field settings, so it lists no files.
-  "/insights": [1, 1, 1],
+  // /insights spans 8 days (24h + 7d baseline) so it lists view=summary first
+  // (3 pages in fakeNetwork's stub) and only falls back to raw (1 page) for
+  // uncovered ranges (all 8d here since fakeNetwork returns no bundles).
+  "/insights": [4, 4, 4],
   "/network": [1, 1, 1],
   "/security": [1, 1, 1],
   "/origin": [1, 1, 1],
@@ -138,6 +140,12 @@ it.each(Object.keys(PAGES))("lists %s in one request per range", async (page) =>
   vi.resetModules();
   const reload = await load();
   expect([cold.length, revisit.length, reload.length]).toEqual(EXPECTED[page]);
-  for (const call of listings()) expect(call.params.get("view")).not.toBe("summary");
-  for (const call of [...revisit, ...reload]) expect(call.params.get("since_generation")).toBe("100");
+  if (page === "/insights") {
+    for (const call of [...revisit, ...reload].filter((c) => c.params.get("view") !== "summary")) {
+      expect(call.params.get("since_generation")).toBe("100");
+    }
+  } else {
+    for (const call of listings()) expect(call.params.get("view")).not.toBe("summary");
+    for (const call of [...revisit, ...reload]) expect(call.params.get("since_generation")).toBe("100");
+  }
 }, 60_000);

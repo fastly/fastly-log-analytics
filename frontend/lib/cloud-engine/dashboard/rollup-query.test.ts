@@ -679,4 +679,52 @@ describe("queryRollup", () => {
     expect(third !== null && third !== first).toBe(true);
     expect(fetchCount).toBe(count * 2);
   });
+
+  it("answers summary-first prefetched manifests from complete hour bundles without raw files", async () => {
+    let fetchJsonCalls = 0;
+    const s = {
+      cacheScope: "summary-first-bundles-only",
+      fetchJson: async () => {
+        fetchJsonCalls++;
+        throw new Error("should not call fetchJson when manifest is prefetched");
+      },
+      fetchFile: async (key: string) => ({ bytes: BUFFERS[key], cached: false }),
+    };
+    const result = await queryRollup(s, {
+      fromMs: T0,
+      toMs: T0 + 2 * HOUR,
+      manifest: {
+        summaries: { files: HOURS, complete: true },
+        raw: { files: [], complete: true },
+        summaryFirst: true,
+      },
+    });
+    expect(result).not.toBeNull();
+    expect(fetchJsonCalls).toBe(0);
+    expect(overall(result!.rollup)).toBe(overall(await decodeAll(HOURS)));
+    expect([result!.dataFromMs, result!.dataThroughMs]).toEqual([T0, T0 + 2 * HOUR]);
+  });
+
+  it("returns null instead of fabricating zero traffic if a summary-first bundle is missing (404)", async () => {
+    const s = {
+      cacheScope: "summary-first-missing-bundle",
+      fetchJson: async () => {
+        throw new Error("should not call fetchJson");
+      },
+      fetchFile: async (key: string) => {
+        if (key === HOURS[0].key) throw new MissingCloudFileError(key);
+        return { bytes: BUFFERS[key], cached: false };
+      },
+    };
+    const result = await queryRollup(s, {
+      fromMs: T0,
+      toMs: T0 + 2 * HOUR,
+      manifest: {
+        summaries: { files: HOURS, complete: true },
+        raw: { files: [], complete: true },
+        summaryFirst: true,
+      },
+    });
+    expect(result).toBeNull();
+  });
 });

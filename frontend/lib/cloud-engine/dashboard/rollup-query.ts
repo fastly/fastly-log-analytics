@@ -16,6 +16,108 @@ import {
 
 const FIVE_MINUTES_MS = 300_000;
 const HOUR_MS = 3_600_000;
+const DAY_MS = 86_400_000;
+
+export type TimeInterval = { startMs: number; endMs: number };
+
+export type PrefetchedRollupManifest = {
+  raw: { files: ManifestFile[]; complete: boolean };
+  summaries: { files: ManifestFile[]; complete: boolean };
+  /**
+   * When true, complete day/hour bundles from `summaries` are planned directly
+   * without requiring raw files for bundled intervals; raw files are only
+   * expected for intervals not covered by complete bundles.
+   */
+  summaryFirst?: boolean;
+};
+
+export function mergeTimeIntervals(intervals: readonly TimeInterval[]): TimeInterval[] {
+  const valid = intervals
+    .filter((iv) => iv.endMs > iv.startMs)
+    .sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs);
+  const merged: TimeInterval[] = [];
+  for (const iv of valid) {
+    const prev = merged[merged.length - 1];
+    if (prev && iv.startMs <= prev.endMs) {
+      prev.endMs = Math.max(prev.endMs, iv.endMs);
+    } else {
+      merged.push({ startMs: iv.startMs, endMs: iv.endMs });
+    }
+  }
+  return merged;
+}
+
+function isDayBundle(file: ManifestFile): boolean {
+  return file.kind === "day" || file.key.includes("/day_bundle=");
+}
+
+function isHourBundle(file: ManifestFile): boolean {
+  return file.kind === "hour" || file.key.includes("/hour_bundle=");
+}
+
+function preferBundle(a: ManifestFile, b: ManifestFile): ManifestFile {
+  const aSources = a.sources ?? 0;
+  const bSources = b.sources ?? 0;
+  if (aSources !== bSources) return aSources > bSources ? a : b;
+  const aRows = a.rows ?? 0;
+  const bRows = b.rows ?? 0;
+  if (aRows !== bRows) return aRows > bRows ? a : b;
+  return a.key >= b.key ? a : b;
+}
+
+/**
+ * Picks non-overlapping complete `day_bundle` and `hour_bundle` summaries
+ * wholly inside `[fromMs, toMs]` and returns the remaining uncovered intervals.
+ */
+export function planBundleCoverage(
+  summaryFiles: readonly ManifestFile[],
+  fromMs: number,
+  toMs: number,
+): { bundles: ManifestFile[]; uncovered: TimeInterval[] } {
+  if (toMs <= fromMs) return { bundles: [], uncovered: [] };
+
+  const daysByStart = new Map<number, ManifestFile>();
+  for (const file of summaryFiles) {
+    if (!isDayBundle(file)) continue;
+    const s = Date.parse(file.start);
+    const e = Date.parse(file.end);
+    if (!Number.isFinite(s) || !Number.isFinite(e) || e <= s) continue;
+    if (s < fromMs || e > toMs) continue;
+    if (s % DAY_MS !== 0 || e - s !== DAY_MS) continue;
+    const prev = daysByStart.get(s);
+    daysByStart.set(s, prev ? preferBundle(prev, file) : file);
+  }
+
+  const hoursByStart = new Map<number, ManifestFile>();
+  for (const file of summaryFiles) {
+    if (!isHourBundle(file)) continue;
+    const s = Date.parse(file.start);
+    const e = Date.parse(file.end);
+    if (!Number.isFinite(s) || !Number.isFinite(e) || e <= s) continue;
+    if (s < fromMs || e > toMs) continue;
+    if (s % HOUR_MS !== 0 || e - s !== HOUR_MS) continue;
+    const dayStart = Math.floor(s / DAY_MS) * DAY_MS;
+    if (daysByStart.has(dayStart)) continue;
+    const prev = hoursByStart.get(s);
+    hoursByStart.set(s, prev ? preferBundle(prev, file) : file);
+  }
+
+  const bundles = [...daysByStart.values(), ...hoursByStart.values()].sort(
+    (a, b) => Date.parse(a.start) - Date.parse(b.start),
+  );
+
+  const uncovered: TimeInterval[] = [];
+  let cursor = fromMs;
+  for (const b of bundles) {
+    const s = Date.parse(b.start);
+    const e = Date.parse(b.end);
+    if (s > cursor) uncovered.push({ startMs: cursor, endMs: s });
+    cursor = Math.max(cursor, e);
+  }
+  if (cursor < toMs) uncovered.push({ startMs: cursor, endMs: toMs });
+
+  return { bundles, uncovered };
+}
 
 /** Latency histograms per row, in microseconds (summary.rs `HIST_COLS`). */
 export type RollupHists = {
@@ -955,6 +1057,61 @@ export function planRollup(
   return { files: plan.summaries, dataFromMs, dataThroughMs };
 }
 
+function planSummaryFirstRollup(
+  rawFiles: ManifestFile[],
+  summaryFiles: ManifestFile[],
+  fromMs: number,
+  toMs: number,
+  options: { residualBytes?: number } = {},
+): RollupPlan | null {
+  const { bundles, uncovered } = planBundleCoverage(summaryFiles, fromMs, toMs);
+  if (!bundles.length) {
+    return planRollup(rawFiles, summaryFiles, fromMs, toMs, options);
+  }
+  const files: SummaryUse[] = bundles.map((file) => ({ file, covers: [file] }));
+  const residual: ManifestFile[] = [];
+  let residualBytesUsed = 0;
+  let dataFromMs = Math.min(...bundles.map((f) => Date.parse(f.start)));
+  let dataThroughMs = Math.max(...bundles.map((f) => Date.parse(f.end)));
+
+  for (const iv of uncovered) {
+    const ivRaw = filesOverlapping(rawFiles, iv.startMs, iv.endMs);
+    if (!ivRaw.length) continue;
+    const ivSummaries = filesOverlapping(summaryFiles, iv.startMs, iv.endMs);
+    const remainingBytes =
+      options.residualBytes !== undefined
+        ? Math.max(0, options.residualBytes - residualBytesUsed)
+        : undefined;
+    const subPlan = planRollup(
+      ivRaw,
+      ivSummaries,
+      iv.startMs,
+      iv.endMs,
+      remainingBytes !== undefined ? { residualBytes: remainingBytes } : {},
+    );
+    if (!subPlan) return null;
+    files.push(...subPlan.files);
+    if (subPlan.residual?.length) {
+      for (const rf of subPlan.residual) {
+        residual.push(rf);
+        residualBytesUsed += rf.size >= 0 ? rf.size : Infinity;
+      }
+      if (options.residualBytes !== undefined && residualBytesUsed > options.residualBytes) {
+        return null;
+      }
+    }
+    dataFromMs = Math.min(dataFromMs, subPlan.dataFromMs);
+    dataThroughMs = Math.max(dataThroughMs, subPlan.dataThroughMs);
+  }
+
+  return {
+    files,
+    ...(residual.length ? { residual } : {}),
+    dataFromMs,
+    dataThroughMs,
+  };
+}
+
 export type RollupResult = {
   rollup: Rollup;
   dataFromMs: number;
@@ -1090,11 +1247,12 @@ export function queryRollup(
     signal?: AbortSignal;
     spec?: SummarySpec;
     residual?: RollupResidual;
+    manifest?: PrefetchedRollupManifest;
   },
 ): Promise<RollupResult | null> {
   const { signal } = range;
   signal?.throwIfAborted();
-  const key = `${source.cacheScope ?? "default"}|${range.fromMs}|${range.toMs}|${range.spec?.id ?? "whole"}|${range.residual?.id ?? ""}`;
+  const key = `${source.cacheScope ?? "default"}|${range.fromMs}|${range.toMs}|${range.spec?.id ?? "whole"}|${range.residual?.id ?? ""}|${range.manifest?.summaryFirst ? "sf" : ""}`;
   let shared = inflight.get(key);
   if (!shared || shared.settled || shared.controller.signal.aborted) {
     const controller = new AbortController();
@@ -1112,6 +1270,7 @@ export function queryRollup(
       range.toMs,
       range.spec,
       range.residual,
+      range.manifest,
       controller.signal,
       callRollupEpoch,
     ).finally(() => {
@@ -1170,6 +1329,7 @@ async function runRollup(
   toMs: number,
   spec: SummarySpec | undefined,
   residual: RollupResidual | undefined,
+  manifest: PrefetchedRollupManifest | undefined,
   signal: AbortSignal,
   callRollupEpoch: number,
 ): Promise<RollupResult | null> {
@@ -1182,12 +1342,12 @@ async function runRollup(
   assertRollupActive();
   const from = new Date(Math.floor(fromMs / 1000) * 1000).toISOString();
   const to = new Date(Math.ceil(toMs / 1000) * 1000).toISOString();
-  const { raw, summaries } = await fetchManifestWithSummaries(
+  const { raw, summaries } = manifest ?? (await fetchManifestWithSummaries(
     source.fetchJson,
     from,
     to,
     signal,
-  );
+  ));
   assertRollupActive();
   if (!raw.complete || !summaries.complete) return null;
   // A listed summary whose object is gone is planned around like an unlisted
@@ -1198,13 +1358,13 @@ async function runRollup(
   let decodedParts: (Rollup | null)[];
   let residualPart: Rollup | null;
   for (;;) {
-    plan = planRollup(
-      raw.files,
-      missing.size ? summaries.files.filter((file) => !missing.has(file.key)) : summaries.files,
-      fromMs,
-      toMs,
-      residual ? { residualBytes: residual.maxBytes } : {},
-    );
+    const availableSummaries = missing.size
+      ? summaries.files.filter((file) => !missing.has(file.key))
+      : summaries.files;
+    const planOptions = residual ? { residualBytes: residual.maxBytes } : {};
+    plan = manifest?.summaryFirst
+      ? planSummaryFirstRollup(raw.files, availableSummaries, fromMs, toMs, planOptions)
+      : planRollup(raw.files, availableSummaries, fromMs, toMs, planOptions);
     if (!plan) return null;
     mergedKey = `${source.cacheScope ?? "default"}|${spec?.id ?? "whole"}|${residual?.id ?? ""}|${plan.dataFromMs}|${plan.dataThroughMs}|${plan.files.map((use) => use.file.key).join(",")}|${(plan.residual ?? []).map((f) => f.key).join(",")}`;
     const cachedMerged = mergedResults.get(mergedKey);
@@ -1228,6 +1388,10 @@ async function runRollup(
       assertRollupActive();
       if (!(error instanceof MissingCloudFileError) || missing.has(error.key)
         || !plan.files.some((use) => use.file.key === error.key)) throw error;
+      if (manifest?.summaryFirst) {
+        console.warn(`flp: summary ${error.key} is listed but missing in summary-first mode; falling back`);
+        return null;
+      }
       console.warn(`flp: summary ${error.key} is listed but missing; planning without it`);
       missing.add(error.key);
       continue;
