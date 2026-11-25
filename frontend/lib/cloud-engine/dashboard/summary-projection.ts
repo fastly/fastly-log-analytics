@@ -23,25 +23,38 @@ export type SummarySpec = {
   readonly columns: ReadonlySet<string>;
   /** Columns read only in the row groups holding one of their groups. */
   readonly only: ReadonlyMap<string, ReadonlySet<string>>;
+  /** Optional per-group field allowlist so `decodeRollup` skips unneeded dimension/field rows. */
+  readonly fields?: ReadonlyMap<string, ReadonlySet<string>>;
 };
 
-export function defineSummarySpec({ groups, columns, only = {} }: {
+export function defineSummarySpec({ groups, columns, only = {}, fields }: {
   groups: readonly string[];
   columns: readonly string[];
   only?: Record<string, readonly string[]>;
+  fields?: Record<string, readonly string[]>;
 }): SummarySpec {
   const sortedOnly = Object.entries(only).map(([column, of]) => [column, [...new Set(of)].sort()] as const)
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   for (const [column] of sortedOnly) {
     if (!columns.includes(column)) throw new Error(`Summary spec limits ${column}, which it does not read`);
   }
+  const sortedFields = fields
+    ? Object.entries(fields)
+        .map(([group, names]) => [group, [...new Set(names)].sort()] as const)
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    : [];
   const groupSet = [...new Set(groups)].sort();
   const columnSet = [...new Set([...BASE_COLUMNS, ...columns])].sort();
   return {
-    id: JSON.stringify([groupSet, columnSet, sortedOnly]),
+    id: sortedFields.length
+      ? JSON.stringify([groupSet, columnSet, sortedOnly, sortedFields])
+      : JSON.stringify([groupSet, columnSet, sortedOnly]),
     groups: new Set(groupSet),
     columns: new Set(columnSet),
     only: new Map(sortedOnly.map(([column, of]) => [column, new Set(of)])),
+    ...(sortedFields.length
+      ? { fields: new Map(sortedFields.map(([group, names]) => [group, new Set(names)])) }
+      : {}),
   };
 }
 

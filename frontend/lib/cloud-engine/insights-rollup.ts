@@ -168,6 +168,10 @@ export const INSIGHTS_SUMMARY_SPEC = defineSummarySpec({
     elapsed_count: ["urls", "ins_lat"],
     elapsed_hist: ["urls", "ins_lat"],
   },
+  fields: {
+    dims: ["city", "proto"],
+    all_fields: INSIGHTS_RESIDUAL_FIELDS,
+  },
 });
 
 function sumTotalRequests(rollup: Rollup): number {
@@ -509,6 +513,19 @@ export async function insightsFromRollup(
 ) {
   if (filters.length || Array.isArray(body.detectors)) return null;
   const { end, windowStart, start, windowHours, baselineHours } = resolveInsightWindow(body);
+  const earliestLogMs = body.earliest_log_at ? Date.parse(body.earliest_log_at) : Number.NaN;
+  const earliestHourMs = Number.isFinite(earliestLogMs)
+    ? Math.floor(earliestLogMs / HOUR_MS) * HOUR_MS
+    : Number.NaN;
+  const clipPreHistory = (intervals: readonly TimeInterval[]): TimeInterval[] => {
+    if (!Number.isFinite(earliestHourMs)) return [...intervals];
+    const clipped: TimeInterval[] = [];
+    for (const iv of intervals) {
+      if (iv.endMs <= earliestHourMs) continue;
+      clipped.push({ startMs: Math.max(iv.startMs, earliestHourMs), endMs: iv.endMs });
+    }
+    return clipped;
+  };
   const fetchPair = async (fromStart: number, fromWindow: number, toEnd: number) => {
     const isoFloor = (ms: number) => new Date(Math.floor(ms / 1000) * 1000).toISOString();
     const isoCeil = (ms: number) => new Date(Math.ceil(ms / 1000) * 1000).toISOString();
@@ -546,10 +563,9 @@ export async function insightsFromRollup(
 
     const wCoverage = planBundleCoverage(windowSummaries, fromWindow, toEnd);
     const bCoverage = planBundleCoverage(baselineSummaries, fromStart, fromWindow);
-    const uncoveredGroups = coalesceUncoveredIntervals([
-      ...bCoverage.uncovered,
-      ...wCoverage.uncovered,
-    ]);
+    const uncoveredGroups = coalesceUncoveredIntervals(
+      clipPreHistory([...bCoverage.uncovered, ...wCoverage.uncovered]),
+    );
 
     const rawByKey = new Map<string, ManifestFile>();
     if (uncoveredGroups.length) {
@@ -622,7 +638,6 @@ export async function insightsFromRollup(
     ]);
   };
 
-  const earliestLogMs = body.earliest_log_at ? Date.parse(body.earliest_log_at) : Number.NaN;
   const alignedEnd = Math.floor(end / HOUR_MS) * HOUR_MS;
   const canAlignToCompletedHour =
     windowHours >= ALIGN_MIN_WINDOW_HOURS

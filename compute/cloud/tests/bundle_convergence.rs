@@ -441,7 +441,7 @@ fn precharged_resume_keeps_the_partial_and_finishes_exactly_across_slices() {
         bundle::Unit::Hour,
     )
     .unwrap();
-    let first = run_with_cpu(&fake, &svc, 450);
+    let first = run_with_cpu(&fake, &svc, bundle::VCPU_STOP_MS - 150);
     assert_eq!(first.partials, 1);
     let partials = fake.keys("partial=");
     assert_eq!(partials.len(), 1);
@@ -449,7 +449,7 @@ fn precharged_resume_keeps_the_partial_and_finishes_exactly_across_slices() {
     let gets = fake.gets.get();
     let puts = fake.puts.get();
 
-    let deferred = run_with_cpu(&fake, &svc, 550);
+    let deferred = run_with_cpu(&fake, &svc, bundle::VCPU_STOP_MS - 50);
     assert_eq!(deferred.stopped, Some("vcpu"));
     assert!(deferred.more_pending);
     assert_eq!(fake.gets.get(), gets + 1);
@@ -477,11 +477,11 @@ fn a_fully_covered_partial_defers_final_serialization_after_precharged_decode() 
     );
     fake.now.set(BASE + 2 * HOUR);
     watermark(&fake, fake.now.get());
-    let first = run_with_cpu(&fake, &svc, 580);
+    let first = run_with_cpu(&fake, &svc, bundle::VCPU_STOP_MS - 20);
     assert_eq!(first.partials, 1, "{first:?}");
     let partials = fake.keys("partial=");
     let puts = fake.puts.get();
-    let second = run_with_cpu(&fake, &svc, 550);
+    let second = run_with_cpu(&fake, &svc, bundle::VCPU_STOP_MS - 50);
     assert_eq!(second.stopped, Some("vcpu"));
     assert!(second.more_pending);
     assert_eq!(fake.puts.get(), puts);
@@ -1370,4 +1370,40 @@ fn cmcd_bundling_waits_for_a_delete_data_job_to_finish() {
         .keys("hour_bundle=08-")
         .iter()
         .any(|k| k.starts_with(CMCD_BUNDLES)));
+}
+
+#[test]
+fn stage_reserve_bounds_backend_calls_and_vcpu_per_execution() {
+    let fake = Fake::default();
+    let svc = service();
+    let bodies = bodies();
+    // 48 window summaries (1 minute of 6 plans x 8 shards) in a closed hour.
+    minute(&fake, BASE, &bodies);
+    fake.now.set(BASE + 2 * HOUR);
+    watermark(&fake, fake.now.get());
+    let sources: Vec<Vec<u8>> = fake.bucket.borrow().values().cloned().collect();
+    let expected = bundle::merge(
+        &sources.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+        BASE,
+        bundle::Unit::Hour,
+    )
+    .unwrap();
+
+    let (mut runs, mut peak_calls, mut peak_vcpu) = (0, 0, 0);
+    while hour_bundle(&fake, BASE).is_none() {
+        runs += 1;
+        assert!(runs <= 20, "not bundled after {runs} executions");
+        fake.new_execution();
+        // Simulate 2 startup backend calls before bundle_stage enters.
+        fake.calls.set(2);
+        let report =
+            bundle::summary_bundle(&store(&fake, &svc), "ck", bundle::STAGE_CALL_RESERVE).unwrap();
+        assert!(report.errors.is_empty(), "{report:?}");
+        peak_calls = peak_calls.max(fake.calls.get());
+        peak_vcpu = peak_vcpu.max(fake.vcpu.get());
+    }
+    let key = hour_bundle(&fake, BASE).unwrap();
+    assert_eq!(fake.bucket.borrow()[&key], expected);
+    assert!(peak_calls <= 20, "peak_calls={peak_calls} exceeded 20");
+    assert!(peak_vcpu <= 550, "peak_vcpu={peak_vcpu}ms exceeded 550ms");
 }

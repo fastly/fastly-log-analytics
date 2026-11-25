@@ -1559,7 +1559,8 @@ impl PassChain {
 /// Merges closed hours' window summaries into hour bundles and closed days into day bundles.
 fn bundle_stage<R: Runtime>(store: &Store<'_, R>) -> Option<StageRow> {
     let runtime = store.runtime;
-    if !enough(runtime, MIN_BUNDLE_CALLS) {
+    let reserve = bundle::STAGE_CALL_RESERVE.max(TAIL + 1);
+    if !admit_stage(runtime.admin_remaining_calls(), reserve + MIN_BUNDLE_CALLS) {
         return None;
     }
     let cdn_key = runtime
@@ -1574,7 +1575,7 @@ fn bundle_stage<R: Runtime>(store: &Store<'_, R>) -> Option<StageRow> {
     let before = runtime.admin_remaining_calls();
     // The two datasets share the execution's calls and vCPU; `bundle_datasets` alternates which
     // goes first, so a backlog in one cannot hold the other back until it clears.
-    let reports = bundle::bundle_datasets(store, &cdn_key, TAIL + 1, MIN_BUNDLE_CALLS);
+    let reports = bundle::bundle_datasets(store, &cdn_key, reserve, MIN_BUNDLE_CALLS);
     let (request, cmcd, cmcd_first) = match reports {
         Ok(r) => (
             r.request

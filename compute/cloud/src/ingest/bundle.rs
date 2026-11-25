@@ -83,7 +83,11 @@ pub const SERIES_ASN_TOP_K: usize = 30;
 /// Cities a day bundle writes in `series5` (the /network map).
 pub const SERIES_CITY_TOP_K: usize = 50;
 /// Sources folded per execution, which bounds heap and time per build step.
-pub const MAX_SOURCES: usize = 24;
+pub const MAX_SOURCES: usize = 16;
+/// Backend calls kept in reserve by `admin::logs::bundle_stage` so each Compute execution
+/// stays <= 20 of Compute's 32-call limit (stopping work at <= 18 calls, plus state CAS and
+/// stage tail) and bounds per-execution fold vCPU well under 1,000 ms.
+pub const STAGE_CALL_RESERVE: u32 = 13;
 /// Folds an open-hour turn reserves backend calls for before it starts; it folds on while
 /// calls and vCPU allow.
 const OPEN_BATCH_SOURCES: usize = 8;

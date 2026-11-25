@@ -1308,4 +1308,54 @@ describe("insightsFromRollup summary-first multi-day manifest handling", () => {
     );
     expect(truncResult).toBeNull();
   });
+
+  it("clips uncovered pre-history before earliest_log_at so raw listings do not bridge bundled hours", async () => {
+    const END = Date.UTC(2025, 0, 4, 0, 0, 0);
+    // Data only exists from Jan 2 18:00Z onward (30h of history), while baseline looks back 48h to Jan 1 00:00Z.
+    const earliestMs = Date.UTC(2025, 0, 2, 18, 0, 0);
+    // Hours [Jan 1 00:00Z .. Jan 2 18:00Z) have no bundles (pre-history), and Jan 3 04:00Z is an uncovered gap.
+    const preHistoryHours: number[] = [];
+    for (let h = Date.UTC(2025, 0, 1, 0, 0, 0); h < earliestMs; h += HOUR) {
+      preHistoryHours.push(h);
+    }
+    const gapHour = Date.UTC(2025, 0, 3, 4, 0, 0);
+    const { src, rawCalls } = makeMultiDayServer({
+      endMs: END,
+      dayCount: 3,
+      missingHourStartsMs: [...preHistoryHours, gapHour],
+      omitInlineSummaries: true,
+      rawTruncatedOverMs: 2 * HOUR,
+    });
+    const result = await insightsFromRollup(
+      withSettings({
+        ...body,
+        clamp_end: new Date(END).toISOString(),
+        window_size_hrs: 24,
+        baseline_hours: 48,
+        earliest_log_at: new Date(earliestMs + 12_000).toISOString(),
+      }),
+      [],
+      src,
+      signal,
+    );
+    expect(result).not.toBeNull();
+    // Only the single 1h uncovered gap after earliest_log_at is listed; pre-history is clipped and never bridged.
+    expect(rawCalls).toHaveLength(1);
+    const p = new URL(rawCalls[0], "http://x").searchParams;
+    expect(p.get("from")).toBe(new Date(gapHour).toISOString());
+    expect(p.get("to")).toBe(new Date(gapHour + HOUR).toISOString());
+  });
+
+  it("decodeRollup with INSIGHTS_SUMMARY_SPEC skips non-insights dims and all_fields", async () => {
+    const full = await decodeRollup(sampleHourBuf, 300_000);
+    const filtered = await decodeRollup(sampleHourBuf, 300_000, INSIGHTS_SUMMARY_SPEC);
+    expect(full).not.toBeNull();
+    expect(filtered).not.toBeNull();
+    // Full bundle has more dims than just city/proto, while INSIGHTS_SUMMARY_SPEC keeps only city and proto.
+    expect(full!.dims.size).toBeGreaterThan(2);
+    expect([...filtered!.dims.keys()].sort()).toEqual(["city", "proto"]);
+    for (const key of filtered!.fields.keys()) {
+      expect(["country", "p_type", "method", "referer", "ua", "asn", "cache", "transport", "ip"]).toContain(key);
+    }
+  });
 });

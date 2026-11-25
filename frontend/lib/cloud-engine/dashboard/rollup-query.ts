@@ -697,6 +697,7 @@ export async function decodeRollup(
     present: new Set(),
   };
   const groups = spec?.groups;
+  const allowedFields = spec?.fields;
   const readAgg = (i: number) => {
     const agg = emptyAgg();
     for (let s = 0; s < skippedSumKeys.length; s++) agg[skippedSumKeys[s]] = NaN;
@@ -717,9 +718,19 @@ export async function decodeRollup(
   };
   for (let i = 0; i < rows; i++) {
     const g = group[i];
+    const gStr = String(g);
     const name = String(field[i] ?? "");
-    if (groups && (!groups.has(String(g))
+    if (groups && (!groups.has(gStr)
       || g === "dim_totals" && !groups.has(String(value[i])))) continue;
+    if (allowedFields) {
+      const fieldGroup = g === "dim_totals"
+        ? String(value[i])
+        : g === "field_totals"
+          ? "all_fields"
+          : gStr;
+      const allowed = allowedFields.get(fieldGroup);
+      if (allowed && !allowed.has(name)) continue;
+    }
     switch (g) {
       case "dims": {
         const values = rollup.dims.get(name) ?? new Map<string, RollupAgg>();
