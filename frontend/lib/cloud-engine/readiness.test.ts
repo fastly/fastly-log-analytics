@@ -3353,6 +3353,110 @@ it("SEC-T5-ITER40-FE-03: prevents non-contraction apostrophe mismatch and cross-
         ["error", "="],
         "Error: Runtime Error: [redacted]",
       ],
+      // Wave 58 / Iter 59: AUTH_SCHEMES followed by ;/, (inline or spaced)
+      [
+        "Runtime Error: Cookie:bearer; a = error",
+        ["bearer", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Cookie:token; a = error",
+        ["token", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Cookie: bearer ; a = error",
+        ["bearer", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Cookie": bearer ; a = error',
+        ["bearer", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Digest , a = error",
+        ["Digest", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": Digest , a = error',
+        ["Digest", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization:Digest, a = error",
+        ["Digest", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: WWW-Authenticate:Basic, a = error",
+        ["Basic", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Digest , a = error",
+        ["Digest", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 58 / Iter 59: Nameless =value continuation item (Stage 2A & 2B)
+      [
+        "Runtime Error: Cookie: a=1; =error; b = cache",
+        ["error", "cache", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Cookie": a=1; =error; b = cache',
+        ["error", "cache", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Digest a=1, =error, b = cache",
+        ["error", "cache", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": Digest a=1, =error, b = cache',
+        ["error", "cache", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 58 / Iter 59: Comma-folded Set-Cookie headers & JSON member boundaries
+      [
+        "Runtime Error: Set-Cookie: a=1; HttpOnly, b = error",
+        ["HttpOnly", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Set-Cookie: a=1, b = error",
+        ["error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Set-Cookie: a=1; Expires=Wed, 21 Oct 2015 07:28:00 GMT, b = error",
+        ["Expires", "GMT", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: {"Set-Cookie": a=1; HttpOnly, "status": 500}',
+        ["HttpOnly", "status", "500"],
+        "Error: Runtime Error: [redacted], [redacted]: [redacted]",
+      ],
+      // Wave 58 / Iter 59: Backslash escapes in JSON secret keys
+      [
+        'Runtime Error: "my\\\\token": error',
+        ["token", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "X\\tCookie": a=1; b = error',
+        ["Cookie", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "X\\u0020Authorization": Digest a=1, b = error',
+        ["Authorization", "Digest", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
     ];
     for (const [msg, forbidden, expectedExact] of cases) {
       const err = new Error(msg);
@@ -3382,6 +3486,9 @@ it("SEC-T5-ITER40-FE-04: maintains strict O(N) performance (<10ms median, <150ms
       `Error: "${"a".repeat(64000)}\\" HTTP 403 100 MB session valid" 'foo"bar'`,
       `Error: "${"\\".repeat(63999)}" and "select"`,
       (`${'"Authorization":a,('.repeat(30)}${"x".repeat(65536)}`).slice(0, 65536),
+      (`${'"Authorization":a,('.repeat(30)}${"x".repeat(65536)}`).slice(0, 65535) + ")",
+      (`'a\\\\' ${'"Authorization":a,('.repeat(26)}${"[x]".repeat(22000)}`).slice(0, 65535) + ")",
+      (`${'"Authorization":a,('.repeat(30)}${"x".repeat(65536)}`).slice(0, 65536 - 29) + ")".repeat(29),
     ];
     for (const payload of perfPayloads64k) {
       const err = new Error(payload);

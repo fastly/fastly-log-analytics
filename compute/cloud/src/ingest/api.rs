@@ -458,14 +458,12 @@ pub fn files<R: Runtime>(runtime: &R, service: &Service, query: &str, started: I
             let room = FILES_PAGE.saturating_sub(combined.len());
             let (mut page, used) = hour_files(
                 &store,
-                &table_root,
-                (dataset, table),
+                (&table_root, dataset, table),
                 (from, to),
                 (day, after.take()),
                 secret.as_bytes(),
                 include_summaries,
-                room,
-                remaining_calls,
+                (room, remaining_calls),
             )?;
             remaining_calls = remaining_calls.saturating_sub(used);
             if let Some(files) = page["files"].as_array_mut() {
@@ -612,14 +610,12 @@ pub fn files<R: Runtime>(runtime: &R, service: &Service, query: &str, started: I
 /// generation.
 fn hour_files<R: Runtime>(
     store: &Store<'_, R>,
-    root: &str,
-    (dataset, table): (&str, Option<&str>),
+    (root, dataset, table): (&str, &str, Option<&str>),
     (from, to): (i64, i64),
     (mut day, mut after): (usize, Option<String>),
     secret: &[u8],
     include_summaries: bool,
-    limit: usize,
-    max_calls: u32,
+    (limit, max_calls): (usize, u32),
 ) -> Result<(Value, u32), Failure> {
     let runtime = store.runtime;
     // A window can start in the hour before `from` and still overlap it.
