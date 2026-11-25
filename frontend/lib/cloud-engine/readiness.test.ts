@@ -3962,6 +3962,163 @@ it("SEC-T5-ITER40-FE-03: prevents non-contraction apostrophe mismatch and cross-
         ["Set-Cookie", "a=1"],
         "Error: Runtime Error: [redacted], [redacted]: [redacted]",
       ],
+      // Wave 63 / Iter 64: Verifier 5 #1 — Bearer/Basic key= value not misclassified as base64 padding
+      [
+        "Runtime Error: Authorization: Bearer realm= local, scope = valid",
+        ["Authorization", "Bearer", "realm", "local", "scope", "valid", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": Bearer realm= local, scope = valid',
+        ["Authorization", "Bearer", "realm", "local", "scope", "valid", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Basic realm= local, mode = valid",
+        ["Authorization", "Basic", "realm", "local", "mode", "valid", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Bearer realm= local, scope = valid",
+        ["Bearer", "realm", "local", "scope", "valid", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: X-Token=Bearer:realm= local, status = valid",
+        ["Token", "Bearer", "realm", "local", "status", "valid", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 63 / Iter 64: Verifier 5 #2 — Spaced => / := / =: / : after Bearer/Basic & Bearer = local, scope = valid
+      [
+        "Runtime Error: Authorization: Bearer => error",
+        ["Authorization", "Bearer", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Bearer := error",
+        ["Authorization", "Bearer", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Bearer =: error",
+        ["Authorization", "Bearer", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Bearer : error",
+        ["Authorization", "Bearer", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": Bearer => error',
+        ["Authorization", "Bearer", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": Bearer := error',
+        ["Authorization", "Bearer", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: X-Token: Bearer => error",
+        ["Token", "Bearer", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Bearer = local, scope = valid",
+        ["Authorization", "Bearer", "local", "scope", "valid", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 63 / Iter 64: Verifier 5 #3 — Spaced : after custom auth scheme
+      [
+        "Runtime Error: Authorization: MyScheme : error",
+        ["Authorization", "MyScheme", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": MyScheme : error',
+        ["Authorization", "MyScheme", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: WWW-Authenticate: Digest realm=host, MyScheme : error",
+        ["WWW-Authenticate", "Digest", "realm", "host", "MyScheme", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "WWW-Authenticate": Digest realm=host, MyScheme : error',
+        ["WWW-Authenticate", "Digest", "realm", "host", "MyScheme", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 63 / Iter 64: Verifier 5 #4 — Stage 2A quoted "Digest" / "oauth" / "Basic" JSON keys
+      [
+        'Runtime Error: "Digest": realm = local, mode = valid',
+        ["Digest", "realm", "local", "mode", "valid", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "oauth": realm = local, mode = valid',
+        ["oauth", "realm", "local", "mode", "valid", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Basic": error',
+        ["Basic", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 63 / Iter 64: Verifier 5 #5 — Stage 2A comma-folded compound quoted cookie name at EOL / before } or )
+      [
+        'Runtime Error: "Set-Cookie": a=1, "my"status',
+        ["Set-Cookie", "status", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: {"Set-Cookie": a=1, "my"status}',
+        ["Set-Cookie", "status", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: ("Set-Cookie": a=1, "my"status)',
+        ["Set-Cookie", "status", "="],
+        "Error: Runtime Error: ([redacted])",
+      ],
+      // Wave 63 / Iter 64: Verifier 5 #6 — Set-Cookie Expires= optional seconds, punct in TZ label, >128-char spaces & >64-char TZ
+      [
+        "Runtime Error: Set-Cookie: a=1; Expires=Thu, 01 Jan 2099 00:00 GMT, status = valid",
+        ["Set-Cookie", "Expires", "GMT", "status", "valid", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Set-Cookie: a=1; Expires=Thu, 01 Jan 2099 00:00:00 GMT+0000 (St. Johns), status = valid",
+        ["Set-Cookie", "Expires", "GMT", "Johns", "status", "valid", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        `Runtime Error: Set-Cookie: a=1; Expires=Mon, ${" ".repeat(125)}01 Jan 2099 00:00:00 GMT; status = valid`,
+        ["Set-Cookie", "Expires", "GMT", "status", "valid", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        `Runtime Error: Set-Cookie: a=1; Expires=Thu, 01 Jan 2099 00:00:00 GMT+0000 (${"A".repeat(65)}), status = valid`,
+        ["Set-Cookie", "Expires", "GMT", "AAA", "status", "valid", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 63 / Iter 64: Verifier 5 #7 — Custom auth scheme >32 chars & SQL E'token':
+      [
+        "Runtime Error: Authorization: CUSTOM_ENTERPRISE_VEND_SCHEME_V2X error",
+        ["Authorization", "CUSTOM_ENTERPRISE_VEND_SCHEME_V2X", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: WWW-Authenticate: Digest realm=host, CUSTOM_ENTERPRISE_VEND_SCHEME_V2X error",
+        ["WWW-Authenticate", "Digest", "realm", "host", "CUSTOM_ENTERPRISE_VEND_SCHEME_V2X", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: E'token': error",
+        ["token", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
     ];
     for (const [msg, forbidden, expectedExact] of cases) {
       const err = new Error(msg);
@@ -3994,6 +4151,8 @@ it("SEC-T5-ITER40-FE-04: maintains strict O(N) performance (<10ms median, <150ms
       (`${'"Authorization":a,('.repeat(30)}${"x".repeat(65536)}`).slice(0, 65535) + ")",
       (`'a\\\\' ${'"Authorization":a,('.repeat(26)}${"[x]".repeat(22000)}`).slice(0, 65535) + ")",
       (`${'"Authorization":a,('.repeat(30)}${"x".repeat(65536)}`).slice(0, 65536 - 29) + ")".repeat(29),
+      `Runtime Error: "Set-Cookie": a${":".repeat(65000)}`,
+      `Runtime Error: "Authorization": Digest a${":".repeat(65000)}`,
     ];
     for (const payload of perfPayloads64k) {
       const err = new Error(payload);
