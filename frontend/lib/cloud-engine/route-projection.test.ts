@@ -117,29 +117,29 @@ describe("Cloud route column projections", () => {
   // Each variant's own projection gives the full-table result; every projected column is read by some variant.
   // `nullFill` checks only that each projection answers like the full table; its NULLs can't show a column unread.
   async function guard(variants: Variant[], nullFill = false) {
-    for (const variant of variants) {
-      expect(variant.columns, variant.name).not.toBeNull();
-      expect(variant.columns!.filter((column) => !all.includes(column)), variant.name).toEqual([]);
-      await view(all);
-      const expected = await variant.run(read);
-      await view(variant.columns!, nullFill);
-      expect(await variant.run(read), variant.name).toEqual(expected);
-    }
-    if (nullFill) {
-      await view(all);
-      return;
-    }
-    // The loader derives ts_ms from the physical timestamp, which no scan names.
-    const used = new Set(variants.flatMap((variant) => variant.columns!).filter((column) => column !== "timestamp"));
-    for (const column of used) {
-      let failed = false;
-      for (const variant of variants.filter((item) => item.columns!.includes(column))) {
-        await view(variant.columns!.filter((item) => item !== column));
-        if (await variant.run(read).then(() => false, () => true)) { failed = true; break; }
+    try {
+      for (const variant of variants) {
+        expect(variant.columns, variant.name).not.toBeNull();
+        expect(variant.columns!.filter((column) => !all.includes(column)), variant.name).toEqual([]);
+        await view(all);
+        const expected = await variant.run(read);
+        await view(variant.columns!, nullFill);
+        expect(await variant.run(read), variant.name).toEqual(expected);
       }
-      expect(failed, `no scan read ${column}`).toBe(true);
+      if (nullFill) return;
+      // The loader derives ts_ms from the physical timestamp, which no scan names.
+      const used = new Set(variants.flatMap((variant) => variant.columns!).filter((column) => column !== "timestamp"));
+      for (const column of used) {
+        let failed = false;
+        for (const variant of variants.filter((item) => item.columns!.includes(column))) {
+          await view(variant.columns!.filter((item) => item !== column));
+          if (await variant.run(read).then(() => false, () => true)) { failed = true; break; }
+        }
+        expect(failed, `no scan read ${column}`).toBe(true);
+      }
+    } finally {
+      await view(all);
     }
-    await view(all);
   }
 
   const origin = (path: string, body: Record<string, unknown>): Variant => ({
@@ -176,7 +176,7 @@ describe("Cloud route column projections", () => {
     // A sub-hour series is the page's only raw read when unfiltered; it loads just its own columns.
     const rawSeries = { ...page, bucket_minutes: 1, sections: ["timeseries"] };
     expect([...originScanColumns("/api/origin/aggregates", rawSeries)!].sort())
-      .toEqual(["ottfb", "timestamp", "ts_ms", "ttfb"]);
+      .toEqual(["cache", "ottfb", "timestamp", "ts_ms", "ttfb"]);
     await guard([
       origin("/api/origin/aggregates", rawSeries),
       origin("/api/origin/aggregates", { ...rawSeries, timeseries_metric: "ttlb", split_by_leg: true }),

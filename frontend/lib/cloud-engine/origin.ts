@@ -898,7 +898,7 @@ const ORIGIN_LATENCY_COLUMNS = ["timestamp", "ts_ms", "ottfb", "ttfb"] as const;
 export const ORIGIN_SCAN_COLUMNS = {
   aggregates: [...ORIGIN_LATENCY_COLUMNS, "cache", "ottlb", "elapsed", "ost", "obytes", "edge", "url", "pop", "oip"],
   "shielding-analysis": [...ORIGIN_LATENCY_COLUMNS, "edge", "rid", "prid", "pop"],
-  drilldown: [...ORIGIN_LATENCY_COLUMNS, "ost", "obytes", "host", "pop", "server_region", "proto", "oip"],
+  drilldown: [...ORIGIN_LATENCY_COLUMNS, "cache", "ost", "obytes", "host", "pop", "server_region", "proto", "oip"],
 } as const;
 
 const ORIGIN_AGGREGATE_ROUTES = new Set([
@@ -913,7 +913,7 @@ function filterFields(filters: unknown): string[] | null {
 
 /** The columns an aggregates read of `sections` needs beyond the time columns. */
 function originSectionColumns(sections: readonly string[], body: Record<string, unknown>, ttlb: boolean): string[] {
-  const latency = ["ottfb", "ttfb"];
+  const latency = ["ottfb", "ttfb", "cache"];
   const columns: Record<string, string[]> = {
     summary: [...latency, "cache", "ottlb", "elapsed", "ost", "obytes"],
     timeseries: [...ttlb ? ["ottlb"] : latency, ...body.split_by_leg ? ["edge"] : []],

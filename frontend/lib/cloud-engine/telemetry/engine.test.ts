@@ -845,4 +845,61 @@ describe("tagged compact files (Rust parity)", () => {
     expect(log.files).toEqual([key, key]);
     expect(proj2.rows[0].op).toBe("GET");
   });
+
+  it("ignores missing projected columns on older Parquet schemas for both ranged and full-file reads", async () => {
+    clearOpsDecodedCache();
+    const rowCount = 3_000;
+    const baseTs = DAY_MS + 10 * 3_600_000;
+    const oldSchemaBig = parquetWriteBuffer({
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: rowCount }, (_, i) => new Date(baseTs + i * 1000)) },
+        { name: "event_id", type: "STRING", data: Array.from({ length: rowCount }, (_, i) => `evt-${i}-${(i * 9973).toString(16)}`) },
+        { name: "raw_key", type: "STRING", data: Array.from({ length: rowCount }, (_, i) => `raw/old-${i}.log.gz`) },
+        { name: "output_keys_json", type: "STRING", data: Array.from({ length: rowCount }, (_, i) => `["processed/requests/year=2026/month=10/day=29/hour=10/part-${i}-${(i * 7919).toString(16)}.parquet"]`) },
+      ],
+      codec: "SNAPPY",
+    });
+    const oldSchemaSmall = parquetWriteBuffer({
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: [new Date(baseTs)] },
+        { name: "raw_key", type: "STRING", data: ["raw/tiny-old.log.gz"] },
+      ],
+      codec: "SNAPPY",
+    });
+    expect(oldSchemaBig.byteLength).toBeGreaterThan(OPS_PROJECTED_MIN_BYTES);
+    const bigKey = "processed/ops/ingest_files/old-big.parquet";
+    const smallKey = "processed/ops/ingest_files/old-small.parquet";
+    const fileMap: Record<string, ArrayBuffer> = { [bigKey]: oldSchemaBig, [smallKey]: oldSchemaSmall };
+    const rangeCalls: Array<{ key: string; start: number; end: number }> = [];
+    const { src, log } = source({
+      live: noLive,
+      manifest: [
+        {
+          files: [
+            { key: bigKey, start: "2026-10-29T10:00:00Z", end: "2026-10-29T11:00:00Z", size: oldSchemaBig.byteLength, rows: rowCount },
+            { key: smallKey, start: "2026-10-29T11:00:00Z", end: "2026-10-29T12:00:00Z", size: oldSchemaSmall.byteLength, rows: 1 },
+          ],
+          next_cursor: null,
+        },
+      ],
+      files: fileMap,
+    });
+    src.fetchRange = async (file, start, end) => {
+      rangeCalls.push({ key: file.key, start, end });
+      return { bytes: fileMap[file.key].slice(start, end), cached: false, cdn: "HIT" };
+    };
+
+    const res = await readLogs(src, {
+      kind: "ingest_files",
+      ...range,
+      columns: ["timestamp", "raw_key", "raw_bytes", "nonexistent_future_col"],
+      dedupe: false,
+      sort: false,
+    });
+    expect(log.files).toEqual([smallKey]);
+    expect(rangeCalls.some((c) => c.key === bigKey)).toBe(true);
+    expect(res.rows).toHaveLength(rowCount + 1);
+    expect(res.rows.some((r) => r.raw_key === "raw/old-0.log.gz")).toBe(true);
+    expect(res.rows.some((r) => r.raw_key === "raw/tiny-old.log.gz")).toBe(true);
+  });
 });

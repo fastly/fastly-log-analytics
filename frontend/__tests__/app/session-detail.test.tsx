@@ -29,6 +29,7 @@ vi.mock('@/components/DataTable', () => ({
       {data.filter((row) => row.status !== undefined).map((row) => <li key={`${row.timestamp}:${row.status}`}>{row.status}</li>)}
     </ol>
   ),
+  PopLabel: ({ code }: { code?: string | null }) => <span>{code || '—'}</span>,
 }))
 vi.mock('@/app/streaming/_sections/StreamingClient', () => ({}))
 

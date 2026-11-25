@@ -909,6 +909,10 @@ def test_real_sql_metric_formats_zero_and_case_normalization(run_analytics) -> N
     assert vitals["lcp"]["p75"] == result["trends"]["lcp"][0] == 4.0
     assert vitals["cls"]["p75"] == result["trends"]["cls"][0] == 0.0
     assert vitals["inp"]["p75"] == 123 and vitals["fid"] == {"p75": 12.3, "fcp": 1.5, "ttfb": 0.5}
+    assert vitals["fcp"]["p75"] == result["trends"]["fcp"][0] == 1.5
+    assert vitals["ttfb"]["p75"] == result["trends"]["ttfb"][0] == 0.5
+    assert vitals["fcp"]["distribution"] == {"good": 100, "needs_improvement": 0, "poor": 0}
+    assert vitals["ttfb"]["distribution"] == {"good": 100, "needs_improvement": 0, "poor": 0}
     assert vitals["lcp"]["distribution"] == {"good": 100, "needs_improvement": 0, "poor": 0}
     assert result["beacon_count"] == result["pageview_count"] == 1
 

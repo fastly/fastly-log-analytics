@@ -1,9 +1,9 @@
-import {
-  billedVcpuForExecutions,
-  type ComputeBilling,
-  type FosUsageRow,
-  type UsageLoggingSettings,
+import type {
+  ComputeBilling,
+  FosUsageRow,
+  UsageLoggingSettings,
 } from "./summary";
+import { billedVcpuForExecutions } from "./pricing";
 import {
   INGEST_ASSUMPTIONS,
   INGEST_LIMITS,

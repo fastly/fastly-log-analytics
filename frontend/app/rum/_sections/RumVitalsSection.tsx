@@ -1,7 +1,7 @@
 'use client'
 
 import React from 'react'
-import { Activity, Cpu, Eye, Monitor, PieChart, ShieldAlert, TrendingUp } from 'lucide-react'
+import { Activity, Clock, Cpu, Eye, Gauge, Monitor, PieChart, ShieldAlert, TrendingUp } from 'lucide-react'
 import { AnalyticsCard, TimeSeriesChart } from '@/components/AnalyticsCard'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { CHART_COLORS, formatCount, formatDate } from '@/lib/utils'
@@ -75,8 +75,14 @@ export function RumVitalsTopSection({
     () => [
       { x: formattedTimestamps, y: analytics.trends?.lcp || [], name: 'LCP (s)', type: 'scatter' as const, mode: 'lines+markers' as const, line: { color: CHART_COLORS.success } },
       { x: formattedTimestamps, y: analytics.trends?.cls || [], name: 'CLS', type: 'scatter' as const, mode: 'lines+markers' as const, line: { color: CHART_COLORS.info } },
+      ...((analytics.trends?.fcp || []).some((v) => v != null)
+        ? [{ x: formattedTimestamps, y: analytics.trends?.fcp || [], name: 'FCP (s)', type: 'scatter' as const, mode: 'lines+markers' as const, line: { color: CHART_COLORS.warning } }]
+        : []),
+      ...((analytics.trends?.ttfb || []).some((v) => v != null)
+        ? [{ x: formattedTimestamps, y: analytics.trends?.ttfb || [], name: 'TTFB (s)', type: 'scatter' as const, mode: 'lines+markers' as const, line: { color: '#8b5cf6' } }]
+        : []),
     ],
-    [formattedTimestamps, analytics.trends?.lcp, analytics.trends?.cls],
+    [formattedTimestamps, analytics.trends?.lcp, analytics.trends?.cls, analytics.trends?.fcp, analytics.trends?.ttfb],
   )
 
   const errorRateTrendData = React.useMemo(
@@ -111,11 +117,27 @@ export function RumVitalsTopSection({
         </p>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
         {[
           { title: 'Largest Contentful Paint (LCP)', Icon: Activity, vital: analytics.vitals.lcp, good: 2.5, poor: 4.0, unit: 's' },
           { title: 'Cumulative Layout Shift (CLS)', Icon: Cpu, vital: analytics.vitals.cls, good: 0.1, poor: 0.25, unit: '' },
           { title: 'Interaction to Next Paint (INP)', Icon: Monitor, vital: analytics.vitals.inp, good: 200, poor: 500, unit: 'ms' },
+          {
+            title: 'First Contentful Paint (FCP)',
+            Icon: Clock,
+            vital: analytics.vitals.fcp ?? { p75: analytics.vitals.fid?.fcp ?? null, distribution: { good: 0, needs_improvement: 0, poor: 0 } },
+            good: 1.8,
+            poor: 3.0,
+            unit: 's',
+          },
+          {
+            title: 'Time to First Byte (TTFB)',
+            Icon: Gauge,
+            vital: analytics.vitals.ttfb ?? { p75: analytics.vitals.fid?.ttfb ?? null, distribution: { good: 0, needs_improvement: 0, poor: 0 } },
+            good: 0.8,
+            poor: 1.8,
+            unit: 's',
+          },
         ].map(({ title, Icon, vital, good, poor, unit }) => {
           const colors = getThresholdColors(vital.p75, good, poor)
           const formatted = vital.p75 != null ? `${vital.p75.toFixed(2)}${unit}` : '—'

@@ -593,7 +593,10 @@ fn rum_file_listing_combines_both_tables_in_one_page_when_under_limit() {
         iso_url(hour + 3600)
     );
     let page = files_page(&fake, &query).unwrap();
-    assert_eq!(page["complete"], true, "both RUM tables should fit in one page");
+    assert_eq!(
+        page["complete"], true,
+        "both RUM tables should fit in one page"
+    );
     assert!(page["next_cursor"].is_null());
     let listed: std::collections::BTreeSet<String> = page["files"]
         .as_array()

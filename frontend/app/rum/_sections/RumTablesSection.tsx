@@ -4,7 +4,7 @@ import React, { useState } from 'react'
 import type { ColumnDef } from '@/lib/table'
 import { Activity, Monitor, ShieldAlert, Terminal } from 'lucide-react'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
-import { DataTable, DataTableReadonly } from '@/components/DataTable'
+import { DataTable, DataTableReadonly, PopLabel } from '@/components/DataTable'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { formatDate } from '@/lib/utils'
@@ -168,7 +168,7 @@ export function RumLiveActivitySection({
     }, (r) => [cleanRumField(r.raw_log?.city), cleanRumField(r.raw_log?.region), cleanRumField(r.raw_log?.country)].filter(Boolean).join(', ')),
     liveCol('pop', 'Edge POP', (r) => {
       const pop = cleanRumField(r.raw_log?.pop)
-      return <span className="font-mono text-xs text-muted-foreground uppercase">{pop || '—'}</span>
+      return <PopLabel code={pop || null} className="font-mono text-xs" />
     }, (r) => cleanRumField(r.raw_log?.pop)),
     liveCol('tls', 'TLS', (r) => {
       const tls = cleanRumField(r.raw_log?.tls)

@@ -949,7 +949,13 @@ def usage_current_storage(
             storage_intervals: list[StorageBillingInterval] = []
 
             storage_reads_ok = False
-            if high_scale_service is not None and pg_billing_res is not None and cc_intervals_res is not None:
+            if (
+                high_scale_service is not None
+                and isinstance(pg_billing_res, tuple)
+                and len(pg_billing_res) == 5
+                and isinstance(cc_intervals_res, tuple)
+                and len(cc_intervals_res) == 2
+            ):
                 pg_live, pg_deleted, pg_min, pg_complete, pg_provenance = pg_billing_res
                 cloud_copy_intervals, cloud_copy_intervals_ok = cc_intervals_res
                 pg_unavailable = "high-scale:postgres_unavailable" in pg_provenance

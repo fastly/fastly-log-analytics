@@ -62,6 +62,8 @@ class RumVitals(WireSafeModel):
     cls: RumCwvVital
     inp: RumCwvVital
     fid: RumFidVital
+    fcp: RumCwvVital | None = None
+    ttfb: RumCwvVital | None = None
 
 
 class RumWorstPage(WireSafeModel):
@@ -89,6 +91,8 @@ class RumTrends(WireSafeModel):
     pageviews: list[int] | None = None
     interactions: list[int] | None = None
     errors: list[int] | None = None
+    fcp: list[RumNumber | None] | None = None
+    ttfb: list[RumNumber | None] | None = None
 
 
 class RumEnvironments(WireSafeModel):

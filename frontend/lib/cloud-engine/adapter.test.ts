@@ -1554,7 +1554,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect((await options("/api/insights", post({ window_size_hrs: 24, baseline_hours: 720 }, { "x-flp-cloud-prefetch": "1" })))
       ?.projection?.maxBytes).toBe(32 * 1024 * 1024);
     expect((await options("/api/security/aggregates", post({ sections: ["summary"] })))?.projection)
-      .toEqual({ columns: securityScanColumns(undefined) });
+      .toEqual({ columns: securityScanColumns(undefined, ["summary"]) });
   });
 
   it("loads each /network scan as its own sections' column projection, plus filtered fields", async () => {
@@ -2201,7 +2201,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     const summaryColumns = ORIGIN_SCAN_COLUMNS.aggregates.filter((c) => !["edge", "url", "pop", "oip"].includes(c));
     expect(await options("/api/origin/aggregates", { filters, sections: ["summary"] }))
       .toEqual({ columns: [...summaryColumns, "host"], filters: [{ field: "host", mode: "include", values: ["example.com"] }] });
-    expect(await options("/api/origin/slow-urls")).toEqual({ columns: ["timestamp", "ts_ms", "ottfb", "ttfb", "url"] });
+    expect(await options("/api/origin/slow-urls")).toEqual({ columns: ["timestamp", "ts_ms", "ottfb", "ttfb", "cache", "url"] });
     expect(await options("/api/origin/shielding-analysis", {}))
       .toEqual({ columns: [...ORIGIN_SCAN_COLUMNS["shielding-analysis"]] });
     expect(await options("/api/origin/drilldown", { dimension: "pop" }))

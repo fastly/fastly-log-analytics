@@ -218,12 +218,37 @@ def rum_analytics(
 
     hourly = end - start <= timedelta(hours=48)
     bucket_sql = "toStartOfHour(event_timestamp, 'UTC')" if hourly else "toStartOfDay(event_timestamp, 'UTC')"
+    vitals_good = (
+        "metric_rating = 'good' OR (metric_rating = '' AND multiIf("
+        "lower(metric_name) = 'lcp', metric_value <= 2500, "
+        "lower(metric_name) = 'cls', metric_value <= 0.1, "
+        "lower(metric_name) = 'inp', metric_value <= 200, "
+        "lower(metric_name) = 'fcp', metric_value <= 1800, "
+        "lower(metric_name) = 'ttfb', metric_value <= 800, 0))"
+    )
+    vitals_ni = (
+        "metric_rating IN ('needs-improvement', 'needs_improvement') OR ("
+        "metric_rating = '' AND multiIf("
+        "lower(metric_name) = 'lcp', metric_value > 2500 AND metric_value <= 4000, "
+        "lower(metric_name) = 'cls', metric_value > 0.1 AND metric_value <= 0.25, "
+        "lower(metric_name) = 'inp', metric_value > 200 AND metric_value <= 500, "
+        "lower(metric_name) = 'fcp', metric_value > 1800 AND metric_value <= 3000, "
+        "lower(metric_name) = 'ttfb', metric_value > 800 AND metric_value <= 1800, 0))"
+    )
+    vitals_poor = (
+        "metric_rating = 'poor' OR (metric_rating = '' AND multiIf("
+        "lower(metric_name) = 'lcp', metric_value > 4000, "
+        "lower(metric_name) = 'cls', metric_value > 0.25, "
+        "lower(metric_name) = 'inp', metric_value > 500, "
+        "lower(metric_name) = 'fcp', metric_value > 3000, "
+        "lower(metric_name) = 'ttfb', metric_value > 1800, 0))"
+    )
     vitals_sql = (
         f"/* rum_analytics_vitals */ SELECT lower(metric_name) AS metric_name, "
         f"quantileExactInclusiveOrNull(0.75)(metric_value) as p75, sum({_ROW_WEIGHT}) as total, "
-        f"sumIf({_ROW_WEIGHT}, metric_rating = 'good') as good, "
-        f"sumIf({_ROW_WEIGHT}, metric_rating IN ('needs-improvement', 'needs_improvement')) as ni, "
-        f"sumIf({_ROW_WEIGHT}, metric_rating = 'poor') as poor "
+        f"sumIf({_ROW_WEIGHT}, {vitals_good}) as good, "
+        f"sumIf({_ROW_WEIGHT}, {vitals_ni}) as ni, "
+        f"sumIf({_ROW_WEIGHT}, {vitals_poor}) as poor "
         f"FROM rum_vitals_facts WHERE {where_vitals} GROUP BY metric_name"
     )
     environments_sql = (
@@ -238,6 +263,8 @@ def rum_analytics(
         events + f"/* rum_analytics_trends */ SELECT {bucket_sql} AS bucket, "
         "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'lcp') AS lcp, "
         "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'cls') AS cls, "
+        "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'fcp') AS fcp, "
+        "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'ttfb') AS ttfb, "
         f"{_weighted_beacons(is_vital)} AS views, {_weighted_beacons(pageview)} AS pageviews, "
         f"{_weighted_beacons(interaction)} AS interactions, {_weighted_beacons(is_error)} AS errors "
         "FROM events GROUP BY bucket ORDER BY bucket"
@@ -287,7 +314,8 @@ def rum_analytics(
             devices[row["env_device"]] = int(row["beacons"])
 
     vitals: dict[str, Any] = {
-        m: {"p75": None, "distribution": {"good": 0, "needs_improvement": 0, "poor": 0}} for m in ("lcp", "cls", "inp")
+        m: {"p75": None, "distribution": {"good": 0, "needs_improvement": 0, "poor": 0}}
+        for m in ("lcp", "cls", "inp", "fcp", "ttfb")
     }
     vitals["fid"] = {"p75": None, "fcp": None, "ttfb": None}
 
@@ -299,10 +327,10 @@ def rum_analytics(
 
     for r in rows:
         m, p75 = r["metric_name"].lower(), r["p75"]
-        if m in ("lcp", "cls", "inp"):
+        if m in ("lcp", "cls", "inp", "fcp", "ttfb"):
             if p75 is None:
                 vitals[m]["p75"] = None
-            elif m == "lcp":
+            elif m in ("lcp", "fcp", "ttfb"):
                 vitals[m]["p75"] = seconds(p75)
             elif m == "cls":
                 vitals[m]["p75"] = round(p75, 3)
@@ -316,7 +344,7 @@ def rum_analytics(
                     "poor": poor,
                     "needs_improvement": round(max(0.0, 100.0 - good - poor), 2),
                 }
-        elif m == "fid":
+        if m == "fid":
             vitals["fid"]["p75"] = round(p75, 1) if p75 is not None else None
         elif m in ("fcp", "ttfb"):
             vitals["fid"][m] = seconds(p75)
@@ -329,7 +357,7 @@ def rum_analytics(
         trend_by_bucket[norm_dt] = row
 
     trends: dict[str, list[Any]] = {
-        k: [] for k in ("timestamps", "lcp", "cls", "error_rate", "pageviews", "interactions", "errors")
+        k: [] for k in ("timestamps", "lcp", "cls", "fcp", "ttfb", "error_rate", "pageviews", "interactions", "errors")
     }
     curr = start.replace(minute=0, second=0, microsecond=0)
     end_incl = end - timedelta(microseconds=1) if end > start else end
@@ -342,6 +370,8 @@ def rum_analytics(
         trends["timestamps"].append(curr.isoformat())
         trends["lcp"].append(seconds(bucket_row["lcp"]) if bucket_row else None)
         trends["cls"].append(round(bucket_row["cls"], 3) if bucket_row and bucket_row["cls"] is not None else None)
+        trends["fcp"].append(seconds(bucket_row.get("fcp")) if bucket_row else None)
+        trends["ttfb"].append(seconds(bucket_row.get("ttfb")) if bucket_row else None)
         denom = bucket_row["views"] + bucket_row["errors"] if bucket_row else 0
         trends["error_rate"].append(round(bucket_row["errors"] * 100.0 / denom, 2) if bucket_row and denom else None)
         for metric_key in ("pageviews", "interactions", "errors"):

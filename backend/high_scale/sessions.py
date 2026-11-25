@@ -71,7 +71,7 @@ _SESSIONS_INDEX_FAST_CTE = """
         FROM request_facts
         WHERE {where}
     ),
-    pair_sessions AS (
+    pair_grouped AS (
         SELECT
             ip,
             ja4,
@@ -82,8 +82,19 @@ _SESSIONS_INDEX_FAST_CTE = """
             max(has_edge) AS p_edge,
             max(has_esid) AS p_esid,
             max(has_cmcd) AS p_cmcd,
-            groupArray(ts_ms) AS raw_ts,
-            arraySort(if(intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) > 1800, raw_ts, [])) AS sorted_ts,
+            if(intDiv(max(ts_ms), 1000) - intDiv(min(ts_ms), 1000) > 1800, groupArray(ts_ms), []) AS raw_ts
+        FROM raw_events
+        GROUP BY ip, ja4
+    ),
+    pair_sorted AS (
+        SELECT
+            *,
+            arraySort(raw_ts) AS sorted_ts
+        FROM pair_grouped
+    ),
+    pair_sessions AS (
+        SELECT
+            *,
             if(
                 intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) <= 1800,
                 [toUInt32(1)],
@@ -92,8 +103,7 @@ _SESSIONS_INDEX_FAST_CTE = """
                     arrayEnumerate(sorted_ts)
                 )
             ) AS starts
-        FROM raw_events
-        GROUP BY ip, ja4
+        FROM pair_sorted
     ),
     sessions_agg AS (
         SELECT
@@ -140,14 +150,26 @@ _SESSIONS_SLIM_INDEX_FAST_CTE = """
         FROM request_facts
         PREWHERE {where}
     ),
-    pair_sessions AS (
+    pair_grouped AS (
         SELECT
             ip,
             ja4,
             min(ts_ms) AS p_min_ms,
             max(ts_ms) AS p_max_ms,
             count() AS p_reqs,
-            arraySort(if(intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) > 1800, groupArray(toUInt32(intDiv(ts_ms, 1000))), [])) AS sorted_ts,
+            if(intDiv(max(ts_ms), 1000) - intDiv(min(ts_ms), 1000) > 1800, groupArray(toUInt32(intDiv(ts_ms, 1000))), []) AS raw_ts
+        FROM raw_events
+        GROUP BY ip, ja4
+    ),
+    pair_sorted AS (
+        SELECT
+            *,
+            arraySort(raw_ts) AS sorted_ts
+        FROM pair_grouped
+    ),
+    pair_sessions AS (
+        SELECT
+            *,
             if(
                 intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) <= 1800,
                 [toUInt32(1)],
@@ -156,8 +178,7 @@ _SESSIONS_SLIM_INDEX_FAST_CTE = """
                     arrayEnumerate(sorted_ts)
                 )
             ) AS starts
-        FROM raw_events
-        GROUP BY ip, ja4
+        FROM pair_sorted
     ),
     sessions_agg AS (
         SELECT
@@ -215,7 +236,7 @@ _SESSIONS_FAST_CTE = """
         FROM request_facts
         WHERE {where}
     ),
-    pair_sessions AS (
+    pair_grouped AS (
         SELECT
             ip,
             ja4,
@@ -230,10 +251,21 @@ _SESSIONS_FAST_CTE = """
             max(toUInt8(bitAnd(bitShiftRight(packed_ev, 2), 1))) AS p_rtt,
             max(toUInt8(bitAnd(bitShiftRight(packed_ev, 1), 1))) AS p_esid,
             sum(bitAnd(packed_ev, 1)) AS p_stream,
-            groupArray(packed_ev) AS raw_ev,
-            groupArray(resp_bytes) AS raw_bytes,
-            arraySort(if(intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) > 1800, raw_ev, [])) AS sorted_ev,
-            arraySort((b, e) -> e, if(intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) > 1800, raw_bytes, []), if(intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) > 1800, raw_ev, [])) AS sorted_bytes,
+            if(intDiv(max(ts_ms), 1000) - intDiv(min(ts_ms), 1000) > 1800, groupArray(packed_ev), []) AS raw_ev,
+            if(intDiv(max(ts_ms), 1000) - intDiv(min(ts_ms), 1000) > 1800, groupArray(resp_bytes), []) AS raw_bytes
+        FROM raw_events
+        GROUP BY ip, ja4
+    ),
+    pair_sorted AS (
+        SELECT
+            *,
+            arraySort(raw_ev) AS sorted_ev,
+            arraySort((b, e) -> e, raw_bytes, raw_ev) AS sorted_bytes
+        FROM pair_grouped
+    ),
+    pair_sessions AS (
+        SELECT
+            *,
             if(
                 intDiv(p_max_ms, 1000) - intDiv(p_min_ms, 1000) <= 1800,
                 [toUInt32(1)],
@@ -242,8 +274,7 @@ _SESSIONS_FAST_CTE = """
                     arrayEnumerate(sorted_ev)
                 )
             ) AS starts
-        FROM raw_events
-        GROUP BY ip, ja4
+        FROM pair_sorted
     ),
     sessions_sliced AS (
         SELECT

@@ -6,9 +6,10 @@ import { useSearchParams } from 'next/navigation'
 import { useQuery } from '@tanstack/react-query'
 import { Activity, ArrowDown, ArrowLeft } from 'lucide-react'
 
-import { DataTable } from '@/components/DataTable'
+import { DataTable, PopLabel } from '@/components/DataTable'
 import { NoServiceSelected } from '@/components/ReportLayout'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { Badge } from '@/components/ui/badge'
 import { Button, buttonVariants } from '@/components/ui/button'
 import { PageHeader } from '@/components/ui/confirm-dialog'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -17,7 +18,7 @@ import { useDateFormat } from '@/hooks/useSSE'
 import { client, extractApiError, unwrapClient } from '@/lib/api'
 import { readCloudSessionReference } from '@/lib/cloud-engine/session-reference'
 import type { ColumnDef } from '@/lib/table'
-import { buildServiceHref, buildSessionDashboardUrl, formatCount } from '@/lib/utils'
+import { buildServiceHref, buildSessionDashboardUrl, formatBytes, formatCount } from '@/lib/utils'
 import type { SessionDetailResponse } from '@/types/api'
 import { analyzeTrace, durationMs, type Lane, type RequestRow } from './trace'
 
@@ -83,6 +84,14 @@ function SessionTrace({ detail, serviceId }: { detail: SessionDetailResponse; se
     cell: ({ row }) => {
       const value = row.original[key]
       if (key === 'elapsed' || key === 'tcp_rtt') return durationMs(value)?.toFixed(1) ?? '—'
+      if (key === 'status' && value != null && value !== '') {
+        const s = Number(value)
+        return <Badge variant={s >= 500 ? 'destructive' : s >= 400 ? 'outline' : 'secondary'}>{s}</Badge>
+      }
+      if (key === 'pop') return <PopLabel code={typeof value === 'string' ? value : null} />
+      if (key === 'resp_bytes' && value != null && value !== '') {
+        return <span className="font-mono tabular-nums">{formatBytes(Number(value))}</span>
+      }
       const label = typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' ? String(value) : ''
       return <span className="inline-block max-w-[24rem] truncate align-middle" title={label}>{label || '—'}</span>
     },

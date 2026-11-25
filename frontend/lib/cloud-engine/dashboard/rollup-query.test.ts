@@ -52,6 +52,9 @@ const overall = (rollup: Rollup) =>
     0,
   );
 
+const dimTotal = (rollup: Rollup, dim: string) =>
+  [...(rollup.dims.get(dim)?.values() ?? [])].reduce((sum, agg) => sum + agg.requests, 0);
+
 describe("decodeRollup and mergeRollups", () => {
   it("adds up to the timed raw rows and agrees across windows, hour and day bundles", async () => {
     const raw = await Promise.all(
@@ -484,12 +487,12 @@ describe("queryRollup", () => {
         if (ts[i] != null && t >= fromMs && t < toMs) rows++;
       }
     }
-    expect(overall(result.rollup)).toBe(rows);
+    expect(dimTotal(result.rollup, "proto")).toBe(rows);
     expect([result.dataFromMs, result.dataThroughMs]).toEqual([fromMs, toMs]);
     expect(s.ranges.toSorted()).toEqual(
       [RAW[0], RAW.find((f) => at(f) === T0 + HOUR)!, RAW.at(-1)!].map((f) => f.key).toSorted(),
     );
-    expect([...result.rollup.dims.keys()]).toEqual(["city"]);
+    expect([...result.rollup.dims.keys()].toSorted()).toEqual(["city", "proto"]);
     expect(result.rollup.present!.has("ins_url/url")).toBe(true);
     expect(result.missingRanges!.size).toBe(0);
   });
@@ -505,7 +508,7 @@ describe("queryRollup", () => {
       return fetchFile(key, signal);
     };
     const result = await queryRollup(s, { fromMs: T0, toMs: T0 + 2 * HOUR, residual: INSIGHTS_RESIDUAL });
-    expect(overall(result!.rollup)).toBe(overall(await decodeAll(WINDOWS)));
+    expect(dimTotal(result!.rollup, "proto")).toBe(overall(await decodeAll(WINDOWS)));
     expect([result!.dataFromMs, result!.dataThroughMs]).toEqual([T0, T0 + 2 * HOUR]);
     expect(goneReads).toBe(1);
     expect(s.ranges).toEqual([]);

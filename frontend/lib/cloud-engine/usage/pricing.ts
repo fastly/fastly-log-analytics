@@ -205,3 +205,55 @@ export function kvStorageGibMonthsFromHourlyMax(hourlyMaxBytes: readonly number[
 export function priceSecrets(secrets: number, ratePerMonth: number = LIST_RATES.secret_rate_per_month): number {
   return priceProgressive(secrets, 1, SECRET_TIERS, ratePerMonth, LIST_RATES.secret_rate_per_month);
 }
+
+/**
+ * Billed excess vCPU ms for a single Compute Request under the contract terms:
+ * `round(max(0, vcpuMs - freeMs) / roundingMs) * roundingMs`.
+ */
+export function billedVcpuMsPerRequest(
+  vcpuMs: number,
+  freeMs = 20,
+  roundingMs = 10,
+): number {
+  const excess = Math.max(0, vcpuMs - freeMs);
+  return roundingMs > 0 ? Math.round(excess / roundingMs) * roundingMs : excess;
+}
+
+export function billedVcpuForExecutions(
+  totalVcpuMs: number,
+  executions: number,
+  settings: {
+    compute_vcpu_free_ms_per_request: number;
+    compute_vcpu_excess_rate_per_second: number;
+    compute_vcpu_rounding_ms: number;
+    compute_vcpu_rate_per_million_ms?: number;
+  },
+): { billedMs: number; usd: number } {
+  if (executions <= 0 || totalVcpuMs <= 0) return { billedMs: 0, usd: 0 };
+  const freeMs =
+    Number.isFinite(settings.compute_vcpu_free_ms_per_request) &&
+    settings.compute_vcpu_free_ms_per_request >= 0
+      ? settings.compute_vcpu_free_ms_per_request
+      : LIST_RATES.compute_vcpu_free_ms_per_request;
+  const roundingMs =
+    Number.isFinite(settings.compute_vcpu_rounding_ms) &&
+    settings.compute_vcpu_rounding_ms >= 0
+      ? settings.compute_vcpu_rounding_ms
+      : LIST_RATES.compute_vcpu_rounding_ms;
+  const excessRatePerSecond =
+    Number.isFinite(settings.compute_vcpu_excess_rate_per_second) &&
+    settings.compute_vcpu_excess_rate_per_second > 0
+      ? settings.compute_vcpu_excess_rate_per_second
+      : Number.isFinite(settings.compute_vcpu_rate_per_million_ms) &&
+          (settings.compute_vcpu_rate_per_million_ms ?? 0) > 0
+        ? (settings.compute_vcpu_rate_per_million_ms ?? 0) / 1000
+        : 0;
+  const perExecBilled = billedVcpuMsPerRequest(
+    totalVcpuMs / executions,
+    freeMs,
+    roundingMs,
+  );
+  const billedMs = perExecBilled * executions;
+  const usd = (billedMs / 1000) * excessRatePerSecond;
+  return { billedMs, usd };
+}

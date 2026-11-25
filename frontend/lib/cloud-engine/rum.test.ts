@@ -563,4 +563,60 @@ describe("Feature F23 — RUM & Web Vitals cloud-engine", () => {
       await engine.reset();
     }
   });
+
+  it("scales Cloud RUM counts by sample_rate, populates fcp/ttfb vitals, and pads >48h trends daily", async () => {
+    const engine = getDuckDBEngine();
+    try {
+      const t0 = Date.parse("2026-09-01T00:10:00Z");
+      const t3 = Date.parse("2026-09-03T12:10:00Z");
+      await engine.executeSql(`INSERT INTO client_vitals
+        (scoped_key, ts_ms, client_id, metric_name, metric_value, page_url, browser_name, sample_rate)
+        VALUES
+          ('rum', ${t0}, 'sampled', 'LCP', 1000, '/home', 'Firefox', 0.5),
+          ('rum', ${t0}, 'sampled', 'CLS', 0.1, '/home', 'Firefox', 0.5),
+          ('rum', ${t0}, 'sampled', 'FCP', 1500, '/home', 'Firefox', 0.5),
+          ('rum', ${t0}, 'sampled', 'TTFB', 500, '/home', 'Firefox', 0.5),
+          ('rum', ${t0}, 'sampled', 'event_click', 1, '/home', 'Firefox', 0.5),
+          ('rum', ${t3}, 'unsampled', 'LCP', 3000, '/home', 'Chrome', 1.0),
+          ('rum', ${t3}, 'unsampled', 'ttlb', 250, '/home', 'Chrome', 1.0)`);
+      await engine.executeSql(`INSERT INTO client_errors
+        (scoped_key, ts_ms, client_id, error_message, page_url, sample_rate)
+        VALUES
+          ('rum', ${t0}, 'sampled', 'Boom', '/home', 0.25),
+          ('rum', ${t0}, 'sampled', 'Boom', '/home', 0.25)`);
+
+      const data = await cloudRumAnalytics({
+        start_time: "2026-09-01T00:00:00Z",
+        end_time: "2026-09-04T00:00:00Z",
+      });
+      expect(data.estimated).toBe(true);
+      expect(data.pageview_count).toBe(3);
+      expect(data.interaction_count).toBe(2);
+      expect(data.error_count).toBe(4);
+      expect(data.beacon_count).toBe(5);
+      expect(data.vitals.fcp).toEqual({
+        p75: 1.5,
+        distribution: { good: 100, needs_improvement: 0, poor: 0 },
+      });
+      expect(data.vitals.ttfb).toEqual({
+        p75: 0.5,
+        distribution: { good: 100, needs_improvement: 0, poor: 0 },
+      });
+      expect(data.environments.browsers).toEqual({ Firefox: 2, Chrome: 1 });
+      expect(data.errors[0].count).toBe(8);
+      // >48h range uses 3 dense UTC daily buckets (Sep 1, Sep 2 empty, Sep 3)
+      expect(data.trends.timestamps).toEqual([
+        "2026-09-01T00:00:00.000Z",
+        "2026-09-02T00:00:00.000Z",
+        "2026-09-03T00:00:00.000Z",
+      ]);
+      expect(data.trends.pageviews).toEqual([2, 0, 1]);
+      expect(data.trends.errors).toEqual([4, 0, 0]);
+      expect(data.trends.fcp).toEqual([1.5, null, null]);
+      expect(data.trends.ttfb).toEqual([0.5, null, null]);
+      expect(data.trends.error_rate).toEqual([66.67, null, 0]);
+    } finally {
+      await engine.reset();
+    }
+  });
 });

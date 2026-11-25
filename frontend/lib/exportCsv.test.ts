@@ -8,7 +8,10 @@ vi.mock('./cloud-engine/telemetry/admin', () => ({
   deleteLogHistory: vi.fn(),
   purgeQuarantine: vi.fn(),
 }))
-vi.mock('./cloud-engine/telemetry/client', () => ({ queryOpsLogs: vi.fn() }))
+vi.mock('./cloud-engine/telemetry/client', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./cloud-engine/telemetry/client')>()
+  return { ...actual, queryOpsLogs: vi.fn() }
+})
 
 describe('T5-FE-07: CSV formula-injection neutralization in exportCsv and cloud-engine admin-wire', () => {
   it('neutralizes formula prefixes including leading whitespace/control/zero-width chars while preserving signed numbers', () => {

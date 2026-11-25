@@ -13,8 +13,8 @@ import { createSharedRequests } from "../shared-request";
 import {
   clearOpsDecodedCache,
   OpsRangeUnsupportedError,
-  type OpsSource,
-} from "./engine";
+} from "./decoded-cache";
+import type { OpsSource } from "./engine";
 
 export const OPS_CACHE_PREFIX = "flp-ops-parquet-v1:";
 

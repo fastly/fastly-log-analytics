@@ -18,16 +18,18 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { cn, buildSessionDashboardUrl, buildSessionDetailUrl, buildStreamDetailUrl, formatCount, formatCountMaybe } from '@/lib/utils'
+import { cn, buildSessionDashboardUrl, buildSessionDetailUrl, buildStreamDetailUrl, formatBytes, formatCountMaybe } from '@/lib/utils'
+import { PopLabel } from '@/components/DataTable'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { saveCloudSessionReference } from '@/lib/cloud-engine/session-reference'
 import { OBJECT_TYPE_LABELS, STREAM_TYPE_LABELS, STREAMING_FORMAT_LABELS, cmcdLabel } from '@/app/streaming/_sections/StreamingClient'
+import { durationMs } from '@/app/sessions/detail/trace'
 import type { Session, SessionDetailResponse, SessionsResponse } from '@/types/api'
 
 type SessionDetailRow = SessionDetailResponse['data'][number]
 
 const CMCD_DETAIL_COLS = ['cmcd_ot', 'cmcd_br', 'cmcd_bl', 'cmcd_sf', 'cmcd_st']
-const DEFAULT_VISIBLE_DETAIL_COLS = ['timestamp', 'host', 'url', 'method', 'edge', 'status', 'cache', 'ua', 'pop']
+const DEFAULT_VISIBLE_DETAIL_COLS = ['timestamp', 'host', 'url', 'method', 'edge', 'status', 'cache', 'ua', 'pop', 'elapsed', 'tcp_rtt']
 const INITIAL_DETAIL_COLUMN_ORDER = [...DEFAULT_VISIBLE_DETAIL_COLS, ...CMCD_DETAIL_COLS]
 
 export function MetadataItem({ label, children, className }: { label: string; children: React.ReactNode; className?: string }) {
@@ -111,35 +113,45 @@ export function SessionDetail({
   const detailColumnNames = detailData?.columns
   const detailColumns: ColumnDef<SessionDetailRow>[] = React.useMemo(() => {
     if (!detailColumnNames) return []
-    return detailColumnNames.map((col) => ({
-      id: col,
-      accessorFn: (row) => row[col],
-      meta: { label: getFieldLabel(col) },
-      header: getFieldLabel(col),
-      cell: ({ row }) => {
-        const value = row.original[col]
-        const text = value == null ? '' : String(value)
-        if (col === 'timestamp') {
-          return (
-            <RelativeTimeTooltip
-              timestamp={text} relative={relative} full={full} abbr={abbr}
-              className="whitespace-nowrap font-mono text-xs border-b border-dotted border-muted-foreground/30"
-            />
-          )
-        }
-        if (col === 'status') {
-          const s = Number(value)
-          return <Badge variant={s >= 500 ? 'destructive' : s >= 400 ? 'outline' : 'secondary'}>{s}</Badge>
-        }
-        if (col === 'resp_bytes' || col === 'elapsed') {
-          return <span className="text-xs font-mono tabular-nums">{formatCount(Number(value))}</span>
-        }
-        if (col === 'cmcd_ot') return <span className="text-xs">{cmcdLabel(OBJECT_TYPE_LABELS, text)}</span>
-        if (col === 'cmcd_sf') return <span className="text-xs">{cmcdLabel(STREAMING_FORMAT_LABELS, text)}</span>
-        if (col === 'cmcd_st') return <span className="text-xs">{cmcdLabel(STREAM_TYPE_LABELS, text)}</span>
-        return <span className="text-xs truncate max-w-[220px] inline-block">{text}</span>
-      },
-    }))
+    return detailColumnNames.map((col) => {
+      const colLabel = col === 'elapsed' ? 'Elapsed (ms)' : col === 'tcp_rtt' ? 'TCP RTT (ms)' : getFieldLabel(col)
+      return {
+        id: col,
+        accessorFn: (row) => row[col],
+        meta: { label: colLabel },
+        header: colLabel,
+        cell: ({ row }) => {
+          const value = row.original[col]
+          const text = value == null ? '' : String(value)
+          if (col === 'timestamp') {
+            return (
+              <RelativeTimeTooltip
+                timestamp={text} relative={relative} full={full} abbr={abbr}
+                className="whitespace-nowrap font-mono text-xs border-b border-dotted border-muted-foreground/30"
+              />
+            )
+          }
+          if (col === 'status') {
+            const s = Number(value)
+            return <Badge variant={s >= 500 ? 'destructive' : s >= 400 ? 'outline' : 'secondary'}>{s}</Badge>
+          }
+          if (col === 'pop') {
+            return <PopLabel code={text || null} className="text-xs" />
+          }
+          if (col === 'elapsed' || col === 'tcp_rtt') {
+            const ms = durationMs(value)
+            return <span className="text-xs font-mono tabular-nums">{ms != null ? ms.toFixed(1) : '—'}</span>
+          }
+          if (col === 'resp_bytes') {
+            return <span className="text-xs font-mono tabular-nums">{value == null || value === '' ? '—' : formatBytes(Number(value))}</span>
+          }
+          if (col === 'cmcd_ot') return <span className="text-xs">{cmcdLabel(OBJECT_TYPE_LABELS, text)}</span>
+          if (col === 'cmcd_sf') return <span className="text-xs">{cmcdLabel(STREAMING_FORMAT_LABELS, text)}</span>
+          if (col === 'cmcd_st') return <span className="text-xs">{cmcdLabel(STREAM_TYPE_LABELS, text)}</span>
+          return <span className="text-xs truncate max-w-[220px] inline-block">{text}</span>
+        },
+      }
+    })
   }, [detailColumnNames, relative, full, abbr, getFieldLabel])
 
   const initialDetailVisibility = React.useMemo(() => {
@@ -221,7 +233,13 @@ export function SessionDetail({
           <MetadataItem label="Country">
             <span className="flex items-center gap-1"><Globe className="h-3 w-3" /> {selectedSession?.country || '—'}</span>
           </MetadataItem>
-          <MetadataItem label="ASN">{selectedSession?.asn ? `AS${selectedSession.asn}` : '—'}</MetadataItem>
+          <MetadataItem label="ASN">
+            {selectedSession?.asn
+              ? (data?.asn_names?.[String(selectedSession.asn)] ||
+                (selectedSession as { asn_label?: string }).asn_label ||
+                `AS${selectedSession.asn}`)
+              : '—'}
+          </MetadataItem>
           <MetadataItem label="Requests"><span className="font-semibold">{formatCountMaybe(selectedSession?.req_count)}</span></MetadataItem>
           <MetadataItem label="Unique URLs">{selectedSession?.unique_urls ?? '—'}</MetadataItem>
           <MetadataItem label="Edge / Shield">

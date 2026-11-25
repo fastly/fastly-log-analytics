@@ -939,6 +939,7 @@ export const RUM_VITALS_COLUMNS: Readonly<Record<string, DuckDBColumnType>> = {
   element: "VARCHAR",
   attribution: "VARCHAR",
   service_id: "VARCHAR",
+  sample_rate: "DOUBLE",
 };
 
 export const RUM_ERRORS_COLUMNS: Readonly<Record<string, DuckDBColumnType>> = {
@@ -967,6 +968,7 @@ export const RUM_ERRORS_COLUMNS: Readonly<Record<string, DuckDBColumnType>> = {
   ttfb: "DOUBLE",
   session_id: "VARCHAR",
   service_id: "VARCHAR",
+  sample_rate: "DOUBLE",
 };
 
 export class DuckDBAnalyticalEngine extends ParquetBindingStore {

@@ -78315,6 +78315,54 @@
               }
             ],
             "title": "Errors"
+          },
+          "fcp": {
+            "anyOf": [
+              {
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fcp"
+          },
+          "ttfb": {
+            "anyOf": [
+              {
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ttfb"
           }
         },
         "additionalProperties": true,
@@ -78406,6 +78454,26 @@
           },
           "fid": {
             "$ref": "#/components/schemas/RumFidVital"
+          },
+          "fcp": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RumCwvVital"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ttfb": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RumCwvVital"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "additionalProperties": true,

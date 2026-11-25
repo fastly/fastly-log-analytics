@@ -123,10 +123,21 @@ export async function readParquetRows(
   buffer: ArrayBuffer,
   columns?: string[],
 ): Promise<Record<string, unknown>[]> {
+  let metadata: FileMetaData | undefined;
+  let effectiveColumns = columns;
+  if (columns) {
+    metadata = parquetMetadata(buffer);
+    const present = new Set(metadata.schema.slice(1).map((element) => element.name));
+    effectiveColumns = columns.filter((name) => present.has(name));
+    if (effectiveColumns.length === 0) {
+      return Array.from({ length: Number(metadata.num_rows) }, () => ({}));
+    }
+  }
   const rows = (await parquetReadObjects({
     file: buffer,
+    ...(metadata ? { metadata } : {}),
     compressors,
-    ...(columns ? { columns } : {}),
+    ...(effectiveColumns ? { columns: effectiveColumns } : {}),
   })) as Record<string, unknown>[];
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];

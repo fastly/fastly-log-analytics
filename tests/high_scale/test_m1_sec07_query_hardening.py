@@ -4951,10 +4951,13 @@ def test_sec_t5_iter36_bare_alias_parity_and_select_head_star_wildcard() -> None
 @pytest.mark.security_regression
 def test_sec_t5_iter36_linear_time_dos_union_with_and_in_rhs() -> None:
     """ITER36 remediation (Findings 3a & 3b): O(N^2) UNION WITH and IN-RHS AS-chain DoS fixed to linear time (< 150ms)."""
+    import sys
     import time
 
     from backend.core.sql_validator import SQLValidationError, validate_user_sql
 
+    # Python coverage tracing (`sys.gettrace()`) + parallel xdist slows pure-Python regex/walker loops ~2-3x.
+    cov_scale = 3.0 if sys.gettrace() is not None else 1.0
     payloads = (
         ("union_with_bare", "SELECT 1" + " UNION WITH" * 4000),
         ("union_with_expr", "SELECT 1" + " UNION WITH 1 AS a SELECT 1" * 2000),
@@ -4969,7 +4972,9 @@ def test_sec_t5_iter36_linear_time_dos_union_with_and_in_rhs() -> None:
         except SQLValidationError:
             pass
         val_ms = (time.perf_counter() - t0) * 1000.0
-        assert val_ms < 150.0, f"DoS {label} validate_user_sql took {val_ms:.1f}ms (target < 150ms)"
+        assert val_ms < 150.0 * cov_scale, (
+            f"DoS {label} validate_user_sql took {val_ms:.1f}ms (target < {150.0 * cov_scale:.0f}ms)"
+        )
 
         t1 = time.perf_counter()
         try:
@@ -4979,7 +4984,7 @@ def test_sec_t5_iter36_linear_time_dos_union_with_and_in_rhs() -> None:
         except (PermissionError, SQLValidationError):
             pass
         rw_ms = (time.perf_counter() - t1) * 1000.0
-        assert rw_ms < 750.0, f"DoS {label} _rewrite_console_sql took {rw_ms:.1f}ms"
+        assert rw_ms < 750.0 * cov_scale, f"DoS {label} _rewrite_console_sql took {rw_ms:.1f}ms"
 
 
 @pytest.mark.security_regression

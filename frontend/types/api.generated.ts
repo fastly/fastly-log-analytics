@@ -16000,6 +16000,10 @@ export interface components {
             interactions?: number[] | null;
             /** Errors */
             errors?: number[] | null;
+            /** Fcp */
+            fcp?: (number | null)[] | null;
+            /** Ttfb */
+            ttfb?: (number | null)[] | null;
         } & {
             [key: string]: unknown;
         };
@@ -16046,6 +16050,8 @@ export interface components {
             cls: components["schemas"]["RumCwvVital"];
             inp: components["schemas"]["RumCwvVital"];
             fid: components["schemas"]["RumFidVital"];
+            fcp?: components["schemas"]["RumCwvVital"] | null;
+            ttfb?: components["schemas"]["RumCwvVital"] | null;
         } & {
             [key: string]: unknown;
         };

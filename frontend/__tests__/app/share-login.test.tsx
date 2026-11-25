@@ -12,7 +12,7 @@ import type { PlotlyLayout, PlotlyTrace, SessionsResponse } from '@/types/api'
 import type { components } from '@/types/api.generated'
 import ShareLoginPage, { ShareLoginForm, safeReturnTarget, AcknowledgeButton, AcknowledgeFallback } from '@/app/share-login/page'
 import ShareLoginLoading from '@/app/share-login/loading'
-import { SessionDetail, SessionsTable, ScoringControls } from '@/app/sessions/page'
+import SessionsPage, { SessionDetail, SessionsTable, ScoringControls } from '@/app/sessions/page'
 import { useServiceStore } from '@/stores/filterStore'
 
 let mockSearchParamsString = 'service=svc-test'
@@ -20,6 +20,7 @@ let mockScoringSubcomponents = false
 let useMockInsightsApi = false
 let useMockReportLayout = false
 let useMockSessionApi = false
+let useMockDataReady = false
 let useMockShareSearchParams = false
 let mockPathname = '/admin'
 let mockSearchParams = new URLSearchParams()
@@ -77,18 +78,23 @@ vi.mock('@/components/PlotlyChart', async () =>
   }),
 )
 
-vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@/hooks/useBootstrap')>()),
-  useLogFieldsCatalog: vi.fn(() => ({
-    data: {
-      fields: [
-        { id: 'requests', unit: '', precision: 0 },
-        { id: 'origin_latency_ms', unit: 'ms', precision: 1 },
-      ],
-    },
-  })),
-  useFieldLabel: () => (id: string) => id,
-}))
+vi.mock('@/hooks/useBootstrap', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/hooks/useBootstrap')>()
+  return {
+    ...actual,
+    useIsDataReady: (...args: Parameters<typeof actual.useIsDataReady>) =>
+      useMockDataReady ? true : actual.useIsDataReady(...args),
+    useLogFieldsCatalog: vi.fn(() => ({
+      data: {
+        fields: [
+          { id: 'requests', unit: '', precision: 0 },
+          { id: 'origin_latency_ms', unit: 'ms', precision: 1 },
+        ],
+      },
+    })),
+    useFieldLabel: () => (id: string) => id,
+  }
+})
 
 vi.mock('@/lib/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/api')>()
@@ -215,6 +221,7 @@ beforeEach(() => {
   useMockInsightsApi = false
   useMockReportLayout = false
   useMockSessionApi = false
+  useMockDataReady = false
   if (realApiRef.adminFetch) adminFetchSpy.mockImplementation(realApiRef.adminFetch)
   if (realApiRef.adminJson) adminJsonSpy.mockImplementation(realApiRef.adminJson)
   if (realApiRef.adminJsonResult) adminJsonResultSpy.mockImplementation(realApiRef.adminJsonResult)
@@ -853,6 +860,42 @@ describe('ShareLogin & Sessions Pages', () => {
       )
       expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
     }, 15000)
+
+    it('formats elapsed/tcp_rtt in ms, resp_bytes cleanly, renders cache + pop, and shows ASN name when available', async () => {
+      postMock.mockResolvedValue({
+        data: {
+          _is_cached: false,
+          columns: ['timestamp', 'host', 'url', 'method', 'edge', 'status', 'cache', 'ua', 'pop', 'elapsed', 'tcp_rtt', 'resp_bytes'],
+          data: [
+            {
+              timestamp: '2026-06-15T00:00:00Z',
+              host: 'example.com',
+              url: '/checkout',
+              method: 'GET',
+              edge: 'edge',
+              status: 200,
+              cache: 'HIT',
+              ua: 'Mozilla/5.0',
+              pop: 'IAD',
+              elapsed: 45_200,
+              tcp_rtt: 12_300,
+              resp_bytes: 2048,
+            },
+          ],
+        },
+      })
+      renderSessionDetail({
+        data: { ...makeResponse([]), asn_names: { '7922': 'AS7922 Comcast Cable' } },
+      })
+      expect(screen.getByText('AS7922 Comcast Cable')).toBeInTheDocument()
+      await waitFor(() => expect(screen.getByText('/checkout')).toBeInTheDocument())
+      expect(screen.getByText('HIT')).toBeInTheDocument()
+      expect(screen.getByText(/IAD/)).toBeInTheDocument()
+      expect(screen.getByText('45.2')).toBeInTheDocument()
+      expect(screen.getByText('12.3')).toBeInTheDocument()
+      expect(screen.getByText('Elapsed (ms)')).toBeInTheDocument()
+      expect(screen.getByText('TCP RTT (ms)')).toBeInTheDocument()
+    })
   })
 
   function baseProps(overrides: Partial<React.ComponentProps<typeof SessionsTable>> = {}): React.ComponentProps<typeof SessionsTable> {
@@ -1033,6 +1076,49 @@ describe('ShareLogin & Sessions Pages', () => {
     it('does not render the streaming sessions switch when cmcdEnabled is false', () => {
       rtlRender(<ScoringControls {...controlsBaseProps({ cmcdEnabled: false })} />)
       expect(screen.queryByText(/streaming sessions/i)).toBeNull()
+    })
+  })
+
+  describe('SessionsPage pagination', () => {
+    beforeEach(() => {
+      useMockReportLayout = true
+      useMockSessionApi = true
+      useMockDataReady = true
+      postMock.mockReset()
+      server.use(
+        http.get('/api/services/test-svc/scoring/labels', () => HttpResponse.json({ labels: [] })),
+      )
+      useServiceStore.setState({
+        services: [{ id: 'test-svc', name: 'Test', active: true, capabilities: {} }] as never,
+        activeServiceId: 'test-svc',
+        isInitialized: true,
+      })
+    })
+    afterEach(() => {
+      useMockReportLayout = false
+      useMockSessionApi = false
+      useMockDataReady = false
+      cleanup()
+      postMock.mockReset()
+    })
+
+    it('renders server-side pagination controls when total exceeds page limit and requests page 2 on Next', async () => {
+      const { NuqsTestingAdapter } = await import('nuqs/adapters/testing')
+      postMock.mockResolvedValue({
+        data: { ...makeResponse([makeRow({ ip: '10.0.0.1' })]), total: 250, page: 1, limit: 100 },
+      })
+      renderPage(<NuqsTestingAdapter><SessionsPage /></NuqsTestingAdapter>)
+      expect(await screen.findByText(/Showing 1–100 of 250 sessions \(Page 1 of 3\)/)).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /previous/i })).toBeDisabled()
+      const nextBtn = screen.getByRole('button', { name: /next/i })
+      expect(nextBtn).toBeEnabled()
+      fireEvent.click(nextBtn)
+      await waitFor(() =>
+        expect(postMock).toHaveBeenCalledWith(
+          '/api/sessions',
+          expect.objectContaining({ body: expect.objectContaining({ page: 2, limit: 100 }) }),
+        ),
+      )
     })
   })
 })

@@ -5,8 +5,6 @@ import { useQueryClient } from '@tanstack/react-query'
 import { RefreshCw, HelpCircle, Trash2 } from 'lucide-react'
 import { queryKeys } from '@/lib/api'
 import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
-import { resetCronWireCache } from '@/lib/cloud-engine/admin-wire'
-import { resetOpsReadCache } from '@/lib/cloud-engine/telemetry/client'
 import { cn } from '@/lib/utils'
 import type { SyncStatus } from '@/hooks/useSSE'
 import { Button, buttonVariants } from '@/components/ui/button'
@@ -251,8 +249,12 @@ export function CronTab({
                   size="sm"
                   className="h-8 text-xs"
                   disabled={isFetchingCron}
-                  onClick={() => {
+                  onClick={async () => {
                     if (IS_CLOUD_MODE) {
+                      const [{ resetCronWireCache }, { resetOpsReadCache }] = await Promise.all([
+                        import('@/lib/cloud-engine/admin-wire'),
+                        import('@/lib/cloud-engine/telemetry/client'),
+                      ])
                       resetCronWireCache()
                       resetOpsReadCache()
                     }

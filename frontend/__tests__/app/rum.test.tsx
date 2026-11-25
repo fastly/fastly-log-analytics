@@ -434,6 +434,8 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
       })
       expect(screen.getByText('Cumulative Layout Shift (CLS)')).toBeInTheDocument()
       expect(screen.getByText('Interaction to Next Paint (INP)')).toBeInTheDocument()
+      expect(screen.getByText('First Contentful Paint (FCP)')).toBeInTheDocument()
+      expect(screen.getByText('Time to First Byte (TTFB)')).toBeInTheDocument()
     })
   })
 

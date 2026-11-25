@@ -309,6 +309,69 @@ class TestWireCmcd:
                     "startup_ratio": 2.0,
                 }
             ],
+            "cmcd:sessions": [
+                {
+                    "kind": "new_sessions",
+                    "k": bucket,
+                    "session_count": 3,
+                    "positive_duration_sum": 0.0,
+                    "positive_duration_count": 0,
+                },
+                {
+                    "kind": "duration",
+                    "k": "3",
+                    "session_count": 3,
+                    "positive_duration_sum": 270.0,
+                    "positive_duration_count": 3,
+                },
+            ],
+            "cmcd:breakdowns": [
+                {
+                    "kind": "content",
+                    "k": "c1",
+                    "session_count": 3,
+                    "rebuffer_rate": 10.0,
+                    "avg_br": 4000.0,
+                    "avg_bl": 9.0,
+                    "median_mtp": None,
+                },
+                {
+                    "kind": "country",
+                    "k": "US",
+                    "session_count": 3,
+                    "rebuffer_rate": 10.0,
+                    "avg_br": None,
+                    "avg_bl": None,
+                    "median_mtp": 7000.0,
+                },
+                {
+                    "kind": "asn",
+                    "k": "7922",
+                    "session_count": 3,
+                    "rebuffer_rate": 10.0,
+                    "avg_br": 4000.0,
+                    "avg_bl": 9.0,
+                    "median_mtp": None,
+                },
+                {
+                    "kind": "ot",
+                    "k": "v",
+                    "session_count": 5,
+                    "rebuffer_rate": None,
+                    "avg_br": None,
+                    "avg_bl": None,
+                    "median_mtp": None,
+                },
+                {
+                    "kind": "sf",
+                    "k": "h",
+                    "session_count": 3,
+                    "rebuffer_rate": None,
+                    "avg_br": None,
+                    "avg_bl": None,
+                    "median_mtp": None,
+                },
+            ],
             "cmcd:new_sessions": [{"bucket": bucket, "new_sessions": 3}],
             "cmcd:top_content": [
                 {"content_id": "c1", "session_count": 3, "rebuffer_rate": 10.0, "avg_br": 4000.0, "avg_bl": 9.0}
@@ -597,6 +660,15 @@ class TestWireInsights:
                     return [{"earliest": params["window_end"].replace(year=2020), "window_total": 9}]
                 if "insight:fields" in query:
                     return [{"fields": ["status", "elapsed", "cache"]}]
+                if "insight:group_rollup_standalone" in query:
+                    return [
+                        {
+                            "_q": "error_spikes",
+                            "_r": json.dumps(
+                                {"url": "/a", "w_rate": 0.7, "b_rate": 0.0, "w_errors": 7, "w_total": 10, "b_total": 99}
+                            ),
+                        }
+                    ]
                 if "insight:error_spikes" in query:
                     return [{"url": "/a", "w_rate": 0.7, "b_rate": 0.0, "w_errors": 7, "w_total": 10, "b_total": 99}]
                 return []

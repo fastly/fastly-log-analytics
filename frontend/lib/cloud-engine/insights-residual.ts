@@ -113,8 +113,7 @@ function addElapsed(agg: RollupAgg, elapsed: number | null) {
 /**
  * Rolls up raw rows into what the /insights rollup reads, as summary.rs
  * `write_v3`, `write_insights`, `write_insights_lat_asn` and `write_summary`
- * count them: `dims/city` requests and errors, the `series5` overall request
- * series, the `all_fields` counts of `INSIGHTS_RESIDUAL_FIELDS`, `ins_url`,
+ * count them: `dims/city` and `dims/proto` requests and errors, the `all_fields` counts of `INSIGHTS_RESIDUAL_FIELDS`, `ins_url`,
  * `ins_ip`, `ins_lat`, `ins_asn` and `urls/url` requests with their elapsed
  * histograms. Rows are never cut to a top K, so the residual is never truncated.
  */
