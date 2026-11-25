@@ -116,41 +116,369 @@ pub const PII_FILTER_KEYS: &[&str] = &[
     "session_id",
 ];
 
-fn is_pii_key_exact(candidate: &str) -> bool {
-    let trimmed = candidate
-        .trim()
-        .trim_matches(|c| matches!(c, '"' | '\'' | '`' | '[' | ']'));
-    if trimmed.is_empty() {
-        return false;
+const PII_NONWORD_KEYS: &[&str] = &[
+    "ip",
+    "clientip",
+    "cip",
+    "ipaddress",
+    "remoteaddr",
+    "oip",
+    "xforwardedfor",
+    "trueclientip",
+    "fastlyclientip",
+    "cookiesession",
+    "cid",
+    "clientid",
+    "edgesid",
+    "sid",
+    "sessionid",
+];
+
+fn is_pii_ws_or_ctrl(ch: char) -> bool {
+    let u = ch as u32;
+    u <= 0x1f
+        || u == 0x20
+        || u == 0x7f
+        || u == 0x0085
+        || u == 0x00a0
+        || u == 0x1680
+        || u == 0x180e
+        || (0x2000..=0x200d).contains(&u)
+        || matches!(
+            u,
+            0x2028 | 0x2029 | 0x202f | 0x205f | 0x2060 | 0x3000 | 0xfeff
+        )
+        || ch.is_whitespace()
+}
+
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
-    let canon: String = trimmed
-        .chars()
-        .map(|c| {
-            if c == '-' {
-                '_'
-            } else {
-                c.to_ascii_lowercase()
+}
+
+fn decode_pii_url_once(s: &str) -> String {
+    if !s.contains('%') {
+        return s.to_owned();
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2])) {
+                out.push((hi << 4) | lo);
+                i += 3;
+                continue;
             }
-        })
-        .collect();
-    if PII_FILTER_KEYS.contains(&canon.as_str()) {
-        return true;
+        }
+        out.push(bytes[i]);
+        i += 1;
     }
-    if let Some((base, suffix)) = canon.rsplit_once('_') {
-        if !suffix.is_empty()
-            && suffix.bytes().all(|b| b.is_ascii_digit())
-            && PII_FILTER_KEYS.contains(&base)
-        {
-            return true;
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn decode_pii_url_twice(s: &str) -> String {
+    let first = decode_pii_url_once(s);
+    if !first.contains('%') {
+        return first;
+    }
+    decode_pii_url_once(&first)
+}
+
+fn normalize_pii_unicode(s: &str) -> String {
+    if s.is_ascii() {
+        return s.to_owned();
+    }
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\u{0130}' => out.push('I'),
+            '\u{0307}' => {}
+            '\u{212a}' => out.push('K'),
+            _ => out.push(ch),
         }
     }
-    false
+    out
+}
+
+fn camel_to_snake_lower(s: &str) -> String {
+    // Normalize IPv4/IPv6/IPV4/IPV6 -> Ipv4/Ipv6 before camelCase splitting.
+    let bytes = s.as_bytes();
+    let mut pre = String::with_capacity(s.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if i + 3 < bytes.len()
+            && bytes[i] == b'I'
+            && bytes[i + 1] == b'P'
+            && matches!(bytes[i + 2], b'v' | b'V')
+            && matches!(bytes[i + 3], b'4' | b'6')
+        {
+            pre.push_str("Ipv");
+            pre.push(bytes[i + 3] as char);
+            i += 4;
+        } else {
+            let ch = s[i..].chars().next().unwrap();
+            pre.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    let chars: Vec<char> = pre.chars().collect();
+    let mut out = String::with_capacity(pre.len() + 8);
+    for idx in 0..chars.len() {
+        let cur = chars[idx];
+        if idx > 0 {
+            let prev = chars[idx - 1];
+            let next_is_lower = chars.get(idx + 1).is_some_and(char::is_ascii_lowercase);
+            let split_1 =
+                (prev.is_ascii_lowercase() || prev.is_ascii_digit()) && cur.is_ascii_uppercase();
+            let split_2 = prev.is_ascii_uppercase() && cur.is_ascii_uppercase() && next_is_lower;
+            if split_1 || split_2 {
+                out.push('_');
+            }
+        }
+        out.push(cur.to_ascii_lowercase());
+    }
+    out
+}
+
+/// O(N) iterative bracket stripping matching `console_access.py::_strip_pii_brackets`.
+fn strip_pii_brackets(s: &str) -> String {
+    if !s.contains('[') {
+        return s.to_owned();
+    }
+    let mut stack: Vec<String> = vec![String::with_capacity(s.len())];
+    for ch in s.chars() {
+        match ch {
+            '[' => stack.push(String::from("[")),
+            ']' => {
+                if stack.len() > 1 {
+                    stack.pop();
+                } else {
+                    stack[0].push(']');
+                }
+            }
+            _ => stack.last_mut().unwrap().push(ch),
+        }
+    }
+    stack.concat()
+}
+
+fn normalize_pii_ipv(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if i + 4 < bytes.len()
+            && (bytes[i].is_ascii_lowercase() || bytes[i] == b'_')
+            && &bytes[i + 1..i + 4] == b"ipv"
+            && matches!(bytes[i + 4], b'4' | b'6')
+            && (i + 5 == bytes.len() || bytes[i + 5] == b'_')
+        {
+            out.push(bytes[i] as char);
+            out.push_str("ip_");
+            i += if i + 5 < bytes.len() && bytes[i + 5] == b'_' {
+                6
+            } else {
+                5
+            };
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    out.trim_matches('_').to_owned()
+}
+
+fn strip_pii_affix_prefixes(mut s: &str) -> &str {
+    const PREFIXES: &[&str] = &[
+        "x_filter_",
+        "xfilter_",
+        "filter_",
+        "_cf_",
+        "cf_",
+        "request_http_",
+        "response_http_",
+        "req_http_",
+        "resp_http_",
+        "bereq_http_",
+        "beresp_http_",
+        "obj_http_",
+        "http_",
+        "request_",
+        "response_",
+        "req_",
+        "resp_",
+        "headers_",
+        "header_",
+        "original_",
+        "orig_",
+        "raw_",
+    ];
+    loop {
+        let mut changed = false;
+        for prefix in PREFIXES {
+            if let Some(rest) = s.strip_prefix(prefix) {
+                s = rest;
+                changed = true;
+                break;
+            }
+        }
+        if !changed {
+            return s.trim_matches('_');
+        }
+    }
+}
+
+fn strip_pii_suffixes(mut s: &str) -> &str {
+    loop {
+        let before = s;
+        if let Some(rest) = s.strip_suffix("_hash") {
+            s = rest;
+        } else if let Some(rest) = s.strip_suffix("_addr") {
+            s = rest;
+        } else {
+            let trimmed_digits = s.trim_end_matches(|c: char| c.is_ascii_digit());
+            if trimmed_digits.len() < s.len() {
+                if let Some(rest) = trimmed_digits.strip_suffix("_v") {
+                    s = rest;
+                } else {
+                    s = trimmed_digits.strip_suffix('_').unwrap_or(trimmed_digits);
+                }
+            }
+        }
+        if s == before {
+            return s.trim_matches('_');
+        }
+    }
+}
+
+fn matches_pii_canon(cand: &str) -> bool {
+    if cand.is_empty() {
+        return false;
+    }
+    if PII_FILTER_KEYS.contains(&cand) {
+        return true;
+    }
+    let no_under: String = cand.chars().filter(|&c| c != '_').collect();
+    !no_under.is_empty() && PII_NONWORD_KEYS.contains(&no_under.as_str())
+}
+
+fn segment_is_pii(seg: &str) -> bool {
+    if seg.is_empty() {
+        return false;
+    }
+    if PII_FILTER_KEYS.contains(&seg) {
+        return true;
+    }
+    let mut canon = String::with_capacity(seg.len());
+    let mut prev_sep = false;
+    let mut nw_under = String::with_capacity(seg.len());
+    for ch in seg.chars() {
+        let c = ch.to_ascii_lowercase();
+        if c.is_ascii_lowercase() || c.is_ascii_digit() {
+            canon.push(c);
+            nw_under.push(c);
+            prev_sep = false;
+        } else {
+            if c == '_' {
+                nw_under.push('_');
+            }
+            if !prev_sep && !canon.is_empty() {
+                canon.push('_');
+                prev_sep = true;
+            }
+        }
+    }
+    let canon = canon.trim_matches('_');
+    if canon.is_empty() && nw_under.is_empty() {
+        return false;
+    }
+    let ipv_norm = if canon.is_empty() {
+        String::new()
+    } else {
+        normalize_pii_ipv(canon)
+    };
+    let affix_stripped = strip_pii_affix_prefixes(&ipv_norm);
+    let no_suffix = strip_pii_suffixes(&ipv_norm);
+    let stripped = strip_pii_suffixes(affix_stripped);
+
+    let nw_ipv = if nw_under.is_empty() {
+        String::new()
+    } else {
+        normalize_pii_ipv(&nw_under)
+    };
+    let nw_affix = strip_pii_affix_prefixes(&nw_ipv);
+    let nw_stripped = strip_pii_suffixes(nw_affix);
+
+    let matched = [
+        canon,
+        ipv_norm.as_str(),
+        affix_stripped,
+        no_suffix,
+        stripped,
+        nw_ipv.as_str(),
+        nw_affix,
+        nw_stripped,
+    ]
+    .into_iter()
+    .any(matches_pii_canon);
+    matched
+}
+
+fn is_pii_split_outer(ch: char) -> bool {
+    matches!(
+        ch,
+        '[' | ']' | '/' | ':' | ';' | '|' | ',' | '&' | '=' | '?' | '{' | '}'
+    ) || is_pii_ws_or_ctrl(ch)
+}
+
+fn is_pii_split_all(ch: char) -> bool {
+    ch == '.' || is_pii_split_outer(ch)
+}
+
+fn is_pii_key_exact(candidate: &str) -> bool {
+    let raw_pre = normalize_pii_unicode(candidate)
+        .trim_matches(is_pii_ws_or_ctrl)
+        .trim_matches(|c| matches!(c, '"' | '\'' | '`' | '[' | ']'))
+        .to_ascii_lowercase();
+    if raw_pre.is_empty() {
+        return false;
+    }
+    if segment_is_pii(&raw_pre) {
+        return true;
+    }
+    let decoded = normalize_pii_unicode(&decode_pii_url_twice(candidate));
+    let raw_lower = decoded
+        .trim_matches(is_pii_ws_or_ctrl)
+        .trim_matches(|c| matches!(c, '"' | '\'' | '`' | '[' | ']'))
+        .to_ascii_lowercase();
+    let camel = camel_to_snake_lower(&decoded)
+        .trim_matches(is_pii_ws_or_ctrl)
+        .trim_matches(|c| matches!(c, '"' | '\'' | '`' | '[' | ']'))
+        .to_owned();
+    let raw_unbrack = strip_pii_brackets(&raw_lower)
+        .trim_matches(is_pii_ws_or_ctrl)
+        .to_owned();
+    let camel_unbrack = strip_pii_brackets(&camel)
+        .trim_matches(is_pii_ws_or_ctrl)
+        .to_owned();
+    [raw_lower, camel, raw_unbrack, camel_unbrack]
+        .iter()
+        .any(|cand| segment_is_pii(cand))
 }
 
 const MAX_JSON_DEPTH: usize = 16;
 
 fn is_sql_unicode_ws(ch: char) -> bool {
-    ch.is_whitespace() || matches!(ch, '\u{200b}' | '\u{2060}' | '\u{feff}')
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            '\u{180e}' | '\u{200b}'..='\u{200d}' | '\u{2060}' | '\u{feff}'
+        )
 }
 
 fn trim_sql_ws(s: &str) -> &str {
@@ -175,20 +503,60 @@ fn is_extra_column_ident(raw: &str) -> bool {
 }
 
 fn is_pii_identifier(raw: &str) -> bool {
-    let trimmed = trim_sql_ws(raw)
+    let raw_pre = normalize_pii_unicode(raw)
+        .trim_matches(is_pii_ws_or_ctrl)
         .trim_start_matches(['+', '-', '!', '$'])
-        .trim_matches(|c| matches!(c, '"' | '\'' | '`' | '[' | ']' | '{' | '}'));
-    if is_pii_key_exact(trimmed) {
+        .trim_matches(|c| matches!(c, '"' | '\'' | '`' | '[' | ']' | '{' | '}'))
+        .to_ascii_lowercase();
+    if raw_pre.is_empty() {
+        return false;
+    }
+    if segment_is_pii(&raw_pre) {
         return true;
     }
-    trimmed
-        .split(['.', ':', '[', ']', '{', '}', ','])
-        .any(|segment| {
-            let seg = trim_sql_ws(segment)
+    let decoded = normalize_pii_unicode(&decode_pii_url_twice(raw));
+    let raw_lower = decoded
+        .trim_matches(is_pii_ws_or_ctrl)
+        .trim_start_matches(['+', '-', '!', '$'])
+        .trim_matches(|c| matches!(c, '"' | '\'' | '`' | '[' | ']' | '{' | '}'))
+        .to_ascii_lowercase();
+    let camel = camel_to_snake_lower(&decoded)
+        .trim_matches(is_pii_ws_or_ctrl)
+        .trim_start_matches(['+', '-', '!', '$'])
+        .trim_matches(|c| matches!(c, '"' | '\'' | '`' | '[' | ']' | '{' | '}'))
+        .to_owned();
+    let raw_unbrack = strip_pii_brackets(&raw_lower)
+        .trim_matches(is_pii_ws_or_ctrl)
+        .to_owned();
+    let camel_unbrack = strip_pii_brackets(&camel)
+        .trim_matches(is_pii_ws_or_ctrl)
+        .to_owned();
+
+    for base in [&raw_lower, &camel, &raw_unbrack, &camel_unbrack] {
+        if base.is_empty() {
+            continue;
+        }
+        if segment_is_pii(base) {
+            return true;
+        }
+        for seg in base.split(is_pii_split_outer) {
+            let s = seg
                 .trim_start_matches(['+', '-', '!', '$'])
-                .trim_matches(|c| matches!(c, '"' | '\'' | '`' | '[' | ']' | '{' | '}'));
-            !seg.is_empty() && is_pii_key_exact(seg)
-        })
+                .trim_matches(|c| matches!(c, '"' | '\'' | '`'));
+            if !s.is_empty() && segment_is_pii(s) {
+                return true;
+            }
+        }
+        for seg in base.split(is_pii_split_all) {
+            let s = seg
+                .trim_start_matches(['+', '-', '!', '$'])
+                .trim_matches(|c| matches!(c, '"' | '\'' | '`'));
+            if !s.is_empty() && segment_is_pii(s) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn decode_rfc8259_escapes(raw: &str) -> Option<String> {

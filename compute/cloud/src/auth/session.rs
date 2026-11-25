@@ -2,10 +2,6 @@ use super::{Error, Role, User, GRANT_TTL, SESSION_TTL};
 use cookie::{time::Duration, Cookie, SameSite};
 use serde::{Deserialize, Serialize};
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
-static SESSION_NONCE_COUNTER: AtomicU64 = AtomicU64::new(1);
-
 #[derive(Serialize, Deserialize)]
 pub(super) struct Claims {
     pub sub: String,
@@ -18,15 +14,16 @@ pub(super) struct Claims {
     pub jti: String,
 }
 
-fn next_session_jti() -> String {
+fn next_session_jti_with<E>(
+    fill: impl FnOnce(&mut [u8]) -> Result<(), E>,
+) -> Result<String, Error> {
     let mut nonce = [0u8; 16];
-    if getrandom::getrandom(&mut nonce).is_ok() {
-        return hex::encode(nonce);
-    }
-    format!(
-        "seq-{}",
-        SESSION_NONCE_COUNTER.fetch_add(1, Ordering::Relaxed)
-    )
+    fill(&mut nonce).map_err(|_| Error::Internal)?;
+    Ok(hex::encode(nonce))
+}
+
+fn next_session_jti() -> Result<String, Error> {
+    next_session_jti_with(getrandom::getrandom)
 }
 
 pub(super) fn issue(
@@ -41,7 +38,7 @@ pub(super) fn issue(
         policy_version,
         exp: now.saturating_add(SESSION_TTL),
         iat: now,
-        jti: next_session_jti(),
+        jti: next_session_jti()?,
     };
     compute_common::crypto::seal_json(key, &claims).map_err(|_| Error::InvalidInput)
 }
@@ -357,5 +354,20 @@ mod tests {
         let setup_clear = clear_setup_cookie();
         assert!(setup_clear.starts_with("flp_setup=;"));
         assert!(setup_clear.contains("Max-Age=0"));
+    }
+
+    #[test]
+    fn next_session_jti_fails_closed_when_csprng_errors() {
+        let err = next_session_jti_with(|_| Err("rng unavailable")).unwrap_err();
+        assert_eq!(err, Error::Internal);
+
+        let jti = next_session_jti_with(|buf| -> Result<(), ()> {
+            for (i, b) in buf.iter_mut().enumerate() {
+                *b = i as u8;
+            }
+            Ok(())
+        })
+        .expect("csprng ok");
+        assert_eq!(jti, "000102030405060708090a0b0c0d0e0f");
     }
 }

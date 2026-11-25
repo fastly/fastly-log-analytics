@@ -4,20 +4,30 @@ pub const PUBLIC_BODY_LIMIT: usize = 65_536;
 /// Peer requests carry the ingest watermark root, which outgrows the public cap.
 pub const INTERNAL_BODY_LIMIT: usize = 2 * 1024 * 1024;
 
-/// Bytes the entrypoint reads before handlers apply their own, tighter limits.
-pub fn body_limit(request: &Request) -> usize {
-    let internal = request.method == "POST"
-        && request.header("x-flp-worker-key").is_some()
+pub fn is_internal_body_route(request: &Request) -> bool {
+    request.method == "POST"
         && [
             crate::ingest::worker::PATH,
             crate::ingest::worker::RANGE_PATH,
         ]
-        .contains(&request.path.as_str());
-    if internal {
+        .contains(&request.path.as_str())
+}
+
+/// Bytes the entrypoint reads before handlers apply their own, tighter limits.
+/// Only grants `INTERNAL_BODY_LIMIT` after verifying `x-flp-worker-key` in
+/// constant time against `worker_secret` so unauthenticated callers cannot
+/// amplify request-body buffering to 2 MiB via header presence alone.
+pub fn body_limit_for_runtime<R: crate::shell::Runtime>(runtime: &R, request: &Request) -> usize {
+    if is_internal_body_route(request) && crate::ingest::worker::authorized(runtime, request) {
         INTERNAL_BODY_LIMIT
     } else {
         PUBLIC_BODY_LIMIT
     }
+}
+
+/// Strict pre-auth body limit when no verified worker runtime is available.
+pub fn body_limit(_request: &Request) -> usize {
+    PUBLIC_BODY_LIMIT
 }
 
 #[derive(Default)]

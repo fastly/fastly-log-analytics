@@ -2099,6 +2099,7 @@ fn auth_error(failure: AuthError, path: &str) -> Response {
         AuthError::NotFound => error(404, "Not found"),
         AuthError::InvalidInput => error(422, "Invalid request"),
         AuthError::Storage => error(503, "Store or API unavailable"),
+        AuthError::Internal => error(500, "Internal authentication error"),
         AuthError::RateLimited { retry_after } => {
             error(429, "Too many attempts").header("retry-after", retry_after.to_string())
         }

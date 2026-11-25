@@ -488,20 +488,35 @@ fn retained_raw_backfill_reuses_receipts_after_delete_queue_consumption() {
 
 #[test]
 fn internal_worker_requests_are_read_past_the_public_body_cap() {
-    let worker = |path: &str, key: bool| fastly_log_analytics::http::Request {
+    let runtime = Fake::new(0);
+    let worker = |path: &str, key: Option<&str>| fastly_log_analytics::http::Request {
         method: "POST".into(),
         path: path.into(),
-        headers: if key {
-            [("x-flp-worker-key".into(), "k".into())].into()
-        } else {
-            Default::default()
-        },
+        headers: key
+            .map(|k| [("x-flp-worker-key".into(), k.into())].into())
+            .unwrap_or_default(),
         body: Vec::new(),
     };
-    let limit = fastly_log_analytics::http::body_limit;
+    let limit = |req: &fastly_log_analytics::http::Request| {
+        fastly_log_analytics::http::body_limit_for_runtime(&runtime, req)
+    };
     // A source_index request carries the whole watermark root; truncating it at 64 KiB stalled ingest.
-    assert!(limit(&worker(ingest::worker::PATH, true)) >= 1024 * 1024);
-    assert!(limit(&worker(ingest::worker::RANGE_PATH, true)) >= 1024 * 1024);
-    assert_eq!(limit(&worker(ingest::worker::PATH, false)), 65_536);
-    assert_eq!(limit(&worker("/api/admin/settings", true)), 65_536);
+    assert!(limit(&worker(ingest::worker::PATH, Some("fos-secret"))) >= 1024 * 1024);
+    assert!(limit(&worker(ingest::worker::RANGE_PATH, Some("fos-secret"))) >= 1024 * 1024);
+    // Unauthenticated header presence with a bogus worker key must NOT amplify the body cap to 2 MiB.
+    assert_eq!(limit(&worker(ingest::worker::PATH, Some("bogus"))), 65_536);
+    assert_eq!(
+        limit(&worker(ingest::worker::RANGE_PATH, Some("bogus"))),
+        65_536
+    );
+    assert_eq!(limit(&worker(ingest::worker::PATH, None)), 65_536);
+    assert_eq!(
+        limit(&worker("/api/admin/settings", Some("fos-secret"))),
+        65_536
+    );
+    // Non-runtime body_limit never grants 2 MiB on header presence alone.
+    assert_eq!(
+        fastly_log_analytics::http::body_limit(&worker(ingest::worker::PATH, Some("fos-secret"))),
+        65_536
+    );
 }

@@ -34,6 +34,7 @@ pub enum Error {
     NotFound,
     RateLimited { retry_after: u64 },
     Storage,
+    Internal,
 }
 
 impl std::fmt::Display for Error {

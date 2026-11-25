@@ -52,6 +52,12 @@ pub const GCM_TAG_BYTES: usize = 16;
 /// Minimum total envelope size (nonce + head + length byte + tag). Used by
 /// decode() to reject obviously-malformed cookies before attempting AEAD.
 pub const ENVELOPE_BYTES: usize = NONCE_BYTES + HEAD_PLAINTEXT_BYTES + 1 + GCM_TAG_BYTES;
+/// Maximum valid envelope size (nonce + head + length byte + max path + tag).
+pub const MAX_ENVELOPE_BYTES: usize = ENVELOPE_BYTES + PREV_ROUTE_MAX_BYTES;
+/// Maximum valid unpadded base64url cookie length (`ceil(MAX_ENVELOPE_BYTES * 4 / 3)`).
+/// Checked before base64 decoding or AES-GCM allocation so oversized Cookie
+/// headers are rejected in O(1) without heap amplification.
+pub const MAX_COOKIE_B64_LEN: usize = (MAX_ENVELOPE_BYTES * 4).div_ceil(3);
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum CookieError {
@@ -234,11 +240,18 @@ pub fn decode(
         }
     }
 
+    if cookie.len() > MAX_COOKIE_B64_LEN {
+        return Err(CookieError::BadFraming("cookie too long"));
+    }
+
     let raw = URL_SAFE_NO_PAD
         .decode(cookie)
         .map_err(|_| CookieError::BadBase64)?;
     if raw.len() < ENVELOPE_BYTES {
         return Err(CookieError::BadFraming("envelope too short"));
+    }
+    if raw.len() > MAX_ENVELOPE_BYTES {
+        return Err(CookieError::BadFraming("envelope too long"));
     }
     let nonce = &raw[..NONCE_BYTES];
     let ciphertext = &raw[NONCE_BYTES..];
@@ -590,6 +603,35 @@ mod tests {
         assert_eq!(
             decode(&cookie, &KEY_B, None, SVC, SCHEMA_VERSION),
             Err(CookieError::BadAuth)
+        );
+    }
+
+    #[test]
+    fn decode_rejects_oversized_cookie_before_base64_and_aead() {
+        // Max valid cookie (255-byte prev_route_path) must fit exactly within MAX_COOKIE_B64_LEN.
+        let mut max_state = state();
+        max_state.prev_route_path = "a".repeat(PREV_ROUTE_MAX_BYTES);
+        let max_cookie = encode(&max_state, &KEY_A, &NONCE_FIXED, SVC, SCHEMA_VERSION).unwrap();
+        assert_eq!(max_cookie.len(), MAX_COOKIE_B64_LEN);
+        assert_eq!(
+            decode(&max_cookie, &KEY_A, None, SVC, SCHEMA_VERSION).unwrap(),
+            max_state
+        );
+
+        // Oversized invalid-base64 string must return BadFraming (not BadBase64),
+        // proving the length check runs BEFORE base64 decoding.
+        let giant_garbage = "!".repeat(MAX_COOKIE_B64_LEN + 1);
+        assert_eq!(
+            decode(&giant_garbage, &KEY_A, None, SVC, SCHEMA_VERSION),
+            Err(CookieError::BadFraming("cookie too long"))
+        );
+
+        // Oversized valid-base64 payload must return BadFraming (not BadAuth),
+        // proving the length check runs BEFORE AES-GCM allocation/decryption.
+        let giant_b64 = URL_SAFE_NO_PAD.encode(vec![0u8; 4096]);
+        assert_eq!(
+            decode(&giant_b64, &KEY_A, None, SVC, SCHEMA_VERSION),
+            Err(CookieError::BadFraming("cookie too long"))
         );
     }
 }

@@ -1054,4 +1054,14 @@ mod tests {
             "age one second past cap must expire"
         );
     }
+
+    #[test]
+    fn cookie_decode_rejects_oversized_cookie_before_base64_and_aead() {
+        let key = [0x11u8; cookie::KEY_BYTES];
+        let oversized = "!".repeat(512);
+        assert_eq!(
+            cookie::decode(&oversized, &key, None, "TestSvc", cookie::SCHEMA_VERSION),
+            Err(cookie::CookieError::BadFraming("cookie too long"))
+        );
+    }
 }

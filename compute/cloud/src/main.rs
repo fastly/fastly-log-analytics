@@ -28,11 +28,6 @@ fn main() -> Result<(), fastly::Error> {
         headers,
         body: Vec::new(),
     };
-    let limit = http::body_limit(&input) as u64 + 1;
-    request
-        .take_body()
-        .take(limit)
-        .read_to_end(&mut input.body)?;
     let send_raw = |output: http::Response| {
         let mut response = fastly::Response::from_status(output.status).with_body(output.body);
         let has_multi_cookies = !output.set_cookies.is_empty();
@@ -52,6 +47,11 @@ fn main() -> Result<(), fastly::Error> {
     let send = |output: http::Response| send_raw(output.secured());
     let (status, after_ack) = match sdk::FastlyRuntime::open() {
         Ok(runtime) => {
+            let limit = http::body_limit_for_runtime(&runtime, &input) as u64 + 1;
+            request
+                .take_body()
+                .take(limit)
+                .read_to_end(&mut input.body)?;
             let worker_id = runtime
                 .config("worker_service_id")
                 .map_err(fastly::Error::msg)?;
