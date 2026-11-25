@@ -1,9 +1,9 @@
-import type { FileMetaData } from "hyparquet";
+import { parquetMetadata, type FileMetaData } from "hyparquet";
 import { fetchLanes } from "../fetch-lanes";
 import type { FileSource } from "./engine";
 import { currentStoreMetaEpoch } from "./file-store";
 import type { ManifestFile } from "./manifest";
-import { readColumns } from "./parquet";
+import { readColumns, type DecodedColumns } from "./parquet";
 import {
   assembleProjectedParquet, fetchProjectedRanges, planParquetProjection, readParquetFooter, type ParquetFooter,
 } from "./parquet-projection";
@@ -238,16 +238,11 @@ export async function readSummaryProjection(
   return { parts, whole: false, cached: downloadedBytes === 0, downloadedBytes };
 }
 
-/**
- * `wanted` columns across `parts`, rows in part order. A column one part
- * lacks reads as undefined for that part's rows.
- */
-export async function readSummaryColumns(
-  parts: readonly ArrayBuffer[],
+function mergeDecodedParts(
+  decoded: readonly DecodedColumns[],
   wanted: readonly string[],
-  utf8 = true,
-): Promise<{ rows: number; columns: Map<string, ArrayLike<unknown>> }> {
-  const decoded = await Promise.all(parts.map((part) => readColumns(part, wanted, utf8)));
+): DecodedColumns {
+  if (decoded.length === 0) return { rows: 0, columns: new Map() };
   if (decoded.length === 1) return decoded[0];
   const rows = decoded.reduce((sum, part) => sum + part.rows, 0);
   const columns = new Map<string, ArrayLike<unknown>>();
@@ -263,4 +258,73 @@ export async function readSummaryColumns(
     columns.set(name, out);
   }
   return { rows, columns };
+}
+
+async function readSummaryPart(
+  part: ArrayBuffer,
+  wanted: readonly string[],
+  utf8: boolean,
+  spec: SummarySpec | undefined,
+): Promise<DecodedColumns> {
+  if (!spec) return readColumns(part, wanted, utf8);
+  const metadata = parquetMetadata(part);
+  const layout = summaryLayout(metadata);
+  if (!layout) return readColumns(part, wanted, utf8, { metadata });
+  const wantedGroups = new Set([...spec.groups].filter((group) => group !== "dim_totals"));
+  const keep: number[] = [];
+  for (let i = 0; i < metadata.row_groups.length; i++) {
+    if (intersects(layout[i], wantedGroups)) keep.push(i);
+  }
+  if (!keep.length && metadata.row_groups.length > 0) keep.push(0);
+  if (!keep.length) return { rows: 0, columns: new Map() };
+
+  // Group adjacent row groups in strictly ascending order so text and binary reads align row-for-row.
+  const runs: { cols: string[]; rowGroups: number[]; rows: number }[] = [];
+  let prevKey: string | null = null;
+  for (const index of keep) {
+    const cols = wanted.filter((column) => {
+      const of = spec.only.get(column);
+      return !of || intersects(layout[index], of);
+    });
+    const key = cols.join("\0");
+    const rgRows = Number(metadata.row_groups[index].num_rows);
+    if (key === prevKey && runs.length > 0) {
+      const last = runs[runs.length - 1];
+      last.rowGroups.push(index);
+      last.rows += rgRows;
+    } else {
+      runs.push({ cols, rowGroups: [index], rows: rgRows });
+      prevKey = key;
+    }
+  }
+  if (runs.length === 1) {
+    const onlyRun = runs[0];
+    if (!onlyRun.cols.length) return { rows: onlyRun.rows, columns: new Map() };
+    return readColumns(part, onlyRun.cols, utf8, { metadata, rowGroups: onlyRun.rowGroups });
+  }
+  const segments = await Promise.all(
+    runs.map((run) =>
+      run.cols.length
+        ? readColumns(part, run.cols, utf8, { metadata, rowGroups: run.rowGroups })
+        : Promise.resolve<DecodedColumns>({ rows: run.rows, columns: new Map() }),
+    ),
+  );
+  return mergeDecodedParts(segments, wanted);
+}
+
+/**
+ * `wanted` columns across `parts`, rows in part order. A column one part
+ * lacks reads as undefined for that part's rows. When `spec` is supplied and a
+ * part carries `flp_summary_layout`, only the row groups and per-group columns
+ * needed by `spec` are decoded.
+ */
+export async function readSummaryColumns(
+  parts: readonly ArrayBuffer[],
+  wanted: readonly string[],
+  utf8 = true,
+  spec?: SummarySpec,
+): Promise<DecodedColumns> {
+  if (!wanted.length || !parts.length) return { rows: 0, columns: new Map() };
+  const decoded = await Promise.all(parts.map((part) => readSummaryPart(part, wanted, utf8, spec)));
+  return mergeDecodedParts(decoded, wanted);
 }

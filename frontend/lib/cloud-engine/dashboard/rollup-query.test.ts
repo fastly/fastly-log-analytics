@@ -626,4 +626,57 @@ describe("queryRollup", () => {
       summaryProjectionLimits.wholeBelowBytes = prevLimit;
     }
   });
+
+  it("reuses the merged RollupResult across sequential calls and handles >64 files without thrashing", async () => {
+    const { clearRollupQueryCache } = await import("./rollup-query");
+    const { defineSummarySpec } = await import("./summary-projection");
+    const spec = defineSummarySpec({ groups: ["dims", "series5", "dim_totals"], columns: ["requests"] });
+    const count = 70;
+    const baseSum = WINDOWS[0];
+    const baseRaw = RAW.find((r) => r.start === baseSum.start && r.end === baseSum.end) ?? RAW[0];
+    const rawMany: ManifestFile[] = [];
+    const sumMany: ManifestFile[] = [];
+    const buffersMany: Record<string, ArrayBuffer> = {};
+    for (let i = 0; i < count; i++) {
+      const start = new Date(T0 + i * 30_000).toISOString();
+      const end = new Date(T0 + (i + 1) * 30_000).toISOString();
+      const sumKey = baseSum.key.replace(/(-n\d+\.parquet)$/, `-s${i}$1`);
+      const rawKey = sumKey
+        .replace("processed/summary/request/", "processed/request/")
+        .replace("/summary=", "/window=");
+      rawMany.push({ ...baseRaw, key: rawKey, start, end, rows: baseSum.rows });
+      sumMany.push({ ...baseSum, key: sumKey, start, end, rows: baseSum.rows });
+      buffersMany[sumKey] = BUFFERS[baseSum.key];
+    }
+    let fetchCount = 0;
+    const manySource = {
+      cacheScope: "merged-cache-test",
+      fetchJson: async () => ({
+        files: rawMany,
+        summary_files: sumMany,
+        next_cursor: null,
+        complete: true,
+        catalog_generation: 1,
+      }),
+      fetchFile: async (key: string) => {
+        fetchCount++;
+        return { bytes: buffersMany[key], cached: true };
+      },
+    };
+
+    const first = await queryRollup(manySource, { fromMs: T0, toMs: T0 + count * 30_000, spec });
+    expect(first !== null).toBe(true);
+    expect(fetchCount).toBe(count);
+
+    // Sequential second call (after inflight has settled) must hit the merged rollup cache with 0 fetches.
+    const second = await queryRollup(manySource, { fromMs: T0, toMs: T0 + count * 30_000, spec });
+    expect(second === first).toBe(true);
+    expect(fetchCount).toBe(count);
+
+    // clearRollupQueryCache must evict the merged cache too.
+    clearRollupQueryCache();
+    const third = await queryRollup(manySource, { fromMs: T0, toMs: T0 + count * 30_000, spec });
+    expect(third !== null && third !== first).toBe(true);
+    expect(fetchCount).toBe(count * 2);
+  });
 });

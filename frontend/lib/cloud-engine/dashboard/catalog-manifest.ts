@@ -4,6 +4,7 @@ import {
   deleteManifestSnapshots,
   persistManifestSnapshot,
   readManifestSnapshot,
+  readManifestSnapshotWithAge,
 } from "./manifest-store";
 import { CARD_FIELDS, type CustomCard } from "./summaries";
 
@@ -52,6 +53,7 @@ export const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
 export const MAX_IDENTITIES = 16_384;
 const MAX_REPLAY = 32;
 const MAX_SNAPSHOTS = 8;
+const MAX_WINDOWS_PER_KEY = 4;
 const MAX_DELTA_PAGES = 64;
 const DAY_MS = 86_400_000;
 /**
@@ -113,8 +115,66 @@ type Requirement = {
   reset: number;
   manifest?: string | null;
 };
-const snapshots = new Map<string, Snapshot>();
+const snapshots = new Map<string, Snapshot[]>();
+const persistedMeta = new Map<string, { generation: number; toMs: number }>();
 const requirements = new Map<string, Requirement>();
+
+function selectBaseSnapshot(
+  key: string,
+  fromMs: number,
+  toMs: number,
+  summaries: boolean | undefined,
+): Snapshot | undefined {
+  const list = snapshots.get(key);
+  if (!list?.length) return undefined;
+  let best: Snapshot | undefined;
+  let bestGen = -1;
+  let bestOverlap = -1;
+  let bestToMs = -Infinity;
+  for (const s of list) {
+    if (summaries && !s.manifest.summaryFiles) continue;
+    const sFrom = Date.parse(s.from);
+    const sTo = Date.parse(s.to);
+    const overlap =
+      Number.isFinite(fromMs) &&
+      Number.isFinite(toMs) &&
+      Number.isFinite(sFrom) &&
+      Number.isFinite(sTo)
+        ? Math.max(0, Math.min(toMs, sTo) - Math.max(fromMs, sFrom))
+        : 0;
+    if (
+      !best ||
+      s.generation > bestGen ||
+      (s.generation === bestGen &&
+        (overlap > bestOverlap ||
+          (overlap === bestOverlap && sTo > bestToMs)))
+    ) {
+      best = s;
+      bestGen = s.generation;
+      bestOverlap = overlap;
+      bestToMs = sTo;
+    }
+  }
+  return best;
+}
+
+function saveMemorySnapshot(key: string, snapshot: Snapshot, resynced: boolean): void {
+  const existing = resynced ? [] : (snapshots.get(key) ?? []);
+  const filtered = existing.filter(
+    (s) =>
+      s.generation >= snapshot.generation &&
+      !(s.from === snapshot.from && s.to === snapshot.to),
+  );
+  filtered.push(snapshot);
+  while (filtered.length > MAX_WINDOWS_PER_KEY) filtered.shift();
+  snapshots.delete(key);
+  snapshots.set(key, filtered);
+  while (snapshots.size > MAX_SNAPSHOTS) {
+    const oldest = snapshots.keys().next().value!;
+    snapshots.delete(oldest);
+    persistedMeta.delete(oldest);
+  }
+}
 let fetchIds = new WeakMap<FetchJson, number>();
 let nextFetchId = 0;
 let epoch = 0;
@@ -190,6 +250,7 @@ export function clearCatalogManifests(): void {
   inFlight.clear();
   recent.clear();
   snapshots.clear();
+  persistedMeta.clear();
   requirements.clear();
   fetchIds = new WeakMap();
   epoch++;
@@ -215,7 +276,10 @@ export function observeCatalogCommit(
   const previous = requirements.get(identity);
   if (event.type === "resync") {
     for (const key of snapshots.keys())
-      if (JSON.parse(key)[0] === identity) snapshots.delete(key);
+      if (JSON.parse(key)[0] === identity) {
+        snapshots.delete(key);
+        persistedMeta.delete(key);
+      }
     for (const summaries of [false, true]) {
       const key = manifestCacheKey(fetchJson, undefined, undefined, summaries);
       queueStoreInvalidation(key, () => deleteManifestSnapshot(key));
@@ -429,6 +493,10 @@ async function delta(
 }
 
 type SharedListing = {
+  key: string;
+  fromMs: number;
+  toMs: number;
+  summaries: boolean;
   promise: Promise<Manifest>;
   controller: AbortController;
   waiters: number;
@@ -603,9 +671,89 @@ export async function fetchCatalogManifest(
       }
     }
   }
+  if (Number.isFinite(fromMs) && Number.isFinite(toMs) && fromMs <= toMs) {
+    const candidateKeys = withSummariesKey ? [key, withSummariesKey] : [key];
+    for (const candidateKey of candidateKeys) {
+      for (const shared of inFlight.values()) {
+        if (
+          shared.settled ||
+          shared.reset !== reset ||
+          shared.key !== candidateKey ||
+          !Number.isFinite(shared.fromMs) ||
+          !Number.isFinite(shared.toMs) ||
+          shared.fromMs > fromMs ||
+          toMs > shared.toMs ||
+          (summaries && !shared.summaries)
+        )
+          continue;
+        try {
+          const manifest = await join(shared, signal);
+          if (!manifest.complete) continue;
+          if (summaries && manifest.summaryFiles === undefined) continue;
+          return {
+            files: manifest.files.filter((file) => overlaps(file, from, to)),
+            complete: manifest.complete,
+            ...(manifest.catalogGeneration !== undefined
+              ? { catalogGeneration: manifest.catalogGeneration }
+              : {}),
+            ...(summaries && manifest.summaryFiles !== undefined
+              ? {
+                  summaryFiles: manifest.summaryFiles.filter((file) =>
+                    overlaps(file, from, to),
+                  ),
+                  summaryRange: { from, to },
+                }
+              : {}),
+          };
+        } catch (error) {
+          signal?.throwIfAborted();
+          if (!isAbort(error) && candidateKey === key) throw error;
+        }
+      }
+    }
+    // Cross-thread handoff: when the worker just persisted a fresh summaries listing
+    // covering [from, to], a raw-only main-thread caller can slice it without re-listing.
+    if (
+      typeof caches !== "undefined" &&
+      withSummariesKey &&
+      !globalHydrationBlocked &&
+      !blockedHydrationScopes.has(withSummariesKey)
+    ) {
+      const saved = await readManifestSnapshotWithAge(withSummariesKey, now);
+      signal?.throwIfAborted();
+      if (
+        callEpoch !== epoch ||
+        scope(fetchJson) !== callIdentity ||
+        reset !== (requirements.get(identity)?.reset ?? 0)
+      ) {
+        throw new Error("File manifest cache identity changed during discovery");
+      }
+      if (
+        saved &&
+        now - saved.savedAt < SNAPSHOT_REUSE_MS &&
+        (required === undefined || saved.snapshot.generation >= required)
+      ) {
+        const sFrom = Date.parse(saved.snapshot.from);
+        const sTo = Date.parse(saved.snapshot.to);
+        if (Number.isFinite(sFrom) && Number.isFinite(sTo) && sFrom <= fromMs && toMs <= sTo) {
+          return {
+            files: saved.snapshot.manifest.files.filter((file) => overlaps(file, from, to)),
+            complete: saved.snapshot.manifest.complete,
+            ...(saved.snapshot.manifest.catalogGeneration !== undefined
+              ? { catalogGeneration: saved.snapshot.manifest.catalogGeneration }
+              : {}),
+          };
+        }
+      }
+    }
+  }
   const controller = new AbortController();
   const startEpoch = epoch;
   const own: SharedListing = {
+    key,
+    fromMs,
+    toMs,
+    summaries: Boolean(summaries),
     controller,
     waiters: 0,
     settled: false,
@@ -705,9 +853,9 @@ async function fetchCatalogManifestUncached(
   const persisted = incremental;
   const startEpoch = epoch;
   const reset = requirements.get(identity)?.reset ?? 0;
-  let base = incremental ? snapshots.get(key) : undefined;
-  // A delta resets only some summary days; it needs a base holding the rest.
-  if (base && summaries && !base.manifest.summaryFiles) base = undefined;
+  const fromMs = Date.parse(from);
+  const toMs = Date.parse(to);
+  let base = incremental ? selectBaseSnapshot(key, fromMs, toMs, summaries) : undefined;
   if (
     !base &&
     persisted &&
@@ -722,6 +870,10 @@ async function fetchCatalogManifestUncached(
         generation: saved.generation,
         manifest: saved.manifest,
       };
+      persistedMeta.set(key, {
+        generation: saved.generation,
+        toMs: Date.parse(saved.to),
+      });
     }
   }
   const requiredGeneration = requirements.get(identity)?.generation;
@@ -731,6 +883,7 @@ async function fetchCatalogManifestUncached(
     requiredGeneration - base.generation > MAX_REPLAY
   ) {
     snapshots.delete(key);
+    persistedMeta.delete(key);
     if (persisted) {
       queueStoreInvalidation(key, () => deleteManifestSnapshot(key));
     }
@@ -767,6 +920,7 @@ async function fetchCatalogManifestUncached(
     )
       throw error;
     snapshots.delete(key);
+    persistedMeta.delete(key);
     if (persisted) {
       queueStoreInvalidation(key, () => deleteManifestSnapshot(key));
     }
@@ -788,14 +942,19 @@ async function fetchCatalogManifestUncached(
     const minimum = requirements.get(identity)?.generation;
     if (minimum !== undefined && generation < minimum)
       throw new ManifestRequestError(503, "catalog_head_behind");
-    const current = snapshots.get(key);
+    const current = selectBaseSnapshot(key, fromMs, toMs, summaries);
     if (!current || generation >= current.generation || resynced) {
       const snapshot = { from, to, generation, manifest: result };
-      snapshots.delete(key);
-      snapshots.set(key, snapshot);
-      while (snapshots.size > MAX_SNAPSHOTS)
-        snapshots.delete(snapshots.keys().next().value!);
-      if (persisted) {
+      saveMemorySnapshot(key, snapshot, resynced);
+      const prevPersisted = persistedMeta.get(key);
+      const shouldPersist =
+        persisted &&
+        (resynced ||
+          !prevPersisted ||
+          generation > prevPersisted.generation ||
+          (generation === prevPersisted.generation && toMs >= prevPersisted.toMs));
+      if (shouldPersist) {
+        persistedMeta.set(key, { generation, toMs });
         await queueStoreWork(() => persistManifestSnapshot(key, snapshot));
         if (
           startEpoch !== epoch ||

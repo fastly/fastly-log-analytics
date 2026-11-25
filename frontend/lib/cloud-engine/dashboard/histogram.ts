@@ -57,9 +57,14 @@ export class Histogram {
   static fromBytes(blob: Uint8Array): Histogram | null {
     if (blob[0] !== VERSION) return null;
     const at = { i: 1 };
-    const fields = [0, 0, 0, 0].map(() => readVarint(blob, at));
-    if (fields.some((f) => f === null)) return null;
-    const [under, over, min, max] = fields as number[];
+    const under = readVarint(blob, at);
+    if (under === null) return null;
+    const over = readVarint(blob, at);
+    if (over === null) return null;
+    const min = readVarint(blob, at);
+    if (min === null) return null;
+    const max = readVarint(blob, at);
+    if (max === null) return null;
     const h = new Histogram();
     h.under = under;
     h.over = over;

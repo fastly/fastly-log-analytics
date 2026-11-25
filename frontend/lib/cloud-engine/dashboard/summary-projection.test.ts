@@ -261,6 +261,35 @@ describe("readSummaryProjection", () => {
     for (const flush of pendingWrites) flush();
     expect(await hasSummaryProjection(base, file, HEAD)).toBe(true);
   });
+
+  it("prunes row groups and spec.only columns when reading columns from a whole layout file", async () => {
+    const spec = defineSummarySpec({
+      groups: ["overview", "dims", "dim_totals"],
+      columns: ["requests", "ip_sketch"],
+      only: { ip_sketch: ["overview"] },
+    });
+    const whole = await readSummaryColumns([layoutBytes], ["bundle", "requests", "ip_sketch"], false);
+    const pruned = await readSummaryColumns([layoutBytes], ["bundle", "requests", "ip_sketch"], false, spec);
+    expect(pruned.rows).toBeLessThan(whole.rows);
+    expect(pruned.rows).toBeGreaterThan(0);
+    const bundles = Array.from({ length: pruned.rows }, (_, i) => text(pruned.columns.get("bundle")![i]));
+    const bundleSet = new Set(bundles);
+    expect(bundleSet.has("overview")).toBe(true);
+    expect(bundleSet.has("dims")).toBe(true);
+    expect(bundleSet.has("all_fields")).toBe(false);
+    expect(bundleSet.has("sample")).toBe(false);
+    // ip_sketch is only requested for overview, so dims rows have undefined in ip_sketch
+    const dimsIndices = bundles.flatMap((b, i) => (b === "dims" ? [i] : []));
+    expect(dimsIndices.length).toBeGreaterThan(0);
+    for (const i of dimsIndices) {
+      expect(pruned.columns.get("ip_sketch")?.[i]).toBeUndefined();
+    }
+    const overviewSketches = (columns: Map<string, ArrayLike<unknown>>, rows: number) =>
+      Array.from({ length: rows }, (_, i) => i)
+        .filter((i) => text(columns.get("bundle")![i]) === "overview")
+        .map((i) => columns.get("ip_sketch")![i]);
+    expect(overviewSketches(pruned.columns, pruned.rows)).toEqual(overviewSketches(whole.columns, whole.rows));
+  });
 });
 
 describe("summaryLayout", () => {

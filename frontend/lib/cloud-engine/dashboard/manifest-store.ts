@@ -24,6 +24,11 @@ export type ManifestSnapshot = {
   manifest: Manifest;
 };
 
+export type PersistedManifestSnapshot = {
+  snapshot: ManifestSnapshot;
+  savedAt: number;
+};
+
 type PersistedManifest = {
   formatVersion: number;
   cacheKey: string;
@@ -98,11 +103,11 @@ function validFile(
   );
 }
 
-function parseSnapshot(
+function parseSnapshotRecord(
   body: unknown,
   cacheKey: string,
   now: number,
-): ManifestSnapshot | null {
+): PersistedManifestSnapshot | null {
   const summaries = cacheKeySummaries(cacheKey);
   if (
     summaries === null ||
@@ -167,8 +172,16 @@ function parseSnapshot(
   }
   return budget.bytes <= MAX_MANIFEST_BYTES &&
     budget.identities.size <= MAX_IDENTITIES
-    ? (snapshot as ManifestSnapshot)
+    ? { snapshot: snapshot as ManifestSnapshot, savedAt: record.savedAt }
     : null;
+}
+
+function parseSnapshot(
+  body: unknown,
+  cacheKey: string,
+  now: number,
+): ManifestSnapshot | null {
+  return parseSnapshotRecord(body, cacheKey, now)?.snapshot ?? null;
 }
 
 async function boundedBody(
@@ -230,10 +243,10 @@ async function report(
   }
 }
 
-export async function readManifestSnapshot(
+export async function readManifestSnapshotWithAge(
   cacheKey: string,
   now = Date.now(),
-): Promise<ManifestSnapshot | null> {
+): Promise<PersistedManifestSnapshot | null> {
   const callMetaEpoch = currentStoreMetaEpoch();
   let bytes = 0;
   try {
@@ -263,15 +276,22 @@ export async function readManifestSnapshot(
       if (callMetaEpoch === currentStoreMetaEpoch()) await cache.delete(url);
       return null;
     }
-    const snapshot = parseSnapshot(body, cacheKey, now);
-    if (!snapshot && callMetaEpoch === currentStoreMetaEpoch()) {
+    const record = parseSnapshotRecord(body, cacheKey, now);
+    if (!record && callMetaEpoch === currentStoreMetaEpoch()) {
       await cache.delete(url);
     }
-    return callMetaEpoch === currentStoreMetaEpoch() ? snapshot : null;
+    return callMetaEpoch === currentStoreMetaEpoch() ? record : null;
   } catch (error) {
     await report("read", cacheKey, bytes, error, callMetaEpoch);
     return null;
   }
+}
+
+export async function readManifestSnapshot(
+  cacheKey: string,
+  now = Date.now(),
+): Promise<ManifestSnapshot | null> {
+  return (await readManifestSnapshotWithAge(cacheKey, now))?.snapshot ?? null;
 }
 
 export async function persistManifestSnapshot(

@@ -330,10 +330,49 @@ const HIST_KEYS = Object.keys(HIST_COLUMNS) as (keyof RollupHists)[];
 
 /** An aggregate of no rows: zero sums, no label, no histograms. */
 export function emptyAgg(): RollupAgg {
-  const agg = { label: null, hists: {} } as unknown as RollupAgg;
-  for (const key of SUM_KEYS) agg[key] = 0;
-  for (const key of HIST_KEYS) agg.hists[key] = null;
-  return agg;
+  return {
+    requests: 0,
+    count: 0,
+    errors: 0,
+    status5xx: 0,
+    cacheHits: 0,
+    hitRequests: 0,
+    respBytes: 0,
+    latUsSum: 0,
+    latUsCount: 0,
+    ost5xx: 0,
+    ostTotal: 0,
+    rttSum: 0,
+    rttCount: 0,
+    plossSum: 0,
+    plossCount: 0,
+    cwndSum: 0,
+    cwndCount: 0,
+    rttvarSum: 0,
+    rttvarCount: 0,
+    retrans: 0,
+    latSum: 0,
+    lonSum: 0,
+    geoCount: 0,
+    missRequests: 0,
+    passRequests: 0,
+    deliverySum: 0,
+    deliveryCount: 0,
+    elapsedSum: 0,
+    elapsedCount: 0,
+    throughputSum: 0,
+    throughputCount: 0,
+    label: null,
+    hists: {
+      ttfb: null,
+      elapsed: null,
+      rtt: null,
+      ottfb: null,
+      ottlb: null,
+      obytes: null,
+      overhead: null,
+    },
+  };
 }
 
 /** Adds `from` into `into`; histograms are copied, never shared. */
@@ -349,11 +388,6 @@ function addAgg(into: RollupAgg, from: RollupAgg) {
     target.merge(h);
   }
 }
-
-/** Every row of a column a spec left out: NaN. */
-const SKIPPED: ArrayLike<unknown> = new Proxy({ length: 0 }, {
-  get: (_, property) => (property === "length" ? 0 : NaN),
-});
 
 const num = (value: unknown) =>
   typeof value === "bigint" ? Number(value) : typeof value === "number" ? value : 0;
@@ -508,24 +542,45 @@ export async function decodeRollup(
     ...Object.values(OVERVIEW_COLUMNS),
     ...Object.values(ASSET_COLUMNS),
     ...Object.values(VALUE_COLUMNS),
-  ])]));
-  const binary = await readSummaryColumns(parts, read(Object.values(HIST_COLUMNS)), false);
+  ])]), true, spec);
+  const histWanted = read(Object.values(HIST_COLUMNS));
+  const binary = histWanted.length
+    ? await readSummaryColumns(parts, histWanted, false, spec)
+    : { rows: 0, columns: new Map<string, ArrayLike<unknown>>() };
   // A column the spec left out reads as NaN; one the file lacks (an older summary) as 0.
   const skipped = (name: string) => spec !== undefined && !spec.columns.has(name);
-  const col = (name: string): ArrayLike<unknown> => columns.get(name) ?? (skipped(name) ? SKIPPED : []);
-  const [group, bucket, field, value, truncated, label, count] = [
-    col("bundle"),
-    col("bucket"),
-    col("field"),
-    col("value"),
-    col("truncated"),
-    col("label"),
-    col("count"),
-  ];
-  const sums = SUM_KEYS.map((key) => [key, col(SUM_COLUMNS[key])] as const);
-  const hists = HIST_KEYS.map(
-    (key) => [key, binary.columns.get(HIST_COLUMNS[key]) ?? []] as const,
-  );
+  const colNum = (name: string, i: number) => {
+    const values = columns.get(name);
+    if (values) return num(values[i]);
+    return skipped(name) ? NaN : 0;
+  };
+  const emptyCol: ArrayLike<unknown> = [];
+  const group = columns.get("bundle") ?? emptyCol;
+  const bucket = columns.get("bucket") ?? emptyCol;
+  const field = columns.get("field") ?? emptyCol;
+  const value = columns.get("value") ?? emptyCol;
+  const truncated = columns.get("truncated") ?? emptyCol;
+  const labelCol = columns.get("label");
+  const countCol = columns.get("count");
+  const countSkipped = !countCol && skipped("count");
+  const ttfbSumCol = columns.get("ttfb_sum");
+  const sampleKeyCol = columns.get("sample_key");
+  const rttSumCol = columns.get("rtt_sum");
+  const elapsedUsCol = columns.get("elapsed_us");
+
+  const presentSums: [SumKey, ArrayLike<unknown>][] = [];
+  const skippedSumKeys: SumKey[] = [];
+  for (const key of SUM_KEYS) {
+    const colName = SUM_COLUMNS[key];
+    const values = columns.get(colName);
+    if (values) presentSums.push([key, values]);
+    else if (skipped(colName)) skippedSumKeys.push(key);
+  }
+  const presentHists: [keyof RollupHists, ArrayLike<unknown>][] = [];
+  for (const key of HIST_KEYS) {
+    const values = binary.columns.get(HIST_COLUMNS[key]);
+    if (values) presentHists.push([key, values]);
+  }
   const rollup: Rollup = {
     dims: new Map(),
     series: new Map(),
@@ -538,19 +593,28 @@ export async function decodeRollup(
   const groups = spec?.groups;
   const readAgg = (i: number) => {
     const agg = emptyAgg();
-    for (const [key, values] of sums) agg[key] = num(values[i]);
-    agg.label = typeof label[i] === "string" ? (label[i] as string) : null;
-    for (const [key, values] of hists) {
+    for (let s = 0; s < skippedSumKeys.length; s++) agg[skippedSumKeys[s]] = NaN;
+    for (let s = 0; s < presentSums.length; s++) {
+      const [key, values] = presentSums[s];
+      agg[key] = num(values[i]);
+    }
+    if (labelCol) {
+      const v = labelCol[i];
+      agg.label = typeof v === "string" ? v : null;
+    }
+    for (let h = 0; h < presentHists.length; h++) {
+      const [key, values] = presentHists[h];
       const blob = values[i];
       agg.hists[key] = blob instanceof Uint8Array ? Histogram.fromBytes(blob) : null;
     }
     return agg;
   };
   for (let i = 0; i < rows; i++) {
+    const g = group[i];
     const name = String(field[i] ?? "");
-    if (groups && (!groups.has(String(group[i]))
-      || group[i] === "dim_totals" && !groups.has(String(value[i])))) continue;
-    switch (group[i]) {
+    if (groups && (!groups.has(String(g))
+      || g === "dim_totals" && !groups.has(String(value[i])))) continue;
+    switch (g) {
       case "dims": {
         const values = rollup.dims.get(name) ?? new Map<string, RollupAgg>();
         rollup.dims.set(name, values);
@@ -564,7 +628,7 @@ export async function decodeRollup(
       case "series1": {
         const t = bucketMs(bucket[i]);
         if (t === null) return null;
-        const series = group[i] === "series5" ? rollup.series : (rollup.series1 ??= new Map());
+        const series = g === "series5" ? rollup.series : (rollup.series1 ??= new Map());
         const values = series.get(name) ?? new Map();
         series.set(name, values);
         const key = String(value[i] ?? "");
@@ -580,32 +644,32 @@ export async function decodeRollup(
         if (truncated[i] === true) rollup.truncated.add(`${String(value[i])}/${name}`);
         if (value[i] === "value") {
           const totals = (rollup.valueTotals ??= new Map());
-          totals.set(name, (totals.get(name) ?? 0) + num(col("requests")[i]));
+          totals.set(name, (totals.get(name) ?? 0) + colNum("requests", i));
         } else if (value[i] === "bins") {
           const totals = (rollup.binsTotals ??= new Map());
-          totals.set(name, (totals.get(name) ?? 0) + num(col("requests")[i]));
+          totals.set(name, (totals.get(name) ?? 0) + colNum("requests", i));
         }
         break;
       case "value": {
         const t = bucketMs(bucket[i]);
         if (t === null) return null;
         const sums = {} as RollupValue;
-        for (const key of VALUE_KEYS) sums[key] = num(col(VALUE_COLUMNS[key])[i]);
+        for (const key of VALUE_KEYS) sums[key] = colNum(VALUE_COLUMNS[key], i);
         addValue((rollup.value ??= new Map()), name, String(value[i] ?? ""), t, sums);
         break;
       }
       case "overview": {
         const sums = {} as RollupWaterfall;
-        for (const key of WATERFALL_KEYS) sums[key] = num(col(WATERFALL_COLUMNS[key])[i]);
+        for (const key of WATERFALL_KEYS) sums[key] = colNum(WATERFALL_COLUMNS[key], i);
         rollup.waterfall = addWaterfall(rollup.waterfall, sums);
         const overview = {} as RollupOverview;
-        for (const key of OVERVIEW_KEYS) overview[key] = num(col(OVERVIEW_COLUMNS[key])[i]);
+        for (const key of OVERVIEW_KEYS) overview[key] = colNum(OVERVIEW_COLUMNS[key], i);
         rollup.overview = addSums(rollup.overview, overview, OVERVIEW_KEYS);
         break;
       }
       case "assets": {
         const asset = {} as RollupAsset;
-        for (const key of ASSET_KEYS) asset[key] = num(col(ASSET_COLUMNS[key])[i]);
+        for (const key of ASSET_KEYS) asset[key] = colNum(ASSET_COLUMNS[key], i);
         const assets = (rollup.assets ??= new Map());
         const key = String(value[i] ?? "");
         assets.set(key, addSums(assets.get(key), asset, ASSET_KEYS));
@@ -615,7 +679,7 @@ export async function decodeRollup(
         const values = rollup.fields.get(name) ?? new Map<string, number>();
         rollup.fields.set(name, values);
         const key = String(value[i] ?? "");
-        values.set(key, (values.get(key) ?? 0) + num(count[i]));
+        values.set(key, (values.get(key) ?? 0) + (countCol ? num(countCol[i]) : countSkipped ? NaN : 0));
         break;
       }
       case "field_totals":
@@ -623,11 +687,11 @@ export async function decodeRollup(
         break;
       case "sample": {
         const t = bucketMs(bucket[i]);
-        const ttfb = col("ttfb_sum")[i];
-        const key = col("sample_key")[i];
+        const ttfb = ttfbSumCol ? ttfbSumCol[i] : skipped("ttfb_sum") ? NaN : undefined;
+        const key = sampleKeyCol ? sampleKeyCol[i] : skipped("sample_key") ? NaN : undefined;
         if (t === null || ttfb == null || key == null) break;
-        const rtt = col("rtt_sum")[i];
-        const elapsed = col("elapsed_us")[i];
+        const rtt = rttSumCol ? rttSumCol[i] : skipped("rtt_sum") ? NaN : undefined;
+        const elapsed = elapsedUsCol ? elapsedUsCol[i] : skipped("elapsed_us") ? NaN : undefined;
         (rollup.samples ??= []).push({
           key: typeof key === "bigint" ? key : BigInt(Math.trunc(num(key))),
           tsMs: t,
@@ -639,8 +703,8 @@ export async function decodeRollup(
         break;
       }
       default:
-        if (KEYED_GROUPS.has(String(group[i]))) {
-          addKeyed(rollup.groups!, String(group[i]), name, String(value[i] ?? ""), readAgg(i), false);
+        if (KEYED_GROUPS.has(String(g))) {
+          addKeyed(rollup.groups!, String(g), name, String(value[i] ?? ""), readAgg(i), false);
         }
     }
   }
@@ -921,7 +985,8 @@ export type RollupResidual = {
   };
 };
 
-const DECODED_LIMIT = 64;
+const DECODED_LIMIT = 256;
+const MERGED_LIMIT = 8;
 const RESIDUAL_READ_CONCURRENCY = 4;
 let rollupEpoch = 0;
 type SharedRollup = {
@@ -931,6 +996,7 @@ type SharedRollup = {
   promise: Promise<RollupResult | null>;
 };
 const decoded = new Map<string, Promise<Rollup | null>>();
+const mergedResults = new Map<string, RollupResult>();
 const inflight = new Map<string, SharedRollup>();
 const activeRollupControllers = new Set<AbortController>();
 
@@ -947,6 +1013,7 @@ export function clearRollupQueryCache(): void {
   }
   inflight.clear();
   decoded.clear();
+  mergedResults.clear();
 }
 
 function decodeCached(
@@ -1113,8 +1180,8 @@ async function runRollup(
     }
   };
   assertRollupActive();
-  const from = new Date(fromMs).toISOString();
-  const to = new Date(toMs).toISOString();
+  const from = new Date(Math.floor(fromMs / 1000) * 1000).toISOString();
+  const to = new Date(Math.ceil(toMs / 1000) * 1000).toISOString();
   const { raw, summaries } = await fetchManifestWithSummaries(
     source.fetchJson,
     from,
@@ -1127,6 +1194,7 @@ async function runRollup(
   // one: its raw files fall to other summaries or the residual, so it stays exact.
   const missing = new Set<string>();
   let plan: RollupPlan | null;
+  let mergedKey = "";
   let decodedParts: (Rollup | null)[];
   let residualPart: Rollup | null;
   for (;;) {
@@ -1138,6 +1206,13 @@ async function runRollup(
       residual ? { residualBytes: residual.maxBytes } : {},
     );
     if (!plan) return null;
+    mergedKey = `${source.cacheScope ?? "default"}|${spec?.id ?? "whole"}|${residual?.id ?? ""}|${plan.dataFromMs}|${plan.dataThroughMs}|${plan.files.map((use) => use.file.key).join(",")}|${(plan.residual ?? []).map((f) => f.key).join(",")}`;
+    const cachedMerged = mergedResults.get(mergedKey);
+    if (cachedMerged) {
+      mergedResults.delete(mergedKey);
+      mergedResults.set(mergedKey, cachedMerged);
+      return cachedMerged;
+    }
     try {
       [decodedParts, residualPart] = await Promise.all([
         Promise.all(
@@ -1188,12 +1263,19 @@ async function runRollup(
     }
     if (startMs < endMs) missingRanges.set(key, { startMs, endMs });
   }
-  return {
+  const result: RollupResult = {
     rollup: merged,
     dataFromMs: plan.dataFromMs,
     dataThroughMs: plan.dataThroughMs,
     missingRanges,
   };
+  if (callRollupEpoch === rollupEpoch && !signal.aborted) {
+    mergedResults.set(mergedKey, result);
+    while (mergedResults.size > MERGED_LIMIT) {
+      mergedResults.delete(mergedResults.keys().next().value!);
+    }
+  }
+  return result;
 }
 
 /**

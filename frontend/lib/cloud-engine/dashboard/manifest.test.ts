@@ -1389,6 +1389,137 @@ describe("closed-hour manifest cache", () => {
     expect(subRaw.summaryFiles).toBeUndefined();
     expect(fetchJson).toHaveBeenCalledTimes(1);
   });
+
+  it("does not let an older baseline window overwrite a newer persisted snapshot", async () => {
+    fakeManifestCacheStorage();
+    const scope = '["insights-to-network","service"]';
+    const todayFrom = T0 + 24 * H;
+    const todayTo = T0 + 48 * H;
+    const yesterdayFrom = T0;
+    const yesterdayTo = T0 + 24 * H;
+    const todayFile = file(todayFrom + H);
+    const yesterdayFile = file(yesterdayFrom + H);
+    const todaySum = { ...file(todayFrom, 60), key: "sum-today", kind: "hour" as const };
+    const yesterdaySum = { ...file(yesterdayFrom, 60), key: "sum-yesterday", kind: "hour" as const };
+    const calls: URLSearchParams[] = [];
+    const fetchJson = Object.assign(
+      vi.fn(async (input: string) => {
+        const params = new URL(input, "http://x").searchParams;
+        calls.push(params);
+        const reqFrom = Date.parse(params.get("from")!);
+        const isToday = reqFrom >= todayFrom;
+        if (!params.has("since_generation")) {
+          return {
+            files: [isToday ? todayFile : yesterdayFile],
+            summary_files: [isToday ? todaySum : yesterdaySum],
+            next_cursor: null,
+            complete: true,
+            catalog_generation: 100,
+          };
+        }
+        return {
+          files: isToday ? [todayFile] : [yesterdayFile],
+          summary_files: [],
+          changes: [],
+          summary_partitions: [],
+          base_generation: 100,
+          catalog_generation: 100,
+          next_cursor: null,
+          complete: true,
+        };
+      }),
+      { manifestCacheScope: () => scope },
+    );
+
+    // 1. /insights queries today, then yesterday (baseline) at the same generation.
+    await fetchManifest(fetchJson, iso(todayFrom), iso(todayTo), undefined, undefined, undefined, true);
+    await fetchManifest(fetchJson, iso(yesterdayFrom), iso(yesterdayTo), undefined, undefined, undefined, true);
+
+    // 2. Navigate to /network (fresh module load) and query today + 60s.
+    vi.resetModules();
+    const { fetchManifest: fetchAfterNav } = await import("./manifest");
+    calls.length = 0;
+    await fetchAfterNav(
+      fetchJson,
+      iso(todayFrom + 60_000),
+      iso(todayTo + 60_000),
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].get("previous_from")).toBe(iso(todayFrom));
+    expect(calls[0].get("previous_to")).toBe(iso(todayTo));
+  });
+
+  it("coalesces an in-flight superset listing for a concurrent sub-range caller", async () => {
+    const f1 = file(T0);
+    const f2 = file(T0 + 10 * H);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fetchJson = vi.fn(async () => {
+      await gate;
+      return {
+        files: [f1, f2],
+        summary_files: [{ ...file(T0 + 10 * H, 60), key: "sum-2", kind: "hour" as const }],
+        next_cursor: null,
+        complete: true,
+        catalog_generation: 12,
+      };
+    });
+
+    const pFull = fetchManifest(fetchJson, iso(T0), iso(T0 + 24 * H), undefined, "request", "raw", true);
+    const pSubSum = fetchManifest(fetchJson, iso(T0 + 8 * H), iso(T0 + 24 * H), undefined, "request", "raw", true);
+    const pSubRaw = fetchManifest(fetchJson, iso(T0 + 8 * H), iso(T0 + 24 * H), undefined, "request", "raw", false);
+    release();
+
+    const [full, subSum, subRaw] = await Promise.all([pFull, pSubSum, pSubRaw]);
+    expect(fetchJson).toHaveBeenCalledTimes(1);
+    expect(keys(full.files)).toEqual(keys([f1, f2]));
+    expect(keys(subSum.files)).toEqual(keys([f2]));
+    expect(keys(subRaw.files)).toEqual(keys([f2]));
+    expect(subRaw.summaryFiles).toBeUndefined();
+  });
+
+  it("reuses a fresh persisted summaries snapshot for a raw-only caller across worker/main-thread boundary", async () => {
+    fakeManifestCacheStorage();
+    const scope = '["worker-to-main","service"]';
+    const f1 = file(T0);
+    const f2 = file(T0 + 10 * H);
+    const sum1 = { ...file(T0, 60), key: "sum-1", kind: "hour" as const };
+    const calls: URLSearchParams[] = [];
+    const fetchJson = Object.assign(
+      vi.fn(async (input: string) => {
+        const params = new URL(input, "http://x").searchParams;
+        calls.push(params);
+        return {
+          files: [f1, f2],
+          summary_files: [sum1],
+          next_cursor: null,
+          complete: true,
+          catalog_generation: 55,
+        };
+      }),
+      { manifestCacheScope: () => scope },
+    );
+
+    // Worker lists with summaries=true and persists to CacheStorage.
+    await fetchManifest(fetchJson, iso(T0), iso(T0 + 24 * H), undefined, undefined, undefined, true);
+    expect(calls).toHaveLength(1);
+
+    // Main thread (separate module memory) requests raw files within SNAPSHOT_REUSE_MS.
+    vi.resetModules();
+    const { fetchManifest: fetchOnMain } = await import("./manifest");
+    calls.length = 0;
+    const rawResult = await fetchOnMain(fetchJson, iso(T0 + 8 * H), iso(T0 + 24 * H), undefined, "request", "raw", false);
+    expect(calls).toHaveLength(0);
+    expect(keys(rawResult.files)).toEqual(keys([f2]));
+    expect(rawResult.summaryFiles).toBeUndefined();
+    expect(rawResult.catalogGeneration).toBe(55);
+  });
 });
 
 describe("forked catalog listing", () => {
