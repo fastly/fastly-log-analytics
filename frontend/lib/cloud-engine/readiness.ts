@@ -1959,7 +1959,11 @@ function scanContinuationParamsEnd(
         while (ws < len && isInlineWs(line[ws])) ws += 1;
         const itemSlice = line.slice(next, itemEnd);
         const hasUrl = itemSlice.includes("[url]") || (allowQuoted && itemSlice.includes("://"));
-        const isJsonMemberKey = itemSlice.endsWith(":") || line[ws] === ":";
+        let isJsonMemberKey = itemSlice === "[redacted]:" || (itemSlice === "[redacted]" && line[ws] === ":");
+        if (!isJsonMemberKey && allowQuoted && (line[next] === '"' || line[next] === "'" || line[next] === "`")) {
+          const qEnd = scanQuotedLiteralEnd(line, next, line[next]!, escapeState);
+          isJsonMemberKey = (qEnd === itemEnd && line[ws] === ":") || (qEnd === itemEnd - 1 && line[itemEnd - 1] === ":");
+        }
         const hasGluedSentinelOrQuote = keySegments > 1 && !isJsonMemberKey && (
           itemSlice.includes("[redacted]")
           || (allowQuoted && /['"`]/.test(itemSlice))
