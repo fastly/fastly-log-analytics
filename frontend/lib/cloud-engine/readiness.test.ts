@@ -4119,6 +4119,161 @@ it("SEC-T5-ITER40-FE-03: prevents non-contraction apostrophe mismatch and cross-
         ["token", "error"],
         "Error: Runtime Error: [redacted]",
       ],
+      // Wave 64 / Iter 65: Verifier 3 & Verifier 5 #5 — Spaced : in authParamMode, continuation params, and : : : runs
+      [
+        "Runtime Error: WWW-Authenticate: Bearer : error",
+        ["WWW-Authenticate", "Bearer", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "WWW-Authenticate": Bearer : error',
+        ["WWW-Authenticate", "Bearer", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Digest : error",
+        ["Authorization", "Digest", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": Digest : error',
+        ["Authorization", "Digest", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Digest": : error',
+        ["Digest", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Cookie: a=1; : error",
+        ["Cookie", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Digest a=1, : error",
+        ["Authorization", "Digest", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: token: : : error",
+        ["token", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "token": : : error',
+        ["token", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Bearer : : error",
+        ["Authorization", "Bearer", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 64 / Iter 65: Verifier 5 #1 — Dot-prefixed secret keys in Stage 2B
+      [
+        "Runtime Error: config[0].password = error",
+        ["password", "error", "="],
+        "Error: Runtime Error: config[[redacted]][redacted]",
+      ],
+      [
+        "Runtime Error: headers[0].cookie: path = error; mode = timeout",
+        ["cookie", "path", "error", "mode", "timeout", "="],
+        "Error: Runtime Error: headers[[redacted]][redacted]",
+      ],
+      [
+        "Runtime Error: headers[0].authorization: CustomScheme error",
+        ["authorization", "CustomScheme", "error"],
+        "Error: Runtime Error: headers[[redacted]][redacted]",
+      ],
+      [
+        "Runtime Error: .token: error",
+        ["token", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 64 / Iter 65: Verifier 5 #2 — SQL typed single-quoted secret keys & E'...' / U&'...' escapes
+      [
+        "Runtime Error: N'token': error",
+        ["token", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: r'token': error",
+        ["token", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: R'Authorization': CustomScheme error",
+        ["Authorization", "CustomScheme", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: b'token': error",
+        ["token", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: E'tok\\x65n': error",
+        ["tok", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: E'\\164oken': error",
+        ["oken", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: E'\\U00000074oken': error",
+        ["oken", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: U&'\\0074oken': error",
+        ["oken", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: U&'tok\\+000065n': error",
+        ["tok", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 64 / Iter 65: Verifier 5 #3 — isNonBase64KvParamAfterKey real kv params
+      [
+        "Runtime Error: Authorization: Bearer accessToken= error",
+        ["Authorization", "Bearer", "accessToken", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Bearer clientId123= error, scope = timeout",
+        ["Authorization", "Bearer", "clientId123", "error", "scope", "timeout", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": Bearer accessToken= error',
+        ["Authorization", "Bearer", "accessToken", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 64 / Iter 65: Verifier 5 #4 — scanCookieExpiresValueEnd Go/JS/HTTP date formats
+      [
+        "Runtime Error: Set-Cookie: sid=1; Expires=2099-01-01 00:00:00 +0000 UTC; path = error",
+        ["Set-Cookie", "sid", "Expires", "2099", "UTC", "path", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Set-Cookie: sid=1; Expires=Jan 01, 2099 00:00:00 GMT; path = error",
+        ["Set-Cookie", "sid", "Expires", "Jan", "2099", "GMT", "path", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Set-Cookie: sid=1; Expires=2099-01-01 00:00:00 GMT +0000; path = error",
+        ["Set-Cookie", "sid", "Expires", "2099", "GMT", "path", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Set-Cookie": sid=1; Expires=2099-01-01 00:00:00 +0000 UTC; path = error',
+        ["Set-Cookie", "sid", "Expires", "2099", "UTC", "path", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
     ];
     for (const [msg, forbidden, expectedExact] of cases) {
       const err = new Error(msg);

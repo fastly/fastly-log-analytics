@@ -246,23 +246,44 @@ function scanCookieExpiresValueEnd(line: string, vStart: number): number {
   };
   const scanOptionalTzAndParen = (pos: number): number => {
     let p = pos;
+    const isTzDelim = (idx: number): boolean => (
+      idx >= len || isInlineWs(line[idx]) || line[idx] === ";" || line[idx] === ","
+    );
     const afterWs1 = skipWs(p);
     if (afterWs1 > p && afterWs1 < len) {
       let tzEnd = -1;
       const alphaEnd = scanAlpha(afterWs1, 1, 5);
       if (alphaEnd !== -1) {
         const offEnd = scanTzOffset(alphaEnd);
-        tzEnd = offEnd !== -1 ? offEnd : alphaEnd;
-      } else {
-        const offEnd = scanTzOffset(afterWs1);
         if (offEnd !== -1) {
           tzEnd = offEnd;
+        } else if (isTzDelim(alphaEnd)) {
+          tzEnd = alphaEnd;
+          const afterAlphaWs = skipWs(alphaEnd);
+          if (afterAlphaWs > alphaEnd) {
+            const spacedOffEnd = scanTzOffset(afterAlphaWs);
+            if (spacedOffEnd !== -1 && isTzDelim(spacedOffEnd)) {
+              tzEnd = spacedOffEnd;
+            }
+          }
+        }
+      } else {
+        const offEnd = scanTzOffset(afterWs1);
+        if (offEnd !== -1 && isTzDelim(offEnd)) {
+          tzEnd = offEnd;
+          const afterOffWs = skipWs(offEnd);
+          if (afterOffWs > offEnd) {
+            const spacedAlphaEnd = scanAlpha(afterOffWs, 1, 5);
+            if (spacedAlphaEnd !== -1 && isTzDelim(spacedAlphaEnd)) {
+              tzEnd = spacedAlphaEnd;
+            }
+          }
         } else {
           const yearEnd = scanDigits(afterWs1, 4, 4);
           if (yearEnd !== -1 && !isAsciiDigit(line[yearEnd])) tzEnd = yearEnd;
         }
       }
-      if (tzEnd !== -1 && (tzEnd >= len || isInlineWs(line[tzEnd]) || line[tzEnd] === ";" || line[tzEnd] === ",")) {
+      if (tzEnd !== -1 && isTzDelim(tzEnd)) {
         p = tzEnd;
       }
     }
@@ -282,12 +303,23 @@ function scanCookieExpiresValueEnd(line: string, vStart: number): number {
       }
       if (parenEnd > afterWs2 + 1 && parenEnd < len && line[parenEnd] === ")") {
         const closed = parenEnd + 1;
-        if (closed >= len || isInlineWs(line[closed]) || line[closed] === ";" || line[closed] === ",") {
+        if (isTzDelim(closed)) {
           p = closed;
         }
       }
     }
     return p;
+  };
+  const finishDateOrSemi = (pos: number): number => {
+    if (pos < len && isInlineWs(line[pos])) {
+      for (let s = pos; s < len; s += 1) {
+        const ch = line[s]!;
+        if (ch === ";") return s;
+        if (ch === "=" || ch === "\r" || ch === "\n" || ch === "}" || ch === "]") break;
+        if ((ch === '"' || ch === "'" || ch === "`") && line[s + 1] === ":") break;
+      }
+    }
+    return pos;
   };
   const scanTime = (pos: number): number => {
     const hEnd = scanDigits(pos, 1, 2);
@@ -338,9 +370,9 @@ function scanCookieExpiresValueEnd(line: string, vStart: number): number {
         }
         if (hasTime) {
           p = scanOptionalTzAndParen(p);
-          if (isDateBoundary(p, false)) return p;
+          if (isDateBoundary(p, false)) return finishDateOrSemi(p);
         } else if (isDateBoundary(p, true)) {
-          return p;
+          return finishDateOrSemi(p);
         }
       }
     }
@@ -395,7 +427,7 @@ function scanCookieExpiresValueEnd(line: string, vStart: number): number {
       }
     }
   }
-  // Form B: Mon ws+ DD (ws+ YYYY)?
+  // Form B: Mon ws+ DD,? (ws+ YYYY)?
   if (dateEnd === -1) {
     const mEndB = scanAlpha(p, 3, 9);
     if (mEndB !== -1) {
@@ -404,8 +436,9 @@ function scanCookieExpiresValueEnd(line: string, vStart: number): number {
         const dEndB = scanDigits(sep1, 1, 2);
         if (dEndB !== -1 && !isAsciiDigit(line[dEndB])) {
           dateEnd = dEndB;
-          const sep2 = skipWs(dEndB);
-          if (sep2 > dEndB) {
+          const afterDay = line[dEndB] === "," ? dEndB + 1 : dEndB;
+          const sep2 = skipWs(afterDay);
+          if (sep2 > afterDay) {
             const yEndB = scanDigits(sep2, 2, 4);
             if (yEndB !== -1 && !isAsciiDigit(line[yEndB]) && line[yEndB] !== ":") {
               dateEnd = yEndB;
@@ -422,22 +455,23 @@ function scanCookieExpiresValueEnd(line: string, vStart: number): number {
       const tEnd = scanTime(afterDateWs);
       if (tEnd !== -1) {
         const fullEnd = scanOptionalTzAndParen(tEnd);
-        if (isDateBoundary(fullEnd, false)) return fullEnd;
+        if (isDateBoundary(fullEnd, false)) return finishDateOrSemi(fullEnd);
       }
       // Truncated date with hour only (e.g. "01 Jan 2099 00")
       const truncHr = scanDigits(afterDateWs, 1, 2);
       if (truncHr !== -1 && !isAsciiDigit(line[truncHr]) && isDateBoundary(truncHr, true)) {
-        return truncHr;
+        return finishDateOrSemi(truncHr);
       }
     }
-    if (isDateBoundary(dateEnd, true)) return dateEnd;
+    if (isDateBoundary(dateEnd, true)) return finishDateOrSemi(dateEnd);
   }
 
   // 3. Semicolon fallback (O(N), no 128-char cap)
   for (let s = vStart; s < len; s += 1) {
     const ch = line[s]!;
     if (ch === ";") return s;
-    if (ch === "=" || ch === "\r" || ch === "\n") break;
+    if (ch === "=" || ch === "\r" || ch === "\n" || ch === "}" || ch === "]") break;
+    if ((ch === '"' || ch === "'" || ch === "`") && line[s + 1] === ":") break;
   }
   return -1;
 }
@@ -584,6 +618,26 @@ function advancePastSepRun(line: string, pos: number): number {
   return p;
 }
 
+function advancePastSpacedSepRun(line: string, pos: number): { afterLastSep: number; vStart: number } {
+  const len = line.length;
+  let afterLastSep = pos;
+  let p = pos;
+  while (p < len) {
+    const next = advancePastSepRun(line, p);
+    if (next > p) {
+      afterLastSep = next;
+      p = next;
+      continue;
+    }
+    if (isInlineWs(line[p])) {
+      p += 1;
+      continue;
+    }
+    break;
+  }
+  return { afterLastSep, vStart: p };
+}
+
 function advancePastAuthSchemeSep(line: string, sEnd: number): number {
   return advancePastSepRun(line, sEnd);
 }
@@ -602,11 +656,31 @@ function isNonBase64KvParamAfterKey(line: string, keyStart: number, k: number): 
     if (isInlineWs(line[afterSep])) {
       const key = line.slice(keyStart, k);
       const totalLen = afterSep - keyStart;
+      let nextPos = afterSep;
+      while (nextPos < line.length && isInlineWs(line[nextPos])) nextPos += 1;
+      let tokEnd = nextPos;
+      while (
+        tokEnd < line.length
+        && !isInlineWs(line[tokEnd])
+        && line[tokEnd] !== ","
+        && line[tokEnd] !== ";"
+        && line[tokEnd] !== "\r"
+        && line[tokEnd] !== "\n"
+      ) {
+        tokEnd += 1;
+      }
+      let afterTok = tokEnd;
+      while (afterTok < line.length && isInlineWs(line[afterTok])) afterTok += 1;
+      const followedByComma = tokEnd > nextPos && line[afterTok] === ",";
       if (
-        totalLen >= 12
+        !followedByComma
+        && totalLen >= 16
         && totalLen % 4 === 0
         && /^[A-Za-z0-9+/_-]+$/.test(key)
-        && (/[0-9+/]/.test(key) || (/[A-Z]/.test(key) && /[a-z]/.test(key)))
+        && /[A-Z]/.test(key)
+        && /[a-z]/.test(key)
+        && /[0-9+/]/.test(key)
+        && !isSecretKeyStem(key)
       ) {
         return false;
       }
@@ -1331,7 +1405,7 @@ function redactPostColonDiagnosticTail(line1: string): string {
   return line1;
 }
 
-function unescapeJsonKey(raw: string): string {
+function unescapeJsonKey(raw: string, isSqlUnicodeEscape = false): string {
   if (!raw.includes("\\")) return raw;
   let out = "";
   const len = raw.length;
@@ -1339,6 +1413,38 @@ function unescapeJsonKey(raw: string): string {
     const c = raw[i]!;
     if (c === "\\" && i + 1 < len) {
       const next = raw[i + 1]!;
+      if (isSqlUnicodeEscape) {
+        if (next === "\\") {
+          out += "\\";
+          i += 1;
+          continue;
+        }
+        if (
+          next === "+"
+          && i + 7 < len
+          && isHexDigit(raw[i + 2]) && isHexDigit(raw[i + 3])
+          && isHexDigit(raw[i + 4]) && isHexDigit(raw[i + 5])
+          && isHexDigit(raw[i + 6]) && isHexDigit(raw[i + 7])
+        ) {
+          const cp = parseInt(raw.slice(i + 2, i + 8), 16);
+          if (cp <= 0x10ffff) {
+            out += String.fromCodePoint(cp);
+            i += 7;
+            continue;
+          }
+        }
+        if (
+          i + 4 < len
+          && isHexDigit(raw[i + 1]) && isHexDigit(raw[i + 2])
+          && isHexDigit(raw[i + 3]) && isHexDigit(raw[i + 4])
+        ) {
+          out += String.fromCharCode(parseInt(raw.slice(i + 1, i + 5), 16));
+          i += 4;
+          continue;
+        }
+        out += c;
+        continue;
+      }
       switch (next) {
         case "\\": out += "\\"; i += 1; continue;
         case '"': out += '"'; i += 1; continue;
@@ -1349,6 +1455,14 @@ function unescapeJsonKey(raw: string): string {
         case "n": out += "\n"; i += 1; continue;
         case "r": out += "\r"; i += 1; continue;
         case "t": out += "\t"; i += 1; continue;
+        case "x":
+          if (i + 2 < len && isHexDigit(raw[i + 2])) {
+            const hexEnd = i + 3 < len && isHexDigit(raw[i + 3]) ? i + 4 : i + 3;
+            out += String.fromCharCode(parseInt(raw.slice(i + 2, hexEnd), 16));
+            i = hexEnd - 1;
+            continue;
+          }
+          break;
         case "u":
           if (
             i + 5 < len
@@ -1360,7 +1474,36 @@ function unescapeJsonKey(raw: string): string {
             continue;
           }
           break;
+        case "U":
+          if (
+            i + 9 < len
+            && isHexDigit(raw[i + 2]) && isHexDigit(raw[i + 3])
+            && isHexDigit(raw[i + 4]) && isHexDigit(raw[i + 5])
+            && isHexDigit(raw[i + 6]) && isHexDigit(raw[i + 7])
+            && isHexDigit(raw[i + 8]) && isHexDigit(raw[i + 9])
+          ) {
+            const cp = parseInt(raw.slice(i + 2, i + 10), 16);
+            if (cp <= 0x10ffff) {
+              out += String.fromCodePoint(cp);
+              i += 9;
+              continue;
+            }
+          }
+          break;
         default:
+          if (next >= "0" && next <= "7") {
+            let octEnd = i + 2;
+            const octLimit = Math.min(len, i + 4);
+            while (octEnd < octLimit && raw[octEnd]! >= "0" && raw[octEnd]! <= "7") {
+              octEnd += 1;
+            }
+            const val = parseInt(raw.slice(i + 1, octEnd), 8);
+            if (val <= 0xff) {
+              out += String.fromCharCode(val);
+              i = octEnd - 1;
+              continue;
+            }
+          }
           break;
       }
     }
@@ -1480,13 +1623,14 @@ function consumeJsonSecretValueAfterQuote(
   pos: number,
   keyCandidate: string,
   escapeState?: QuoteEscapeState,
+  isSqlUnicodeEscape = false,
 ): number {
   const len = line1.length;
   let p = pos;
   while (p < len && isInlineWs(line1[p])) p += 1;
   const afterSep = advancePastSepRun(line1, p);
   if (afterSep === p) return pos;
-  const decodedKey = unescapeJsonKey(keyCandidate);
+  const decodedKey = unescapeJsonKey(keyCandidate, isSqlUnicodeEscape);
   if (!isSecretJsonKey(decodedKey)) return pos;
   const decodedKeyLower = decodedKey.toLowerCase();
   const keyAuthScheme = AUTH_SCHEMES.has(decodedKeyLower) ? decodedKeyLower : "";
@@ -1541,11 +1685,9 @@ function consumeJsonSecretValueAfterQuote(
   if (cookieMode || authParamMode) {
     valEnd = scanSecretHeaderOrValueEnd(line1, valStart, decodedKey, matchedScheme, true, true, escapeState);
   } else if (line1[valStart] === "=" || (line1[valStart] === ":" && !line1.startsWith("://", valStart))) {
-    const afterValSep = advancePastSepRun(line1, valStart);
-    let vStart = afterValSep;
-    while (vStart < len && (isInlineWs(line1[vStart]) || line1[vStart] === "=")) vStart += 1;
+    const { afterLastSep, vStart } = advancePastSpacedSepRun(line1, valStart);
     valEnd = scanJsonValueEnd(line1, vStart, escapeState);
-    if (valEnd === vStart) valEnd = afterValSep;
+    if (valEnd === vStart) valEnd = afterLastSep;
     if (matchedScheme !== "" && valEnd > valStart) {
       valEnd = scanContinuationParamsEnd(line1, valEnd, false, true, true, escapeState);
     }
@@ -1693,9 +1835,12 @@ function scanQuotesAndUrlsPass(
         }
       }
       if (i > limit) i = limit;
-      if ((typedLen === 0 || isEscapeSingle) && contentEnd > contentStart && i < limit) {
+      if (contentEnd > contentStart && i < limit) {
         const subState: QuoteEscapeState = { backslashEscapesQuotes, sawAmbiguousBackslashQuote };
-        i = Math.min(limit, consumeJsonSecretValueAfterQuote(line1, i, line1.slice(contentStart, contentEnd), subState));
+        i = Math.min(
+          limit,
+          consumeJsonSecretValueAfterQuote(line1, i, line1.slice(contentStart, contentEnd), subState, typedLen === 3),
+        );
         sawAmbiguousBackslashQuote = subState.sawAmbiguousBackslashQuote;
       }
       spans.push({ start: spanStart, end: i, replacement: "[redacted]" });
@@ -2311,8 +2456,7 @@ function tryFinishKeyValueParamEnd(
   if (rejectDoubleEq && sepSlice.startsWith("==")) {
     return -1;
   }
-  let vStart = afterSep;
-  while (vStart < len && (isInlineWs(line[vStart]) || line[vStart] === "=")) vStart += 1;
+  const vStart = advancePastSpacedSepRun(line, afterSep).vStart;
   if (rejectDoubleEq && vStart >= len) {
     return -1;
   }
@@ -2386,10 +2530,28 @@ function scanContinuationParamsEnd(
         end = next;
         continue;
       }
-      if (line[next] === "=" || line[next] === ":") {
+      if (line[next] === "=" || (line[next] === ":" && !line.startsWith("://", next))) {
         const kvNext = tryFinishKeyValueParamEnd(line, next, "", true, allowQuoted, escapeState);
         if (kvNext !== -1) {
           end = kvNext;
+          continue;
+        }
+        const { afterLastSep, vStart } = advancePastSpacedSepRun(line, next);
+        if (vStart < len && !line.startsWith("[url]", vStart)) {
+          const kvAfter = tryScanKeyValueParamEnd(line, vStart, true, allowQuoted, escapeState);
+          if (kvAfter !== -1) {
+            end = kvAfter;
+            continue;
+          }
+          let vEnd = scanSingleSecretValueEnd(line, vStart, true, false, allowQuoted, escapeState);
+          vEnd = consumeChainedUrlEquals(line, vStart, vEnd, true, allowQuoted, escapeState);
+          if (vEnd > vStart) {
+            end = vEnd;
+            continue;
+          }
+        }
+        if (afterLastSep > next) {
+          end = afterLastSep;
           continue;
         }
       }
@@ -2438,10 +2600,28 @@ function scanContinuationParamsEnd(
         end = next;
         continue;
       }
-      if (line[next] === "=" || line[next] === ":") {
+      if (line[next] === "=" || (line[next] === ":" && !line.startsWith("://", next))) {
         const kvNext = tryFinishKeyValueParamEnd(line, next, "", false, allowQuoted, escapeState);
         if (kvNext !== -1) {
           end = kvNext;
+          continue;
+        }
+        const { afterLastSep, vStart } = advancePastSpacedSepRun(line, next);
+        if (vStart < len && !line.startsWith("[url]", vStart)) {
+          const kvAfter = tryScanKeyValueParamEnd(line, vStart, false, allowQuoted, escapeState);
+          if (kvAfter !== -1) {
+            end = kvAfter;
+            continue;
+          }
+          let vEnd = scanSingleSecretValueEnd(line, vStart, true, false, allowQuoted, escapeState);
+          vEnd = consumeChainedUrlEquals(line, vStart, vEnd, false, allowQuoted, escapeState);
+          if (vEnd > vStart) {
+            end = vEnd;
+            continue;
+          }
+        }
+        if (afterLastSep > next) {
+          end = afterLastSep;
           continue;
         }
       }
@@ -2532,21 +2712,34 @@ function scanSecretHeaderOrValueEnd(
   const allowUrl = cookieMode || authParamMode;
   let end: number;
   if (cookieMode || authParamMode) {
-    const kvEnd = line[p] === "=" || line[p] === ":"
+    const startsWithSep = line[p] === "=" || (line[p] === ":" && !line.startsWith("://", p));
+    const kvEnd = startsWithSep
       ? tryFinishKeyValueParamEnd(line, p, "", cookieMode, allowQuoted, escapeState)
       : tryScanKeyValueParamEnd(line, p, cookieMode, allowQuoted, escapeState);
     if (kvEnd !== -1) {
       end = kvEnd;
+    } else if (startsWithSep) {
+      const { afterLastSep, vStart } = advancePastSpacedSepRun(line, p);
+      if (vStart < line.length && (allowUrl || !line.startsWith("[url]", vStart))) {
+        const kvAfter = tryScanKeyValueParamEnd(line, vStart, cookieMode, allowQuoted, escapeState);
+        if (kvAfter !== -1) {
+          end = kvAfter;
+        } else {
+          end = scanSingleSecretValueEnd(line, vStart, allowRedacted, allowUrl, allowQuoted, escapeState);
+          end = consumeChainedUrlEquals(line, vStart, end, cookieMode, allowQuoted, escapeState);
+          if (end === vStart) end = afterLastSep;
+        }
+      } else {
+        end = afterLastSep;
+      }
     } else {
       end = scanSingleSecretValueEnd(line, p, allowRedacted, allowUrl, allowQuoted, escapeState);
       end = consumeChainedUrlEquals(line, p, end, cookieMode, allowQuoted, escapeState);
     }
   } else if (line[p] === "=" || (line[p] === ":" && !line.startsWith("://", p))) {
-    const afterValSep = advancePastSepRun(line, p);
-    let vStart = afterValSep;
-    while (vStart < line.length && (isInlineWs(line[vStart]) || line[vStart] === "=")) vStart += 1;
+    const { afterLastSep, vStart } = advancePastSpacedSepRun(line, p);
     end = scanSingleSecretValueEnd(line, vStart, allowRedacted, false, allowQuoted, escapeState);
-    if (end === vStart) end = afterValSep;
+    if (end === vStart) end = afterLastSep;
     if (authScheme !== "") {
       authParamMode = true;
     }
@@ -2826,19 +3019,29 @@ function emitAllowlistedTokens(line: string): string {
           if (line.startsWith("[redacted]", j) || line.startsWith("[url]", j)) break;
           j += 1;
         }
-        parts.push("[redacted]");
-        i = j;
-        isClauseStart = false;
+        const dotTok = line.slice(i + 1, j);
+        const dotBare = dotTok.replace(/^\.+/, "");
+        const isDotSecret = dotBare.length > 0 && (
+          findSecretKeySep(dotTok) !== null
+          || isSecretKeyStem(dotBare)
+          || AUTH_SCHEMES.has(dotBare.toLowerCase())
+        );
+        if (!isDotSecret) {
+          parts.push("[redacted]");
+          i = j;
+          isClauseStart = false;
+          prevTokLower = "";
+          prevTokExact = "";
+          continue;
+        }
+      } else {
+        parts.push(ch);
+        i += 1;
+        isClauseStart = true;
         prevTokLower = "";
         prevTokExact = "";
         continue;
       }
-      parts.push(ch);
-      i += 1;
-      isClauseStart = true;
-      prevTokLower = "";
-      prevTokExact = "";
-      continue;
     }
     if (ch === ";") {
       parts.push(" ");
@@ -2999,6 +3202,8 @@ function emitAllowlistedTokens(line: string): string {
       continue;
     }
     const rawLower = rawTok.toLowerCase();
+    const bareTok = rawTok.startsWith(".") ? rawTok.replace(/^\.+/, "") : rawTok;
+    const bareLower = bareTok.toLowerCase();
     let afterWs = i;
     while (afterWs < len && isInlineWs(line[afterWs])) afterWs += 1;
     const afterExplicitSep = advancePastSepRun(line, afterWs);
@@ -3006,12 +3211,12 @@ function emitAllowlistedTokens(line: string): string {
     const isSqlKeyPhrase = rawLower === "key" && !hasExplicitSep && SAFE_KEY_PREFIX_WORDS.has(prevTokLower);
     const isBenignBareVocabStem = !hasExplicitSep && (rawLower === "session" || rawLower === "sessions" || rawLower === "keys");
     const isBareAuthScheme = (
-      (rawLower === "basic" || rawLower === "digest" || rawLower === "oauth" || rawLower === "negotiate")
-      && (rawTok !== rawLower || hasExplicitSep)
+      (bareLower === "basic" || bareLower === "digest" || bareLower === "oauth" || bareLower === "negotiate")
+      && (bareTok !== bareLower || hasExplicitSep)
     ) || (
-      MULTI_PARAM_AUTH_SCHEMES.has(rawLower)
+      MULTI_PARAM_AUTH_SCHEMES.has(bareLower)
       && (
-        rawTok !== rawLower
+        bareTok !== bareLower
         || hasExplicitSep
         || (afterWs < len && tryScanKeyValueParamEnd(line, afterWs, false, false, undefined, true) !== -1)
       )
@@ -3023,7 +3228,7 @@ function emitAllowlistedTokens(line: string): string {
         p = afterExplicitSep;
         while (p < len && isInlineWs(line[p])) p += 1;
       }
-      let matchedScheme = isBareAuthScheme || AUTH_SCHEMES.has(rawLower) ? rawLower : "";
+      let matchedScheme = isBareAuthScheme || AUTH_SCHEMES.has(bareLower) ? bareLower : "";
       if (!isBareAuthScheme && p < len && !line.startsWith("[redacted]", p) && !line.startsWith("[url]", p)) {
         const sEnd = scanAuthSchemeTokenEnd(line, p);
         const rawScheme = line.slice(p, sEnd);
