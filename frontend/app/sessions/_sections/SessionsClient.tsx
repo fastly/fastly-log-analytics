@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useEffect, useState } from 'react'
+import dynamic from 'next/dynamic'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { parseAsBoolean, parseAsInteger, useQueryState } from 'nuqs'
 import { ChevronLeft, ChevronRight, Users } from 'lucide-react'
@@ -9,17 +10,12 @@ import { client, extractApiError, unwrapClient, queryKeys } from '@/lib/api'
 import { formatCount } from '@/lib/utils'
 import { useIsDataReady, useServiceSwitchReset } from '@/hooks/useBootstrap'
 import { useReportCancelQueries } from '@/hooks/useReportPageState'
-import { useScoringLabels } from '@/components/SessionScoring/ScoringAdminPanels'
+import { useScoringLabels } from '@/components/SessionScoring/scoringHooks'
 import { useServiceStore } from '@/stores/filterStore'
 import { ReportLayout } from '@/components/ReportLayout'
 import { Button } from '@/components/ui/button'
 import { UpdatingBadge } from '@/components/AnalyticsCard'
 import { RawWindowNote, readRawWindow } from '@/components/network/rollupLabels'
-import {
-  SessionDetail,
-  SessionDetailModal,
-  type SessionDetailProps,
-} from '@/components/SessionDetailModal'
 import {
   ScoringControls,
   SessionsTable,
@@ -29,12 +25,14 @@ import {
 import type { components } from '@/types/api.generated'
 import type { BootstrapResponse, Session, SessionsResponse } from '@/types/api'
 
+const SessionDetail = dynamic(
+  () => import('@/components/SessionDetailModal').then((m) => m.SessionDetail),
+  { ssr: false },
+)
+
 export {
-  SessionDetail,
-  SessionDetailModal,
   SessionsTable,
   ScoringControls,
-  type SessionDetailProps,
   type SessionsTableProps,
   type ScoringControlsProps,
 }
@@ -208,10 +206,12 @@ function SessionsBody({
         )
       })()}
 
-      <SessionDetail
-        selectedSession={selectedSession} setSelectedSession={setSelectedSession} activeServiceId={activeServiceId}
-        data={data} labels={labels} labelBySid={labelBySid} onFlagged={onFlagged}
-      />
+      {selectedSession && (
+        <SessionDetail
+          selectedSession={selectedSession} setSelectedSession={setSelectedSession} activeServiceId={activeServiceId}
+          data={data} labels={labels} labelBySid={labelBySid} onFlagged={onFlagged}
+        />
+      )}
     </div>
   )
 }

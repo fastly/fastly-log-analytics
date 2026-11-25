@@ -1,8 +1,8 @@
 'use client'
 
-import React, { useMemo } from 'react'
+import React, { useEffect, useMemo, useRef } from 'react'
 import { Database, Zap } from 'lucide-react'
-import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
+import { AnalyticsCard, type AnalyticsCardError, useInViewOnce } from '@/components/AnalyticsCard'
 import { PlotlyChart } from '@/components/PlotlyChart'
 import { Button } from '@/components/ui/button'
 import { ButtonGroup } from '@/components/ui/button-group'
@@ -80,6 +80,7 @@ export function UsageChartsGrid({
   errorRumBreakdown,
   rumCardRef,
   rumVisible = true,
+  onRumVisible,
   isRumEnabled,
   isFetchingAny,
   isLoadingInitial,
@@ -113,6 +114,7 @@ export function UsageChartsGrid({
   errorRumBreakdown: unknown
   rumCardRef?: React.RefObject<HTMLDivElement | null>
   rumVisible?: boolean
+  onRumVisible?: () => void
   isRumEnabled: boolean
   isFetchingAny: boolean
   isLoadingInitial: boolean
@@ -129,6 +131,14 @@ export function UsageChartsGrid({
   fetchingCompute?: boolean
   errorCompute?: unknown
 }) {
+  const internalRumCardRef = useRef<HTMLDivElement>(null)
+  const resolvedRumCardRef = rumCardRef ?? internalRumCardRef
+  const observedRumVisible = useInViewOnce(resolvedRumCardRef, { rootMargin: '100px' })
+  useEffect(() => {
+    if (observedRumVisible) onRumVisible?.()
+  }, [observedRumVisible, onRumVisible])
+  const effectiveRumVisible = rumVisible || observedRumVisible
+
   // FOS Operations, Bandwidth, and Log Activity use historical Platform Metrics.
   // Render a custom button group
   // with just those two so the user sees no misleading 1s/1m buttons.
@@ -181,15 +191,15 @@ export function UsageChartsGrid({
   )
 
   // ── Ops chart ──────────────────────────────────────────────────────────────
-  const opsDates = useMemo(() => ops?.data.map((d) => d.date) ?? [], [ops?.data])
-  const opsClassA = useMemo(() => ops?.data.map((d) => d.class_a) ?? [], [ops?.data])
-  const opsClassB = useMemo(() => ops?.data.map((d) => d.class_b) ?? [], [ops?.data])
+  const opsDates = useMemo(() => ops?.data?.map((d) => d.date) ?? [], [ops?.data])
+  const opsClassA = useMemo(() => ops?.data?.map((d) => d.class_a) ?? [], [ops?.data])
+  const opsClassB = useMemo(() => ops?.data?.map((d) => d.class_b) ?? [], [ops?.data])
   const kvClassA = useMemo(
-    () => ops?.data.map((d) => ((d as Record<string, unknown>).kv_class_a as number | undefined) ?? 0) ?? [],
+    () => ops?.data?.map((d) => ((d as Record<string, unknown>).kv_class_a as number | undefined) ?? 0) ?? [],
     [ops?.data],
   )
   const kvClassB = useMemo(
-    () => ops?.data.map((d) => ((d as Record<string, unknown>).kv_class_b as number | undefined) ?? 0) ?? [],
+    () => ops?.data?.map((d) => ((d as Record<string, unknown>).kv_class_b as number | undefined) ?? 0) ?? [],
     [ops?.data],
   )
   const hasKvOps = useMemo(
@@ -241,8 +251,8 @@ export function UsageChartsGrid({
   const opsLayout = useMemo(() => ({ ...baseLayout, barmode: 'stack' as const }), [baseLayout])
 
   // ── Bandwidth chart ────────────────────────────────────────────────────────
-  const bwTimes = useMemo(() => bw?.data.map((p) => p.time) ?? [], [bw?.data])
-  const bwBytes = useMemo(() => bw?.data.map((p) => p.bandwidth_bytes ?? 0) ?? [], [bw?.data])
+  const bwTimes = useMemo(() => bw?.data?.map((p) => p.time) ?? [], [bw?.data])
+  const bwBytes = useMemo(() => bw?.data?.map((p) => p.bandwidth_bytes ?? 0) ?? [], [bw?.data])
   const maxBw = bwBytes.length > 0 ? Math.max(...bwBytes) : 0
 
   let bwDiv = 1
@@ -289,9 +299,9 @@ export function UsageChartsGrid({
 
   // ── Log generation chart ───────────────────────────────────────────────────
   const logProcData = useMemo<PlotlyTrace[]>(() => {
-    const genTimes = logActivity?.data.map((p) => p.time) ?? []
-    const ingestCounts = logActivity?.data.map((p) => p.row_count) ?? []
-    const apiCounts = logActivity?.data.map((p) => p.api_requests) ?? []
+    const genTimes = logActivity?.data?.map((p) => p.time) ?? []
+    const ingestCounts = logActivity?.data?.map((p) => p.row_count) ?? []
+    const apiCounts = logActivity?.data?.map((p) => p.api_requests) ?? []
     const hasApiCounts = apiCounts.some((v) => v != null && v > 0)
 
     const traces: PlotlyTrace[] = [
@@ -535,7 +545,7 @@ export function UsageChartsGrid({
         </>
       )}
       {isRumEnabled && (
-        <div ref={rumCardRef} className={!rumVisible ? 'min-h-[360px]' : undefined}>
+        <div ref={resolvedRumCardRef} className={!effectiveRumVisible ? 'min-h-[360px]' : undefined}>
           {Boolean(rumBreakdown || loadingRumBreakdown || errorRumBreakdown) && (
             <AnalyticsCard
               title="Real User Monitoring (RUM) Operations"

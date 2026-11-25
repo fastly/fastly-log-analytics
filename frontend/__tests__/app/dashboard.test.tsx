@@ -1204,12 +1204,12 @@ describe('Performance, Fastly-Value & Origin smoke tests', () => {
       'Origin TTFB (P95)', 'Origin Error Rate', 'Fetch Volume', 'Origin Latency', 'Status Code Distribution',
       'Slowest URLs at Origin', 'Origin Performance by POP', 'Origin IP Health', 'Origin Payload Size',
     ]) {
-      expect(screen.getByText(title)).toBeInTheDocument()
+      expect(await screen.findByText(title)).toBeInTheDocument()
     }
     expect(errorSpy).not.toHaveBeenCalled()
   })
 
-  test('origin page displays contextual loading messages while query is pending', () => {
+  test('origin page displays contextual loading messages while query is pending', async () => {
     mockPost.mockReturnValue(new Promise(() => {}))
     renderWithQuery(<OriginClient />, { queryClient })
     for (const msg of [
@@ -1218,7 +1218,7 @@ describe('Performance, Fastly-Value & Origin smoke tests', () => {
       'Loading slowest URLs at origin...', 'Loading origin performance by POP...', 'Loading origin IP health...',
       'Loading origin payload size...',
     ]) {
-      expect(screen.getByText(msg)).toBeInTheDocument()
+      expect(await screen.findByText(msg)).toBeInTheDocument()
     }
   })
 

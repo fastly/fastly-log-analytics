@@ -16,9 +16,16 @@ import { Label } from '@/components/ui/label'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { LayoutDashboard, EyeOff, ChevronDown, ChevronRight, Bot } from 'lucide-react'
 import { LazyMount, CardErrorState } from '@/components/AnalyticsCard'
-import { TopTenTable } from '@/components/Dashboard/TopTenTable'
 import { cn } from '@/lib/utils'
 import { useDateFormat } from '@/hooks/useSSE'
+
+const TopTenTable = dynamic(
+  () => import('@/components/Dashboard/TopTenTable').then((m) => m.TopTenTable),
+  {
+    ssr: false,
+    loading: () => <CardSkeleton isReady />,
+  },
+)
 
 type CatalogEntry = components['schemas']['LogFieldCatalogEntry']
 type CatalogGroup = components['schemas']['LogFieldCatalogGroup']

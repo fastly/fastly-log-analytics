@@ -123,6 +123,10 @@ vi.mock('next/dynamic', () => ({
           </div>
         )
       }
+      if ('field' in props && 'title' in props && mocks.mockTopTenTable) {
+        const { field, title } = props as unknown as { field?: string; title?: string }
+        return <div data-testid={`card-${field ?? title}`}>{title}</div>
+      }
       plotCalls.push(props)
       return <div data-testid="plot-stub" />
     }
@@ -2061,7 +2065,7 @@ describe('TimeSeriesChart, ScorerSeries, PlotlyChart, TrafficChart, CardGrid, Fi
       mocks.mockTopTenTable = true
     })
 
-    it('distinguishes loading from an empty card selection, and renders categorized/custom cards once ready', () => {
+    it('distinguishes loading from an empty card selection, and renders categorized/custom cards once ready', async () => {
       const { container, rerender: rerenderEmpty, unmount } = render(
         <CardGrid
           visibleCardList={[]}
@@ -2114,9 +2118,9 @@ describe('TimeSeriesChart, ScorerSeries, PlotlyChart, TrafficChart, CardGrid, Fi
           onRowClick={vi.fn()}
         />,
       )
-      expect(screen.getByTestId('card-ip')).toBeInTheDocument()
-      expect(screen.getByTestId('card-status')).toBeInTheDocument()
-      expect(screen.getByTestId('card-custom_field_42')).toBeInTheDocument()
+      expect(await screen.findByTestId('card-ip')).toBeInTheDocument()
+      expect(await screen.findByTestId('card-status')).toBeInTheDocument()
+      expect(await screen.findByTestId('card-custom_field_42')).toBeInTheDocument()
       expect(screen.getByText('Custom')).toBeInTheDocument()
 
       fireEvent.click(screen.getByRole('button', { name: /request/i }))

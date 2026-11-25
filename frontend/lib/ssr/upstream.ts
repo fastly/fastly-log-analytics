@@ -167,6 +167,7 @@ export const SECURITY_SSR_DEFAULTS = {
 
 export const SECURITY_SSR_TIMEOUT_MS = 900
 export const INSIGHTS_SSR_TIMEOUT_MS = 900
+export const ORIGIN_SSR_TIMEOUT_MS = 900
 
 export async function fetchSecurityServerSide(
   serviceId: string | undefined,
@@ -214,6 +215,7 @@ export async function fetchOriginServerSide(
     path: '/api/origin/aggregates',
     logPrefix: 'ssr/origin',
     now,
+    timeoutMs: ORIGIN_SSR_TIMEOUT_MS,
     body: {
       bucket_minutes: ORIGIN_SSR_DEFAULTS.bucketMinutes,
       split_by_leg: false,
@@ -428,7 +430,6 @@ export async function resolveReportPageParams(
   searchParams: Promise<ReportSearchParams>,
 ): Promise<{ serviceId: string | undefined; isDefaultView: boolean }> {
   const params: ReportSearchParams = process.env.STATIC_EXPORT === '1' ? {} : await searchParams
-  const serviceId = await resolvePageServiceId(params)
   const isDefaultView =
     !params.start_time &&
     !params.end_time &&
@@ -441,6 +442,9 @@ export async function resolveReportPageParams(
     !params.top_n &&
     !params.window &&
     !params.baseline
+  const urlServiceId = firstParam(params.service)
+  const validUrlServiceId = urlServiceId && SERVICE_ID_RE.test(urlServiceId) ? urlServiceId : undefined
+  const serviceId = isDefaultView ? (validUrlServiceId ?? await resolvePageServiceId(params)) : validUrlServiceId
   return { serviceId, isDefaultView }
 }
 

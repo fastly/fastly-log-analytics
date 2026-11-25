@@ -2,7 +2,7 @@
 
 import React from 'react'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQueryClient } from '@tanstack/react-query'
 import { Loader2, Pencil, Trash2 } from 'lucide-react'
 import type { ColumnDef } from '@/lib/table'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
@@ -15,59 +15,20 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Textarea } from '@/components/ui/textarea'
 import { useDeferredDeleteWithUndo } from '@/hooks/useSSE'
 import { client, extractApiError, unwrapClient, queryKeys } from '@/lib/api'
-import type { components } from '@/types/api'
 import { LabelsHelp } from './help-content'
 import { SessionEventsDialog } from './TopFlaggedTable'
+import {
+  useScoringLabels,
+  type LabelRow,
+  type LabelValue,
+  type ScoringLabelsResult,
+} from './scoringHooks'
 
-type LabelRowWire = components['schemas']['ScoringLabelRow']
-export type LabelValue = LabelRowWire['label']
-export type LabelRow = LabelRowWire
-
-export interface ScoringLabelsResult {
-  labels: LabelRow[]
-  counts: Record<LabelValue, number>
-  labelBySid: Map<string, LabelValue>
-  idBySid: Map<string, string>
-  isLoading: boolean
-  isFetching: boolean
-  error: (Error & { status?: number }) | null
-}
-
-export function useScoringLabels(
-  serviceId: string,
-  opts: { enabled?: boolean } = {},
-): ScoringLabelsResult {
-  const { enabled = true } = opts
-  const q = useQuery({
-    queryKey: queryKeys.scoringLabels(serviceId),
-    enabled: enabled && !!serviceId,
-    queryFn: async ({ signal }) =>
-      unwrapClient(
-        client.GET('/api/services/{service_id}/scoring/labels', {
-          params: { path: { service_id: serviceId } },
-          signal,
-        }),
-      ),
-    staleTime: 5 * 60_000,
-  })
-  const { labelBySid, idBySid } = React.useMemo(() => {
-    const lab = new Map<string, LabelValue>()
-    const id = new Map<string, string>()
-    for (const l of q.data?.labels ?? []) {
-      lab.set(l.sid, l.label)
-      id.set(l.sid, l.id)
-    }
-    return { labelBySid: lab, idBySid: id }
-  }, [q.data])
-  return {
-    labels: q.data?.labels ?? [],
-    counts: q.data?.counts ?? { good: 0, bad: 0, neutral: 0 },
-    labelBySid,
-    idBySid,
-    isLoading: q.isLoading,
-    isFetching: q.isFetching,
-    error: (q.error as (Error & { status?: number }) | null) ?? null,
-  }
+export {
+  useScoringLabels,
+  type LabelRow,
+  type LabelValue,
+  type ScoringLabelsResult,
 }
 
 function labelBadge(label: LabelValue) {

@@ -12,7 +12,8 @@ import type { PlotlyLayout, PlotlyTrace, SessionsResponse } from '@/types/api'
 import type { components } from '@/types/api.generated'
 import ShareLoginPage, { ShareLoginForm, safeReturnTarget, AcknowledgeButton, AcknowledgeFallback } from '@/app/share-login/page'
 import ShareLoginLoading from '@/app/share-login/loading'
-import SessionsPage, { SessionDetail, SessionsTable, ScoringControls } from '@/app/sessions/page'
+import SessionsPage, { SessionsTable, ScoringControls } from '@/app/sessions/page'
+import { SessionDetail } from '@/components/SessionDetailModal'
 import { useServiceStore } from '@/stores/filterStore'
 
 let mockSearchParamsString = 'service=svc-test'
@@ -183,6 +184,15 @@ vi.mock('@/components/SessionScoring/StatusPanel', async (importOriginal) => {
   }
 })
 
+
+vi.mock('@/components/SessionScoring/SessionFlagAndEvents', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/components/SessionScoring/SessionFlagAndEvents')>()
+  return {
+    ...actual,
+    FlagSessionPopover: (...args: Parameters<typeof actual.FlagSessionPopover>) =>
+      useMockSessionApi ? <span data-testid="flag-popover" /> : actual.FlagSessionPopover(...args),
+  }
+})
 
 vi.mock('@/components/SessionScoring/TopFlaggedTable', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/components/SessionScoring/TopFlaggedTable')>()

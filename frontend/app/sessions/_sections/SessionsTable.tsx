@@ -4,18 +4,33 @@ import React from 'react'
 import type { ColumnDef } from '@/lib/table'
 import { AlertTriangle, Clock, ExternalLink, Film } from 'lucide-react'
 
-import { type LabelRow, type LabelValue } from '@/components/SessionScoring/ScoringAdminPanels'
-import { FlagSessionPopover } from '@/components/SessionScoring/TopFlaggedTable'
+import { type LabelRow, type LabelValue } from '@/components/SessionScoring/scoringHooks'
+import { FlagSessionPopover } from '@/components/SessionScoring/SessionFlagAndEvents'
 import { useDateFormat } from '@/hooks/useSSE'
 import { DataTable } from '@/components/DataTable'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { Label } from '@/components/ui/label'
 import { Input } from '@/components/ui/input'
-import { RelativeTimeTooltip } from '@/components/SessionDetailModal'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn, formatCountMaybe } from '@/lib/utils'
 import type { components } from '@/types/api.generated'
 import type { Session, SessionsResponse } from '@/types/api'
+
+function RelativeTimeTooltip({
+  timestamp, relative, full, abbr, className,
+}: {
+  timestamp: string; relative: (ts: string) => string; full: (ts: string) => string; abbr: () => string; className?: string
+}) {
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger render={<span className={className}>{relative(timestamp)}</span>} />
+        <TooltipContent className="text-xs">{full(timestamp)} {abbr()}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
 
 export interface SessionsTableProps {
   data: SessionsResponse | undefined

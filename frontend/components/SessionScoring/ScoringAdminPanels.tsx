@@ -2,13 +2,13 @@
 
 import {
   queryOptions,
-  useQuery,
   type QueryClient,
-  type QueryKey,
-  type UseQueryOptions,
 } from '@tanstack/react-query'
 import { client, unwrapClient } from '@/lib/api'
 import type { components } from '@/types/api'
+import { useScoringQuery } from './scoringHooks'
+
+export { useScoringQuery } from './scoringHooks'
 
 export const scoringAnalyticsCompositeKey = (serviceId: string | null | undefined) =>
   ['scoring-analytics-composite', serviceId] as const
@@ -71,19 +71,6 @@ export function invalidateServiceScoringQueries(queryClient: QueryClient, servic
   for (const prefix of SCORING_KEY_PREFIXES) {
     queryClient.invalidateQueries({ queryKey: [prefix, serviceId] })
   }
-}
-
-export function useScoringQuery<TData>(
-  queryKey: QueryKey,
-  fn: (signal?: AbortSignal) => Promise<{ data?: TData; error?: unknown; response: Response }>,
-  options?: Omit<UseQueryOptions<TData, Error>, 'queryKey' | 'queryFn'>,
-) {
-  return useQuery<TData, Error>({
-    queryKey,
-    queryFn: ({ signal }) => unwrapClient(fn(signal)),
-    staleTime: 60_000,
-    ...options,
-  })
 }
 
 export function useScoringStatus(serviceId: string) {

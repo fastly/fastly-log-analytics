@@ -1,18 +1,17 @@
 'use client'
 
 import React, { useRef } from 'react'
+import dynamic from 'next/dynamic'
 import { useRouter } from 'next/navigation'
 import { useQuery } from '@tanstack/react-query'
 import { Activity as ActivityIcon } from 'lucide-react'
 import { useTheme } from 'next-themes'
 import { AnalyticsCard, useInViewOnce } from '@/components/AnalyticsCard'
-import { CostCalculator } from '@/components/CostCalculator/CostCalculator'
-import { CloudCostCalculator } from '@/components/CostCalculator/CloudCostCalculator'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
 import type { ComputeUsageResponse } from '@/lib/cloud-engine/usage/computeSeries'
 import type { MeasuredEstimate } from '@/lib/cloud-engine/usage/estimatePrefill'
 import { ReportLayout } from '@/components/ReportLayout'
-import { SkeletonGrid } from '@/components/ui/skeleton'
+import { Skeleton, SkeletonGrid } from '@/components/ui/skeleton'
 import { useIsDataReady } from '@/hooks/useBootstrap'
 import type { ReportConfiguration } from '@/hooks/useDashboardCards'
 import { adminFetch, client, unwrapClient } from '@/lib/api'
@@ -21,13 +20,11 @@ import type { LogFieldsConfig } from '@/types/api'
 import { queryKeys } from '@/lib/apiQueryKeys'
 import type { ChartInterval } from '@/lib/utils'
 import { useFilterStore, useServiceStore } from '@/stores/filterStore'
-import {
-  FosOperationsHelp,
-  UsageChartsGrid,
-  type BandwidthUsageData,
-  type LogActivityData,
-  type OperationsUsageData,
-  type RumBreakdownData,
+import type {
+  BandwidthUsageData,
+  LogActivityData,
+  OperationsUsageData,
+  RumBreakdownData,
 } from './UsageChartsGrid'
 import {
   BreakdownTable,
@@ -36,9 +33,46 @@ import {
   type StorageUsageData,
 } from './UsageStatCards'
 
+const UsageChartsGrid = dynamic(
+  () => import('./UsageChartsGrid').then((m) => m.UsageChartsGrid),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 min-h-[744px]">
+        <Skeleton className="h-[360px] w-full rounded-xl" />
+        <Skeleton className="h-[360px] w-full rounded-xl" />
+        <Skeleton className="h-[360px] w-full rounded-xl" />
+        <Skeleton className="h-[360px] w-full rounded-xl" />
+      </div>
+    ),
+  },
+)
+
+const CostCalculator = dynamic(
+  () => import('@/components/CostCalculator/CostCalculator').then((m) => m.CostCalculator),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="space-y-3 min-h-[580px]">
+        <SkeletonGrid count={4} height="36px" className="rounded-md" />
+      </div>
+    ),
+  },
+)
+
+const CloudCostCalculator = dynamic(
+  () => import('@/components/CostCalculator/CloudCostCalculator').then((m) => m.CloudCostCalculator),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="space-y-3 min-h-[820px]">
+        <SkeletonGrid count={4} height="36px" className="rounded-md" />
+      </div>
+    ),
+  },
+)
+
 export {
-  FosOperationsHelp,
-  UsageChartsGrid,
   BreakdownTable,
   UsageStatCards,
   type BreakdownRow,
@@ -95,8 +129,8 @@ export function UsagePageContent({
   const activityBy = config.effectiveInterval.split(' ')[1] || 'hour'
   const estimatorRef = useRef<HTMLDivElement>(null)
   const estimatorVisible = useInViewOnce(estimatorRef, { rootMargin: '100px' })
-  const rumCardRef = useRef<HTMLDivElement>(null)
-  const rumVisible = useInViewOnce(rumCardRef, { rootMargin: '100px' })
+  const [rumVisible, setRumVisible] = React.useState(false)
+  const handleRumVisible = React.useCallback(() => setRumVisible(true), [])
   const cloudMode = isCloudMode()
 
   // The Cost Estimator lives below the fold; defer /api/usage/prefill until it nears
@@ -380,8 +414,8 @@ export function UsagePageContent({
         loadingRumBreakdown={loadingRumBreakdown}
         fetchingRumBreakdown={fetchingRumBreakdown}
         errorRumBreakdown={errorRumBreakdown}
-        rumCardRef={rumCardRef}
         rumVisible={rumVisible}
+        onRumVisible={handleRumVisible}
         isRumEnabled={isRumEnabled}
         isFetchingAny={isFetchingAny}
         isLoadingInitial={isLoadingInitial}

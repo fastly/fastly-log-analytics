@@ -1,8 +1,10 @@
 'use client'
 
 import React from 'react'
+import dynamic from 'next/dynamic'
 import { parseAsStringLiteral, useQueryState } from 'nuqs'
 import { Server } from 'lucide-react'
+import { Skeleton } from '@/components/ui/skeleton'
 import { client, unwrapClient } from '@/lib/api'
 import type { components, PlotlyTrace } from '@/types/api'
 import {
@@ -47,13 +49,31 @@ import {
   type OriginPercentile,
   type TimeseriesProps,
 } from './Timeseries'
-import { LatencyHeatmap, type LatencyHeatmapProps } from './LatencyHeatmap'
+import type { LatencyHeatmapProps } from './LatencyHeatmap'
+
+const LatencyHeatmap = dynamic(
+  () => import('./LatencyHeatmap').then((m) => m.LatencyHeatmap),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="space-y-6">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <Skeleton className="h-[480px] w-full rounded-xl" />
+          <Skeleton className="h-[480px] w-full rounded-xl" />
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <Skeleton className="h-[480px] w-full rounded-xl" />
+          <Skeleton className="h-[220px] w-full rounded-xl" />
+        </div>
+      </div>
+    ),
+  },
+)
 
 export {
   Aggregates,
   ApproxBadge,
   Timeseries,
-  LatencyHeatmap,
   type OriginAggregates,
   type OriginSummary,
   type OriginTimeseries,

@@ -9,8 +9,8 @@ import { Activity, AlertTriangle, Clock, ExternalLink, Film, Globe, Shield, User
 
 import { client, extractApiError, unwrapClient } from '@/lib/api'
 import { useFieldLabel } from '@/hooks/useBootstrap'
-import { type LabelRow, type LabelValue } from '@/components/SessionScoring/ScoringAdminPanels'
-import { FlagSessionPopover } from '@/components/SessionScoring/TopFlaggedTable'
+import { type LabelRow, type LabelValue } from '@/components/SessionScoring/scoringHooks'
+import { FlagSessionPopover } from '@/components/SessionScoring/SessionFlagAndEvents'
 import { useDateFormat } from '@/hooks/useSSE'
 import { DataTable } from '@/components/DataTable'
 import { Badge } from '@/components/ui/badge'
@@ -22,7 +22,7 @@ import { cn, buildSessionDashboardUrl, buildSessionDetailUrl, buildStreamDetailU
 import { PopLabel } from '@/components/DataTable'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { saveCloudSessionReference } from '@/lib/cloud-engine/session-reference'
-import { OBJECT_TYPE_LABELS, STREAM_TYPE_LABELS, STREAMING_FORMAT_LABELS, cmcdLabel } from '@/app/streaming/_sections/StreamingClient'
+import { OBJECT_TYPE_LABELS, STREAM_TYPE_LABELS, STREAMING_FORMAT_LABELS, cmcdLabel } from '@/app/streaming/_sections/StreamingConstants'
 import { durationMs } from '@/app/sessions/detail/trace'
 import type { Session, SessionDetailResponse, SessionsResponse } from '@/types/api'
 

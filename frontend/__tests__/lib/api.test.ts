@@ -1227,6 +1227,7 @@ describe('Insights page barrel export', () => {
       expect(resolveSpy).not.toHaveBeenCalled()
       expect(upstream.INSIGHTS_SSR_TIMEOUT_MS).toBeLessThanOrEqual(1000)
       expect(upstream.SECURITY_SSR_TIMEOUT_MS).toBeLessThanOrEqual(1000)
+      expect(upstream.ORIGIN_SSR_TIMEOUT_MS).toBeLessThanOrEqual(1000)
 
       insightsSpy.mockClear()
       await InsightsPage({

@@ -24,8 +24,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { client, extractApiError, unwrapClient } from '@/lib/api'
 import { formatLocalDateTime, keyByOccurrence, normalizeCookieCompliance } from '@/lib/utils'
 import type { components } from '@/types/api'
-import type { LabelValue } from './LabelsTab'
-import { useScoringQuery } from './ScoringAdminPanels'
+import { useScoringQuery, type LabelValue } from './scoringHooks'
 
 export interface FlagSessionPopoverProps {
   serviceId: string
