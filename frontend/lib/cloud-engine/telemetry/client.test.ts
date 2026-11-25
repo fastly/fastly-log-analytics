@@ -658,4 +658,78 @@ describe("readLogs request sharing", () => {
     });
     expect(worker.jobs()).toHaveLength(2);
   });
+
+  it("readIngestLifecycle dispatches op=ingestLifecycle, coalesces concurrent calls, caches settled results, and aborts only when all waiters abort", async () => {
+    const { readIngestLifecycle } = await load();
+    const range = {
+      from: "2026-10-01T00:00:00.000Z",
+      to: "2026-10-31T00:00:00.000Z",
+    };
+    const identity = { user: "alice", role: "admin" };
+    const lifecycleResult = {
+      intervals: [],
+      outputs: [],
+      deletedParquetKeys: ["processed/logs/p1.parquet"],
+      bytes: 1234,
+      complete: true,
+      provenance: "cloud:ingest_files" as const,
+      liveTruncated: false,
+    };
+
+    const ctrl1 = new AbortController();
+    const ctrl2 = new AbortController();
+    const p1 = readIngestLifecycle(range, {
+      ...identity,
+      minimumBilledDays: 30,
+      signal: ctrl1.signal,
+    });
+    const p2 = readIngestLifecycle(range, {
+      ...identity,
+      minimumBilledDays: 30,
+      signal: ctrl2.signal,
+    });
+
+    const worker = MockWorker.instances[0];
+    expect(worker.jobs()).toHaveLength(1);
+    expect(worker.jobs()[0]).toMatchObject({
+      op: "ingestLifecycle",
+      options: {
+        from: range.from,
+        to: range.to,
+        minimumBilledDays: 30,
+      },
+    });
+
+    // Aborting one waiter does NOT abort the worker job.
+    ctrl1.abort();
+    await expect(p1).rejects.toMatchObject({ name: "AbortError" });
+    expect(worker.cancels()).toHaveLength(0);
+
+    worker.emit({
+      id: worker.jobs()[0].id,
+      type: "result",
+      result: lifecycleResult,
+    });
+    expect(await p2).toEqual(lifecycleResult);
+
+    // Subsequent call within TTL reuses settled result (0 new jobs).
+    const p3 = await readIngestLifecycle(range, {
+      ...identity,
+      minimumBilledDays: 30,
+    });
+    expect(p3).toEqual(lifecycleResult);
+    expect(worker.jobs()).toHaveLength(1);
+
+    // Different minimumBilledDays starts a new job; aborting its sole waiter cancels the worker job.
+    const ctrl4 = new AbortController();
+    const p4 = readIngestLifecycle(range, {
+      ...identity,
+      minimumBilledDays: 15,
+      signal: ctrl4.signal,
+    });
+    expect(worker.jobs()).toHaveLength(2);
+    ctrl4.abort();
+    await expect(p4).rejects.toMatchObject({ name: "AbortError" });
+    expect(worker.cancels()).toHaveLength(1);
+  });
 });

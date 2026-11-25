@@ -1,4 +1,5 @@
 import { createSharedRequests } from "../shared-request";
+import type { IngestLifecycleFold } from "./ingest-lifecycle";
 
 export class OpsRangeUnsupportedError extends Error {
   constructor(message: string) {
@@ -10,11 +11,14 @@ export class OpsRangeUnsupportedError extends Error {
 const MAX_DECODED_PARQUET_ENTRIES = 512;
 const decodedParquetCache = new Map<string, Record<string, unknown>[]>();
 const sharedDecodedParquet = createSharedRequests<Record<string, unknown>[]>();
+const ingestFoldCache = new Map<string, IngestLifecycleFold>();
+const sharedIngestFolds = createSharedRequests<IngestLifecycleFold>();
 let decodedCacheGeneration = 0;
 
 export function clearOpsDecodedCache(): void {
   decodedCacheGeneration += 1;
   decodedParquetCache.clear();
+  ingestFoldCache.clear();
 }
 
 function decodedCacheKey(scope: string, key: string, columnsKey: string): string {
@@ -62,6 +66,44 @@ export function deleteDecodedParquet(scope: string, key: string): void {
   for (const cacheKey of [...decodedParquetCache.keys()]) {
     if (cacheKey.startsWith(prefix)) decodedParquetCache.delete(cacheKey);
   }
+  ingestFoldCache.delete(`${scope}\0${key}`);
+}
+
+export async function loadIngestFileFold(
+  scope: string,
+  key: string,
+  loader: (signal: AbortSignal) => Promise<IngestLifecycleFold>,
+  signal?: AbortSignal,
+): Promise<{ fold: IngestLifecycleFold; coalesced: boolean }> {
+  signal?.throwIfAborted();
+  const foldKey = `${scope}\0${key}`;
+  const cached = ingestFoldCache.get(foldKey);
+  if (cached !== undefined) {
+    ingestFoldCache.delete(foldKey);
+    ingestFoldCache.set(foldKey, cached);
+    return { fold: cached, coalesced: true };
+  }
+  const gen = decodedCacheGeneration;
+  const inFlightKey = `${gen}\0${foldKey}`;
+  let started = false;
+  const fold = await sharedIngestFolds(
+    inFlightKey,
+    async (sharedSignal) => {
+      started = true;
+      const computed = await loader(sharedSignal);
+      if (decodedCacheGeneration === gen) {
+        ingestFoldCache.delete(foldKey);
+        ingestFoldCache.set(foldKey, computed);
+        if (ingestFoldCache.size > MAX_DECODED_PARQUET_ENTRIES) {
+          const oldest = ingestFoldCache.keys().next().value;
+          if (oldest !== undefined) ingestFoldCache.delete(oldest);
+        }
+      }
+      return computed;
+    },
+    { signal },
+  );
+  return { fold, coalesced: !started };
 }
 
 /**

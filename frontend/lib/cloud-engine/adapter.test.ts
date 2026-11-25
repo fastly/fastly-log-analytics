@@ -3768,6 +3768,90 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect(badInsightsRes?.status).toBe(400);
   });
 
+  it("starts 30-day ingest_files and fos_usage reads in parallel with fetchUsageSettings and re-queries on non-default min_billed_days", async () => {
+    const { syncOpsCacheForSession } = await import("./telemetry/sources");
+    await syncOpsCacheForSession({ userId: "alice", role: "admin", needsLogin: false });
+
+    const mockSummary = usage.summarizeUsage(fixtureUsageInput);
+    vi.spyOn(usage, "fetchUsageSummary").mockResolvedValue({
+      ...mockSummary,
+      input: {
+        ...fixtureUsageInput,
+        settings: { ...fixtureUsageInput.settings, enabled: true },
+        rows: { ...fixtureUsageInput.rows, fos_usage: [] },
+        telemetryCoverage: { fos_usage: false },
+      },
+      summary: mockSummary,
+      lines: [],
+      totalUsd: 0,
+    });
+    vi.spyOn(usage, "fetchCloudStorageInventory").mockResolvedValue({
+      intervals: [],
+      complete: true,
+      snapshotId: "snap-spec",
+      observedAt: fixtureUsageInput.now,
+      provenance: "cloud:inventory",
+    });
+
+    // 1. Default min_billed_days (30): ingest_files and fos_usage start BEFORE settings resolves, and are reused (1 call each).
+    let releaseSettings1!: (val: typeof fixtureUsageInput.settings) => void;
+    vi.spyOn(usage, "fetchUsageSettings").mockImplementation(
+      () => new Promise((resolve) => { releaseSettings1 = resolve; }),
+    );
+    const ingestSpy = vi.spyOn(usage, "fetchIngestDeletedIntervals").mockResolvedValue({
+      outputs: [],
+      intervals: [],
+      bytes: 0,
+      complete: true,
+      provenance: "cloud:ingest_files",
+    });
+    const fosSpy = vi.spyOn(usage, "fetchUsageKindWithCoverage").mockResolvedValue({
+      rows: [],
+      complete: true,
+    });
+
+    const endIso = new Date(Date.now()).toISOString();
+    const startIso = new Date(Date.now() - 6 * 3_600_000).toISOString();
+    const storageUrl = `http://localhost/api/usage/current-storage?start=${encodeURIComponent(startIso)}&end=${encodeURIComponent(endIso)}`;
+
+    const pDefault = handleCloudAnalyticalRequest(new Request(storageUrl));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(ingestSpy).toHaveBeenCalledTimes(1);
+    expect(fosSpy).toHaveBeenCalledTimes(1);
+
+    releaseSettings1({ ...fixtureUsageInput.settings, enabled: true, min_billed_days: 30 });
+    const resDefault = await pDefault;
+    expect(resDefault?.status).toBe(200);
+    expect(ingestSpy).toHaveBeenCalledTimes(1);
+    expect(fosSpy).toHaveBeenCalledTimes(1);
+
+    // 2. Non-default min_billed_days (15): speculative signal is aborted and both reads re-run with min_billed_days = 15.
+    ingestSpy.mockClear();
+    fosSpy.mockClear();
+    const ingestSignals: Array<AbortSignal | undefined> = [];
+    ingestSpy.mockImplementation(async (_range, _identity, _read, opts) => {
+      ingestSignals.push(opts?.signal);
+      return { outputs: [], intervals: [], bytes: 0, complete: true, provenance: "cloud:ingest_files" };
+    });
+    let releaseSettings2!: (val: typeof fixtureUsageInput.settings) => void;
+    vi.spyOn(usage, "fetchUsageSettings").mockImplementation(
+      () => new Promise((resolve) => { releaseSettings2 = resolve; }),
+    );
+
+    const pCustom = handleCloudAnalyticalRequest(new Request(storageUrl));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(ingestSpy).toHaveBeenCalledTimes(1);
+    expect(ingestSignals[0]?.aborted).toBe(false);
+
+    releaseSettings2({ ...fixtureUsageInput.settings, enabled: true, min_billed_days: 15 });
+    const resCustom = await pCustom;
+    expect(resCustom?.status).toBe(200);
+    expect(ingestSignals[0]?.aborted).toBe(true);
+    expect(ingestSpy).toHaveBeenCalledTimes(2);
+    expect(ingestSpy.mock.calls[1][3]?.minimumBilledDays).toBe(15);
+    expect(fosSpy).toHaveBeenCalledTimes(2);
+  });
+
   it("short-circuits scoring scans with zero Parquet reads when edge_score is disabled or labels lack minimum samples", async () => {
     vi.mocked(ensureCloudRange).mockClear();
     vi.mocked(cloudActiveLogFieldIds).mockResolvedValue(new Set(["status"]));

@@ -6,11 +6,14 @@ import type { RunProgress } from "../dashboard/engine";
 import { dashboardCacheIdentity } from "../dashboard/sources";
 import {
   normalizeOpsColumns,
+  readIngestLifecycle as readIngestLifecycleInline,
   readLogs as readLogsInline,
+  type IngestLifecycleResult,
   type LogResult,
   type LogsRange,
   type LogsResult,
   type OpsKind,
+  type ReadIngestLifecycleOptions,
   type ReadLogsOptions,
 } from "./engine";
 import {
@@ -21,16 +24,26 @@ import {
   type OpsIdentity,
 } from "./sources";
 
-type WorkerRequest = {
-  id: number;
-  options: Omit<ReadLogsOptions, "signal" | "onProgress">;
-  pageLoadId: string | null;
-  identity: OpsIdentity;
-  reportApiCalls?: boolean;
-};
+type WorkerRequest =
+  | {
+      id: number;
+      op?: "logs";
+      options: Omit<ReadLogsOptions, "signal" | "onProgress">;
+      pageLoadId: string | null;
+      identity: OpsIdentity;
+      reportApiCalls?: boolean;
+    }
+  | {
+      id: number;
+      op: "ingestLifecycle";
+      options: Omit<ReadIngestLifecycleOptions, "signal" | "onProgress">;
+      pageLoadId: string | null;
+      identity: OpsIdentity;
+      reportApiCalls?: boolean;
+    };
 
 type WorkerMessage =
-  | { id: number; type: "result"; result: LogResult }
+  | { id: number; type: "result"; result: LogResult | IngestLifecycleResult }
   | { id: number; type: "progress"; progress: RunProgress }
   | { id: number; type: "apiCall"; call: ApiCallEntry }
   | { id: number; type: "error"; message: string };
@@ -39,7 +52,10 @@ class OpsWorkerClient extends BaseWorkerRpcClient<
   WorkerRequest,
   WorkerMessage
 > {
-  private readonly resolvers = new Map<number, (result: LogResult) => void>();
+  private readonly resolvers = new Map<
+    number,
+    (result: LogResult | IngestLifecycleResult) => void
+  >();
   private readonly progressCallbacks = new Map<number, (progress: RunProgress) => void>();
 
   constructor() {
@@ -90,6 +106,30 @@ class OpsWorkerClient extends BaseWorkerRpcClient<
     }
   }
 
+  async runIngestLifecycle(
+    options: ReadIngestLifecycleOptions,
+    identity: OpsIdentity,
+  ): Promise<IngestLifecycleResult> {
+    const loading = beginCloudLoading("listing");
+    let success = false;
+    try {
+      const result = await this.runIngestLifecycleWithProgress(
+        {
+          ...options,
+          onProgress: (progress) => {
+            loading.update({ stage: "files", progress });
+            options.onProgress?.(progress);
+          },
+        },
+        identity,
+      );
+      success = true;
+      return result;
+    } finally {
+      loading.finish(success);
+    }
+  }
+
   private runWithProgress(
     options: ReadLogsOptions,
     identity: OpsIdentity,
@@ -121,7 +161,7 @@ class OpsWorkerClient extends BaseWorkerRpcClient<
     const id = this.allocateId();
     const { signal, onProgress, ...serializable } = options;
     return new Promise<LogResult>((resolve, reject) => {
-      this.resolvers.set(id, resolve);
+      this.resolvers.set(id, resolve as (result: LogResult | IngestLifecycleResult) => void);
       if (onProgress) this.progressCallbacks.set(id, onProgress);
       this.registerJob(id, worker, signal, reject, () => {
         this.resolvers.delete(id);
@@ -129,6 +169,58 @@ class OpsWorkerClient extends BaseWorkerRpcClient<
       });
       const req: WorkerRequest = {
         id,
+        options: serializable,
+        pageLoadId: getPageLoadId(),
+        identity,
+        reportApiCalls,
+      };
+      worker.postMessage(req);
+    });
+  }
+
+  private runIngestLifecycleWithProgress(
+    options: ReadIngestLifecycleOptions,
+    identity: OpsIdentity,
+  ): Promise<IngestLifecycleResult> {
+    if (options.signal?.aborted) {
+      return Promise.reject(new DOMException("Aborted", "AbortError"));
+    }
+    const worker = this.getWorker(this.handleMessage);
+    const reportApiCalls = useDebugStore.getState().apiCallsEnabled;
+    if (!worker) {
+      return readIngestLifecycleInline(
+        browserOpsSource(
+          typeof window !== "undefined" ? window.location.origin : "",
+          identity,
+          {
+            getPageLoadId: () => getPageLoadId() ?? "",
+            onApiCall: reportApiCalls
+              ? (call) => {
+                  const state = useDebugStore.getState();
+                  if (state.apiCallsEnabled) state.addApiCall(call);
+                }
+              : undefined,
+          },
+        ),
+        options,
+      );
+    }
+
+    const id = this.allocateId();
+    const { signal, onProgress, ...serializable } = options;
+    return new Promise<IngestLifecycleResult>((resolve, reject) => {
+      this.resolvers.set(
+        id,
+        resolve as (result: LogResult | IngestLifecycleResult) => void,
+      );
+      if (onProgress) this.progressCallbacks.set(id, onProgress);
+      this.registerJob(id, worker, signal, reject, () => {
+        this.resolvers.delete(id);
+        this.progressCallbacks.delete(id);
+      });
+      const req: WorkerRequest = {
+        id,
+        op: "ingestLifecycle",
         options: serializable,
         pageLoadId: getPageLoadId(),
         identity,
@@ -196,8 +288,24 @@ function coversReadOptions(
 const inFlightOpsReads = new Set<InFlightOpsRead>();
 const settledOpsReads = new Map<string, SettledOpsRead>();
 
+interface InFlightIngestLifecycle {
+  key: string;
+  controller: AbortController;
+  waiters: Set<Waiter>;
+  promise: Promise<IngestLifecycleResult>;
+}
+
+interface SettledIngestLifecycle {
+  at: number;
+  result: IngestLifecycleResult;
+}
+
+const inFlightIngestLifecycle = new Map<string, InFlightIngestLifecycle>();
+const settledIngestLifecycle = new Map<string, SettledIngestLifecycle>();
+
 export function resetOpsReadCache(): void {
   settledOpsReads.clear();
+  settledIngestLifecycle.clear();
 }
 
 export function resetOpsLogsClient(): void {
@@ -205,6 +313,8 @@ export function resetOpsLogsClient(): void {
   rpcClient = null;
   inFlightOpsReads.clear();
   settledOpsReads.clear();
+  inFlightIngestLifecycle.clear();
+  settledIngestLifecycle.clear();
 }
 
 function abortError(): DOMException {
@@ -592,6 +702,123 @@ export function readLogs(
 }
 
 export const queryOpsLogs = readLogs;
+
+export function readIngestLifecycle(
+  range: LogsRange,
+  options?: {
+    user?: string;
+    role?: string;
+    minimumBilledDays?: number;
+    signal?: AbortSignal;
+    onProgress?: (progress: RunProgress) => void;
+  },
+): Promise<IngestLifecycleResult> {
+  const signal = options?.signal;
+  if (signal?.aborted) return Promise.reject(abortError());
+  const identity = currentOpsIdentity({
+    user: options?.user,
+    role: options?.role,
+  });
+  const minimumBilledDays = options?.minimumBilledDays ?? 30;
+  const startEpoch = currentOpsCacheEpoch();
+  const key = JSON.stringify([
+    "ingestLifecycle",
+    identity.user,
+    identity.role,
+    activeOpsUser(),
+    dashboardCacheIdentity(),
+    getPageLoadId(),
+    startEpoch,
+    range.from,
+    range.to,
+    minimumBilledDays,
+  ]);
+  const now = Date.now();
+  for (const [k, entry] of settledIngestLifecycle) {
+    if (now - entry.at >= OPS_READ_TTL_MS) settledIngestLifecycle.delete(k);
+  }
+  const settled = settledIngestLifecycle.get(key);
+  if (settled) return Promise.resolve(settled.result);
+
+  let entry = inFlightIngestLifecycle.get(key);
+  if (!entry) {
+    const controller = new AbortController();
+    const waiters = new Set<Waiter>();
+    entry = {
+      key,
+      controller,
+      waiters,
+      promise: null as unknown as Promise<IngestLifecycleResult>,
+    };
+    const active = entry;
+    active.promise = getClient()
+      .runIngestLifecycle(
+        {
+          from: range.from,
+          to: range.to,
+          minimumBilledDays,
+          signal: controller.signal,
+          onProgress: (progress) => {
+            for (const waiter of waiters) {
+              waiter.onProgress?.(progress);
+            }
+          },
+        },
+        identity,
+      )
+      .then((res) => {
+        if (
+          startEpoch === currentOpsCacheEpoch() &&
+          res.liveTruncated !== true
+        ) {
+          settledIngestLifecycle.delete(key);
+          if (settledIngestLifecycle.size >= MAX_SETTLED_OPS_READS) {
+            const oldest = settledIngestLifecycle.keys().next().value;
+            if (oldest !== undefined) settledIngestLifecycle.delete(oldest);
+          }
+          settledIngestLifecycle.set(key, { at: Date.now(), result: res });
+        }
+        return res;
+      })
+      .finally(() => {
+        if (inFlightIngestLifecycle.get(key) === active) {
+          inFlightIngestLifecycle.delete(key);
+        }
+      });
+    inFlightIngestLifecycle.set(key, active);
+  }
+
+  const waiter: Waiter = { onProgress: options?.onProgress };
+  entry.waiters.add(waiter);
+  const activeEntry = entry;
+  return new Promise<IngestLifecycleResult>((resolve, reject) => {
+    const cleanup = () => {
+      activeEntry.waiters.delete(waiter);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const onAbort = () => {
+      cleanup();
+      if (activeEntry.waiters.size === 0) {
+        if (inFlightIngestLifecycle.get(key) === activeEntry) {
+          inFlightIngestLifecycle.delete(key);
+        }
+        activeEntry.controller.abort(signal?.reason ?? abortError());
+      }
+      reject(abortError());
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    activeEntry.promise.then(
+      (res) => {
+        cleanup();
+        resolve(res);
+      },
+      (err) => {
+        cleanup();
+        reject(err);
+      },
+    );
+  });
+}
 
 export function opsLogRange(
   hours: number,

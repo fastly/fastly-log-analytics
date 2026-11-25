@@ -487,14 +487,15 @@ export function browserOpsSource(
               await denied(response);
               throw new Error(`File ${key} failed (${response.status})`);
             }
+            let writePromise: Promise<void> | undefined;
             if (cache && callEpoch === opsCacheEpoch && !controller.signal.aborted) {
-              const writePromise = cache.put(url, response.clone()).catch(() => {});
+              writePromise = cache.put(url, response.clone()).catch(() => {});
               activeOpsWrites.add(writePromise);
-              writePromise.finally(() => activeOpsWrites.delete(writePromise));
-              await writePromise;
+              writePromise.finally(() => activeOpsWrites.delete(writePromise!));
             }
-            assertOpsActive(callEpoch, controller);
-            const bytes = await response.arrayBuffer();
+            const bytes = writePromise
+              ? (await Promise.all([response.arrayBuffer(), writePromise]))[0]
+              : await response.arrayBuffer();
             assertOpsActive(callEpoch, controller);
             const end =
               typeof performance !== "undefined" ? performance.now() : Date.now();

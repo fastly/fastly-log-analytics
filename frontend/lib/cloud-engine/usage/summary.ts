@@ -1,6 +1,14 @@
 import { dashboardCacheIdentity } from "../dashboard/sources";
 import { createSharedRequests } from "../shared-request";
-import { readLogs as clientReadLogs } from "../telemetry/client";
+import {
+  readIngestLifecycle as clientReadIngestLifecycle,
+  readLogs as clientReadLogs,
+} from "../telemetry/client";
+import {
+  createIngestLifecycleFold,
+  finalizeIngestLifecycle,
+  foldIngestRows,
+} from "../telemetry/ingest-lifecycle";
 import { reconcileStorage, adminRequest } from "../telemetry/admin";
 import type { LogsRange } from "../telemetry/kinds";
 import {
@@ -12,10 +20,7 @@ import {
 import { DAY_MS, FREE_SECRETS, LIST_RATES } from "./rates";
 import { billedVcpuForExecutions, billedVcpuMsPerRequest, priceKvStorageGb } from "./pricing";
 export { billedVcpuMsPerRequest, billedVcpuForExecutions };
-import type {
-  StorageBillingInterval,
-  StorageBillingIntervalKind,
-} from "./storageBilling";
+import type { StorageBillingInterval } from "./storageBilling";
 
 const readLogs: UsageLogReader = clientReadLogs;
 
@@ -369,176 +374,49 @@ export async function fetchIngestDeletedIntervals(
   } = {},
 ): Promise<IngestDeletedIntervalsResult> {
   const minimumBilledDays = options.minimumBilledDays ?? 30;
-  const minWindowMs = minimumBilledDays * DAY_MS;
-  const result = await read(
-    "ingest_files",
-    {
-      from: new Date(range.from).toISOString(),
-      to: new Date(range.to).toISOString(),
-    },
-    {
-      ...identity,
-      signal: options.signal,
-      columns: INGEST_DELETED_COLUMNS,
-      dedupe: false,
-      sort: false,
-    },
-  );
-
-  type RawLifecycle = {
-    earliestTs: number | null;
-    sawNonDeleted: boolean;
-    knownSize: number | undefined;
-    latest: {
-      deleted: boolean;
-      deletedAt: number | null;
-      rowAt: number;
-      version: number;
-    };
+  const isoRange = {
+    from: new Date(range.from).toISOString(),
+    to: new Date(range.to).toISOString(),
   };
 
-  const lifecycles = new Map<string, RawLifecycle>();
-  const outputs = new Map<string, IngestOutput>();
-  const deletedParquetKeys = new Set<string>();
-  for (const row of result.rows) {
-    if (
-      (row.status === "converted" || row.status === "compacted") &&
-      typeof row.output_keys_json === "string" &&
-      row.output_keys_json.length > 2
-    ) {
-      const at = parseTimestampMs(row.timestamp);
-      let written: unknown = [];
-      try {
-        written = JSON.parse(row.output_keys_json);
-      } catch {
-        written = [];
-      }
-      for (const output of Array.isArray(written) ? written : []) {
-        const key = typeof output?.key === "string" ? output.key : "";
-        const bytes = Number(output?.bytes);
-        if (!key || !Number.isFinite(bytes) || at === null || outputs.has(key)) continue;
-        outputs.set(key, { key, bytes, createdAt: at });
-      }
-    }
-    if (
-      row.status === "parquet_deleted" &&
-      typeof row.output_keys_json === "string" &&
-      row.output_keys_json.length > 2
-    ) {
-      let deleted: unknown = [];
-      try {
-        deleted = JSON.parse(row.output_keys_json);
-      } catch {
-        deleted = [];
-      }
-      for (const entry of Array.isArray(deleted) ? deleted : []) {
-        const key =
-          typeof entry === "string"
-            ? entry
-            : typeof entry?.key === "string"
-              ? entry.key
-              : "";
-        if (key) deletedParquetKeys.add(key);
-      }
-    }
-    const rawKey = typeof row.raw_key === "string" ? row.raw_key : "";
-    if (!rawKey) continue;
-    const rawSize = row.raw_size;
-    const size =
-      rawSize !== null && rawSize !== undefined ? Number(rawSize) : NaN;
-    const validSize = Number.isFinite(size) && size >= 0 ? size : undefined;
-    const ts = parseTimestampMs(row.timestamp);
-    const deletedAt = parseTimestampMs(row.raw_deleted_at);
-    const rowAt = deletedAt ?? ts ?? 0;
-    const version = Number(row.state_version ?? 0);
-    const validVersion = Number.isFinite(version) ? version : 0;
-    const deleted = row.raw_deleted === true;
-
-    const existing = lifecycles.get(rawKey);
-    if (!existing) {
-      lifecycles.set(rawKey, {
-        earliestTs: ts,
-        sawNonDeleted: !deleted,
-        knownSize: validSize,
-        latest: {
-          deleted,
-          deletedAt,
-          rowAt,
-          version: validVersion,
-        },
-      });
-      continue;
-    }
-
-    if (ts !== null && (existing.earliestTs === null || ts < existing.earliestTs)) {
-      existing.earliestTs = ts;
-    }
-    if (!deleted) {
-      existing.sawNonDeleted = true;
-    }
-    if (existing.knownSize === undefined && validSize !== undefined) {
-      existing.knownSize = validSize;
-    }
-    if (
-      validVersion > existing.latest.version ||
-      (validVersion === existing.latest.version && rowAt > existing.latest.rowAt)
-    ) {
-      existing.latest = {
-        deleted,
-        deletedAt,
-        rowAt,
-        version: validVersion,
-      };
-    }
-  }
-
-  const intervals: StorageBillingInterval[] = [];
-  let bytes = 0;
-  let complete = result.liveTruncated !== true;
-
-  for (const [rawKey, entry] of lifecycles) {
-    if (!entry.latest.deleted) continue;
-    const deletedAt = entry.latest.deletedAt ?? entry.latest.rowAt;
-    if (entry.knownSize === undefined) {
-      complete = false;
-      continue;
-    }
-    const hasCreationEvidence =
-      entry.sawNonDeleted ||
-      (entry.earliestTs !== null && entry.earliestTs < deletedAt);
-    const createdAt = entry.earliestTs ?? deletedAt;
-    const minFloor = createdAt + minWindowMs;
-    const billedUntil = Math.max(deletedAt, minFloor);
-    const kind: StorageBillingIntervalKind =
-      billedUntil > deletedAt ? "minimum_billed" : "deleted";
-    const intervalComplete = hasCreationEvidence && result.liveTruncated !== true;
-    if (!intervalComplete) {
-      complete = false;
-    }
-    bytes += entry.knownSize;
-    intervals.push({
-      id: `raw_request:${rawKey}`,
-      dataset: "raw_request",
-      kind,
-      bytes: entry.knownSize,
-      createdAt: hasCreationEvidence ? createdAt : null,
-      deletedAt,
-      billedFrom: createdAt,
-      billedUntil,
-      complete: intervalComplete,
-      provenance: "cloud:ingest_files",
+  if (read === readLogs) {
+    const folded = await clientReadIngestLifecycle(isoRange, {
+      ...identity,
+      minimumBilledDays,
+      signal: options.signal,
     });
+    return {
+      intervals: folded.intervals,
+      outputs: folded.outputs,
+      deletedParquetKeys: new Set(folded.deletedParquetKeys),
+      bytes: folded.bytes,
+      complete: folded.complete,
+      provenance: folded.provenance,
+    };
   }
+
+  const result = await read("ingest_files", isoRange, {
+    ...identity,
+    signal: options.signal,
+    columns: INGEST_DELETED_COLUMNS,
+    dedupe: false,
+    sort: false,
+  });
+
+  const fold = createIngestLifecycleFold();
+  foldIngestRows(fold, result.rows);
+  const finalized = finalizeIngestLifecycle(fold, {
+    minimumBilledDays,
+    liveTruncated: result.liveTruncated === true,
+  });
 
   return {
-    intervals,
-    outputs: [...outputs.values()],
-    deletedParquetKeys,
-    bytes,
-    complete,
-    provenance: complete
-      ? "cloud:ingest_files"
-      : "cloud:ingest_files_incomplete",
+    intervals: finalized.intervals,
+    outputs: finalized.outputs,
+    deletedParquetKeys: new Set(finalized.deletedParquetKeys),
+    bytes: finalized.bytes,
+    complete: finalized.complete,
+    provenance: finalized.provenance,
   };
 }
 

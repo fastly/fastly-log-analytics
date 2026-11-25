@@ -5,7 +5,7 @@ import {
   type FetchJson,
   type ManifestFile,
 } from "../dashboard/manifest";
-import { readParquetRows as readRows } from "../dashboard/parquet";
+import { readColumns, readParquetRows as readRows } from "../dashboard/parquet";
 import {
   assembleProjectedParquet,
   fetchProjectedRanges,
@@ -27,12 +27,30 @@ import {
   clearOpsDecodedCache,
   deleteDecodedParquet,
   loadDecodedParquet,
+  loadIngestFileFold,
 } from "./decoded-cache";
+import {
+  INGEST_LIFECYCLE_COLUMNS,
+  createIngestLifecycleFold,
+  finalizeIngestLifecycle,
+  foldIngestColumns,
+  foldIngestRows,
+  mergeIngestLifecycleFold,
+  type IngestLifecycleFold,
+  type IngestLifecycleResult,
+} from "./ingest-lifecycle";
 
 export { OpsRangeUnsupportedError, clearOpsDecodedCache };
 
 export { fnv1a32 };
-export type { LogRow, LogsRange, LogsResult, LogsStats, OpsKind };
+export type {
+  IngestLifecycleResult,
+  LogRow,
+  LogsRange,
+  LogsResult,
+  LogsStats,
+  OpsKind,
+};
 export type LogResult = LogsResult;
 
 /**
@@ -160,7 +178,8 @@ const LIVE_LIMIT = 2000;
 const LIVE_SOURCE_CURSOR = "source-v1";
 const MAX_LIVE_RESTARTS = 2;
 const MAX_LIVE_PAGES = 50;
-const CONCURRENCY = 24;
+export const OPS_FETCH_CONCURRENCY = 32;
+const CONCURRENCY = OPS_FETCH_CONCURRENCY;
 const MINUTE_MS = 60_000;
 
 const KEY_PATTERN =
@@ -395,7 +414,7 @@ export async function readLogs(
   );
   stats.evicted = evictions.length;
 
-  const fileRows: Record<string, unknown>[] = [];
+  const fileChunks: Record<string, unknown>[][] = [];
   const fetchAndDecode = async (
     file: ManifestFile,
     loadSignal?: AbortSignal,
@@ -608,7 +627,7 @@ export async function readLogs(
             }
             for (const { file: w } of coveredBy(item.parsed)) covered.add(w.key);
           }
-          fileRows.push(...rows);
+          fileChunks.push(rows);
           bestCutoff = latestCompleteSnapshotCutoff(rows, bestCutoff);
         },
         signal,
@@ -649,7 +668,7 @@ export async function readLogs(
           }
           for (const { file: w } of coveredBy(item.parsed)) covered.add(w.key);
         }
-        fileRows.push(...rows);
+        fileChunks.push(rows);
       },
       signal,
     );
@@ -661,7 +680,7 @@ export async function readLogs(
       await mapLimit(
         fallbackWindows,
         async (file) => {
-          fileRows.push(...(await load(file)));
+          fileChunks.push(await load(file));
         },
         signal,
       );
@@ -681,12 +700,14 @@ export async function readLogs(
         continue;
       byId.set(eventId, { ...raw, timestamp, event_id: eventId });
     }
-    for (const raw of fileRows) {
-      const timestamp = Number(raw.timestamp);
-      const eventId = String(raw.event_id ?? "");
-      if (!Number.isFinite(timestamp) || timestamp < fromMs || timestamp >= toMs)
-        continue;
-      byId.set(eventId, { ...raw, timestamp, event_id: eventId });
+    for (const chunk of fileChunks) {
+      for (const raw of chunk) {
+        const timestamp = Number(raw.timestamp);
+        const eventId = String(raw.event_id ?? "");
+        if (!Number.isFinite(timestamp) || timestamp < fromMs || timestamp >= toMs)
+          continue;
+        byId.set(eventId, { ...raw, timestamp, event_id: eventId });
+      }
     }
     rows = [...byId.values()];
   } else {
@@ -701,15 +722,17 @@ export async function readLogs(
           : ({ ...raw, timestamp } as LogRow),
       );
     }
-    for (const raw of fileRows) {
-      const timestamp = Number(raw.timestamp);
-      if (!Number.isFinite(timestamp) || timestamp < fromMs || timestamp >= toMs)
-        continue;
-      rows.push(
-        raw.timestamp === timestamp
-          ? (raw as LogRow)
-          : ({ ...raw, timestamp } as LogRow),
-      );
+    for (const chunk of fileChunks) {
+      for (const raw of chunk) {
+        const timestamp = Number(raw.timestamp);
+        if (!Number.isFinite(timestamp) || timestamp < fromMs || timestamp >= toMs)
+          continue;
+        rows.push(
+          raw.timestamp === timestamp
+            ? (raw as LogRow)
+            : ({ ...raw, timestamp } as LogRow),
+        );
+      }
     }
   }
   if (sort) {
@@ -734,6 +757,303 @@ export async function readLogs(
     status: live.status,
     stats,
   };
+}
+
+export interface ReadIngestLifecycleOptions {
+  from: string;
+  to: string;
+  minimumBilledDays?: number;
+  signal?: AbortSignal;
+  onProgress?: (p: RunProgress) => void;
+}
+
+export async function readIngestLifecycle(
+  source: OpsSource,
+  options: ReadIngestLifecycleOptions,
+): Promise<IngestLifecycleResult> {
+  const { from, to, minimumBilledDays, signal, onProgress } = options;
+  const fromMs = Date.parse(from);
+  const toMs = Date.parse(to);
+  const columns = [...INGEST_LIFECYCLE_COLUMNS];
+  const progress: RunProgress = {
+    phase: "cache",
+    cached: 0,
+    toFetch: 0,
+    toDecode: 0,
+    done: 0,
+    downloadedBytes: 0,
+    cachedBytes: 0,
+  };
+  const stats: LogsStats = {
+    listed: 0,
+    read: 0,
+    cached: 0,
+    cdnHits: 0,
+    skippedCovered: 0,
+    ignoredCompact: 0,
+    evicted: 0,
+    liveRows: 0,
+  };
+
+  const [live, manifest] = await Promise.all([
+    readLive(source, "ingest_files", fromMs, signal),
+    fetchManifest(source.fetchJson, from, to, signal, "ops:ingest_files"),
+  ]);
+  if (!manifest.complete) {
+    throw new Error(
+      "The file manifest for this range is incomplete; choose a shorter range.",
+    );
+  }
+  stats.listed = manifest.files.length;
+
+  const listed = new Set(manifest.files.map((file) => file.key));
+  const cachedKeys = new Set(await source.cachedKeys());
+  const evictions = [...cachedKeys].filter((key) => {
+    if (listed.has(key) || !key.startsWith("processed/ops/ingest_files/")) {
+      return false;
+    }
+    const parsed = parseKey(key);
+    return !!parsed && parsed.spanFrom < toMs && parsed.spanTo > fromMs;
+  });
+  await Promise.all(
+    evictions.map(async (key) => {
+      if (source.cacheScope) {
+        deleteDecodedParquet(source.cacheScope, key);
+      }
+      await source.evict(key);
+    }),
+  );
+  stats.evicted = evictions.length;
+
+  const fetchAndFold = async (
+    file: ManifestFile,
+    loadSignal: AbortSignal | undefined,
+    filterFrom?: number,
+    filterTo?: number,
+  ): Promise<IngestLifecycleFold> => {
+    if (
+      source.fetchRange &&
+      file.size > OPS_PROJECTED_MIN_BYTES &&
+      !cachedKeys.has(file.key)
+    ) {
+      try {
+        let anyNetwork = false;
+        let anyCdnHit = false;
+        let downloaded = 0;
+        let cachedBytes = 0;
+        const fetchRangeBytes = async (start: number, end: number) => {
+          const part = await source.fetchRange!(file, start, end, loadSignal);
+          if (part.cached) {
+            cachedBytes += part.bytes.byteLength;
+          } else {
+            anyNetwork = true;
+            downloaded += part.bytes.byteLength;
+          }
+          if (isCdnHit(part.cdn)) anyCdnHit = true;
+          return part.bytes;
+        };
+        const footer = await readParquetFooter(
+          file.size,
+          fetchRangeBytes,
+          OPS_FOOTER_PROBE_BYTES,
+        );
+        const projection = planParquetProjection(footer, new Set(columns));
+        const tailStart = footer.tail?.start ?? file.size;
+        const extraRanges = projection.ranges.filter((r) => r.start < tailStart);
+        const extraBytes = extraRanges.reduce(
+          (sum, r) => sum + (Math.min(r.end, tailStart) - r.start),
+          0,
+        );
+        const tailBytes = footer.tail ? footer.tail.bytes.byteLength : 0;
+        if (projection.chunks.length === 0) {
+          const empty = createIngestLifecycleFold();
+          empty.rowCount = Number(footer.metadata.num_rows);
+          if (!anyNetwork) stats.cached++;
+          if (anyCdnHit) stats.cdnHits++;
+          stats.read++;
+          if (!anyNetwork) progress.cached++;
+          progress.cachedBytes += cachedBytes;
+          progress.downloadedBytes += downloaded;
+          progress.done++;
+          onProgress?.({ ...progress });
+          return empty;
+        }
+        if (
+          extraBytes + tailBytes < file.size * OPS_PROJECTED_MAX_RATIO &&
+          extraRanges.length <= OPS_PROJECTED_MAX_RANGES
+        ) {
+          const rangeBytes = await fetchProjectedRanges(projection, fetchRangeBytes);
+          const projected = assembleProjectedParquet(projection, rangeBytes);
+          const decoded = await readColumns(projected, columns);
+          const fold = createIngestLifecycleFold();
+          foldIngestColumns(fold, decoded, filterFrom, filterTo);
+          if (!anyNetwork) stats.cached++;
+          if (anyCdnHit) stats.cdnHits++;
+          stats.read++;
+          if (!anyNetwork) progress.cached++;
+          progress.cachedBytes += cachedBytes;
+          progress.downloadedBytes += downloaded;
+          progress.done++;
+          onProgress?.({ ...progress });
+          return fold;
+        }
+      } catch (err) {
+        if (loadSignal?.aborted || isAbortOrAuthError(err)) throw err;
+      }
+    }
+    const { bytes, cached, cdn } = await source.fetchFile(file.key, loadSignal);
+    if (cached) stats.cached++;
+    if (isCdnHit(cdn)) stats.cdnHits++;
+    stats.read++;
+    if (cached) {
+      progress.cached++;
+      progress.cachedBytes += bytes.byteLength;
+    } else {
+      progress.downloadedBytes += bytes.byteLength;
+    }
+    const decoded = await readColumns(bytes, columns);
+    const fold = createIngestLifecycleFold();
+    foldIngestColumns(fold, decoded, filterFrom, filterTo);
+    progress.done++;
+    onProgress?.({ ...progress });
+    return fold;
+  };
+
+  const loadFold = async (
+    file: ManifestFile,
+    parsed: ParsedKey | null,
+  ): Promise<IngestLifecycleFold> => {
+    const interior =
+      parsed !== null && parsed.spanFrom >= fromMs && parsed.spanTo <= toMs;
+    if (source.cacheScope && interior) {
+      const { fold, coalesced } = await loadIngestFileFold(
+        source.cacheScope,
+        file.key,
+        (sharedSignal) => fetchAndFold(file, sharedSignal),
+        signal,
+      );
+      if (coalesced) {
+        stats.cached++;
+        stats.read++;
+        progress.cached++;
+        progress.done++;
+        onProgress?.({ ...progress });
+      }
+      if (fold.rowCount === 0 || (fold.minTs >= fromMs && fold.maxTs < toMs)) {
+        return fold;
+      }
+      return fetchAndFold(file, signal, fromMs, toMs);
+    }
+    return fetchAndFold(file, signal, fromMs, toMs);
+  };
+
+  const windows = new Map<
+    string,
+    { file: ManifestFile; parsed: ParsedKey }[]
+  >();
+  const compacts: { file: ManifestFile; parsed: ParsedKey }[] = [];
+  const plain: ManifestFile[] = [];
+  for (const file of manifest.files) {
+    const parsed = parseKey(file.key);
+    if (!parsed) plain.push(file);
+    else if (parsed.kind === "compact") compacts.push({ file, parsed });
+    else {
+      const list = windows.get(parsed.dir) ?? [];
+      list.push({ file, parsed });
+      windows.set(parsed.dir, list);
+    }
+  }
+
+  const covered = new Set<string>();
+  const coveredBy = (parsed: ParsedKey) =>
+    (windows.get(parsed.dir) ?? []).filter(({ parsed: w }) =>
+      parsed.tags
+        ? parsed.tags.has(fnv1a32(w.fileName))
+        : w.start >= parsed.start && w.start <= parsed.end,
+    );
+  const validCompacts = compacts.filter(({ parsed }) => {
+    if (parsed.malformed) return false;
+    if (parsed.tags) return true;
+    const inRange = coveredBy(parsed);
+    return inRange.length === parsed.sources || inRange.length === 0;
+  });
+  stats.ignoredCompact += compacts.length - validCompacts.length;
+
+  const queueProgress = (queued: ManifestFile[]) => {
+    for (const file of queued) {
+      if (cachedKeys.has(file.key)) progress.toDecode++;
+      else progress.toFetch++;
+    }
+    progress.phase = "files";
+    onProgress?.({ ...progress });
+  };
+
+  const potentiallyCovered = new Set<string>();
+  for (const { parsed } of validCompacts) {
+    for (const { file: w } of coveredBy(parsed)) potentiallyCovered.add(w.key);
+  }
+  const rest = [...windows.values()].flat();
+  const uncoveredWindows = rest.filter(({ file }) => !potentiallyCovered.has(file.key));
+  const coveredWindows = rest.filter(({ file }) => potentiallyCovered.has(file.key));
+
+  type FirstWaveItem =
+    | { kind: "compact"; file: ManifestFile; parsed: ParsedKey }
+    | { kind: "file"; file: ManifestFile; parsed: ParsedKey | null };
+  const firstWave: FirstWaveItem[] = [
+    ...validCompacts.map(({ file, parsed }) => ({
+      kind: "compact" as const,
+      file,
+      parsed,
+    })),
+    ...plain.map((file) => ({ kind: "file" as const, file, parsed: null })),
+    ...uncoveredWindows.map(({ file, parsed }) => ({
+      kind: "file" as const,
+      file,
+      parsed,
+    })),
+  ];
+
+  const totalFold = createIngestLifecycleFold();
+  queueProgress(firstWave.map((item) => item.file));
+  await mapLimit(
+    firstWave,
+    async (item) => {
+      const fold = await loadFold(item.file, item.parsed);
+      if (item.kind === "compact") {
+        if (fold.rowCount !== item.parsed.rows) {
+          stats.ignoredCompact++;
+          return;
+        }
+        for (const { file: w } of coveredBy(item.parsed)) covered.add(w.key);
+      }
+      mergeIngestLifecycleFold(totalFold, fold);
+    },
+    signal,
+  );
+
+  const fallbackWindows = coveredWindows.filter(({ file }) => !covered.has(file.key));
+  stats.skippedCovered = coveredWindows.length - fallbackWindows.length;
+  if (fallbackWindows.length > 0) {
+    queueProgress(fallbackWindows.map(({ file }) => file));
+    await mapLimit(
+      fallbackWindows,
+      async ({ file, parsed }) => {
+        mergeIngestLifecycleFold(totalFold, await loadFold(file, parsed));
+      },
+      signal,
+    );
+  }
+
+  progress.phase = "aggregate";
+  onProgress?.({ ...progress });
+  stats.liveRows = live.rows.length;
+  foldIngestRows(totalFold, live.rows, fromMs, toMs);
+
+  return finalizeIngestLifecycle(totalFold, {
+    minimumBilledDays,
+    liveTruncated: live.truncated,
+    stats,
+  });
 }
 
 

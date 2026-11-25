@@ -379,4 +379,78 @@ describe("browserOpsSource fetchFile deduplication", () => {
     expect(fromCache.cached).toBe(true);
     expect(new Uint8Array(fromCache.bytes)).toEqual(new Uint8Array([6, 7, 8, 9]));
   });
+
+  it("overlaps response.arrayBuffer() with cache.put() while awaiting both before resolving", async () => {
+    const events: string[] = [];
+    let releasePut!: () => void;
+    const putBlocked = new Promise<void>((resolve) => {
+      releasePut = resolve;
+    });
+    const store = new Map<string, Response>();
+    vi.stubGlobal("caches", {
+      async open() {
+        return {
+          async match(req: RequestInfo | URL) {
+            return store.get(String(req))?.clone();
+          },
+          async put(req: RequestInfo | URL, res: Response) {
+            events.push("put:start");
+            await putBlocked;
+            store.set(String(req), res);
+            events.push("put:end");
+          },
+          async delete(req: RequestInfo | URL) {
+            return store.delete(String(req));
+          },
+          async keys() {
+            return [...store.keys()].map((u) => new Request(u));
+          },
+        };
+      },
+      async keys() {
+        return [];
+      },
+      async delete() {
+        return true;
+      },
+    });
+
+    const payload = new Uint8Array([11, 22, 33, 44]);
+    const fakeResponse = {
+      ok: true,
+      status: 200,
+      headers: new Headers({ "x-flp-cdn-cache": "HIT" }),
+      clone() {
+        return new Response(payload, { status: 200 });
+      },
+      async arrayBuffer() {
+        events.push("arrayBuffer");
+        return payload.buffer;
+      },
+    } as unknown as Response;
+    vi.stubGlobal("fetch", vi.fn(async () => fakeResponse));
+
+    const src = browserOpsSource("http://localhost", {
+      user: "alice",
+      role: "admin",
+    });
+    let resolved = false;
+    const pending = src
+      .fetchFile("processed/ops/ingest_files/overlap.parquet")
+      .then((res) => {
+        resolved = true;
+        return res;
+      });
+
+    await new Promise((r) => setTimeout(r, 10));
+    // arrayBuffer must start immediately without waiting for cache.put to finish,
+    // and fetchFile must wait for cache.put before resolving.
+    expect(events).toEqual(["put:start", "arrayBuffer"]);
+    expect(resolved).toBe(false);
+
+    releasePut();
+    const res = await pending;
+    expect(events).toEqual(["put:start", "arrayBuffer", "put:end"]);
+    expect(new Uint8Array(res.bytes)).toEqual(payload);
+  });
 });

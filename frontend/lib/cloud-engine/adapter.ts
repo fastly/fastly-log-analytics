@@ -205,43 +205,101 @@ async function storageBillingIntervals(
     signal,
   });
   inventoryRead.catch(() => {});
-  const settings = await fetchUsageSettings(signal);
-  checkUsageEpoch();
-  const minBilledDays = settings.min_billed_days;
-  const minWindowMs = minBilledDays * 86_400_000;
-  const deletionWindow =
+
+  const defaultMinDays = LIST_RATES.min_billed_days;
+  const defaultMinWindowMs = defaultMinDays * 86_400_000;
+  const defaultWindow =
     toMs < now
-      ? { from: fromMs - minWindowMs, to: toMs }
-      : { from: Math.min(fromMs, now - minWindowMs), to: now };
-  const ingestRead = fetchIngestDeletedIntervals(
-    deletionWindow,
+      ? { from: fromMs - defaultMinWindowMs, to: toMs }
+      : { from: Math.min(fromMs, now - defaultMinWindowMs), to: now };
+  const defaultCovers =
+    fromMs <= defaultWindow.from && toMs >= defaultWindow.to;
+
+  // Start the 30-day ingest_files and fos_usage reads immediately in parallel
+  // with fetchUsageSettings so their manifest/file fetches don't wait an extra
+  // network round-trip. If the server reports a non-default min_billed_days,
+  // abort the speculative reads and re-read for the configured window.
+  const speculativeController = new AbortController();
+  const onParentAbort = () => speculativeController.abort(signal.reason);
+  if (signal.aborted) {
+    speculativeController.abort(signal.reason);
+  } else {
+    signal.addEventListener("abort", onParentAbort, { once: true });
+  }
+  const speculativeIngestRead = fetchIngestDeletedIntervals(
+    defaultWindow,
     identity,
     undefined,
-    { minimumBilledDays: minBilledDays, signal },
+    { minimumBilledDays: defaultMinDays, signal: speculativeController.signal },
   );
-  ingestRead.catch(() => {});
-  const coversBillingWindow =
-    fromMs <= deletionWindow.from && toMs >= deletionWindow.to;
-  const fosSourceRead = coversBillingWindow
-    ? getSummaryRead().then(({ input }) => ({
-        rows: input.rows.fos_usage,
-        complete: input.telemetryCoverage?.fos_usage === true,
-      }))
+  speculativeIngestRead.catch(() => {});
+  const speculativeFosRead = defaultCovers
+    ? null
     : fetchUsageKindWithCoverage(
         "fos_usage",
-        deletionWindow,
+        defaultWindow,
         identity,
         undefined,
-        signal,
+        speculativeController.signal,
       );
-  fosSourceRead.catch(() => {});
+  speculativeFosRead?.catch(() => {});
 
-  const [inventory, ingest, fosSource] = await Promise.all([
-    inventoryRead,
-    ingestRead,
-    fosSourceRead,
-  ]);
-  checkUsageEpoch();
+  let settings: Awaited<ReturnType<typeof fetchUsageSettings>>;
+  let minWindowMs: number;
+  let deletionWindow: { from: number; to: number };
+  let inventory: Awaited<typeof inventoryRead>;
+  let ingest: Awaited<typeof speculativeIngestRead>;
+  let fosSource: Awaited<NonNullable<typeof speculativeFosRead>>;
+  try {
+    settings = await fetchUsageSettings(signal);
+    checkUsageEpoch();
+    const minBilledDays = settings.min_billed_days;
+    minWindowMs = minBilledDays * 86_400_000;
+    deletionWindow =
+      toMs < now
+        ? { from: fromMs - minWindowMs, to: toMs }
+        : { from: Math.min(fromMs, now - minWindowMs), to: now };
+    const matchesDefault = minBilledDays === defaultMinDays;
+    if (!matchesDefault) {
+      speculativeController.abort();
+    }
+    const ingestRead = matchesDefault
+      ? speculativeIngestRead
+      : fetchIngestDeletedIntervals(deletionWindow, identity, undefined, {
+          minimumBilledDays: minBilledDays,
+          signal,
+        });
+    ingestRead.catch(() => {});
+    const coversBillingWindow =
+      fromMs <= deletionWindow.from && toMs >= deletionWindow.to;
+    const fosSourceRead = coversBillingWindow
+      ? getSummaryRead().then(({ input }) => ({
+          rows: input.rows.fos_usage,
+          complete: input.telemetryCoverage?.fos_usage === true,
+        }))
+      : matchesDefault && speculativeFosRead
+        ? speculativeFosRead
+        : fetchUsageKindWithCoverage(
+            "fos_usage",
+            deletionWindow,
+            identity,
+            undefined,
+            signal,
+          );
+    fosSourceRead.catch(() => {});
+
+    [inventory, ingest, fosSource] = await Promise.all([
+      inventoryRead,
+      ingestRead,
+      fosSourceRead,
+    ]);
+    checkUsageEpoch();
+  } catch (err) {
+    speculativeController.abort();
+    throw err;
+  } finally {
+    signal.removeEventListener("abort", onParentAbort);
+  }
 
   const deletedIds = new Set(ingest.intervals.map((interval) => interval.id));
   const deletedParquetKeys = ingest.deletedParquetKeys ?? new Set<string>();
