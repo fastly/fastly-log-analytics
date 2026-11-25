@@ -977,9 +977,9 @@ def _check_rate_limit(request: Request, path: str, content_len: int | None = Non
 
 
 def validate_analyst_request_binding(
-    request: Request, session: object, *, mgr: object | None = None
+    request: Request, session: object, *, mgr: object | None = None, allow_tos_pending: bool = False
 ) -> tuple[int, str] | None:
-    if getattr(session, "tos_pending", False):
+    if not allow_tos_pending and getattr(session, "tos_pending", False):
         return (403, "tos_pending")
     expected_fp = getattr(session, "fingerprint_signature", None)
     if expected_fp is not None:

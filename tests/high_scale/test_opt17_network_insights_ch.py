@@ -87,7 +87,7 @@ def test_network_health_uses_time_block_sampling_and_empty_fallback(monkeypatch:
     def _handler(sql: str, _params: dict[str, Any]) -> list[dict[str, Any]]:
         if "FROM request_aggregates" in sql:
             return [{"asn": 13335, "cnt": 1000}]
-        if "intDiv(toUnixTimestamp(event_timestamp), 15) % 20 = 0" in sql:
+        if "event_timestamp >= toDateTime(" in sql:
             return []
         if "AS rtt_quants" in sql and "GROUP BY asn, bucket_ts" in sql:
             return [
@@ -114,9 +114,10 @@ def test_network_health_uses_time_block_sampling_and_empty_fallback(monkeypatch:
     resp = network_health(service, req, start.isoformat(), end.isoformat())
 
     fact_sqls = [sql for sql, _, _ in client.calls if "FROM request_facts" in sql]
-    assert any("intDiv(toUnixTimestamp(event_timestamp), 15) % 20 = 0" in s for s in fact_sqls)
+    assert any("event_timestamp >= toDateTime(" in s for s in fact_sqls)
+    assert not any("% 20 = 0" in s for s in fact_sqls)
     assert not any("line_ordinal % 20" in s for s in fact_sqls)
-    assert any("intDiv(toUnixTimestamp(event_timestamp), 15) % 20 = 0" not in s for s in fact_sqls)
+    assert any("event_timestamp >= toDateTime(" not in s for s in fact_sqls)
     assert resp.available is True
 
 
@@ -156,7 +157,8 @@ def test_pop_health_quality_transport_and_shielding_use_granule_skipping_and_fas
     pop_svc = HighScaleService(service_id="svc-pop", client=pop_client, cursor_secret=b"s", request_watermark=None)
     pop_res = get_pop_health(pop_svc, start_24h, end)
     pop_sql = pop_client.calls[0][0]
-    assert "intDiv(toUnixTimestamp(event_timestamp), 30) % 20 = 0" in pop_sql
+    assert "event_timestamp >= toDateTime(" in pop_sql
+    assert "% 20 = 0" not in pop_sql
     assert "line_ordinal % 20" not in pop_sql
     assert "upper(custom_fields['cache'])" not in pop_sql
     assert "startsWith(custom_fields['cache'], 'HIT')" in pop_sql
@@ -176,7 +178,8 @@ def test_pop_health_quality_transport_and_shielding_use_granule_skipping_and_fas
     network_quality(q_svc, NetworkQualityRequest(), start_24h.isoformat(), end.isoformat())
     q_sqls = [sql for sql, _, _ in q_client.calls]
     rollup_union = next(s for s in q_sqls if "FROM network_minute_dimensions" in s)
-    assert "intDiv(toUnixTimestamp(event_timestamp), 30) % 20 = 0" in rollup_union
+    assert "event_timestamp >= toDateTime(" in rollup_union
+    assert "% 20 = 0" not in rollup_union
     assert "line_ordinal % 20" not in rollup_union
     scatter_q = next(s for s in q_sqls if "AS ttfb_ms" in s)
     assert scatter_q.index("custom_fields['tcp_rtt'] != ''") < scatter_q.index("line_ordinal % 64 = 0")
@@ -196,7 +199,8 @@ def test_pop_health_quality_transport_and_shielding_use_granule_skipping_and_fas
     )
     tr_svc = HighScaleService(service_id="svc-tr", client=tr_client, cursor_secret=b"s", request_watermark=None)
     get_transport_metrics(tr_svc, start_24h.isoformat(), end.isoformat(), {})
-    assert "intDiv(toUnixTimestamp(event_timestamp), 30) % 20 = 0" in tr_client.calls[0][0]
+    assert "event_timestamp >= toDateTime(" in tr_client.calls[0][0]
+    assert "% 20 = 0" not in tr_client.calls[0][0]
     assert "line_ordinal % 20" not in tr_client.calls[0][0]
 
     sh_client = _RecordingCHClient(

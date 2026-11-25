@@ -2,19 +2,14 @@ import type { Metadata } from "next";
 import { Suspense } from "react";
 import { Inter } from "next/font/google";
 import { cookies, headers } from "next/headers";
-import { QueryClient, dehydrate } from "@tanstack/react-query";
-import type { DehydratedState } from "@tanstack/react-query";
 import "./globals.css";
-import "maplibre-gl/dist/maplibre-gl.css";
 import QueryProvider, { ReloadLoopGuard, StoreHydrator, WebVitalsReporter } from "@/components/QueryProvider";
+import { BootstrapHydration } from "@/components/BootstrapHydration";
 import { ThemeProvider } from "next-themes";
 import { AppLayout } from "@/components/AppLayout";
 import { ServerFooter } from "@/components/ServerFooter";
 import { SIDEBAR_COLLAPSED_COOKIE } from "@/lib/utils";
 import { ErrorBoundaryWithRouteReset } from "@/components/AnalyticsCard";
-import { queryKeys, seedBootstrapDependentCaches } from "@/lib/api";
-import { fetchBootstrapServerSide } from '@/lib/ssr/upstream';
-import { shouldLoadRumScript } from "@/lib/ssr/upstream";
 
 const inter = Inter({ subsets: ["latin"], display: "swap", preload: false });
 
@@ -66,53 +61,8 @@ export default async function RootLayout({
   // header) so the strict script-src nonce policy doesn't drop it.
   const requestHeaders = isStaticExport ? new Headers() : await headers();
   const nonce = requestHeaders.get("x-nonce") ?? undefined;
-
-  // Per-request SSR fetch of /api/bootstrap. Pre-seeds React Query so
-  // useBootstrap (and every hook that reads bootstrap.* via
-  // queryClient.getQueryData) finds data already cached on first
-  // render — the share banner, header badge, etc. land in the
-  // initial HTML paint instead of after the client-side fetch.
-  //
-  // SECURITY: the SSR helper sets X-Remote-Analyst:1 whenever the
-  // inbound request carries the X-Proxied-By-Caddy marker, so the
-  // backend correctly scopes the response to the analyst session
-  // (or returns the anonymous stub) instead of falling back to its
-  // loopback=admin default. See backend/utils/remote_access.py:264
-  // and lib/ssr/bootstrap.ts for the full topology.
-  //
-  // Failure path: helper returns null on any error (network blip,
-  // 5xx, timeout, missing API_PROXY_URL). Layout renders without
-  // HydrationBoundary state and the existing client-side useBootstrap
-  // path takes over unchanged. Never a broken page.
-  const bootstrap = await fetchBootstrapServerSide();
-  let dehydratedState: DehydratedState | null = null;
-  const ssrShell = {
-    activeServiceId: bootstrap?.active_service_id ?? null,
-    isRumEnabled: false,
-    isCmcdEnabled: false,
-  };
-
-  if (bootstrap) {
-    const client = new QueryClient();
-    client.setQueryData(queryKeys.bootstrap(), bootstrap);
-    // Mirror the dependent-cache seeds from useBootstrap.queryFn via shared
-    // seedBootstrapDependentCaches so hooks gated on the bootstrap status flip
-    // find their slice in cache too.
-    seedBootstrapDependentCaches(client, bootstrap);
-    if (ssrShell.activeServiceId) {
-      const activeSvc = bootstrap.services?.find(
-        (service) => service.service_id === ssrShell.activeServiceId,
-      );
-      ssrShell.isRumEnabled = activeSvc?.rum_enabled === true;
-      ssrShell.isCmcdEnabled = activeSvc?.cmcd_enabled === true;
-    }
-    dehydratedState = dehydrate(client);
-  }
-  const loadRumScript = shouldLoadRumScript({
-    host: requestHeaders.get("host"),
-    proxiedByCaddy: requestHeaders.get("x-proxied-by-caddy") === "true",
-    rumEnabled: ssrShell.isRumEnabled,
-  });
+  const host = requestHeaders.get("host");
+  const proxiedByCaddy = requestHeaders.get("x-proxied-by-caddy") === "true";
 
   return (
     <html lang="en" suppressHydrationWarning>
@@ -125,11 +75,6 @@ export default async function RootLayout({
             gzip of bandwidth on every non-chart page (/share-login,
             /admin/*, /alerts, /usage, /logs). See P-1 / P-2 in the
             2026-06-15 audit. */}
-        {/* RUM collector script only when the active service has RUM
-            enabled — an unconditional emit makes every page load proxy
-            /js/rum.js to the backend, which fails (ECONNRESET log spam)
-            or 404s on services without RUM. */}
-        {loadRumScript && <script src="/js/rum.js" nonce={nonce} async />}
       </head>
       <body className={`${inter.className} antialiased`} suppressHydrationWarning>
         {/* Skip-to-content link: first focusable element, visually hidden
@@ -155,7 +100,10 @@ export default async function RootLayout({
               app is what stops the loop from re-arming. Wraps QueryProvider so a
               tripped state also halts the WebVitals POSTs that flooded RUM. */}
           <ReloadLoopGuard>
-          <QueryProvider dehydratedState={dehydratedState}>
+          <QueryProvider>
+            <Suspense fallback={null}>
+              <BootstrapHydration host={host} proxiedByCaddy={proxiedByCaddy} nonce={nonce} />
+            </Suspense>
             {/* Rehydrate the persisted Zustand stores (service / timezone /
                 debug) AFTER mount. They use persist({ skipHydration:true })
                 so the first client render matches the server's default
@@ -172,9 +120,6 @@ export default async function RootLayout({
             <WebVitalsReporter />
             <AppLayout
               initialCollapsed={initialSidebarCollapsed}
-              ssrActiveServiceId={ssrShell.activeServiceId}
-              ssrIsRumEnabled={ssrShell.isRumEnabled}
-              ssrIsCmcdEnabled={ssrShell.isCmcdEnabled}
               serverFooter={
                 <Suspense fallback={<div aria-hidden="true" className="mt-12 h-[50px]" />}>
                   <ServerFooter />

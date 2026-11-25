@@ -937,6 +937,49 @@ describe("browserSource", () => {
       vi.useRealTimers();
     }
   });
+
+  it("deduplicates concurrent identical GET fetchJson calls and isolates caller aborts", async () => {
+    let release!: (res: Response) => void;
+    const fetcher = vi.fn(
+      () => new Promise<Response>((resolve) => {
+        release = resolve;
+      }),
+    );
+    vi.stubGlobal("fetch", fetcher);
+
+    const source = browserSource("", { serviceId: "svc-1" });
+    const abortFirst = new AbortController();
+    const abortSecond = new AbortController();
+
+    const p1 = source.fetchJson(
+      "/api/files?dataset=rum&from=2026-10-29T00:00:00.000Z&to=2026-10-30T00:00:00.000Z&view=raw",
+      abortFirst.signal,
+    );
+    const p2 = source.fetchJson(
+      "/api/files?dataset=rum&from=2026-10-29T00:00:00.000Z&to=2026-10-30T00:00:00.000Z&view=raw",
+      abortSecond.signal,
+    );
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    // Aborting one waiter must reject only that waiter without aborting the shared fetch.
+    abortFirst.abort(new DOMException("Aborted first", "AbortError"));
+    await expect(p1).rejects.toMatchObject({ name: "AbortError" });
+    expect(abortSecond.signal.aborted).toBe(false);
+
+    const expected = { files: [], next_cursor: null, complete: true };
+    release(Response.json(expected));
+    await expect(p2).resolves.toEqual(expected);
+
+    // Distinct service scopes do not share in-flight requests, and settled fetches are not cached.
+    fetcher.mockImplementation(async () => Response.json(expected));
+    await Promise.all([
+      source.fetchJson("/api/files?dataset=rum&from=2026-10-29T00:00:00.000Z&to=2026-10-30T00:00:00.000Z&view=raw"),
+      browserSource("", { serviceId: "svc-2" }).fetchJson(
+        "/api/files?dataset=rum&from=2026-10-29T00:00:00.000Z&to=2026-10-30T00:00:00.000Z&view=raw",
+      ),
+    ]);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
 });
 
 function fakeCacheStorage(names: Record<string, string[]>) {

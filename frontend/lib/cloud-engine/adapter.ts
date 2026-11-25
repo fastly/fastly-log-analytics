@@ -15,6 +15,7 @@ import { classifyUserAgentCounts } from "./bots/classify";
 import { CMCD_REQUIRED_ANY_COLUMNS, cmcdScanColumns, handleCmcdRequest, type CmcdQueryParams } from "./cmcd";
 import { cmcdRollupEligible } from "./cmcd-rollup";
 import { formatAsnDisplayLabel, getCachedAsnName, loadAsnNames } from "./asn-names";
+import { fetchManifest, type Manifest } from "./dashboard/manifest";
 import type { MinuteBucket } from "./dashboard/engine";
 import { currentStoreMetaEpoch } from "./dashboard/file-store";
 import { WHOLE_FALLBACK_HIGH_FANOUT_MAX_BYTES } from "./dashboard/parquet-projection";
@@ -892,10 +893,15 @@ async function loadServiceRollupFlags(
  * decoding and merging summaries stays off the main thread, or in-thread over
  * the same range-loader source where there is no Worker (tests, SSR).
  */
-function rollupAnswer(path: string, params: Record<string, unknown>, serviceId: string | undefined,
-  signal: AbortSignal): Promise<unknown> {
-  return answerRollupInWorker(path, params, serviceId, signal)
-    ?? answerFromRollup(path, params, cloudFileSource(serviceId), signal);
+function rollupAnswer(
+  path: string,
+  params: Record<string, unknown>,
+  serviceId: string | undefined,
+  signal: AbortSignal,
+  options?: { rawManifest?: Manifest },
+): Promise<unknown> {
+  return answerRollupInWorker(path, params, serviceId, signal, options)
+    ?? answerFromRollup(path, params, cloudFileSource(serviceId), signal, options);
 }
 
 /**
@@ -1017,6 +1023,27 @@ async function cloudSectionRollup(
   assertAdapterEpoch(request, entryMetaEpoch);
   const finish = route.decorate?.(start, end, { ...params, ...serviceId ? { service_id: serviceId } : {} });
   try {
+    // Share the main-thread catalog-manifest + fetchJson cache with concurrent
+    // rum/live-events scans so the rollup worker does not issue a duplicate
+    // GET /api/files?dataset=rum&view=raw request across threads.
+    let rawManifest: Manifest | undefined;
+    if (path === "/api/rum/analytics") {
+      const startMs = Date.parse(start);
+      const endMs = Date.parse(end);
+      if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs) {
+        const listFrom = new Date(Math.floor(startMs / 1000) * 1000).toISOString();
+        const listTo = new Date(Math.ceil(endMs / 1000) * 1000).toISOString();
+        rawManifest = await fetchManifest(
+          cloudFileSource(serviceId).fetchJson,
+          listFrom,
+          listTo,
+          request.signal,
+          "rum",
+          "raw",
+        );
+        assertAdapterEpoch(request, entryMetaEpoch);
+      }
+    }
     const answer = await rollupAnswer(path, {
       ...params,
       start_time: start,
@@ -1027,7 +1054,7 @@ async function cloudSectionRollup(
       ...(path === "/api/cmcd/aggregates" && typeof serviceFlags.cmcd_available === "boolean"
         ? { available: serviceFlags.cmcd_available }
         : {}),
-    }, serviceId, request.signal);
+    }, serviceId, request.signal, rawManifest ? { rawManifest } : undefined);
     assertAdapterEpoch(request, entryMetaEpoch);
     if (!answer) return null;
     const decorated = finish ? await finish(answer) : answer;

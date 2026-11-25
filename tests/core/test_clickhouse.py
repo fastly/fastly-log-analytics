@@ -1854,5 +1854,21 @@ def test_rewrite_publication_fence_skips_cf_literal_rewrite_on_console_wrapper_a
         assert "`_cf_pop`" not in out_no_cf
         assert "custom_fields['pop']" in out_no_cf
         assert "batch_id NOT IN ('bid-pending-1')" in out_no_cf
+
+        # Regex string literals containing '.*' must not trip star-subquery guard and block _cf_* rewrite:
+        regex_literal_sql = (
+            "SELECT 'impossible_distance' AS _q, formatRow('JSONEachRow', *) AS _r FROM ("
+            "WITH base AS (SELECT custom_fields['ja4'] AS ja4 FROM request_facts WHERE service_id = {service_id:String}) "
+            "SELECT ja4 FROM base"
+            ") UNION ALL "
+            "SELECT 'crawler_disparity' AS _q, formatRow('JSONEachRow', *) AS _r FROM ("
+            "WITH base AS (SELECT custom_fields['ua'] AS ua FROM request_facts WHERE service_id = {service_id:String}) "
+            "SELECT replaceRegexpOne(ua, '(bot).*$', '') FROM base"
+            ")"
+        )
+        out_regex = c.rewrite_publication_fence(regex_literal_sql, {"service_id": "svc_alpha"})
+        assert "custom_fields[" not in out_regex
+        assert "`_cf_ja4`" in out_regex
+        assert "`_cf_ua`" in out_regex
     finally:
         c.close()

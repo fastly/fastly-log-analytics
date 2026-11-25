@@ -78,7 +78,7 @@ from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 
 from .batches import DetectionBatch, plan_execution
 from .rollup import ROLLUP_DETECTIONS, baseline_hours_span, coverage_sql, covered_span, hour_totals, rollup_base_sql
-from .sql_queries import Detection, _base_sql, _detection_for
+from .sql_queries import Detection, _base_sql, _detection_for, rewrite_materialized_cf
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +156,14 @@ def _severity(items: list[dict[str, Any]]) -> str:
     return evaluate_insight_severity(None, items)
 
 
+def _use_materialized_cf(client: Any) -> bool:
+    """Return True only when the ClickHouse client confirms materialized ``_cf_*`` columns are ready."""
+    checker = getattr(client, "_has_materialized_cf_columns", None)
+    if callable(checker):
+        return bool(checker())
+    return bool(getattr(client, "_enable_cf_rewrite_in_tests", False))
+
+
 def _failure_message(exc: Exception) -> str:
     return str(exc) if isinstance(exc, ClickHouseError) else type(exc).__name__
 
@@ -212,6 +220,7 @@ def _evaluate(
             return service.client.execute(sql, q_params, settings=query_settings)
         return service.client.execute(sql, q_params)
 
+    use_cf = _use_materialized_cf(service.client)
     baseline_start, window_start, now = _window(window_hours, baseline_hours, clamp_start, clamp_end)
     scope = " AND ".join(visible_fact_clauses("request"))
     if filter_clause:
@@ -336,6 +345,7 @@ def _evaluate(
                 "AND event_timestamp < {window_end:DateTime64(3)}",
                 f"AND event_timestamp < {{window_end:DateTime64(3)}} AND ({filter_clause})",
             )
+        sql = rewrite_materialized_cf(sql, query_params, use_cf=use_cf)
 
         def _finish(raw_rows: list[dict[str, Any]]) -> list[tuple[str, dict[str, Any]]]:
             try:
@@ -362,6 +372,7 @@ def _evaluate(
         query_params = (
             {**params, "rollup_start": span[0], "rollup_end": span[1]} if (batch.rollup_shape and span) else params
         )
+        sql = rewrite_materialized_cf(sql, query_params, use_cf=use_cf)
 
         def _on_error(exc: Exception) -> list[tuple[str, dict[str, Any]]]:
             msg = _failure_message(exc)
@@ -786,28 +797,35 @@ def cache_collapse_detail_endpoint(
         "window_start": window_start,
         "window_end": now,
     }
+    use_cf = _use_materialized_cf(service.client)
     cache = "custom_fields['cache']"
     hit, miss, passed = (f"startsWith({cache}, '{kind}')" for kind in ("HIT", "MISS", "PASS"))
     is_w = "event_timestamp >= {window_start:DateTime64(3)}"
     is_b = "event_timestamp < {window_start:DateTime64(3)}"
-    rates_sql = (
+    rates_sql = rewrite_materialized_cf(
         "/* insight:cache_collapse_rates */ SELECT "
         f"countIf({is_w} AND {hit}) AS w_hits, countIf({is_w} AND {miss}) AS w_miss, "
         f"countIf({is_w} AND {passed}) AS w_pass, countIf({is_w}) AS w_total, "
         f"countIf({is_b} AND {hit}) AS b_hits, countIf({is_b} AND {miss}) AS b_miss, "
         f"countIf({is_b} AND {passed}) AS b_pass, countIf({is_b}) AS b_total "
-        f"FROM request_facts WHERE {scope}"
+        f"FROM request_facts PREWHERE {scope}",
+        params,
+        use_cf=use_cf,
     )
-    timeline_sql = (
+    timeline_sql = rewrite_materialized_cf(
         "/* insight:cache_collapse_timeline */ SELECT "
         f"toStartOfInterval(event_timestamp, {_bucket_interval(window_hours + baseline_hours)}) AS bucket, "
         f"count() AS total_requests, countIf({hit}) AS real_hits, countIf({miss}) AS misses "
-        f"FROM request_facts WHERE {scope} GROUP BY bucket ORDER BY bucket ASC"
+        f"FROM request_facts PREWHERE {scope} GROUP BY bucket ORDER BY bucket ASC",
+        params,
+        use_cf=use_cf,
     )
-    miss_sql = (
+    miss_sql = rewrite_materialized_cf(
         "/* insight:cache_collapse_misses */ SELECT event_timestamp AS timestamp, "
         f"{cache} AS cache, custom_fields['pop'] AS pop, client_ip AS ip, toInt32OrNull(custom_fields['status']) AS status "
-        f"FROM request_facts WHERE {scope} AND {miss} ORDER BY event_timestamp DESC LIMIT 50"
+        f"FROM request_facts PREWHERE {scope} WHERE {miss} ORDER BY event_timestamp DESC LIMIT 50",
+        params,
+        use_cf=use_cf,
     )
     with ThreadPoolExecutor(max_workers=3, thread_name_prefix="hs-cache-collapse") as pool:
         fut_rates = pool.submit(contextvars.copy_context().run, service.client.execute, rates_sql, params)

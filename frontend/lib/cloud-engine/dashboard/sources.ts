@@ -683,20 +683,21 @@ export function browserSource(
     networkDone: boolean;
     complete: boolean;
   };
-  type InFlightRange = {
+  type InFlightShared<T> = {
     controller: AbortController;
-    promise: Promise<ArrayBuffer>;
+    promise: Promise<T>;
     waiters: number;
     complete: boolean;
   };
   const inFlightFiles = new Map<string, InFlightFile>();
-  const inFlightRanges = new Map<string, InFlightRange>();
+  const inFlightRanges = new Map<string, InFlightShared<ArrayBuffer>>();
+  const inFlightJson = new Map<string, InFlightShared<unknown>>();
   const activeRangeControllers = new Set<AbortController>();
   let cacheEpoch = 0;
-  const waitSharedRange = (
-    entry: InFlightRange,
+  const waitShared = <T>(
+    entry: InFlightShared<T>,
     signal?: AbortSignal,
-  ): Promise<ArrayBuffer> => {
+  ): Promise<T> => {
     signal?.throwIfAborted();
     entry.controller.signal.throwIfAborted();
     entry.waiters += 1;
@@ -709,7 +710,7 @@ export function browserSource(
         entry.controller.abort(signal?.reason);
       }
     };
-    return new Promise<ArrayBuffer>((resolve, reject) => {
+    return new Promise<T>((resolve, reject) => {
       const onCallerAbort = () => {
         cleanup();
         release();
@@ -730,10 +731,10 @@ export function browserSource(
       if (signal) signal.addEventListener("abort", onCallerAbort, { once: true });
       entry.controller.signal.addEventListener("abort", onSharedAbort, { once: true });
       entry.promise.then(
-        (bytes) => {
+        (value) => {
           cleanup();
           release();
-          resolve(bytes);
+          resolve(value);
         },
         (error) => {
           cleanup();
@@ -807,6 +808,10 @@ export function browserSource(
       request.controller.abort();
     }
     inFlightRanges.clear();
+    for (const request of inFlightJson.values()) {
+      request.controller.abort();
+    }
+    inFlightJson.clear();
     for (const controller of activeRangeControllers) controller.abort();
     activeRangeControllers.clear();
     memoryRollups.clear();
@@ -853,6 +858,7 @@ export function browserSource(
       storeIndexFlushPinTimer !== null ||
       inFlightFiles.size > 0 ||
       inFlightRanges.size > 0 ||
+      inFlightJson.size > 0 ||
       activeRangeControllers.size > 0
     ) {
       pendingSourceClosures.add(closureHandle);
@@ -1514,73 +1520,106 @@ export function browserSource(
     },
     fetchJson: Object.assign(
       async (url: string, signal?: AbortSignal) => {
-        const headers = buildRequestHeaders(options);
+        signal?.throwIfAborted();
         if (options?.serviceId) {
           const scopedUrl = new URL(url, globalThis.location?.origin ?? "http://localhost");
           scopedUrl.searchParams.set("service_id", options.serviceId);
           url = `${scopedUrl.pathname}${scopedUrl.search}`;
         }
+        const callEpoch = cacheEpoch;
+        const jsonKey = JSON.stringify([
+          fileOwnerScope(options) ?? null,
+          Boolean(options?.debugResponses?.()),
+          url,
+        ]);
+        const existing = inFlightJson.get(jsonKey);
+        if (existing && !existing.controller.signal.aborted) {
+          return waitShared(existing, signal);
+        }
+        const headers = buildRequestHeaders(options);
         const pageLoadId = options?.getPageLoadId?.();
         const endpointPath = url.split("?", 1)[0];
         const endpoint = `GET ${endpointPath}`;
         const retryDelays =
           limits.catalog503RetryDelays ?? CATALOG_503_RETRY_DELAYS_MS;
-        for (let attempt = 0; ; attempt += 1) {
-          const start =
-            typeof performance !== "undefined" ? performance.now() : Date.now();
-          const response = await fetchRetrying(baseUrl + url, {
-            credentials: "same-origin",
-            ...(headers ? { headers } : {}),
-            signal,
-          });
-          const end =
-            typeof performance !== "undefined" ? performance.now() : Date.now();
-          const durationMs = Math.max(0, Math.round(end - start));
-          const vcpuMs = parseVcpuMsHeader(response?.headers);
-          options?.onApiCall?.({
-            source: "Compute API",
-            method: "GET",
-            path: url,
-            status: response?.status ?? null,
-            duration_ms: durationMs,
-            vcpu_ms: vcpuMs,
-            endpoint,
-            server_timing: parseServerTiming(
-              response?.headers?.get?.("server-timing"),
-            ),
-            page_load_id: pageLoadId,
-          });
-          emitDebugSubCalls(response, endpoint, pageLoadId, options?.onApiCall);
-          if (!response.ok) {
-            let code: string | undefined;
-            if (response.status === 409 || response.status === 503) {
-              try {
-                const body = (await manifestJson(response)) as {
-                  code?: unknown;
-                  error?: unknown;
-                  detail?: unknown;
-                };
-                if (typeof body.code === "string") code = body.code;
-                else if (typeof body.error === "string") code = body.error;
-                else if (typeof body.detail === "string") code = body.detail;
-              } catch {
-                // Non-JSON error response; preserve HTTP status without a code.
+        const controller = new AbortController();
+        const entry: InFlightShared<unknown> = {
+          controller,
+          waiters: 0,
+          complete: false,
+          promise: (async () => {
+            for (let attempt = 0; ; attempt += 1) {
+              const start =
+                typeof performance !== "undefined" ? performance.now() : Date.now();
+              const response = await fetchRetrying(baseUrl + url, {
+                credentials: "same-origin",
+                ...(headers ? { headers } : {}),
+                signal: controller.signal,
+              });
+              const end =
+                typeof performance !== "undefined" ? performance.now() : Date.now();
+              const durationMs = Math.max(0, Math.round(end - start));
+              const vcpuMs = parseVcpuMsHeader(response?.headers);
+              options?.onApiCall?.({
+                source: "Compute API",
+                method: "GET",
+                path: url,
+                status: response?.status ?? null,
+                duration_ms: durationMs,
+                vcpu_ms: vcpuMs,
+                endpoint,
+                server_timing: parseServerTiming(
+                  response?.headers?.get?.("server-timing"),
+                ),
+                page_load_id: pageLoadId,
+              });
+              emitDebugSubCalls(response, endpoint, pageLoadId, options?.onApiCall);
+              if (callEpoch !== cacheEpoch) {
+                throw controller.signal.reason ??
+                  new DOMException("The operation was aborted.", "AbortError");
               }
+              if (!response.ok) {
+                let code: string | undefined;
+                if (response.status === 409 || response.status === 503) {
+                  try {
+                    const body = (await manifestJson(response)) as {
+                      code?: unknown;
+                      error?: unknown;
+                      detail?: unknown;
+                    };
+                    if (typeof body.code === "string") code = body.code;
+                    else if (typeof body.error === "string") code = body.error;
+                    else if (typeof body.detail === "string") code = body.detail;
+                  } catch {
+                    // Non-JSON error response; preserve HTTP status without a code.
+                  }
+                }
+                if (
+                  isRetryableCatalog503(endpointPath, response.status, code) &&
+                  !controller.signal.aborted &&
+                  attempt < retryDelays.length
+                ) {
+                  await waitRetryDelay(retryDelays[attempt], controller.signal);
+                  continue;
+                }
+                throw new ManifestRequestError(response.status, code);
+              }
+              return endpointPath === "/api/files"
+                ? manifestJson(response)
+                : response.json();
             }
-            if (
-              isRetryableCatalog503(endpointPath, response.status, code) &&
-              !signal?.aborted &&
-              attempt < retryDelays.length
-            ) {
-              await waitRetryDelay(retryDelays[attempt], signal);
-              continue;
+          })().finally(() => {
+            entry.complete = true;
+            if (inFlightJson.get(jsonKey) === entry) {
+              inFlightJson.delete(jsonKey);
             }
-            throw new ManifestRequestError(response.status, code);
-          }
-          return endpointPath === "/api/files"
-            ? manifestJson(response)
-            : response.json();
-        }
+            syncClosurePin();
+          }),
+        };
+        entry.promise.catch(() => {});
+        inFlightJson.set(jsonKey, entry);
+        syncClosurePin();
+        return waitShared(entry, signal);
       },
       {
         manifestCacheScope: () =>
@@ -1615,7 +1654,7 @@ export function browserSource(
       }
       const existing = inFlightRanges.get(rangeKey);
       if (existing && !existing.controller.signal.aborted) {
-        const bytes = await waitSharedRange(existing, signal);
+        const bytes = await waitShared(existing, signal);
         return bytes.slice(0);
       }
       const controller = new AbortController();
@@ -1625,7 +1664,7 @@ export function browserSource(
         ...(limits.foldFileTelemetry ? { "X-FLP-Fold-Telemetry": "1" } : {}),
       });
       const begin = performance.now();
-      const entry: InFlightRange = {
+      const entry: InFlightShared<ArrayBuffer> = {
         controller,
         waiters: 0,
         complete: false,
@@ -1713,7 +1752,7 @@ export function browserSource(
       entry.promise.catch(() => {});
       inFlightRanges.set(rangeKey, entry);
       syncClosurePin();
-      const bytes = await waitSharedRange(entry, signal);
+      const bytes = await waitShared(entry, signal);
       return bytes.slice(0);
     },
     async fetchFile(key, signal, mode) {

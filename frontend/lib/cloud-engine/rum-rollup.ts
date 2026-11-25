@@ -2,7 +2,7 @@ import { parquetMetadata } from "hyparquet";
 import { MissingCloudFileError } from "./dashboard/file-errors";
 import { Histogram } from "./dashboard/histogram";
 import { Hll } from "./dashboard/hll";
-import { fetchManifest, type ManifestFile } from "./dashboard/manifest";
+import { fetchManifest, type Manifest, type ManifestFile } from "./dashboard/manifest";
 import { readColumns } from "./dashboard/parquet";
 import type { queryRollup } from "./dashboard/rollup-query";
 import { mapLimit } from "./dashboard/sources";
@@ -866,17 +866,21 @@ export function rumWireFromSummary(summary: RumSummary, params: RumQueryParams) 
 async function loadMergedRumSummary(
   source: RumRollupSource,
   params: RumQueryParams,
+  options?: { rawManifest?: Manifest },
 ): Promise<RumSummary | null> {
   if (!rumRollupEligible(params)) return null;
   const fromMs = parseEpochMs(params.start_time);
   const toMs = parseEpochMs(params.end_time);
   if (fromMs === null || toMs === null || !(toMs > fromMs)) return null;
 
-  const from = new Date(fromMs).toISOString();
-  const to = new Date(toMs).toISOString();
+  const listFrom = new Date(Math.floor(fromMs / 1000) * 1000).toISOString();
+  const listTo = new Date(Math.ceil(toMs / 1000) * 1000).toISOString();
+  const rawPromise = options?.rawManifest?.complete
+    ? Promise.resolve(options.rawManifest)
+    : fetchManifest(source.fetchJson, listFrom, listTo, params.signal, "rum", "raw");
   const [raw, summaries] = await Promise.all([
-    fetchManifest(source.fetchJson, from, to, params.signal, "rum", "raw"),
-    fetchManifest(source.fetchJson, from, to, params.signal, "rum", "summary"),
+    rawPromise,
+    fetchManifest(source.fetchJson, listFrom, listTo, params.signal, "rum", "summary"),
   ]);
   if (!raw.complete || !summaries.complete) return null;
 
@@ -928,8 +932,9 @@ export async function queryRumFromRollup(
 export async function queryRumWireFromRollup(
   source: RumRollupSource,
   params: RumQueryParams,
+  options?: { rawManifest?: Manifest },
 ): Promise<ReturnType<typeof rumWireFromSummary> | null> {
-  const merged = await loadMergedRumSummary(source, params);
+  const merged = await loadMergedRumSummary(source, params, options);
   if (!merged || merged.sampled) return null;
   return rumWireFromSummary(merged, params);
 }

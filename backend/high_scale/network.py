@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextvars
+import math
 import os
 import sys
 from collections import defaultdict
@@ -185,23 +186,88 @@ def _network_sample_stride(span_s: float) -> int:
     return 1
 
 
-def _network_time_sample_clause(stride: int, *, bucket_seconds: int | None = None) -> str:
-    """Granule-skipping primary-key time-block sample clause for ClickHouse PREWHERE.
+def _to_utc_epoch_s(dt: datetime) -> int:
+    utc_dt = dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+    return int(utc_dt.timestamp())
 
-    `request_facts` is ordered by `(service_id, toStartOfHour(event_timestamp), event_timestamp)`,
-    so `line_ordinal % stride = 0` matches rows inside every granule and still decompresses 100% of
-    granules. Sampling whole `chunk_s`-second blocks on `event_timestamp` lets ClickHouse skip
-    ~(1 - 1/stride) of granules before reading `_cf_*` columns.
+
+def _pk_range_or_clause(windows: list[tuple[int, int]]) -> str:
+    clauses = [
+        f"(event_timestamp >= toDateTime({w_start}, 'UTC') AND event_timestamp < toDateTime({w_end}, 'UTC'))"
+        for w_start, w_end in windows
+    ]
+    return f" AND ({' OR '.join(clauses)})"
+
+
+def _network_time_sample_clause(
+    stride: int,
+    *,
+    bucket_seconds: int | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> str:
+    """Granule- and partition-skipping primary-key time-window sample clause for ClickHouse PREWHERE.
+
+    `request_facts` is partitioned by `toYYYYMMDD(event_timestamp)` and ordered by
+    `(service_id, toStartOfHour(event_timestamp), event_timestamp)` (or `(service_id, event_timestamp, event_id)`).
+    Modulo predicates like `intDiv(toUnixTimestamp(event_timestamp), 30) % stride = 0` or
+    `line_ordinal % stride = 0` are non-monotonic so ClickHouse's `KeyCondition` cannot prune
+    partitions or granules and still scans 100% of rows. Explicit `(event_timestamp >= ... AND
+    event_timestamp < ...)` range disjunctions are monotonic on the primary key and let
+    ClickHouse skip ~(1 - 1/stride) of granules before reading `_cf_*` columns.
     """
     if stride <= 1:
         return ""
+    if start is None or end is None:
+        if bucket_seconds is not None:
+            if bucket_seconds < stride:
+                return f" AND line_ordinal % {stride} = 0"
+            chunk_s = max(1, min(30, bucket_seconds // stride))
+        else:
+            chunk_s = 30
+        return f" AND intDiv(toUnixTimestamp(event_timestamp), {chunk_s}) % {stride} = 0"
+
+    start_ts, end_ts = _to_utc_epoch_s(start), _to_utc_epoch_s(end)
+    span_s = end_ts - start_ts
+    if span_s <= stride:
+        return ""
+
     if bucket_seconds is not None:
         if bucket_seconds < stride:
             return f" AND line_ordinal % {stride} = 0"
-        chunk_s = max(1, min(30, bucket_seconds // stride))
-    else:
-        chunk_s = 30
-    return f" AND intDiv(toUnixTimestamp(event_timestamp), {chunk_s}) % {stride} = 0"
+        first_b = (start_ts // bucket_seconds) * bucket_seconds
+        last_b = ((end_ts - 1) // bucket_seconds) * bucket_seconds
+        n_buckets = ((last_b - first_b) // bucket_seconds) + 1
+        step_buckets = 1 if n_buckets <= 720 else math.ceil(n_buckets / 360)
+        windows: list[tuple[int, int]] = []
+        for idx in range(0, n_buckets, step_buckets):
+            b_lo = max(start_ts, first_b + idx * bucket_seconds)
+            b_hi = min(end_ts, first_b + (idx + step_buckets) * bucket_seconds)
+            b_dur = b_hi - b_lo
+            if b_dur < stride:
+                continue
+            win_s = max(1, b_dur // stride)
+            slack = b_dur - win_s
+            offset = ((idx * 13) % 60) * slack // 60 if slack > 0 else 0
+            windows.append((b_lo + offset, b_lo + offset + win_s))
+        return _pk_range_or_clause(windows) if windows else ""
+
+    target_sampled_s = max(1, span_s // stride)
+    n_windows = min(24, max(1, target_sampled_s // 60)) if target_sampled_s >= 60 else 1
+    win_s = max(1, target_sampled_s // n_windows)
+    step_s = span_s // n_windows
+    windows = []
+    for i in range(n_windows):
+        slot_lo = start_ts + i * step_s
+        slot_hi = end_ts if i == n_windows - 1 else start_ts + (i + 1) * step_s
+        slot_dur = slot_hi - slot_lo
+        w_dur = min(win_s, slot_dur)
+        if w_dur <= 0:
+            continue
+        slack = slot_dur - w_dur
+        offset = ((i * 13) % 24) * slack // 24 if slack > 0 else 0
+        windows.append((slot_lo + offset, slot_lo + offset + w_dur))
+    return _pk_range_or_clause(windows) if windows else ""
 
 
 def _ch_bucket_expr(bucket_seconds: int) -> str:
@@ -526,7 +592,7 @@ def network_health(
         if is_real_ch:
             nh_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
             sample_stride = _network_sample_stride(nh_span_s) if not os.getenv("PYTEST_CURRENT_TEST") else 1
-            stride_sql = _network_time_sample_clause(sample_stride, bucket_seconds=bs)
+            stride_sql = _network_time_sample_clause(sample_stride, bucket_seconds=bs, start=start, end=end)
             rtt_prewhere = f"{_BASE_WHERE}{filter_sql}{stride_sql} AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0'"
             top_asn_ints: list[int] = []
             raw_speed_rows: list[dict[str, Any]] | None = None
@@ -1171,7 +1237,7 @@ def network_quality(
         def _bar(group_expr: str, extra_where: str = "") -> list[dict]:
             q_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
             scale_factor = _network_sample_stride(q_span_s) if is_real_ch else 1
-            hash_clause = _network_time_sample_clause(scale_factor)
+            hash_clause = _network_time_sample_clause(scale_factor, start=start, end=end)
             if is_real_ch and group_expr != _ASN:
                 sql = (
                     f"SELECT {group_expr} AS label, avg({_RTT} / 1000.0) AS rtt_ms, count() AS reqs "
@@ -1215,7 +1281,7 @@ def network_quality(
             )
             q_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
             region_scale = _network_sample_stride(q_span_s)
-            region_hash = _network_time_sample_clause(region_scale)
+            region_hash = _network_time_sample_clause(region_scale, start=start, end=end)
             sql = (
                 "SELECT dimension, label, rtt_ms, reqs FROM ("
                 "SELECT dimension, value AS label, "
@@ -1388,7 +1454,7 @@ def get_pop_health(
         if is_real_ch:
             pop_span_s = (end - start).total_seconds()
             pop_stride = 1 if filter_sql else _network_sample_stride(pop_span_s)
-            hash_clause = _network_time_sample_clause(pop_stride)
+            hash_clause = _network_time_sample_clause(pop_stride, start=start, end=end)
             cache_hit_pred = "(startsWith(custom_fields['cache'], 'HIT') OR startsWith(custom_fields['cache'], 'hit'))"
             fact_sql = (
                 f"SELECT custom_fields['pop'] AS pop, count() AS requests, countIf({_STATUS} >= 500) AS errors, "
@@ -1581,7 +1647,7 @@ def get_transport_metrics(
         if is_real_ch:
             tr_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
             scale_factor = _network_sample_stride(tr_span_s)
-            hash_clause = _network_time_sample_clause(scale_factor)
+            hash_clause = _network_time_sample_clause(scale_factor, start=start, end=end)
             combined_sql = (
                 f"SELECT count() AS total_reqs, sum(toInt64OrZero(custom_fields['resp_bytes'])) AS total_bytes, "
                 f"quantilesTDigest(0.50, 0.90, 0.95, 0.99)({_RTT}) AS rtt_quants, "

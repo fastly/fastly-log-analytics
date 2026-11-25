@@ -778,3 +778,111 @@ def test_background_insights_refresh_caps_concurrency_and_uses_tdigest(monkeypat
     req = SimpleNamespace(window_size_hrs=24.0, baseline_hours=168.0, filters=None)
     evaluator.insights_endpoint(svc, req, None, None, force_refresh=True)
     assert seen_workers == [evaluator._BACKGROUND_MAX_WORKERS]
+
+
+def test_impossible_distance_uses_selective_prewhere_and_prunes_impossible_rtt() -> None:
+    from backend.high_scale.insights.sql_queries import _base_sql, impossible_distance
+
+    pops = {"SJC": (37.36, -121.93)}
+    det_edge = impossible_distance(pops, "ja4", edge_only=True)
+    assert det_edge.prewhere
+    assert "{window_start" not in det_edge.prewhere and "{window_end" not in det_edge.prewhere
+    assert "lower(" not in det_edge.prewhere
+    assert "lower(" not in det_edge.row_filter
+
+    sql_plain = _base_sql(det_edge, "impossible_distance")
+    pre_plain = re.search(r"FROM request_facts PREWHERE (.*?) WHERE ", sql_plain)
+    assert pre_plain, sql_plain
+    pre_clause = pre_plain.group(1)
+    assert "custom_fields['edge'] IN ('1', 'true', 'True', 'TRUE')" in pre_clause
+    assert "custom_fields['ja4'] != ''" in pre_clause
+    assert "custom_fields['pop'] != ''" in pre_clause
+    assert "custom_fields['tcp_rtt'] != ''" in pre_clause
+    assert "custom_fields['lat'] != ''" in pre_clause
+    assert "custom_fields['lon'] != ''" in pre_clause
+    assert "toFloat64OrNull(custom_fields['tcp_rtt']) > 0" in pre_clause
+    assert "toFloat64OrNull(custom_fields['tcp_rtt']) <= 100100" in pre_clause
+    assert "`_cf_" not in sql_plain
+
+    sql_cf = _base_sql(det_edge, "impossible_distance", use_cf=True)
+    assert "custom_fields[" not in sql_cf
+    pre_cf = re.search(r"FROM request_facts PREWHERE (.*?) WHERE ", sql_cf)
+    assert pre_cf, sql_cf
+    for col in ("`_cf_edge`", "`_cf_ja4`", "`_cf_pop`", "`_cf_tcp_rtt`", "`_cf_lat`", "`_cf_lon`"):
+        assert col in pre_cf.group(1)
+    for col in ("`_cf_pop`", "`_cf_city`", "`_cf_ja4`", "`_cf_edge`"):
+        assert col in sql_cf
+
+    det_no_edge = impossible_distance(pops, "ja3", edge_only=False)
+    assert "edge" not in det_no_edge.prewhere
+    assert "custom_fields['ja3'] != ''" in det_no_edge.prewhere
+
+
+def test_materialized_cf_columns_used_across_insights_and_cache_collapse_when_enabled() -> None:
+    from backend.models.analytics import CacheCollapseDetailRequest
+
+    # 1. Default client without _cf_* support keeps custom_fields[...] for chDB / legacy table parity.
+    plain_client = _BatchFakeClient(with_rollup=True)
+    _run(plain_client)
+    for name, (sql, _params) in plain_client.queries().items():
+        if name not in ("history", "fields", "rollup_coverage"):
+            assert "`_cf_" not in sql, f"Unexpected _cf_ in {name} when disabled"
+
+    # 2. Client with materialized _cf_* columns enabled rewrites all raw-fact insight queries + filters.
+    cf_client = _BatchFakeClient(with_rollup=True)
+    cf_client._enable_cf_rewrite_in_tests = True  # type: ignore[attr-defined]
+    service = SimpleNamespace(service_id="svc-opt", client=cf_client)
+    req = InsightsRequest(window_size_hrs=24.0, baseline_hours=168.0, filters={"cache": ["MISS"]})
+    evaluator.insights_endpoint(service, req, None, None)  # type: ignore[arg-type]
+
+    cf_queries = cf_client.queries()
+    assert "fields" in cf_queries
+    assert "mapKeys(custom_fields)" in cf_queries["fields"][0]
+    assert f"LIMIT {evaluator._FIELD_SAMPLE_ROWS}" in cf_queries["fields"][0]
+
+    for name, (sql, _params) in cf_queries.items():
+        if name in ("history", "fields", "rollup_coverage"):
+            continue
+        assert "custom_fields[" not in sql, f"Unrewritten custom_fields in {name}: {sql}"
+
+    standalone_sql = cf_queries["group_raw_standalone"][0]
+    for expected in ("`_cf_ja4`", "`_cf_lat`", "`_cf_lon`", "`_cf_tcp_rtt`", "`_cf_pop`", "`_cf_ua`", "`_cf_cache`"):
+        assert expected in standalone_sql
+
+    # 3. cache_collapse_detail_endpoint also uses _cf_* and PREWHERE when enabled.
+    detail_calls: list[str] = []
+
+    class _DetailCFClient:
+        _enable_cf_rewrite_in_tests = True
+
+        def execute(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+            detail_calls.append(sql)
+            if "insight:cache_collapse_rates" in sql:
+                return [
+                    {
+                        "w_hits": 10,
+                        "w_miss": 90,
+                        "w_pass": 0,
+                        "w_total": 100,
+                        "b_hits": 90,
+                        "b_miss": 10,
+                        "b_pass": 0,
+                        "b_total": 100,
+                    }
+                ]
+            return []
+
+    detail_svc = SimpleNamespace(service_id="svc-opt", client=_DetailCFClient())
+    evaluator.cache_collapse_detail_endpoint(
+        detail_svc,  # type: ignore[arg-type]
+        CacheCollapseDetailRequest(url="/api/slow", window_size_hrs=24, baseline_hours=168),
+        None,
+        None,
+    )
+    assert len(detail_calls) == 3
+    for sql in detail_calls:
+        assert "custom_fields[" not in sql
+        assert "`_cf_cache`" in sql
+        assert "FROM request_facts PREWHERE " in sql
+    misses_sql = next(s for s in detail_calls if "insight:cache_collapse_misses" in s)
+    assert "`_cf_pop`" in misses_sql and "`_cf_status`" in misses_sql

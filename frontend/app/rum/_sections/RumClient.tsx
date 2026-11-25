@@ -12,7 +12,7 @@ import { useRumStatus } from '@/hooks/useDashboardCards'
 import { useAnalyticsReportQuery, useReportRangeAnchor } from '@/hooks/useReportPageState'
 import { useTimezone } from '@/hooks/useSSE'
 import { adminJsonResult } from '@/lib/api'
-import { arrayOrEmpty, recordOrNull, type RangeWireArgs } from '@/lib/utils'
+import { arrayOrEmpty, rangeLabelToHours, recordOrNull, type RangeWireArgs } from '@/lib/utils'
 import type { FiltersPayload } from '@/types/api'
 import {
   RumEmptyWindowCard,
@@ -133,13 +133,27 @@ export function RumClient({
     queryOptions: { enabled: queriesEnabled, refetchInterval: false },
   })
 
+  const liveRange = useMemo(() => {
+    const hours = relativeRange ? rangeLabelToHours(relativeRange) : isAutoRange ? 24 : null
+    if (hours !== null && anchor) {
+      const endMs = Date.parse(anchor)
+      if (Number.isFinite(endMs)) {
+        return {
+          start: new Date(endMs - hours * 3_600_000).toISOString(),
+          end: anchor,
+        }
+      }
+    }
+    return { start: startTime, end: endTime }
+  }, [relativeRange, isAutoRange, anchor, startTime, endTime])
+
   const { data: liveEvents, isLoading: isLiveEventsLoading, isError: isLiveEventsError, refetch: refetchLiveEvents } = useQuery({
-    queryKey: ['rum-live-events', serviceId, startTime, endTime, filterPayload],
+    queryKey: ['rum-live-events', serviceId, liveRange.start, liveRange.end, filterPayload],
     queryFn: async ({ signal }) => {
       if (!serviceId) return []
       const params = new URLSearchParams()
-      if (startTime) params.append('start_time', startTime)
-      if (endTime) params.append('end_time', endTime)
+      if (liveRange.start) params.append('start_time', liveRange.start)
+      if (liveRange.end) params.append('end_time', liveRange.end)
       if (filterPayload && Object.keys(filterPayload).length > 0) params.append('filters', JSON.stringify(filterPayload))
       const qs = params.toString()
       const res = await adminJsonResult<'/api/services/{service_id}/rum/live-events', RumLiveEvent[]>(

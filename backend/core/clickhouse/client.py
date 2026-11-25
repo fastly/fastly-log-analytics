@@ -175,9 +175,30 @@ _MATERIALIZED_CF_KEYS: frozenset[str] = frozenset(
 _CF_LITERAL_RE = re.compile(r"custom_fields\['([a-zA-Z0-9_]+)'\]")
 _REQUEST_FACTS_WORD_RE = re.compile(r"(?<![A-Za-z0-9_])request_facts(?![A-Za-z0-9_])")
 _CF_PARAM_RE = re.compile(r"custom_fields\[\{([a-zA-Z0-9_]+):String\}\]")
+_SQL_STRING_LIT_RE = re.compile(r"'(?:\\.|''|[^'\\])*'")
 _PUB_FENCE_RE = re.compile(
     r"batch_id\s+IN\s*\(\s*SELECT\s+batch_id\s+FROM\s+high_scale_batch_publications\s+FINAL\s+WHERE\s+([^()]+?)\)"
 )
+
+
+def rewrite_materialized_cf_sql(sql: str, params: Mapping[str, Any] | None = None) -> str:
+    """Rewrite known ``custom_fields[...]`` lookups on ``request_facts`` to materialized ``_cf_*`` columns."""
+    if "custom_fields[" not in sql:
+        return sql
+    sql = _CF_LITERAL_RE.sub(
+        lambda m: f"`_cf_{m.group(1)}`" if m.group(1) in _MATERIALIZED_CF_KEYS else m.group(0),
+        sql,
+    )
+    if params:
+        sql = _CF_PARAM_RE.sub(
+            lambda m: (
+                f"`_cf_{params[m.group(1)]}`"
+                if m.group(1) in params and str(params[m.group(1)]) in _MATERIALIZED_CF_KEYS
+                else m.group(0)
+            ),
+            sql,
+        )
+    return sql
 
 
 class ClickHouseClient:
@@ -390,14 +411,18 @@ class ClickHouseClient:
             sql = _PUB_FENCE_RE.sub(_replace_fence, sql)
 
         upper_sql = sql.lstrip().upper()
+        upper_sql_nostr = _SQL_STRING_LIT_RE.sub("''", upper_sql)
         is_fact_query = bool(_REQUEST_FACTS_WORD_RE.search(sql)) and upper_sql.startswith(("SELECT", "WITH", "/*"))
         is_where_fragment = not upper_sql.startswith(
             ("SELECT", "WITH", "/*", "INSERT", "ALTER", "CREATE", "DROP", "OPTIMIZE", "SYSTEM", "TRUNCATE")
         )
-        is_console_wrapper = bool(re.match(r"^SELECT\s+\*\s+FROM\s*\(\s*\n", upper_sql))
+        is_console_wrapper = bool(re.match(r"^SELECT\s+\*\s+FROM\s*\(\s*\n", upper_sql_nostr))
         has_star_subquery = bool(
-            re.search(r"(?:\bSELECT\s+(?:DISTINCT\s+|ALL\s+)?\*|\.\s*\*)", upper_sql)
-            and (upper_sql.startswith("WITH") or re.search(r"\b(?:FROM|JOIN)\s*\(\s*(?:WITH|SELECT)\b", upper_sql))
+            re.search(r"(?:\bSELECT\s+(?:DISTINCT\s+|ALL\s+)?\*|\.\s*\*)", upper_sql_nostr)
+            and (
+                upper_sql_nostr.startswith("WITH")
+                or re.search(r"\b(?:FROM|JOIN)\s*\(\s*(?:WITH|SELECT)\b", upper_sql_nostr)
+            )
         )
         if (
             rewrite_cf
@@ -409,19 +434,7 @@ class ClickHouseClient:
             and "SELECT event_timestamp, custom_fields FROM" not in sql
             and self._has_materialized_cf_columns()
         ):
-            sql = _CF_LITERAL_RE.sub(
-                lambda m: f"`_cf_{m.group(1)}`" if m.group(1) in _MATERIALIZED_CF_KEYS else m.group(0),
-                sql,
-            )
-            if params:
-                sql = _CF_PARAM_RE.sub(
-                    lambda m: (
-                        f"`_cf_{params[m.group(1)]}`"
-                        if m.group(1) in params and str(params[m.group(1)]) in _MATERIALIZED_CF_KEYS
-                        else m.group(0)
-                    ),
-                    sql,
-                )
+            sql = rewrite_materialized_cf_sql(sql, params)
         return sql
 
     def execute(

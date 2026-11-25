@@ -808,4 +808,31 @@ describe("Feature F23 — RUM & Web Vitals cloud-engine", () => {
       laneSpy.mockRestore();
     }
   });
+
+  it("second-aligns listing bounds and skips duplicate rum/raw fetch when rawManifest is pre-supplied", async () => {
+    const startMs = Date.parse("2027-01-15T08:00:00.250Z");
+    const endMs = Date.parse("2027-01-15T09:00:00.250Z");
+    const seenUrls: string[] = [];
+    const source: RumRollupSource = {
+      async fetchJson(url) {
+        seenUrls.push(url);
+        return { files: [], next_cursor: null, complete: true };
+      },
+      async fetchFile() {
+        throw new Error("should not fetch files for empty manifest");
+      },
+    };
+
+    await queryRumWireFromRollup(
+      source,
+      { start_time: startMs, end_time: endMs },
+      { rawManifest: { files: [], complete: true } },
+    );
+
+    expect(seenUrls).toHaveLength(1);
+    const params = new URL(seenUrls[0], "http://localhost").searchParams;
+    expect(params.get("view")).toBe("summary");
+    expect(params.get("from")).toBe("2027-01-15T08:00:00.000Z");
+    expect(params.get("to")).toBe("2027-01-15T09:00:01.000Z");
+  });
 });
