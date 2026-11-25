@@ -38,7 +38,8 @@ describe('DeployRemoteFrontendDialog opaque naming', () => {
     expect(prefix1).toMatch(OPAQUE_RE)
     expect(prefix1.length).toBeLessThanOrEqual(63)
     expect(prefix1).not.toContain('svc-secret-999')
-    expect(prefix1).not.toContain('999')
+    expect(prefix1).not.toContain('secret')
+    expect(prefix1).not.toContain('svc')
     expect(prefix1.startsWith('fos-')).toBe(false)
     first.unmount()
 
