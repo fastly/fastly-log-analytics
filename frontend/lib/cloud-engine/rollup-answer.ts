@@ -8,6 +8,8 @@ import type { NetworkQueryParams } from "./network";
 import { networkFromRollup } from "./network-rollup";
 import { originFromRollup, type OriginRollupBody } from "./origin-rollup";
 import { performanceFromRollup, type PerformanceRollupBody } from "./performance-rollup";
+import type { RumQueryParams } from "./rum";
+import { queryRumWireFromRollup } from "./rum-rollup";
 import { securityFromRollup, type SecurityRollupBody } from "./security-rollup";
 import { valueFromRollup, type ValueRollupBody } from "./value-rollup";
 
@@ -46,6 +48,8 @@ const ANSWERS: Record<string, Answer> = {
     assetsFromRollup(path, params as AssetsRollupBody, source, signal),
   "/api/cmcd/aggregates": (_path, params, source, signal) =>
     cmcdFromRollup(params as CmcdQueryParams, source, signal),
+  "/api/rum/analytics": (_path, params, source, signal) =>
+    queryRumWireFromRollup(source, { ...(params as RumQueryParams), signal }),
   "/api/value/summary": (path, params, source, signal) =>
     valueFromRollup(path, params as ValueRollupBody, source, signal),
   // The adapter passes only unfiltered baselines; the window is read raw on the page.

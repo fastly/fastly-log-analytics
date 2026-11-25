@@ -394,10 +394,11 @@ pub fn files<R: Runtime>(runtime: &R, service: &Service, query: &str, started: I
             let kind = match dataset {
                 "request" => REQUEST_SUMMARIES,
                 "cmcd_summary" => CMCD_SUMMARIES,
+                "rum" => RUM_SUMMARIES,
                 _ => {
                     return Err((
                         400,
-                        "Summaries exist only for the request and cmcd_summary datasets",
+                        "Summaries exist only for the request, cmcd_summary and rum datasets",
                     ))
                 }
             };
@@ -1123,6 +1124,14 @@ const CMCD_SUMMARIES: SummaryKind = SummaryKind {
     dataset: "cmcd_summary",
     marker: "window=",
     windows: |scope| super::cmcd_summary::cmcd_summary_prefix(scope, "request"),
+    cached: false,
+};
+
+/// RUM window summaries (`processed/rum/summary/`) and their hour/day bundles.
+const RUM_SUMMARIES: SummaryKind = SummaryKind {
+    dataset: "rum",
+    marker: "summary=",
+    windows: super::rum_summary::prefix,
     cached: false,
 };
 

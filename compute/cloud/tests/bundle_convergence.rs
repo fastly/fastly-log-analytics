@@ -167,7 +167,7 @@ impl Runtime for Fake {
         Ok(None)
     }
     fn secret(&self, _name: &str) -> Result<Option<String>, String> {
-        Ok(None)
+        Ok(Some("0123456789abcdef0123456789abcdef".into()))
     }
     fn random(&self) -> Result<[u8; 32], String> {
         Ok([7; 32])
@@ -1406,4 +1406,243 @@ fn stage_reserve_bounds_backend_calls_and_vcpu_per_execution() {
     assert_eq!(fake.bucket.borrow()[&key], expected);
     assert!(peak_calls <= 22, "peak_calls={peak_calls} exceeded 22");
     assert!(peak_vcpu <= 600, "peak_vcpu={peak_vcpu}ms exceeded 600ms");
+}
+
+const RUM_BUNDLES: &str = "processed/summary_bundle/rum/";
+
+fn rum_body(start: i64, seed: u32) -> Vec<u8> {
+    use arrow_array::{
+        builder::{Float64Builder, Int32Builder, StringBuilder, TimestampMillisecondBuilder},
+        RecordBatch,
+    };
+    use std::sync::Arc;
+
+    let mut ts = TimestampMillisecondBuilder::new().with_timezone("UTC");
+    let mut name = StringBuilder::new();
+    let mut value = Float64Builder::new();
+    let mut rating = StringBuilder::new();
+    let mut pathname = StringBuilder::new();
+    let mut browser = StringBuilder::new();
+    let mut os = StringBuilder::new();
+    let mut device = StringBuilder::new();
+    let mut cid = StringBuilder::new();
+    let mut req_id = StringBuilder::new();
+    let mut city = StringBuilder::new();
+    let mut region = StringBuilder::new();
+    let mut country = StringBuilder::new();
+    let mut pop = StringBuilder::new();
+    let mut tls = StringBuilder::new();
+    let mut resource_url = StringBuilder::new();
+    let mut asn = StringBuilder::new();
+    let mut ttfb = Float64Builder::new();
+    let mut sample_rate = Float64Builder::new();
+
+    for (m_name, m_val) in [
+        ("LCP", 1500.0 + f64::from(seed * 10)),
+        ("FCP", 900.0 + f64::from(seed * 5)),
+        ("TTFB", 300.0 + f64::from(seed * 2)),
+    ] {
+        ts.append_value(start * 1000);
+        name.append_value(m_name);
+        value.append_value(m_val);
+        rating.append_value("good");
+        pathname.append_value("/home");
+        browser.append_value("Chrome");
+        os.append_value("macOS");
+        device.append_value("desktop");
+        cid.append_value(format!("c{seed}"));
+        req_id.append_null();
+        city.append_null();
+        region.append_null();
+        country.append_value("US");
+        pop.append_null();
+        tls.append_null();
+        resource_url.append_null();
+        asn.append_null();
+        ttfb.append_null();
+        sample_rate.append_value(1.0);
+    }
+    let vitals = RecordBatch::try_new(
+        ingest::rum::vitals_schema(),
+        vec![
+            Arc::new(ts.finish()),
+            Arc::new(name.finish()),
+            Arc::new(value.finish()),
+            Arc::new(rating.finish()),
+            Arc::new(pathname.finish()),
+            Arc::new(browser.finish()),
+            Arc::new(os.finish()),
+            Arc::new(device.finish()),
+            Arc::new(cid.finish()),
+            Arc::new(req_id.finish()),
+            Arc::new(city.finish()),
+            Arc::new(region.finish()),
+            Arc::new(country.finish()),
+            Arc::new(pop.finish()),
+            Arc::new(tls.finish()),
+            Arc::new(resource_url.finish()),
+            Arc::new(asn.finish()),
+            Arc::new(ttfb.finish()),
+            Arc::new(sample_rate.finish()),
+        ],
+    )
+    .unwrap();
+
+    let errors = RecordBatch::try_new(
+        ingest::rum::errors_schema(),
+        vec![
+            Arc::new(
+                TimestampMillisecondBuilder::new()
+                    .with_timezone("UTC")
+                    .finish(),
+            ),
+            Arc::new(StringBuilder::new().finish()),
+            Arc::new(StringBuilder::new().finish()),
+            Arc::new(Int32Builder::new().finish()),
+            Arc::new(Int32Builder::new().finish()),
+            Arc::new(StringBuilder::new().finish()),
+            Arc::new(StringBuilder::new().finish()),
+            Arc::new(StringBuilder::new().finish()),
+            Arc::new(StringBuilder::new().finish()),
+            Arc::new(StringBuilder::new().finish()),
+            Arc::new(StringBuilder::new().finish()),
+            Arc::new(StringBuilder::new().finish()),
+            Arc::new(StringBuilder::new().finish()),
+            Arc::new(StringBuilder::new().finish()),
+            Arc::new(StringBuilder::new().finish()),
+            Arc::new(StringBuilder::new().finish()),
+            Arc::new(StringBuilder::new().finish()),
+            Arc::new(StringBuilder::new().finish()),
+            Arc::new(Float64Builder::new().finish()),
+            Arc::new(Float64Builder::new().finish()),
+        ],
+    )
+    .unwrap();
+    ingest::rum_summary::write_summary(&[&vitals], &[&errors], start).unwrap()
+}
+
+fn rum_hour(fake: &Fake, hour: i64, minutes: usize) -> Vec<String> {
+    let prefix = ingest::rum_summary::prefix("");
+    let mut keys = Vec::new();
+    for m in 0..minutes {
+        let start = hour + (m as i64) * 60;
+        let key = ingest::rum_summary::key(&prefix, start, start + 60, &format!("p{m}s0"), 3);
+        let body = rum_body(start, m as u32 % 8);
+        fake.bucket.borrow_mut().insert(key.clone(), body);
+        keys.push(key);
+    }
+    keys
+}
+
+fn rum_expected(fake: &Fake, keys: &[String]) -> Vec<u8> {
+    let mut sorted: Vec<&String> = keys.iter().collect();
+    sorted.sort_by_key(|k| k.rsplit('/').next().unwrap().to_owned());
+    let bucket = fake.bucket.borrow();
+    let bodies: Vec<&[u8]> = sorted.iter().map(|k| bucket[*k].as_slice()).collect();
+    ingest::rum_summary::merge_windows(&bodies).unwrap()
+}
+
+#[test]
+fn rum_summaries_bundle_into_exact_hour_and_open_bundles_and_list_via_summary_view() {
+    let fake = Fake::default();
+    let svc = service();
+    let closed = rum_hour(&fake, BASE, 12);
+    let open = rum_hour(&fake, BASE + HOUR, 10);
+    fake.now.set(BASE + HOUR + 30 * 60);
+    watermark(&fake, fake.now.get());
+
+    let mut runs = 0;
+    while runs < 30 {
+        runs += 1;
+        fake.new_execution();
+        let report = bundle::rum_summary_bundle(&store(&fake, &svc), "ck", RESERVE).unwrap();
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let rum_has = |marker: &str| fake.keys(marker).iter().any(|k| k.starts_with(RUM_BUNDLES));
+        if rum_has("hour_bundle=08-") && rum_has("open_bundle=09-") {
+            break;
+        }
+    }
+    let hour_key = fake
+        .keys("hour_bundle=08-")
+        .into_iter()
+        .find(|k| k.starts_with(RUM_BUNDLES))
+        .expect("closed RUM hour is bundled");
+    assert!(hour_key.contains("hour_bundle=08-c12-n36-"), "{hour_key}");
+    assert_eq!(
+        fake.bucket.borrow()[&hour_key],
+        rum_expected(&fake, &closed)
+    );
+
+    let open_key = fake
+        .keys("open_bundle=09-")
+        .into_iter()
+        .find(|k| k.starts_with(RUM_BUNDLES))
+        .expect("open RUM hour gets a snapshot");
+    let name = bundle::parse_name(&open_key).unwrap();
+    let mut sorted = open.clone();
+    sorted.sort_by_key(|k| k.rsplit('/').next().unwrap().to_owned());
+    assert_eq!(
+        fake.bucket.borrow()[&open_key],
+        rum_expected(&fake, &sorted[..name.count])
+    );
+    assert!(fake.kv.borrow().contains_key(bundle::RUM_STATE_KEY));
+
+    // `GET /api/files?dataset=rum&view=summary` returns the hour_bundle instead of 12 per-minute summaries.
+    fake.new_execution();
+    let query = format!(
+        "dataset=rum&view=summary&from={}&to={}",
+        ingest::rfc3339(BASE),
+        ingest::rfc3339(BASE + HOUR)
+    );
+    let resp = ingest::api::files(&fake, &svc, &query, std::time::Instant::now()).unwrap();
+    let listed: Vec<&str> = resp["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|f| f["key"].as_str())
+        .collect();
+    assert_eq!(listed, vec![hour_key.as_str()]);
+    assert_eq!(resp["complete"], true);
+}
+
+#[test]
+fn rum_bundling_runs_in_bundle_datasets_and_waits_for_delete_data() {
+    use fastly_log_analytics::admin::{DataReset, ResetPhase};
+    let fake = Fake::default();
+    let mut svc = service();
+    rum_hour(&fake, BASE, 6);
+    fake.now.set(BASE + 2 * HOUR);
+    watermark(&fake, fake.now.get());
+    svc.data_reset = Some(DataReset {
+        job_id: "job1".into(),
+        reset_at: (BASE + HOUR) as u64,
+        phase: ResetPhase::Cleanup,
+        started_at: (BASE + HOUR) as u64,
+        actor: "tester".into(),
+        rum_held: false,
+    });
+    fake.new_execution();
+    let reports = bundle::bundle_datasets(&store(&fake, &svc), "ck", RESERVE, 4).unwrap();
+    assert!(reports.rum.is_none());
+    assert!(fake.keys(RUM_BUNDLES).is_empty());
+
+    svc.data_reset = None;
+    for _ in 0..8 {
+        fake.new_execution();
+        let reports = bundle::bundle_datasets(&store(&fake, &svc), "ck", RESERVE, 4).unwrap();
+        if let Some(Ok(r)) = reports.rum {
+            assert!(r.errors.is_empty(), "{:?}", r.errors);
+        }
+        if fake
+            .keys("hour_bundle=08-")
+            .iter()
+            .any(|k| k.starts_with(RUM_BUNDLES))
+        {
+            break;
+        }
+    }
+    assert!(fake
+        .keys("hour_bundle=08-")
+        .iter()
+        .any(|k| k.starts_with(RUM_BUNDLES)));
 }

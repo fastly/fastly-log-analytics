@@ -1,6 +1,7 @@
 import { getDuckDBEngine } from "./dashboard/duckdb";
 import { parseEpochMs, roundTo } from "./engine-utils";
 import { buildRumWhere, queryRumAnalytics, queryRumLiveEvents, type RumQueryParams } from "./rum";
+import { queryRumWireFromRollup, type RumRollupSource } from "./rum-rollup";
 
 const BEACON_IDENTITY = `coalesce(nullif(request_event_id, ''), nullif(client_id, '') || '_' || round(ts_ms / 1000.0)::BIGINT::VARCHAR,
   scoped_key || '_' || ts_ms::VARCHAR)`;
@@ -45,7 +46,13 @@ export async function cloudRumUsage(params: RumQueryParams, classARate: number) 
   };
 }
 
-export async function cloudRumAnalytics(params: RumQueryParams) {
+export async function cloudRumAnalytics(
+  params: RumQueryParams & { rollupSource?: RumRollupSource },
+) {
+  if (params.rollupSource) {
+    const rolled = await queryRumWireFromRollup(params.rollupSource, params);
+    if (rolled) return rolled;
+  }
   const engine = params.engine ?? getDuckDBEngine().readContext();
   const data = await queryRumAnalytics({ ...params, engine });
   const where = buildRumWhere(params);

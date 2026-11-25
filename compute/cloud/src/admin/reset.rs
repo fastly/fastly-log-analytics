@@ -601,10 +601,11 @@ fn fence<R: Runtime>(store: &Store<'_, R>, job: &mut ResetJob) -> Result<bool, S
 /// the new head.
 /// `retention:summary_bundle:cmcd_summary` is left out: it is only a listing resume point, the
 /// reset deletes that folder anyway, and one more delete would push the purge to a second tick.
-const STATE_KEYS: [&str; 7] = [
+const STATE_KEYS: [&str; 8] = [
     compaction::STATE_KEY,
     bundle::STATE_KEY,
     bundle::CMCD_STATE_KEY,
+    bundle::RUM_STATE_KEY,
     "retention:request",
     "retention:rum",
     "retention:summary:request",
@@ -979,7 +980,7 @@ fn adopt(job: &mut ResetJob, watermark: &Value, now: u64) {
 }
 
 /// The folders cleanup empties, each under `scope(service)`. `processed/ops/` is never listed.
-pub const CLEANUP_PREFIXES: [&str; 11] = [
+pub const CLEANUP_PREFIXES: [&str; 12] = [
     "raw/request/",
     "raw/rum/",
     "processed/request/",
@@ -987,6 +988,7 @@ pub const CLEANUP_PREFIXES: [&str; 11] = [
     "processed/summary/request/",
     "processed/summary_bundle/request/",
     "processed/summary_bundle/cmcd_summary/",
+    "processed/summary_bundle/rum/",
     "processed/_catalog/",
     "processed/_sources/",
     "processed/_inflight/",

@@ -1,10 +1,11 @@
 // @vitest-environment node
 import { parquetWriteBuffer } from "hyparquet-writer";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { MissingCloudFileError } from "./dashboard/file-errors";
 import { Histogram } from "./dashboard/histogram";
 import { Hll } from "./dashboard/hll";
-import type { RumRollupSource } from "./rum-rollup";
+import { fetchLanes } from "./fetch-lanes";
+import { queryRumWireFromRollup, type RumRollupSource } from "./rum-rollup";
 import { DuckDBAnalyticalEngine, getDuckDBEngine } from "./dashboard/test-fixtures";
 import { cloudRumAnalytics } from "./rum-wire";
 import {
@@ -617,6 +618,194 @@ describe("Feature F23 — RUM & Web Vitals cloud-engine", () => {
       expect(data.trends.error_rate).toEqual([66.67, null, 0]);
     } finally {
       await engine.reset();
+    }
+  });
+
+  it("deduplicates hour_bundle over window summaries, covers compacted raw files, uses fetchLanes, preserves FCP/TTFB in vitals and trends, and skips raw DuckDB", async () => {
+    const T_H8 = Date.UTC(2027, 0, 15, 8, 0, 0);
+    const T_H9 = Date.UTC(2027, 0, 15, 9, 0, 0);
+    const T_OPEN_END = T_H9 + 3 * 60_000;
+    const T_END = T_H9 + 5 * 60_000;
+
+    function buildRumSummaryBuf(opts: {
+      bucketMs: number;
+      lcpMs: number;
+      clsVal: number;
+      inpMs: number;
+      fcpMs: number;
+      ttfbMs: number;
+      cid: string;
+      sampled?: boolean;
+    }): ArrayBuffer {
+      const hist = (scaled: number) => {
+        const h = new Histogram();
+        h.add(scaled);
+        return h.toBytes();
+      };
+      const cidHll = new Hll();
+      cidHll.add(opts.cid);
+      const msgHll = new Hll();
+      msgHll.add("TypeError: boom");
+
+      type Row = {
+        kind: string;
+        bucket: bigint | null;
+        key: string | null;
+        count: bigint | null;
+        good: bigint | null;
+        poor: bigint | null;
+        value_hist: Uint8Array | null;
+        lcp_hist: Uint8Array | null;
+        cls_hist: Uint8Array | null;
+        inp_hist: Uint8Array | null;
+        cid_hll: Uint8Array | null;
+        msg_hll: Uint8Array | null;
+        min_line: bigint | null;
+        min_col: bigint | null;
+        last_ts: bigint | null;
+        truncated: boolean | null;
+      };
+      const blank = {
+        bucket: null, key: null, count: null, good: null, poor: null,
+        value_hist: null, lcp_hist: null, cls_hist: null, inp_hist: null,
+        cid_hll: null, msg_hll: null, min_line: null, min_col: null, last_ts: null, truncated: null,
+      };
+      const rows: Row[] = [
+        { ...blank, kind: "metric", bucket: BigInt(opts.bucketMs), key: "LCP", count: BigInt(1), good: BigInt(1), poor: BigInt(0), value_hist: hist(opts.lcpMs * 1000) },
+        { ...blank, kind: "metric", bucket: BigInt(opts.bucketMs), key: "CLS", count: BigInt(1), good: BigInt(1), poor: BigInt(0), value_hist: hist(opts.clsVal * 1_000_000) },
+        { ...blank, kind: "metric", bucket: BigInt(opts.bucketMs), key: "INP", count: BigInt(1), good: BigInt(1), poor: BigInt(0), value_hist: hist(opts.inpMs * 1000) },
+        { ...blank, kind: "metric", bucket: BigInt(opts.bucketMs), key: "FCP", count: BigInt(1), good: BigInt(1), poor: BigInt(0), value_hist: hist(opts.fcpMs * 1000) },
+        { ...blank, kind: "metric", bucket: BigInt(opts.bucketMs), key: "TTFB", count: BigInt(1), good: BigInt(1), poor: BigInt(0), value_hist: hist(opts.ttfbMs * 1000) },
+        { ...blank, kind: "metric", bucket: BigInt(opts.bucketMs), key: "EVENT_CLICK", count: BigInt(2), good: BigInt(0), poor: BigInt(0), value_hist: hist(1000) },
+        { ...blank, kind: "vitals_total", bucket: BigInt(opts.bucketMs), count: BigInt(7), cid_hll: cidHll.toBytes() },
+        { ...blank, kind: "page", key: "/checkout", count: BigInt(1), lcp_hist: hist(opts.lcpMs * 1000), cls_hist: hist(opts.clsVal * 1_000_000), inp_hist: hist(opts.inpMs * 1000), truncated: false },
+        { ...blank, kind: "env", key: JSON.stringify(["browser", "Chrome"]), count: BigInt(1), truncated: false },
+        { ...blank, kind: "env", key: JSON.stringify(["os", "macOS"]), count: BigInt(1), truncated: false },
+        { ...blank, kind: "env", key: JSON.stringify(["device", "desktop"]), count: BigInt(1), truncated: false },
+        { ...blank, kind: "errors_total", bucket: BigInt(opts.bucketMs), count: BigInt(1), cid_hll: cidHll.toBytes(), msg_hll: msgHll.toBytes() },
+        { ...blank, kind: "error", key: JSON.stringify(["TypeError: boom", "app.js"]), count: BigInt(1), cid_hll: cidHll.toBytes(), min_line: BigInt(12), min_col: BigInt(4), last_ts: BigInt(opts.bucketMs), truncated: false },
+      ];
+      if (opts.sampled) {
+        rows.push({ ...blank, kind: "sampled", count: BigInt(1) });
+      }
+      return parquetWriteBuffer({
+        columnData: [
+          { name: "kind", type: "STRING", data: rows.map((r) => r.kind) },
+          { name: "bucket", type: "INT64", data: rows.map((r) => r.bucket) },
+          { name: "key", type: "STRING", data: rows.map((r) => r.key) },
+          { name: "count", type: "INT64", data: rows.map((r) => r.count) },
+          { name: "good", type: "INT64", data: rows.map((r) => r.good) },
+          { name: "poor", type: "INT64", data: rows.map((r) => r.poor) },
+          { name: "value_hist", type: "BYTE_ARRAY", data: rows.map((r) => r.value_hist) },
+          { name: "lcp_hist", type: "BYTE_ARRAY", data: rows.map((r) => r.lcp_hist) },
+          { name: "cls_hist", type: "BYTE_ARRAY", data: rows.map((r) => r.cls_hist) },
+          { name: "inp_hist", type: "BYTE_ARRAY", data: rows.map((r) => r.inp_hist) },
+          { name: "cid_hll", type: "BYTE_ARRAY", data: rows.map((r) => r.cid_hll) },
+          { name: "msg_hll", type: "BYTE_ARRAY", data: rows.map((r) => r.msg_hll) },
+          { name: "min_line", type: "INT64", data: rows.map((r) => r.min_line) },
+          { name: "min_col", type: "INT64", data: rows.map((r) => r.min_col) },
+          { name: "last_ts", type: "INT64", data: rows.map((r) => r.last_ts) },
+          { name: "truncated", type: "BOOLEAN", data: rows.map((r) => r.truncated) },
+        ],
+        kvMetadata: [{ key: "flp_rum_summary", value: "1" }],
+      });
+    }
+
+    const hourKey = "processed/summary_bundle/rum/year=2027/month=01/day=15/hour_bundle=08-c60-n600-h0123456789abcdef.parquet";
+    const redundantWinKey = `processed/rum/summary/year=2027/month=01/day=15/hour=08/summary=${T_H8 / 1000}-${(T_H8 + 60_000) / 1000}-p0s0-n10.parquet`;
+    const openKey = `processed/summary_bundle/rum/year=2027/month=01/day=15/open_bundle=09-${T_OPEN_END}-c3-n30-h0123456789abcdef.parquet`;
+    const trailingWinKey = `processed/rum/summary/year=2027/month=01/day=15/hour=09/summary=${T_OPEN_END / 1000}-${T_END / 1000}-p4s0-n10.parquet`;
+    const compactRawKey = `processed/rum/client_vitals/year=2027/month=01/day=15/hour=08/compact=${T_H8 / 1000}-${T_H9 / 1000}-c1-n600.parquet`;
+    const openRawKey = `processed/rum/client_vitals/year=2027/month=01/day=15/hour=09/window=${T_H9 / 1000}-${T_END / 1000}-p1s0-n40.parquet`;
+
+    const buffers: Record<string, ArrayBuffer> = {
+      [hourKey]: buildRumSummaryBuf({ bucketMs: T_H8, lcpMs: 2000, clsVal: 0.05, inpMs: 120, fcpMs: 1100, ttfbMs: 400, cid: "c1" }),
+      [openKey]: buildRumSummaryBuf({ bucketMs: T_H9, lcpMs: 2400, clsVal: 0.08, inpMs: 150, fcpMs: 1400, ttfbMs: 600, cid: "c2" }),
+      [trailingWinKey]: buildRumSummaryBuf({ bucketMs: T_H9, lcpMs: 2400, clsVal: 0.08, inpMs: 150, fcpMs: 1400, ttfbMs: 600, cid: "c3" }),
+    };
+
+    const fetchedKeys: string[] = [];
+    const rollupSource: RumRollupSource = {
+      async fetchJson(url) {
+        const view = new URL(url, "http://localhost").searchParams.get("view");
+        if (view === "summary") {
+          return {
+            files: [
+              { key: hourKey, kind: "hour", start: new Date(T_H8).toISOString(), end: new Date(T_H9).toISOString(), size: 100, rows: 10 },
+              { key: redundantWinKey, start: new Date(T_H8).toISOString(), end: new Date(T_H8 + 60_000).toISOString(), size: 50, rows: 5 },
+              { key: openKey, kind: "hour", start: new Date(T_H9).toISOString(), end: new Date(T_OPEN_END).toISOString(), size: 80, rows: 8 },
+              { key: trailingWinKey, start: new Date(T_OPEN_END).toISOString(), end: new Date(T_END).toISOString(), size: 40, rows: 4 },
+            ],
+            next_cursor: null,
+            complete: true,
+          };
+        }
+        return {
+          files: [
+            { key: compactRawKey, start: new Date(T_H8).toISOString(), end: new Date(T_H9).toISOString(), size: 1000, rows: 600 },
+            { key: openRawKey, start: new Date(T_H9).toISOString(), end: new Date(T_END).toISOString(), size: 200, rows: 40 },
+          ],
+          next_cursor: null,
+          complete: true,
+        };
+      },
+      async fetchFile(key) {
+        fetchedKeys.push(key);
+        return { bytes: buffers[key], cached: false };
+      },
+    };
+
+    const laneSpy = vi.spyOn(fetchLanes, "run");
+    const explodingEngine = {
+      executeSql: vi.fn(() => {
+        throw new Error("raw DuckDB must not be queried when RUM rollup covers range");
+      }),
+    } as unknown as DuckDBAnalyticalEngine;
+
+    try {
+      const wire = await cloudRumAnalytics({
+        start_time: T_H8,
+        end_time: T_END,
+        engine: explodingEngine,
+        rollupSource,
+      });
+      // Redundant window summary inside hour 08 is NOT fetched.
+      expect(fetchedKeys.sort()).toEqual([hourKey, openKey, trailingWinKey].sort());
+      expect(laneSpy).toHaveBeenCalledWith("summary", expect.any(Function));
+      expect(explodingEngine.executeSql).not.toHaveBeenCalled();
+
+      expect(wire.no_data).toBe(false);
+      expect(wire.estimated).toBe(false);
+      expect(wire.vitals.fcp.p75).toBeGreaterThan(1.0);
+      expect(wire.vitals.ttfb.p75).toBeGreaterThan(0.3);
+      expect(wire.vitals.fid.fcp).toBe(wire.vitals.fcp.p75);
+      expect(wire.vitals.fid.ttfb).toBe(wire.vitals.ttfb.p75);
+      expect(wire.trends.timestamps).toEqual([
+        "2027-01-15T08:00:00.000Z",
+        "2027-01-15T09:00:00.000Z",
+      ]);
+      expect(wire.trends.fcp[0]).toBeGreaterThan(1.0);
+      expect(wire.trends.fcp[1]).toBeGreaterThan(1.3);
+      expect(wire.trends.ttfb[0]).toBeGreaterThan(0.3);
+      expect(wire.trends.ttfb[1]).toBeGreaterThan(0.5);
+      expect(wire.worst_pages[0].path).toBe("/checkout");
+      expect(wire.errors[0].message).toBe("TypeError: boom");
+      expect(wire.environments.browsers).toEqual({ Chrome: 3 });
+
+      // A sampled summary returns null from queryRumWireFromRollup so raw DuckDB handles 1/sample_rate weighting.
+      const sampledBuf = buildRumSummaryBuf({
+        bucketMs: T_H8, lcpMs: 2000, clsVal: 0.05, inpMs: 120, fcpMs: 1100, ttfbMs: 400, cid: "c1", sampled: true,
+      });
+      const sampledSource: RumRollupSource = {
+        ...rollupSource,
+        async fetchFile(key) {
+          return { bytes: key === hourKey ? sampledBuf : buffers[key], cached: false };
+        },
+      };
+      const sampledWire = await queryRumWireFromRollup(sampledSource, { start_time: T_H8, end_time: T_END });
+      expect(sampledWire).toBeNull();
+    } finally {
+      laneSpy.mockRestore();
     }
   });
 });

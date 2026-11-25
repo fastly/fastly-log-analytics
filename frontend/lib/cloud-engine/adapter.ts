@@ -52,6 +52,7 @@ import {
   type QueryRequest,
 } from "./query";
 import { handleRumRequest, UnsupportedRumFilterError, type RumQueryParams } from "./rum";
+import { rumRollupEligible } from "./rum-rollup";
 import { cloudRumAnalytics, cloudRumLiveEvents, cloudRumUsage } from "./rum-wire";
 import { cloudLogFieldsCatalog, cloudSchema } from "./log-fields";
 import { parquetColumns, sampleStats } from "./schema";
@@ -921,20 +922,22 @@ const SECTION_ROLLUPS: Record<string, SectionRollup> = {
   "/api/security/threat-intel": { label: "/security", eligible: securityRollupEligible },
   "/api/assets/aggregates": { label: "/assets", eligible: assetsRollupEligible },
   "/api/cmcd/aggregates": { label: "/cmcd", eligible: (_path, params) => cmcdRollupEligible(params as CmcdQueryParams) },
+  "/api/rum/analytics": { label: "/rum", eligible: (_path, params) => rumRollupEligible(params as RumQueryParams) },
   "/api/value/summary": { label: "/fastly-value", eligible: valueRollupEligible, decorate: valueStatsDecorator },
 };
 
 /**
  * Serves the summary-backed sections of an /origin, /performance, /security,
- * /assets or /fastly-value read like `cloudNetworkRollup`: over the raw scan's
- * range and service, with null (or a summary failure) leaving the read to the
- * raw scan.
+ * /assets, /cmcd, /rum or /fastly-value read like `cloudNetworkRollup`: over
+ * the raw scan's range and service, with null (or a summary failure) leaving
+ * the read to the raw scan.
  */
 async function cloudSectionRollup(
   request: Request,
   path: string,
   route: SectionRollup,
   entryMetaEpoch: number,
+  pathServiceId?: string,
 ): Promise<Response | null> {
   assertAdapterEpoch(request, entryMetaEpoch);
   const url = new URL(request.url);
@@ -953,7 +956,7 @@ async function cloudSectionRollup(
   }
   const { start } = queryRange({ ...params, end }, 24);
   const rawServiceId = params.service_id ?? request.headers.get("x-service-id");
-  const serviceId = rawServiceId ? decodeUriStrict(String(rawServiceId)) : undefined;
+  const serviceId = pathServiceId ?? (rawServiceId ? decodeUriStrict(String(rawServiceId)) : undefined);
   const finish = route.decorate?.(start, end, { ...params, ...serviceId ? { service_id: serviceId } : {} });
   try {
     const answer = await rollupAnswer(path, {
@@ -1678,9 +1681,17 @@ async function handleCloudRequestInner(
       const answer = await cloudNetworkRollup(request, path, origin, entryMetaEpoch);
       if (answer) return answer;
     }
-    const sectionRollup = localScan ? SECTION_ROLLUPS[path] : undefined;
+    const rumServiceAnalyticsMatch = path.match(/^\/api\/services\/([^/]+)\/rum\/analytics$/);
+    const sectionRollupPath = rumServiceAnalyticsMatch ? "/api/rum/analytics" : path;
+    const sectionRollup = localScan ? SECTION_ROLLUPS[sectionRollupPath] : undefined;
     if (sectionRollup) {
-      const answer = await cloudSectionRollup(request, path, sectionRollup, entryMetaEpoch);
+      const answer = await cloudSectionRollup(
+        request,
+        sectionRollupPath,
+        sectionRollup,
+        entryMetaEpoch,
+        rumServiceAnalyticsMatch ? decodeUriStrict(rumServiceAnalyticsMatch[1]) : undefined,
+      );
       if (answer) return answer;
     }
     if (localScan && path === "/api/sessions/detail") {

@@ -1575,21 +1575,23 @@ fn bundle_stage<R: Runtime>(store: &Store<'_, R>) -> Option<StageRow> {
     let span = VcpuSpan::start(runtime);
     let began = Instant::now();
     let before = runtime.admin_remaining_calls();
-    // The two datasets share the execution's calls and vCPU; `bundle_datasets` alternates which
-    // goes first, so a backlog in one cannot hold the other back until it clears.
+    // The datasets share the execution's calls and vCPU; `bundle_datasets` alternates which
+    // goes first, so a backlog in one cannot hold the others back until it clears.
     let reports = bundle::bundle_datasets(store, &cdn_key, reserve, MIN_BUNDLE_CALLS);
-    let (request, cmcd, cmcd_first) = match reports {
+    let (request, cmcd, rum, cmcd_first) = match reports {
         Ok(r) => (
             r.request
                 .unwrap_or_else(|| Ok(bundle::BundleReport::default())),
             r.cmcd,
+            r.rum,
             r.cmcd_first,
         ),
-        Err(error) => (Err(error), None, false),
+        Err(error) => (Err(error), None, None, false),
     };
-    // A leading CMCD run's work still counts when the request run after it fails.
-    let request = match (request, &cmcd) {
-        (Err(error), Some(Ok(_))) => {
+    // A leading CMCD or RUM run's work still counts when the request run after it fails.
+    let other_ok = matches!(&cmcd, Some(Ok(_))) || matches!(&rum, Some(Ok(_)));
+    let request = match (request, other_ok) {
+        (Err(error), true) => {
             row.error = Some(error);
             Ok(bundle::BundleReport {
                 more_pending: true,
@@ -1608,34 +1610,41 @@ fn bundle_stage<R: Runtime>(store: &Store<'_, R>) -> Option<StageRow> {
                 }
                 None => None,
             };
-            let both = cmcd
-                .as_ref()
-                .map_or(report.clone(), |c| bundle::BundleReport {
-                    hours: report.hours + c.hours,
-                    days: report.days + c.days,
-                    partials: report.partials + c.partials,
-                    sources: report.sources + c.sources,
-                    rows: report.rows + c.rows,
-                    bytes_written: report.bytes_written + c.bytes_written,
-                    deleted: report.deleted + c.deleted,
-                    discarded: report.discarded + c.discarded,
-                    more_pending: report.more_pending || c.more_pending,
-                    stopped: report.stopped.or(c.stopped),
-                    backend_calls: report.backend_calls + c.backend_calls,
-                    errors: report.errors.iter().chain(&c.errors).cloned().collect(),
-                });
-            row.listed = both.sources;
-            row.files = u64::from(both.hours + both.days + both.partials);
-            row.rows = both.rows;
-            row.bytes = both.bytes_written;
-            row.deleted = both.deleted;
-            row.more_pending = both.more_pending;
-            row.error = both.errors.first().cloned().or(row.error.take());
+            let rum = match rum {
+                Some(Ok(rum)) => Some(rum),
+                Some(Err(error)) => {
+                    row.error = row.error.take().or(Some(error));
+                    None
+                }
+                None => None,
+            };
+            let mut combined = report.clone();
+            for extra in [cmcd.as_ref(), rum.as_ref()].into_iter().flatten() {
+                combined.hours += extra.hours;
+                combined.days += extra.days;
+                combined.partials += extra.partials;
+                combined.sources += extra.sources;
+                combined.rows += extra.rows;
+                combined.bytes_written += extra.bytes_written;
+                combined.deleted += extra.deleted;
+                combined.discarded += extra.discarded;
+                combined.more_pending |= extra.more_pending;
+                combined.stopped = combined.stopped.or(extra.stopped);
+                combined.backend_calls += extra.backend_calls;
+                combined.errors.extend(extra.errors.iter().cloned());
+            }
+            row.listed = combined.sources;
+            row.files = u64::from(combined.hours + combined.days + combined.partials);
+            row.rows = combined.rows;
+            row.bytes = combined.bytes_written;
+            row.deleted = combined.deleted;
+            row.more_pending = combined.more_pending;
+            row.error = combined.errors.first().cloned().or(row.error.take());
             row.details = Some(json!({
                 "hours": report.hours,
                 "days": report.days,
                 "partials": report.partials,
-                "discarded": both.discarded,
+                "discarded": combined.discarded,
                 "stopped": report.stopped,
                 "cmcd_first": cmcd_first,
                 "cmcd": cmcd.as_ref().map(|c| json!({
@@ -1645,12 +1654,23 @@ fn bundle_stage<R: Runtime>(store: &Store<'_, R>) -> Option<StageRow> {
                     "stopped": c.stopped,
                     "more_pending": c.more_pending,
                 })),
+                "rum": rum.as_ref().map(|r| json!({
+                    "hours": r.hours,
+                    "days": r.days,
+                    "partials": r.partials,
+                    "stopped": r.stopped,
+                    "more_pending": r.more_pending,
+                })),
             }));
-            if row.files > 0 || both.deleted > 0 {
-                row.outcome = if both.more_pending { "partial" } else { "done" };
+            if row.files > 0 || combined.deleted > 0 {
+                row.outcome = if combined.more_pending {
+                    "partial"
+                } else {
+                    "done"
+                };
             } else if row.error.is_some() {
                 row.outcome = "error";
-            } else if both.more_pending {
+            } else if combined.more_pending {
                 row.outcome = "partial";
             }
         }

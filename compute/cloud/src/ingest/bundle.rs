@@ -56,7 +56,7 @@ use super::{
     cmcd_summary,
     convert::FastMap,
     hist::Hist,
-    hour_dir, raw_key_minute, raw_prefix, scope,
+    hour_dir, raw_key_minute, raw_prefix, rum_summary, scope,
     storage::{Object, Store, CDN_READ_LIMIT},
     summary::{self, Hll, Out, Ty, C, COLS, DIMS, FIELDS, V},
     WATERMARK_KEY,
@@ -111,8 +111,11 @@ pub const HEAL_INTERVAL_S: i64 = 300;
 pub const STATE_KEY: &str = "summary:bundle_state";
 /// The CMCD bundler's state.
 pub const CMCD_STATE_KEY: &str = "summary:cmcd_bundle_state";
+/// The RUM bundler's state.
+pub const RUM_STATE_KEY: &str = "summary:rum_bundle_state";
 const TABLE: &str = "request";
 const CMCD_TABLE: &str = "cmcd_summary";
+const RUM_TABLE: &str = "rum";
 const HOUR_S: i64 = 3600;
 const DAY_S: i64 = 86_400;
 /// Stop starting work this far into the execution; the Compute limit is 60 s.
@@ -2591,6 +2594,40 @@ impl Fold for cmcd_summary::BundleAcc {
     }
 }
 
+/// A RUM partial is [`PARTIAL_MAGIC`] then the bundle Parquet of its state, which folds back
+/// to the same state.
+impl Fold for rum_summary::BundleAcc {
+    fn fresh(_: Unit) -> Self {
+        Self::default()
+    }
+    fn fold_source(&mut self, bytes: Vec<u8>) -> Result<(), String> {
+        self.fold(bytes)
+    }
+    fn prune_state(&mut self) {
+        self.prune()
+    }
+    fn encode(&self) -> Result<Vec<u8>, String> {
+        let mut raw = PARTIAL_MAGIC.to_vec();
+        raw.extend(self.write()?);
+        Ok(raw)
+    }
+    fn decode(raw: &[u8], _: Unit) -> Result<Self, String> {
+        let body = raw
+            .strip_prefix(PARTIAL_MAGIC.as_slice())
+            .ok_or("partial_unreadable")?;
+        let mut acc = Self::default();
+        acc.fold(body.to_vec())?;
+        Ok(acc)
+    }
+    fn finish(&self, _: i64, _: Unit) -> Result<Vec<u8>, String> {
+        self.write()
+    }
+    /// The partial is bundle Parquet that folds by column name.
+    fn layout() -> String {
+        "rum:v1".into()
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct BundleReport {
     /// Hour and day bundles written.
@@ -3665,72 +3702,134 @@ fn cmcd_bundle<R: Runtime>(
     )
 }
 
-/// One execution's request and CMCD bundling, each `Err` on failure and `None` when it did not
-/// get a turn.
+/// [`summary_bundle`] for the RUM window summaries ([`rum_summary`]): hour, open-hour and day
+/// bundles under `summary_bundle/rum/`, built from the `summary=` files of `processed/rum/summary/`
+/// by the same schedule, limits and name-based coverage proofs. RUM files are outside the catalog,
+/// so readers prove coverage from LIST alone.
+pub fn rum_summary_bundle<R: Runtime>(
+    store: &Store<'_, R>,
+    cdn_key: &str,
+    reserve: u32,
+) -> Result<BundleReport, String> {
+    rum_bundle(store, cdn_key, reserve, None, false)
+}
+
+fn rum_bundle<R: Runtime>(
+    store: &Store<'_, R>,
+    cdn_key: &str,
+    reserve: u32,
+    record: Option<Option<crate::admin::Record>>,
+    lead: bool,
+) -> Result<BundleReport, String> {
+    if store.service.data_reset.is_some() {
+        return Ok(BundleReport::default());
+    }
+    let scope = scope(store.service);
+    run::<R, rum_summary::BundleAcc>(
+        store,
+        cdn_key,
+        reserve,
+        record,
+        lead,
+        Spec {
+            windows: rum_summary::prefix(&scope),
+            bundles: bundle_prefix(&scope, RUM_TABLE),
+            marker: "summary=",
+            state_key: RUM_STATE_KEY,
+            catalog: false,
+            caller: "cron:summary_bundle",
+        },
+    )
+}
+
+/// One execution's request, CMCD and RUM bundling, each `Err` on failure and `None` when it did
+/// not get a turn.
 #[derive(Debug, Default)]
 pub struct DatasetReports {
     pub request: Option<Result<BundleReport, String>>,
     pub cmcd: Option<Result<BundleReport, String>>,
+    pub rum: Option<Result<BundleReport, String>>,
     pub cmcd_first: bool,
 }
 
-/// Bundles both datasets in one execution. The one that led less recently goes first with the
-/// whole vCPU and call allowance; the other follows only while the leader stopped short of the
-/// limits and `min_calls` remain. A backlog in either one therefore alternates with the other
-/// instead of holding it back until it clears.
+/// Bundles all datasets in one execution. The one that led less recently goes first with the
+/// whole vCPU and call allowance; the others follow only while the prior stopped short of the
+/// limits and `min_calls` remain. A backlog in any dataset therefore alternates with the others
+/// instead of holding them back until it clears.
 pub fn bundle_datasets<R: Runtime>(
     store: &Store<'_, R>,
     cdn_key: &str,
     reserve: u32,
     min_calls: u32,
 ) -> Result<DatasetReports, String> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Kind {
+        Request,
+        Cmcd,
+        Rum,
+    }
     let runtime = store.runtime;
-    let request_record = runtime.admin_get(STATE_KEY)?;
-    // A reset service skips CMCD bundling (see `cmcd_bundle`), so its state is not read.
-    let cmcd_record = if store.service.data_reset.is_some() {
+    let mut request_record = Some(runtime.admin_get(STATE_KEY)?);
+    // A reset service skips non-catalog bundling (see `cmcd_bundle` / `rum_bundle`), so their
+    // state is not read.
+    let reset = store.service.data_reset.is_some();
+    let mut cmcd_record = if reset {
         None
     } else {
         Some(runtime.admin_get(CMCD_STATE_KEY)?)
     };
+    let mut rum_record = if reset {
+        None
+    } else {
+        Some(runtime.admin_get(RUM_STATE_KEY)?)
+    };
     let led = |record: Option<&crate::admin::Record>| {
         record.and_then(|r| r.value["led"].as_i64()).unwrap_or(0)
     };
-    let cmcd_first = cmcd_record
-        .as_ref()
-        .is_some_and(|cmcd| led(cmcd.as_ref()) < led(request_record.as_ref()));
+    let mut order: Vec<(i64, usize, Kind)> = vec![(
+        led(request_record.as_ref().and_then(|r| r.as_ref())),
+        0,
+        Kind::Request,
+    )];
+    if !reset {
+        order.push((
+            led(cmcd_record.as_ref().and_then(|r| r.as_ref())),
+            1,
+            Kind::Cmcd,
+        ));
+        order.push((
+            led(rum_record.as_ref().and_then(|r| r.as_ref())),
+            2,
+            Kind::Rum,
+        ));
+    }
+    order.sort_by_key(|&(ts, idx, _)| (ts, idx));
+    let cmcd_first = order.first().is_some_and(|&(_, _, k)| k == Kind::Cmcd);
     let mut out = DatasetReports {
         cmcd_first,
         ..DatasetReports::default()
     };
-    let follows = |first: &Result<BundleReport, String>| {
-        first.as_ref().map_or(true, |r| r.stopped.is_none())
+    let follows = |prev: &Result<BundleReport, String>| {
+        prev.as_ref().map_or(true, |r| r.stopped.is_none())
             && runtime.admin_remaining_calls() >= reserve + min_calls
             && runtime.vcpu_ms() < VCPU_STOP_MS / 2
     };
-    if cmcd_first {
-        let first = cmcd_bundle(store, cdn_key, reserve, cmcd_record, true);
-        if follows(&first) {
-            out.request = Some(request_bundle(
-                store,
-                cdn_key,
-                reserve,
-                Some(request_record),
-                false,
-            ));
+    for (pos, &(_, _, kind)) in order.iter().enumerate() {
+        let lead = pos == 0;
+        let report = match kind {
+            Kind::Request => request_bundle(store, cdn_key, reserve, request_record.take(), lead),
+            Kind::Cmcd => cmcd_bundle(store, cdn_key, reserve, cmcd_record.take(), lead),
+            Kind::Rum => rum_bundle(store, cdn_key, reserve, rum_record.take(), lead),
+        };
+        let keep_going = follows(&report);
+        match kind {
+            Kind::Request => out.request = Some(report),
+            Kind::Cmcd => out.cmcd = Some(report),
+            Kind::Rum => out.rum = Some(report),
         }
-        out.cmcd = Some(first);
-    } else {
-        let first = request_bundle(store, cdn_key, reserve, Some(request_record), true);
-        if follows(&first) {
-            out.cmcd = Some(cmcd_bundle(
-                store,
-                cdn_key,
-                reserve,
-                Some(cmcd_record.flatten()),
-                false,
-            ));
+        if !keep_going {
+            break;
         }
-        out.request = Some(first);
     }
     Ok(out)
 }

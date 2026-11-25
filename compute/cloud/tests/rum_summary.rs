@@ -338,3 +338,106 @@ fn resource_timings_do_not_count_as_page_vitals() {
         rum_summary::write_summary(&[&make_vitals(&with_resource)], &[&errors], BASE_S).unwrap();
     assert_eq!(plain, mixed);
 }
+
+#[test]
+fn rum_summary_merge_windows_preserves_fcp_ttfb_buckets_and_sampled_flag() {
+    let w1_vitals = make_vitals(&[
+        ("LCP", 1800.0, "/home", Some("c1")),
+        ("FCP", 1200.0, "/home", Some("c1")),
+        ("TTFB", 400.0, "/home", Some("c1")),
+    ]);
+    let w1_errors = make_errors(&[("Boom", "app.js", 12, 4, Some("c1"))]);
+    let w2_vitals = make_vitals(&[
+        ("LCP", 3200.0, "/about", Some("c2")),
+        ("FCP", 2100.0, "/about", Some("c2")),
+        ("TTFB", 900.0, "/about", Some("c2")),
+    ]);
+    let w2_errors = make_errors(&[("Boom", "app.js", 8, 2, Some("c2"))]);
+
+    let b1 = rum_summary::write_summary(&[&w1_vitals], &[&w1_errors], BASE_S).unwrap();
+    let b2 = rum_summary::write_summary(&[&w2_vitals], &[&w2_errors], BASE_S + 60).unwrap();
+    let merged = rum_summary::merge_windows(&[&b1, &b2]).unwrap();
+    let combined =
+        rum_summary::write_summary(&[&w1_vitals, &w2_vitals], &[&w1_errors, &w2_errors], BASE_S)
+            .unwrap();
+    assert_eq!(merged, combined);
+
+    // A sampled batch emits a `sampled` row that survives `merge_windows`.
+    let mut ts = TimestampMillisecondBuilder::new().with_timezone("UTC");
+    let mut name = StringBuilder::new();
+    let mut value = Float64Builder::new();
+    let mut rating = StringBuilder::new();
+    let mut pathname = StringBuilder::new();
+    let mut browser = StringBuilder::new();
+    let mut os = StringBuilder::new();
+    let mut device = StringBuilder::new();
+    let mut cid = StringBuilder::new();
+    let mut req_id = StringBuilder::new();
+    let mut city = StringBuilder::new();
+    let mut region = StringBuilder::new();
+    let mut country = StringBuilder::new();
+    let mut pop = StringBuilder::new();
+    let mut tls = StringBuilder::new();
+    let mut resource_url = StringBuilder::new();
+    let mut asn = StringBuilder::new();
+    let mut ttfb = Float64Builder::new();
+    let mut sample_rate = Float64Builder::new();
+    ts.append_value(BASE_MS);
+    name.append_value("FCP");
+    value.append_value(1500.0);
+    rating.append_value("good");
+    pathname.append_value("/sampled");
+    browser.append_value("Firefox");
+    os.append_value("Linux");
+    device.append_value("desktop");
+    cid.append_value("c3");
+    req_id.append_null();
+    city.append_null();
+    region.append_null();
+    country.append_value("US");
+    pop.append_null();
+    tls.append_null();
+    resource_url.append_null();
+    asn.append_null();
+    ttfb.append_null();
+    sample_rate.append_value(0.5);
+    let sampled_batch = RecordBatch::try_new(
+        vitals_schema(),
+        vec![
+            Arc::new(ts.finish()),
+            Arc::new(name.finish()),
+            Arc::new(value.finish()),
+            Arc::new(rating.finish()),
+            Arc::new(pathname.finish()),
+            Arc::new(browser.finish()),
+            Arc::new(os.finish()),
+            Arc::new(device.finish()),
+            Arc::new(cid.finish()),
+            Arc::new(req_id.finish()),
+            Arc::new(city.finish()),
+            Arc::new(region.finish()),
+            Arc::new(country.finish()),
+            Arc::new(pop.finish()),
+            Arc::new(tls.finish()),
+            Arc::new(resource_url.finish()),
+            Arc::new(asn.finish()),
+            Arc::new(ttfb.finish()),
+            Arc::new(sample_rate.finish()),
+        ],
+    )
+    .unwrap();
+    let empty_err = make_errors(&[]);
+    let sampled_bytes =
+        rum_summary::write_summary(&[&sampled_batch], &[&empty_err], BASE_S).unwrap();
+    let merged_sampled = rum_summary::merge_windows(&[&b1, &sampled_bytes]).unwrap();
+    let has_sampled = read_all(merged_sampled).iter().any(|batch| {
+        let kinds = batch
+            .column_by_name("kind")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        (0..batch.num_rows()).any(|i| kinds.value(i) == "sampled")
+    });
+    assert!(has_sampled, "merged bundle must preserve sampled marker");
+}

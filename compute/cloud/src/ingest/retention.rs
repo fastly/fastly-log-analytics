@@ -565,6 +565,11 @@ pub fn datasets(
         super::cmcd_summary::cmcd_summary_prefix(&scope, "request"),
         service.log_retention_days,
     ));
+    out.push((
+        "summary_bundle:rum".to_owned(),
+        super::bundle::bundle_prefix(&scope, "rum"),
+        service.rum_retention_days,
+    ));
     out
 }
 

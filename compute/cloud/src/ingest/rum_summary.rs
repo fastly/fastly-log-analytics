@@ -10,10 +10,12 @@ use arrow_array::{
     builder::{
         BinaryBuilder, BooleanBuilder, Int64Builder, StringBuilder, TimestampMillisecondBuilder,
     },
-    Array, ArrayRef, Float64Array, Int32Array, RecordBatch, StringArray, TimestampMillisecondArray,
+    Array, ArrayRef, BinaryArray, BooleanArray, Float64Array, Int32Array, Int64Array, RecordBatch,
+    StringArray, TimestampMillisecondArray,
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef, TimeUnit};
-use parquet::file::metadata::KeyValue;
+use bytes::Bytes;
+use parquet::{arrow::arrow_reader::ParquetRecordBatchReaderBuilder, file::metadata::KeyValue};
 use std::{
     cmp::Reverse,
     collections::BTreeMap,
@@ -252,6 +254,420 @@ fn top_k<K: Ord + Clone, V>(
     (items, truncated)
 }
 
+/// Accumulator that merges `rum_summary` window files (or bundles) into an hour, open-hour or
+/// day bundle with the same `flp_rum_summary` schema and version.
+#[derive(Default)]
+pub struct BundleAcc {
+    metrics: BTreeMap<(i64, String), MetricAgg>,
+    vitals_totals: BTreeMap<i64, VitalsTotalAgg>,
+    pages: BTreeMap<String, PageAgg>,
+    pages_truncated: bool,
+    envs: [BTreeMap<String, i64>; 3],
+    envs_truncated: [bool; 3],
+    errors_totals: BTreeMap<i64, ErrorsTotalAgg>,
+    error_rows: BTreeMap<(String, String), ErrorAgg>,
+    errors_truncated: bool,
+    sampled: bool,
+}
+
+fn col_i64<'a>(batch: &'a RecordBatch, name: &str) -> Option<&'a Int64Array> {
+    batch
+        .column_by_name(name)
+        .and_then(|c| c.as_any().downcast_ref::<Int64Array>())
+}
+
+fn col_bin<'a>(batch: &'a RecordBatch, name: &str) -> Option<&'a BinaryArray> {
+    batch
+        .column_by_name(name)
+        .and_then(|c| c.as_any().downcast_ref::<BinaryArray>())
+}
+
+fn col_bool<'a>(batch: &'a RecordBatch, name: &str) -> Option<&'a BooleanArray> {
+    batch
+        .column_by_name(name)
+        .and_then(|c| c.as_any().downcast_ref::<BooleanArray>())
+}
+
+fn get_i64(col: Option<&Int64Array>, row: usize) -> Option<i64> {
+    col.and_then(|c| (!c.is_null(row)).then(|| c.value(row)))
+}
+
+fn get_bin(col: Option<&BinaryArray>, row: usize) -> Option<&[u8]> {
+    col.and_then(|c| (!c.is_null(row)).then(|| c.value(row)))
+}
+
+fn get_bool(col: Option<&BooleanArray>, row: usize) -> Option<bool> {
+    col.and_then(|c| (!c.is_null(row)).then(|| c.value(row)))
+}
+
+fn merge_hist_opt(target: &mut Hist, blob: Option<&[u8]>) -> Result<(), String> {
+    if let Some(bytes) = blob {
+        if !target.merge_bytes(bytes) {
+            return Err("rum_summary_hist_invalid".into());
+        }
+    }
+    Ok(())
+}
+
+fn merge_hll_opt(target: &mut Hll, blob: Option<&[u8]>) -> Result<(), String> {
+    if let Some(bytes) = blob {
+        if !target.merge_bytes(bytes) {
+            return Err("rum_summary_sketch_invalid".into());
+        }
+    }
+    Ok(())
+}
+
+impl BundleAcc {
+    /// Folds one `rum_summary` Parquet object (window summary or bundle) into this accumulator.
+    pub fn fold(&mut self, bytes: Vec<u8>) -> Result<(), String> {
+        let builder = ParquetRecordBatchReaderBuilder::try_new(Bytes::from(bytes))
+            .map_err(|_| "rum_summary_unreadable")?;
+        let version = builder
+            .metadata()
+            .file_metadata()
+            .key_value_metadata()
+            .and_then(|kv| {
+                kv.iter()
+                    .find(|entry| entry.key == "flp_rum_summary")
+                    .and_then(|entry| entry.value.as_deref())
+            });
+        if version != Some(VERSION) {
+            return Err("rum_summary_version_unsupported".into());
+        }
+        let reader = builder.build().map_err(|_| "rum_summary_unreadable")?;
+        for batch in reader {
+            let batch = batch.map_err(|_| "rum_summary_unreadable")?;
+            let kinds = col_str(&batch, "kind").ok_or("rum_summary_unreadable")?;
+            let buckets = col_ts(&batch, "bucket");
+            let keys = col_str(&batch, "key");
+            let counts = col_i64(&batch, "count");
+            let goods = col_i64(&batch, "good");
+            let poors = col_i64(&batch, "poor");
+            let value_hists = col_bin(&batch, "value_hist");
+            let lcp_hists = col_bin(&batch, "lcp_hist");
+            let cls_hists = col_bin(&batch, "cls_hist");
+            let inp_hists = col_bin(&batch, "inp_hist");
+            let cid_hlls = col_bin(&batch, "cid_hll");
+            let msg_hlls = col_bin(&batch, "msg_hll");
+            let min_lines = col_i64(&batch, "min_line");
+            let min_cols = col_i64(&batch, "min_col");
+            let last_ts_col = col_ts(&batch, "last_ts");
+            let truncated = col_bool(&batch, "truncated");
+
+            for row in 0..batch.num_rows() {
+                if kinds.is_null(row) {
+                    continue;
+                }
+                match kinds.value(row) {
+                    "metric" => {
+                        let Some(bucket5) = get_ts(buckets, row) else {
+                            continue;
+                        };
+                        let Some(metric) = get_str(keys, row) else {
+                            continue;
+                        };
+                        let entry = self
+                            .metrics
+                            .entry((bucket5, metric.to_owned()))
+                            .or_default();
+                        entry.count += get_i64(counts, row).unwrap_or(0);
+                        entry.good += get_i64(goods, row).unwrap_or(0);
+                        entry.poor += get_i64(poors, row).unwrap_or(0);
+                        merge_hist_opt(&mut entry.hist, get_bin(value_hists, row))?;
+                    }
+                    "vitals_total" => {
+                        let Some(bucket5) = get_ts(buckets, row) else {
+                            continue;
+                        };
+                        let entry = self.vitals_totals.entry(bucket5).or_default();
+                        entry.count += get_i64(counts, row).unwrap_or(0);
+                        merge_hll_opt(&mut entry.cid_hll, get_bin(cid_hlls, row))?;
+                    }
+                    "page" => {
+                        let path = get_str(keys, row).unwrap_or("/");
+                        if get_bool(truncated, row) == Some(true) {
+                            self.pages_truncated = true;
+                        }
+                        let entry = self.pages.entry(path.to_owned()).or_default();
+                        entry.count += get_i64(counts, row).unwrap_or(0);
+                        merge_hist_opt(&mut entry.lcp, get_bin(lcp_hists, row))?;
+                        merge_hist_opt(&mut entry.cls, get_bin(cls_hists, row))?;
+                        merge_hist_opt(&mut entry.inp, get_bin(inp_hists, row))?;
+                    }
+                    "env" => {
+                        let Some(raw_key) = get_str(keys, row) else {
+                            continue;
+                        };
+                        let Ok([dim, val]) = serde_json::from_str::<[String; 2]>(raw_key) else {
+                            continue;
+                        };
+                        let idx = match dim.as_str() {
+                            "browser" => 0,
+                            "os" => 1,
+                            "device" => 2,
+                            _ => continue,
+                        };
+                        if get_bool(truncated, row) == Some(true) {
+                            self.envs_truncated[idx] = true;
+                        }
+                        *self.envs[idx].entry(val).or_default() +=
+                            get_i64(counts, row).unwrap_or(0);
+                    }
+                    "errors_total" => {
+                        let Some(bucket5) = get_ts(buckets, row) else {
+                            continue;
+                        };
+                        let entry = self.errors_totals.entry(bucket5).or_default();
+                        entry.count += get_i64(counts, row).unwrap_or(0);
+                        merge_hll_opt(&mut entry.cid_hll, get_bin(cid_hlls, row))?;
+                        merge_hll_opt(&mut entry.msg_hll, get_bin(msg_hlls, row))?;
+                    }
+                    "error" => {
+                        let Some(raw_key) = get_str(keys, row) else {
+                            continue;
+                        };
+                        let Ok([message, file]) = serde_json::from_str::<[String; 2]>(raw_key)
+                        else {
+                            continue;
+                        };
+                        if get_bool(truncated, row) == Some(true) {
+                            self.errors_truncated = true;
+                        }
+                        let entry = self.error_rows.entry((message, file)).or_default();
+                        entry.count += get_i64(counts, row).unwrap_or(0);
+                        if let Some(l) = get_i64(min_lines, row) {
+                            entry.min_line = Some(entry.min_line.map_or(l, |cur| cur.min(l)));
+                        }
+                        if let Some(c) = get_i64(min_cols, row) {
+                            entry.min_col = Some(entry.min_col.map_or(c, |cur| cur.min(c)));
+                        }
+                        merge_hll_opt(&mut entry.cid_hll, get_bin(cid_hlls, row))?;
+                        if let Some(t) = get_ts(last_ts_col, row) {
+                            entry.last_ts = Some(entry.last_ts.map_or(t, |cur| cur.max(t)));
+                        }
+                    }
+                    "sampled" => {
+                        self.sampled = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Trims top-k maps to the schema caps so folding and resuming from a partial give identical
+    /// state and bytes.
+    pub fn prune(&mut self) {
+        if self.pages.len() > PAGE_K {
+            let (kept, trunc) = top_k(std::mem::take(&mut self.pages), PAGE_K, |p| p.count);
+            self.pages = kept.into_iter().collect();
+            self.pages_truncated |= trunc;
+        }
+        for idx in 0..3 {
+            if self.envs[idx].len() > ENV_K {
+                let (kept, trunc) = top_k(std::mem::take(&mut self.envs[idx]), ENV_K, |&c| c);
+                self.envs[idx] = kept.into_iter().collect();
+                self.envs_truncated[idx] |= trunc;
+            }
+        }
+        if self.error_rows.len() > ERROR_K {
+            let (kept, trunc) = top_k(std::mem::take(&mut self.error_rows), ERROR_K, |e| e.count);
+            self.error_rows = kept.into_iter().collect();
+            self.errors_truncated |= trunc;
+        }
+    }
+
+    /// Encodes the accumulated state as a `rum_summary` Parquet file.
+    pub fn write(&self) -> Result<Vec<u8>, String> {
+        let mut out = Out::new();
+
+        for ((bucket5, metric), agg) in &self.metrics {
+            out.kind.append_value("metric");
+            out.bucket.append_value(*bucket5);
+            out.key.append_value(metric);
+            out.count.append_value(agg.count);
+            out.good.append_value(agg.good);
+            out.poor.append_value(agg.poor);
+            let blob = agg.hist.to_bytes();
+            push_opt_bin(&mut out.value_hist, blob.as_deref());
+            out.lcp_hist.append_null();
+            out.cls_hist.append_null();
+            out.inp_hist.append_null();
+            out.cid_hll.append_null();
+            out.msg_hll.append_null();
+            out.min_line.append_null();
+            out.min_col.append_null();
+            out.last_ts.append_null();
+            out.truncated.append_null();
+        }
+
+        for (bucket5, agg) in &self.vitals_totals {
+            out.kind.append_value("vitals_total");
+            out.bucket.append_value(*bucket5);
+            out.key.append_null();
+            out.count.append_value(agg.count);
+            out.good.append_null();
+            out.poor.append_null();
+            out.value_hist.append_null();
+            out.lcp_hist.append_null();
+            out.cls_hist.append_null();
+            out.inp_hist.append_null();
+            out.cid_hll.append_value(agg.cid_hll.to_bytes());
+            out.msg_hll.append_null();
+            out.min_line.append_null();
+            out.min_col.append_null();
+            out.last_ts.append_null();
+            out.truncated.append_null();
+        }
+
+        let pages_truncated = self.pages_truncated || self.pages.len() > PAGE_K;
+        let mut pages: Vec<(&String, &PageAgg)> = self.pages.iter().collect();
+        pages.sort_by(|(ka, va), (kb, vb)| (Reverse(va.count), ka).cmp(&(Reverse(vb.count), kb)));
+        pages.truncate(PAGE_K);
+        for (path, agg) in pages {
+            out.kind.append_value("page");
+            out.bucket.append_null();
+            out.key.append_value(path);
+            out.count.append_value(agg.count);
+            out.good.append_null();
+            out.poor.append_null();
+            out.value_hist.append_null();
+            let lcp = agg.lcp.to_bytes();
+            let cls = agg.cls.to_bytes();
+            let inp = agg.inp.to_bytes();
+            push_opt_bin(&mut out.lcp_hist, lcp.as_deref());
+            push_opt_bin(&mut out.cls_hist, cls.as_deref());
+            push_opt_bin(&mut out.inp_hist, inp.as_deref());
+            out.cid_hll.append_null();
+            out.msg_hll.append_null();
+            out.min_line.append_null();
+            out.min_col.append_null();
+            out.last_ts.append_null();
+            out.truncated.append_value(pages_truncated);
+        }
+
+        for (idx, dim) in ["browser", "os", "device"].into_iter().enumerate() {
+            let map = &self.envs[idx];
+            let env_truncated = self.envs_truncated[idx] || map.len() > ENV_K;
+            let mut items: Vec<(&String, &i64)> = map.iter().collect();
+            items.sort_by(|(ka, va), (kb, vb)| (Reverse(**va), ka).cmp(&(Reverse(**vb), kb)));
+            items.truncate(ENV_K);
+            for (value, &count) in items {
+                let key = serde_json::to_string(&[dim, value.as_str()]).expect("strings serialize");
+                out.kind.append_value("env");
+                out.bucket.append_null();
+                out.key.append_value(&key);
+                out.count.append_value(count);
+                out.good.append_null();
+                out.poor.append_null();
+                out.value_hist.append_null();
+                out.lcp_hist.append_null();
+                out.cls_hist.append_null();
+                out.inp_hist.append_null();
+                out.cid_hll.append_null();
+                out.msg_hll.append_null();
+                out.min_line.append_null();
+                out.min_col.append_null();
+                out.last_ts.append_null();
+                out.truncated.append_value(env_truncated);
+            }
+        }
+
+        for (bucket5, agg) in &self.errors_totals {
+            out.kind.append_value("errors_total");
+            out.bucket.append_value(*bucket5);
+            out.key.append_null();
+            out.count.append_value(agg.count);
+            out.good.append_null();
+            out.poor.append_null();
+            out.value_hist.append_null();
+            out.lcp_hist.append_null();
+            out.cls_hist.append_null();
+            out.inp_hist.append_null();
+            out.cid_hll.append_value(agg.cid_hll.to_bytes());
+            out.msg_hll.append_value(agg.msg_hll.to_bytes());
+            out.min_line.append_null();
+            out.min_col.append_null();
+            out.last_ts.append_null();
+            out.truncated.append_null();
+        }
+
+        let errors_truncated = self.errors_truncated || self.error_rows.len() > ERROR_K;
+        let mut error_items: Vec<(&(String, String), &ErrorAgg)> = self.error_rows.iter().collect();
+        error_items
+            .sort_by(|(ka, va), (kb, vb)| (Reverse(va.count), ka).cmp(&(Reverse(vb.count), kb)));
+        error_items.truncate(ERROR_K);
+        for ((message, file), agg) in error_items {
+            let key = serde_json::to_string(&[message.as_str(), file.as_str()])
+                .expect("strings serialize");
+            out.kind.append_value("error");
+            out.bucket.append_null();
+            out.key.append_value(&key);
+            out.count.append_value(agg.count);
+            out.good.append_null();
+            out.poor.append_null();
+            out.value_hist.append_null();
+            out.lcp_hist.append_null();
+            out.cls_hist.append_null();
+            out.inp_hist.append_null();
+            out.cid_hll.append_value(agg.cid_hll.to_bytes());
+            out.msg_hll.append_null();
+            match agg.min_line {
+                Some(l) => out.min_line.append_value(l),
+                None => out.min_line.append_null(),
+            }
+            match agg.min_col {
+                Some(c) => out.min_col.append_value(c),
+                None => out.min_col.append_null(),
+            }
+            match agg.last_ts {
+                Some(t) => out.last_ts.append_value(t),
+                None => out.last_ts.append_null(),
+            }
+            out.truncated.append_value(errors_truncated);
+        }
+
+        if self.sampled {
+            out.kind.append_value("sampled");
+            out.bucket.append_null();
+            out.key.append_null();
+            out.count.append_value(1);
+            out.good.append_null();
+            out.poor.append_null();
+            out.value_hist.append_null();
+            out.lcp_hist.append_null();
+            out.cls_hist.append_null();
+            out.inp_hist.append_null();
+            out.cid_hll.append_null();
+            out.msg_hll.append_null();
+            out.min_line.append_null();
+            out.min_col.append_null();
+            out.last_ts.append_null();
+            out.truncated.append_null();
+        }
+
+        let batch = out.finish()?;
+        convert::encode_record_batch(
+            schema(),
+            &batch,
+            vec![KeyValue::new("flp_rum_summary".into(), VERSION.to_string())],
+        )
+    }
+}
+
+/// Merges RUM window summaries (or bundles) the way `bundle::rum_summary_bundle` does, folding
+/// each in order and pruning between sources.
+pub fn merge_windows(sources: &[&[u8]]) -> Result<Vec<u8>, String> {
+    let mut acc = BundleAcc::default();
+    for source in sources {
+        acc.fold((*source).to_vec())?;
+        acc.prune();
+    }
+    acc.write()
+}
+
 /// Builds the `rum_summary` Parquet bytes for one window `[start, end)` (seconds).
 pub fn write_summary(
     vitals: &[&RecordBatch],
@@ -259,10 +675,7 @@ pub fn write_summary(
     start: i64,
 ) -> Result<Vec<u8>, String> {
     let default_bucket = start * 1000;
-    let mut metrics: BTreeMap<(i64, String), MetricAgg> = BTreeMap::new();
-    let mut vitals_totals: BTreeMap<i64, VitalsTotalAgg> = BTreeMap::new();
-    let mut pages: BTreeMap<String, PageAgg> = BTreeMap::new();
-    let mut envs: [BTreeMap<String, i64>; 3] = Default::default();
+    let mut acc = BundleAcc::default();
 
     for batch in vitals {
         let ts = col_ts(batch, "timestamp");
@@ -273,15 +686,19 @@ pub fn write_summary(
         let os = col_str(batch, "os");
         let device = col_str(batch, "device");
         let cid = col_str(batch, "cid");
+        let sample_rate = col_f64(batch, "sample_rate");
 
         for row in 0..batch.num_rows() {
             // A resource timing measures one request, not the page view: it is read raw.
             if get_str(name, row) == Some("ttlb") {
                 continue;
             }
+            if get_f64(sample_rate, row).is_some_and(|sr| sr > 0.0 && sr < 1.0) {
+                acc.sampled = true;
+            }
             let row_ts = get_ts(ts, row).unwrap_or(default_bucket);
             let bucket5 = row_ts - row_ts.rem_euclid(BUCKET_MS);
-            let vt = vitals_totals.entry(bucket5).or_default();
+            let vt = acc.vitals_totals.entry(bucket5).or_default();
             vt.count += 1;
             if let Some(c) = get_str(cid, row) {
                 vt.cid_hll.add_hash(hll::hash(c));
@@ -289,7 +706,7 @@ pub fn write_summary(
 
             let upper = get_str(name, row).unwrap_or("").to_ascii_uppercase();
             let val = get_f64(value, row);
-            let m = metrics.entry((bucket5, upper.clone())).or_default();
+            let m = acc.metrics.entry((bucket5, upper.clone())).or_default();
             m.count += 1;
             if let Some(v) = val {
                 let (good_bound, poor_bound) = thresholds(&upper);
@@ -303,7 +720,7 @@ pub fn write_summary(
             }
 
             let path = get_str(pathname, row).unwrap_or("/");
-            let p = pages.entry(path.to_owned()).or_default();
+            let p = acc.pages.entry(path.to_owned()).or_default();
             p.count += 1;
             if let Some(v) = val {
                 match upper.as_str() {
@@ -316,13 +733,10 @@ pub fn write_summary(
 
             for (idx, col) in [browser, os, device].into_iter().enumerate() {
                 let v = get_str(col, row).unwrap_or("Unknown");
-                *envs[idx].entry(v.to_owned()).or_default() += 1;
+                *acc.envs[idx].entry(v.to_owned()).or_default() += 1;
             }
         }
     }
-
-    let mut errors_totals: BTreeMap<i64, ErrorsTotalAgg> = BTreeMap::new();
-    let mut error_rows: BTreeMap<(String, String), ErrorAgg> = BTreeMap::new();
 
     for batch in errors {
         let ts = col_ts(batch, "timestamp");
@@ -331,13 +745,17 @@ pub fn write_summary(
         let line = col_i32(batch, "error_line");
         let col = col_i32(batch, "error_col");
         let cid = col_str(batch, "cid");
+        let sample_rate = col_f64(batch, "sample_rate");
 
         for row in 0..batch.num_rows() {
+            if get_f64(sample_rate, row).is_some_and(|sr| sr > 0.0 && sr < 1.0) {
+                acc.sampled = true;
+            }
             let row_ts = get_ts(ts, row);
             let bucket5 = row_ts
                 .map(|t| t - t.rem_euclid(BUCKET_MS))
                 .unwrap_or(default_bucket - default_bucket.rem_euclid(BUCKET_MS));
-            let et = errors_totals.entry(bucket5).or_default();
+            let et = acc.errors_totals.entry(bucket5).or_default();
             et.count += 1;
             if let Some(c) = get_str(cid, row) {
                 et.cid_hll.add_hash(hll::hash(c));
@@ -348,7 +766,8 @@ pub fn write_summary(
 
             let err_msg = get_str(msg, row).unwrap_or("Unknown Error");
             let err_file = get_str(file, row).unwrap_or("");
-            let entry = error_rows
+            let entry = acc
+                .error_rows
                 .entry((err_msg.to_owned(), err_file.to_owned()))
                 .or_default();
             entry.count += 1;
@@ -369,147 +788,5 @@ pub fn write_summary(
         }
     }
 
-    let mut out = Out::new();
-
-    for ((bucket5, metric), agg) in metrics {
-        out.kind.append_value("metric");
-        out.bucket.append_value(bucket5);
-        out.key.append_value(&metric);
-        out.count.append_value(agg.count);
-        out.good.append_value(agg.good);
-        out.poor.append_value(agg.poor);
-        let blob = agg.hist.to_bytes();
-        push_opt_bin(&mut out.value_hist, blob.as_deref());
-        out.lcp_hist.append_null();
-        out.cls_hist.append_null();
-        out.inp_hist.append_null();
-        out.cid_hll.append_null();
-        out.msg_hll.append_null();
-        out.min_line.append_null();
-        out.min_col.append_null();
-        out.last_ts.append_null();
-        out.truncated.append_null();
-    }
-
-    for (bucket5, agg) in vitals_totals {
-        out.kind.append_value("vitals_total");
-        out.bucket.append_value(bucket5);
-        out.key.append_null();
-        out.count.append_value(agg.count);
-        out.good.append_null();
-        out.poor.append_null();
-        out.value_hist.append_null();
-        out.lcp_hist.append_null();
-        out.cls_hist.append_null();
-        out.inp_hist.append_null();
-        out.cid_hll.append_value(agg.cid_hll.to_bytes());
-        out.msg_hll.append_null();
-        out.min_line.append_null();
-        out.min_col.append_null();
-        out.last_ts.append_null();
-        out.truncated.append_null();
-    }
-
-    let (kept_pages, pages_truncated) = top_k(pages, PAGE_K, |p| p.count);
-    for (path, agg) in kept_pages {
-        out.kind.append_value("page");
-        out.bucket.append_null();
-        out.key.append_value(&path);
-        out.count.append_value(agg.count);
-        out.good.append_null();
-        out.poor.append_null();
-        out.value_hist.append_null();
-        let lcp = agg.lcp.to_bytes();
-        let cls = agg.cls.to_bytes();
-        let inp = agg.inp.to_bytes();
-        push_opt_bin(&mut out.lcp_hist, lcp.as_deref());
-        push_opt_bin(&mut out.cls_hist, cls.as_deref());
-        push_opt_bin(&mut out.inp_hist, inp.as_deref());
-        out.cid_hll.append_null();
-        out.msg_hll.append_null();
-        out.min_line.append_null();
-        out.min_col.append_null();
-        out.last_ts.append_null();
-        out.truncated.append_value(pages_truncated);
-    }
-
-    for (dim, map) in ["browser", "os", "device"].into_iter().zip(envs) {
-        let (kept_env, env_truncated) = top_k(map, ENV_K, |&c| c);
-        for (value, count) in kept_env {
-            let key = serde_json::to_string(&[dim, value.as_str()]).expect("strings serialize");
-            out.kind.append_value("env");
-            out.bucket.append_null();
-            out.key.append_value(&key);
-            out.count.append_value(count);
-            out.good.append_null();
-            out.poor.append_null();
-            out.value_hist.append_null();
-            out.lcp_hist.append_null();
-            out.cls_hist.append_null();
-            out.inp_hist.append_null();
-            out.cid_hll.append_null();
-            out.msg_hll.append_null();
-            out.min_line.append_null();
-            out.min_col.append_null();
-            out.last_ts.append_null();
-            out.truncated.append_value(env_truncated);
-        }
-    }
-
-    for (bucket5, agg) in errors_totals {
-        out.kind.append_value("errors_total");
-        out.bucket.append_value(bucket5);
-        out.key.append_null();
-        out.count.append_value(agg.count);
-        out.good.append_null();
-        out.poor.append_null();
-        out.value_hist.append_null();
-        out.lcp_hist.append_null();
-        out.cls_hist.append_null();
-        out.inp_hist.append_null();
-        out.cid_hll.append_value(agg.cid_hll.to_bytes());
-        out.msg_hll.append_value(agg.msg_hll.to_bytes());
-        out.min_line.append_null();
-        out.min_col.append_null();
-        out.last_ts.append_null();
-        out.truncated.append_null();
-    }
-
-    let (kept_errors, errors_truncated) = top_k(error_rows, ERROR_K, |e| e.count);
-    for ((message, file), agg) in kept_errors {
-        let key =
-            serde_json::to_string(&[message.as_str(), file.as_str()]).expect("strings serialize");
-        out.kind.append_value("error");
-        out.bucket.append_null();
-        out.key.append_value(&key);
-        out.count.append_value(agg.count);
-        out.good.append_null();
-        out.poor.append_null();
-        out.value_hist.append_null();
-        out.lcp_hist.append_null();
-        out.cls_hist.append_null();
-        out.inp_hist.append_null();
-        out.cid_hll.append_value(agg.cid_hll.to_bytes());
-        out.msg_hll.append_null();
-        match agg.min_line {
-            Some(l) => out.min_line.append_value(l),
-            None => out.min_line.append_null(),
-        }
-        match agg.min_col {
-            Some(c) => out.min_col.append_value(c),
-            None => out.min_col.append_null(),
-        }
-        match agg.last_ts {
-            Some(t) => out.last_ts.append_value(t),
-            None => out.last_ts.append_null(),
-        }
-        out.truncated.append_value(errors_truncated);
-    }
-
-    let batch = out.finish()?;
-    convert::encode_record_batch(
-        schema(),
-        &batch,
-        vec![KeyValue::new("flp_rum_summary".into(), VERSION.to_string())],
-    )
+    acc.write()
 }
