@@ -4274,6 +4274,166 @@ it("SEC-T5-ITER40-FE-03: prevents non-contraction apostrophe mismatch and cross-
         ["Set-Cookie", "sid", "Expires", "2099", "UTC", "path", "error", "="],
         "Error: Runtime Error: [redacted]",
       ],
+      // Wave 65 / Iter 66: Verifier 3 & Verifier 5 #5 — Dot-prefixed & dotted-path AUTH_SCHEMES
+      [
+        "Runtime Error: .Basic= error",
+        ["Basic", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: config[0].Digest= error",
+        ["Digest", "error", "="],
+        "Error: Runtime Error: config[[redacted]][redacted]",
+      ],
+      [
+        "Runtime Error: config[0].Digest=a=1, scope=error",
+        ["Digest", "scope", "error", "="],
+        "Error: Runtime Error: config[[redacted]][redacted]",
+      ],
+      [
+        "Runtime Error: .OAuth= realm=error, scope=timeout",
+        ["OAuth", "realm", "error", "scope", "timeout", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: config.Basic: error",
+        ["Basic", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: .config.Basic: error",
+        ["Basic", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: config.Digest: error",
+        ["Digest", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: headers.Digest: realm = error",
+        ["Digest", "realm", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: .headers.Digest: realm = error",
+        ["Digest", "realm", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 65 / Iter 66: Verifier 5 #1 — Spaced separator runs before/around auth schemes
+      [
+        "Runtime Error: Authorization: : Bearer error",
+        ["Authorization", "Bearer", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization = = Bearer error",
+        ["Authorization", "Bearer", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: : CustomScheme error",
+        ["Authorization", "CustomScheme", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: token: : Bearer error",
+        ["token", "Bearer", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": : Bearer error',
+        ["Authorization", "Bearer", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": : CustomScheme error',
+        ["Authorization", "CustomScheme", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "token": : Bearer error',
+        ["token", "Bearer", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Digest a=1, Bearer : : error",
+        ["Authorization", "Digest", "Bearer", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": Digest a=1, Bearer : : error',
+        ["Authorization", "Digest", "Bearer", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Digest a=1, : : Bearer error",
+        ["Authorization", "Digest", "Bearer", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 65 / Iter 66: Verifier 5 #2 — scanCookieExpiresValueEnd Go monotonic clock & UnixDate + comma
+      [
+        "Runtime Error: Set-Cookie: sid=1; Expires=2099-01-01 00:00:00 +0000 UTC m=+0.000000001; path = error",
+        ["Set-Cookie", "sid", "Expires", "2099", "UTC", "path", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Set-Cookie": sid=1; Expires=2099-01-01 00:00:00 +0000 UTC m=+0.000000001; path = error',
+        ["Set-Cookie", "sid", "Expires", "2099", "UTC", "path", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Set-Cookie: sid=1; Expires=Mon Jan 2 15:04:05 MST 2006, sid2 = error",
+        ["Set-Cookie", "sid", "Expires", "MST", "2006", "sid2", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 65 / Iter 66: Verifier 5 #3 — SQL typed U&"..." & unescapeJsonKey \u{...} / non-special \c
+      [
+        'Runtime Error: U&"tok\\0065n": error',
+        ["tok", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: U&"\\0074oken": error',
+        ["oken", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: U&"\\+000074oken": error',
+        ["oken", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "\\u{74}oken": error',
+        ["oken", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: E't\\oken': error",
+        ["oken", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "t\\oken": error',
+        ["oken", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 65 / Iter 66: Verifier 5 #4 — isNonBase64KvParamAfterKey quoted/grouped value & 16-char KV params
+      [
+        'Runtime Error: "Authorization": Bearer clientId1234567= "hello world", scope = error',
+        ["Authorization", "Bearer", "clientId1234567", "hello", "world", "scope", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Bearer clientId1234567= (a b), scope = error",
+        ["Authorization", "Bearer", "clientId1234567", "scope", "error", "=", "("],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Bearer clientId1234567= error",
+        ["Authorization", "Bearer", "clientId1234567", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
     ];
     for (const [msg, forbidden, expectedExact] of cases) {
       const err = new Error(msg);
