@@ -2,14 +2,14 @@
 
 import * as React from 'react'
 import { useEffect, useState } from 'react'
-import { HydrationBoundary, QueryClient, QueryClientProvider, hydrate, useQueryClient } from '@tanstack/react-query'
+import { HydrationBoundary, QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { DehydratedState } from '@tanstack/react-query'
 import dynamic from 'next/dynamic'
 import { usePathname } from 'next/navigation'
 import { useReportWebVitals } from 'next/web-vitals'
 import { NuqsAdapter } from 'nuqs/adapters/next/app'
 import { hydrateFilterStoreFromUrl } from '@/lib/utils'
-import { getApiBase, queryKeys } from '@/lib/api'
+import { getApiBase } from '@/lib/api'
 import { useBootstrap } from '@/hooks/useBootstrap'
 import { useServiceStore } from '@/stores/filterStore'
 import { useTimezoneStore } from '@/stores/filterStore'
@@ -329,20 +329,6 @@ const ReactQueryDevtools = dynamic(
   () => import('@tanstack/react-query-devtools').then(m => ({ default: m.ReactQueryDevtools })),
   { ssr: false }
 )
-
-export function StreamedBootstrapSeed({
-  state,
-}: {
-  state: DehydratedState | null
-}) {
-  const queryClient = useQueryClient()
-  React.useEffect(() => {
-    if (!state) return
-    if (queryClient.getQueryData(queryKeys.bootstrap()) !== undefined) return
-    hydrate(queryClient, state)
-  }, [queryClient, state])
-  return null
-}
 
 interface QueryProviderProps {
   children: React.ReactNode
