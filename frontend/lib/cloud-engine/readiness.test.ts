@@ -3666,6 +3666,156 @@ it("SEC-T5-ITER40-FE-03: prevents non-contraction apostrophe mismatch and cross-
         ["Set-Cookie", "error", "="],
         "Error: Runtime Error: [redacted]",
       ],
+      // Wave 61 / Iter 62: Verifier 3 — Glued inline compound separators =>, ::, := and repeated :::
+      [
+        "Runtime Error: X-Token=Bearer=> error",
+        ["Token", "Bearer", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: X-Token=Bearer:: error",
+        ["Token", "Bearer", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: X-Token=Bearer:= error",
+        ["Token", "Bearer", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Bearer::: error",
+        ["Authorization", "Bearer", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 61 / Iter 62: Verifier 5 #1 — Set-Cookie Expires= extended date formats
+      [
+        "Runtime Error: Set-Cookie: a=1; Expires=Thu, 01 Jan 2099 00:00:00 GMT+0000, status = valid",
+        ["Set-Cookie", "Expires", "GMT", "status", "valid", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Set-Cookie: a=1; Expires=Thu, 01 Jan 2099 00:00:00 UTC-05:00, status = valid",
+        ["Set-Cookie", "Expires", "UTC", "status", "valid", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Set-Cookie: a=1; Expires=Thu Jan 01 2099 00:00:00 GMT, status = valid",
+        ["Set-Cookie", "Expires", "GMT", "status", "valid", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Set-Cookie: a=1; Expires=Thu, 01 Jan 2099 00:00:00.000 GMT, status = valid",
+        ["Set-Cookie", "Expires", "GMT", "status", "valid", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Set-Cookie: a=1; Expires=Thu, 01 Jan 2099 00:00:00 GMT+0000 (UTC); status = valid",
+        ["Set-Cookie", "Expires", "GMT", "UTC", "status", "valid", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Set-Cookie": a=1; Expires=Thu, 01 Jan 2099 00:00:00 GMT+0000, status = valid',
+        ["Set-Cookie", "Expires", "GMT", "status", "valid", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 61 / Iter 62: Verifier 5 #2 — HMAC multi-param, glued key=scheme:val/=, Authorization: Bearer realm = local
+      [
+        "Runtime Error: X-Auth: HMAC id = valid, mode = local",
+        ["Auth", "HMAC", "id", "valid", "mode", "local", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: X-Token: HMAC Credential = valid, mode = local",
+        ["Token", "HMAC", "Credential", "valid", "mode", "local", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: X-Token=Digest:error, mode = local",
+        ["Token", "Digest", "error", "mode", "local", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: X-Token=AWS4-HMAC-SHA256:Credential=valid, mode = local",
+        ["Token", "AWS4", "HMAC", "Credential", "valid", "mode", "local", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: X-Token=OAuth:token=valid, mode = local",
+        ["Token", "OAuth", "valid", "mode", "local", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: X-Token=Digest=realm=valid, mode = local",
+        ["Token", "Digest", "realm", "valid", "mode", "local", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Bearer realm = local",
+        ["Authorization", "Bearer", "realm", "local", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 61 / Iter 62: Verifier 5 #3 — Custom auth schemes (_/., glued :, grouped (/[] in multi-challenge)
+      [
+        "Runtime Error: Authorization: MY_CUSTOM_SCHEME error",
+        ["Authorization", "MY_CUSTOM_SCHEME", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Custom.Scheme error",
+        ["Authorization", "Custom.Scheme", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: WWW-Authenticate: Digest realm=host, MY_CUSTOM_SCHEME error",
+        ["WWW-Authenticate", "Digest", "realm", "host", "MY_CUSTOM_SCHEME", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": MY_CUSTOM_SCHEME error',
+        ["Authorization", "MY_CUSTOM_SCHEME", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: MyScheme: error",
+        ["Authorization", "MyScheme", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: WWW-Authenticate: Digest realm=host, MyScheme: error",
+        ["WWW-Authenticate", "Digest", "realm", "host", "MyScheme", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "WWW-Authenticate": Digest realm=host, MyScheme: error',
+        ["WWW-Authenticate", "Digest", "realm", "host", "MyScheme", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": MyScheme: error',
+        ["Authorization", "MyScheme", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: WWW-Authenticate: Digest realm=host, MyScheme(error)",
+        ["WWW-Authenticate", "Digest", "realm", "host", "MyScheme", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: WWW-Authenticate: Digest realm=host, MyScheme[error]",
+        ["WWW-Authenticate", "Digest", "realm", "host", "MyScheme", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "WWW-Authenticate": Digest realm=host, MyScheme(error)',
+        ["WWW-Authenticate", "Digest", "realm", "host", "MyScheme", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 61 / Iter 62: Verifier 5 #4 — Comma-folded quoted cookie name with unquoted suffix in Stage 2A
+      [
+        'Runtime Error: "Set-Cookie": a=1, "my"status = error',
+        ["Set-Cookie", "status", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
     ];
     for (const [msg, forbidden, expectedExact] of cases) {
       const err = new Error(msg);
