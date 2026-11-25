@@ -72,7 +72,11 @@ fn catalog_fork_listing_lists_the_sequential_walk_in_parallel_chains() {
     let forked = walk_forked(&fake, &query);
     assert_eq!(forked.files, want_files);
     assert_eq!(forked.summaries, want_summaries);
-    assert!(forked.forks >= 4, "{} forks", forked.forks);
+    assert!(
+        (2..=4).contains(&forked.forks),
+        "expected 2..=4 balanced forks for 13h, got {}",
+        forked.forks
+    );
     // Setup reads the range's two day indexes in one round, then writes the forks.
     assert_eq!(forked.setup_rounds, 1);
     assert!(
@@ -154,6 +158,111 @@ fn catalog_fork_is_skipped_when_the_range_has_one_shard() {
     assert!(page.get("forks").is_none_or(Value::is_null));
     assert_eq!(page["complete"], true);
     assert_eq!(page["files"].as_array().unwrap().len(), 4);
+}
+
+#[test]
+fn catalog_fork_is_skipped_for_short_multi_day_range_within_min_hours() {
+    let fake = Fake::new(BASE);
+    fake.heap_mib.set(Some(40));
+    publish_active_day(&fake);
+    // 6 hours spanning UTC midnight (2027-01-14T21:00Z .. 2027-01-15T03:00Z):
+    // 3 hours on day 1 + 3 hours on day 2 = 6 <= MIN_HOURS_PER_FORK (8).
+    let open = BASE - BASE.rem_euclid(3600);
+    let from = open - 11 * 3600;
+    let to = open - 5 * 3600;
+    let query = format!("summaries=1&from={}&to={}", iso_url(from), iso_url(to));
+    let (want_files, want_summaries, _) = walk_files(&fake, &query);
+    assert!(!want_files.is_empty());
+    let page = files_page(&fake, &format!("{query}&fork=1")).unwrap();
+    assert!(page.get("forks").is_none_or(Value::is_null));
+    assert_eq!(page["complete"], true);
+    let got_files: BTreeSet<String> = page["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["key"].as_str().unwrap().to_owned())
+        .collect();
+    let got_summaries: BTreeSet<String> = page["summary_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["key"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(got_files, want_files);
+    assert_eq!(got_summaries, want_summaries);
+}
+
+#[test]
+fn catalog_fork_24h_range_uses_few_balanced_forks_instead_of_16() {
+    use fastly_log_analytics::ingest::summary;
+    let fake = Fake::new(BASE);
+    fake.heap_mib.set(Some(40));
+    let open = BASE - BASE.rem_euclid(3600);
+    let mut want_files = BTreeSet::new();
+    let mut want_summaries = BTreeSet::new();
+    // 24 hours spanning 2 UTC days: 16h on day 1 + 8h on day 2.
+    for h in 0..24 {
+        let hour = open - (23 - h) * 3600;
+        let file = ingest::processed_key("processed/request/", hour + 60, hour + 180, "abc", 3);
+        let sum = summary::summary_key(
+            "processed/summary/request/",
+            hour + 60,
+            hour + 180,
+            "p1s0",
+            3,
+        );
+        fake.bucket.borrow_mut().insert(file.clone(), vec![1]);
+        fake.bucket.borrow_mut().insert(sum.clone(), vec![1]);
+        want_files.insert(file.clone());
+        want_summaries.insert(sum.clone());
+        publish_files(&fake, &[file], &[sum], &[]);
+    }
+    let query = format!(
+        "summaries=1&from={}&to={}",
+        iso_url(open - 23 * 3600),
+        iso_url(open + 3600)
+    );
+    let forked = walk_forked(&fake, &query);
+    assert_eq!(forked.files, want_files);
+    assert_eq!(forked.summaries, want_summaries);
+    // 16h -> 2 shards of 8h, 8h -> 1 shard of 8h (or at most 4 shards for any 24h split).
+    assert!(
+        (2..=4).contains(&forked.forks),
+        "expected 2..=4 forks for 24h, got {}",
+        forked.forks
+    );
+    assert_eq!(forked.longest, 1);
+}
+
+#[test]
+fn catalog_fork_7d_range_caps_hour_forks_at_eight() {
+    let fake = Fake::new(BASE);
+    fake.heap_mib.set(Some(40));
+    let open = BASE - BASE.rem_euclid(3600);
+    let mut want = BTreeSet::new();
+    // 8 UTC days, 4 hours each (32 active hours across 8 days <= FORK_DAY_INDEXES).
+    for day in 0..8 {
+        let day_anchor = open - day * 86_400;
+        for h in 0..4 {
+            let hour = day_anchor - h * 3600;
+            let file = ingest::processed_key("processed/request/", hour + 60, hour + 180, "abc", 1);
+            fake.bucket.borrow_mut().insert(file.clone(), vec![1]);
+            want.insert(file.clone());
+            publish_files(&fake, &[file], &[], &[]);
+        }
+    }
+    let query = format!(
+        "from={}&to={}",
+        iso_url(open - 7 * 86_400 - 4 * 3600),
+        iso_url(open + 3600)
+    );
+    let forked = walk_forked(&fake, &query);
+    assert_eq!(forked.files, want);
+    assert!(
+        forked.forks <= 8,
+        "expected <= 8 forks for 7d range, got {}",
+        forked.forks
+    );
 }
 
 #[test]

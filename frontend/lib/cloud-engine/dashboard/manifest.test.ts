@@ -1632,4 +1632,24 @@ describe("forked catalog listing", () => {
     expect(urls).toHaveLength(1);
     expect(new URL(urls[0], "http://x").searchParams.has("fork")).toBe(false);
   });
+
+  it("coalesces concurrent raw and sub-range callers onto one forked listing", async () => {
+    const chains = [
+      [[file(T0)], [file(T0 + 4 * H)]],
+      [[file(T0 + 8 * H)]],
+      [[file(T0 + 16 * H)]],
+    ];
+    const { fetchJson, started } = forkingServer(chains);
+    const [full, raw, narrowed] = await Promise.all([
+      fetchManifest(fetchJson, iso(T0), iso(T0 + 24 * H), undefined, undefined, undefined, true),
+      fetchManifest(fetchJson, iso(T0), iso(T0 + 24 * H)),
+      fetchManifest(fetchJson, iso(T0 + 8 * H), iso(T0 + 24 * H)),
+    ]);
+    // 1 setup + 3 forks (chain 0 has 2 pages) = 5 HTTP requests shared across all 3 callers.
+    expect(started).toHaveLength(5);
+    expect(keys(full.files)).toEqual(keys(chains.flat(2)));
+    expect(keys(raw.files)).toEqual(keys(chains.flat(2)));
+    expect(raw.summaryFiles).toBeUndefined();
+    expect(keys(narrowed.files)).toEqual(keys([file(T0 + 8 * H), file(T0 + 16 * H)]));
+  });
 });

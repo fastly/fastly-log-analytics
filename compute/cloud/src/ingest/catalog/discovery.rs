@@ -623,8 +623,16 @@ fn walk<R: Runtime>(
     })
 }
 
-/// Most concurrent chains one forked listing splits into.
+/// Most concurrent chains one forked listing splits into (day-level splitting).
 pub const MAX_FORKS: usize = 16;
+/// Most concurrent chains one hour-level forked listing splits into, keeping
+/// typical 24h–7d cold listings within browser per-origin concurrency.
+const MAX_HOUR_FORKS: usize = 8;
+/// Fewest hours assigned to one hour-level fork. Each Compute invocation has a
+/// 32-call backend budget and 16-way FOS prefetch, so 6–8 hours fit in one page
+/// and one parallel FOS batch; ranges at or below this floor walk inline in one
+/// request instead of paying fork setup + parallel round-trip overhead.
+const MIN_HOURS_PER_FORK: usize = 8;
 /// Most day indexes a fork setup reads to split the range by hour; a longer range splits by day.
 const FORK_DAY_INDEXES: usize = 12;
 /// Ranges this short list in one page, so forking would only add a round trip.
@@ -689,6 +697,8 @@ pub fn forked_page<R: Runtime>(
             .map(|(_, key)| (key.clone(), MANIFEST_LIMIT))
             .collect();
         let mut days = Vec::new();
+        let mut non_empty_days = Vec::new();
+        let mut day_bytes = Vec::new();
         for (n, (day, key)) in base.days.iter().enumerate() {
             if !admitted(store)
                 || !(already_sent(store, &prefetched, key)
@@ -707,21 +717,43 @@ pub fn forked_page<R: Runtime>(
             state.day = 0;
             enter_day(&mut state, *day, index, include_summaries, summary_bounds);
             if !state.hours.is_empty() {
+                non_empty_days.push((*day, key.clone()));
+                day_bytes.push((key.clone(), bytes));
                 days.push(state);
             }
         }
         let total: usize = days.iter().map(|day| day.hours.len()).sum();
-        let mut size = total.div_ceil(MAX_FORKS).max(1);
+        if total <= MIN_HOURS_PER_FORK {
+            if days.len() <= 1 {
+                let state = days.pop().unwrap_or(State {
+                    days: Vec::new(),
+                    ..base
+                });
+                return walk(store, state, include_summaries, summary_bounds, prefetched)
+                    .map(Start::Page);
+            }
+            for (key, bytes) in day_bytes {
+                prefetched.insert(key, Ok(Some(bytes)));
+            }
+            let mut state = base;
+            state.days = non_empty_days;
+            return walk(store, state, include_summaries, summary_bounds, prefetched)
+                .map(Start::Page);
+        }
+        let max_forks = MAX_HOUR_FORKS.max(days.len());
+        let mut size = total.div_ceil(max_forks).max(MIN_HOURS_PER_FORK);
         while days
             .iter()
             .map(|day| day.hours.len().div_ceil(size))
             .sum::<usize>()
-            > MAX_FORKS
+            > max_forks
         {
             size += 1;
         }
         for day in days {
-            for (n, hours) in day.hours.chunks(size).enumerate() {
+            let parts = day.hours.len().div_ceil(size);
+            let chunk = day.hours.len().div_ceil(parts);
+            for (n, hours) in day.hours.chunks(chunk).enumerate() {
                 let mut shard = day.clone();
                 shard.hours = hours.to_vec();
                 shard.current = hours.first().map(|(_, r)| r.clone());
