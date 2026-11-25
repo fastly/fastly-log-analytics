@@ -294,12 +294,25 @@ pub fn fetch_batched<R: Runtime>(
     max_batch: usize,
     upcoming: impl FnOnce() -> Vec<(String, usize)>,
 ) -> Result<Option<Vec<u8>>, String> {
+    fetch_batched_reserving(store, prefetched, key, limit, max_batch, 3, upcoming)
+}
+
+/// Like [`fetch_batched`], keeping at least `reserve` backend calls free for the caller's tail.
+pub fn fetch_batched_reserving<R: Runtime>(
+    store: &Store<'_, R>,
+    prefetched: &mut Prefetched,
+    key: &str,
+    limit: usize,
+    max_batch: usize,
+    reserve: u32,
+    upcoming: impl FnOnce() -> Vec<(String, usize)>,
+) -> Result<Option<Vec<u8>>, String> {
     if let Some(result) = prefetched.remove(key) {
         return result;
     }
     let unread = store.runtime.admin_unread(&store.service.service_id);
     let room = (store.runtime.admin_remaining_calls() as usize)
-        .saturating_sub(4)
+        .saturating_sub(reserve as usize + 1)
         .clamp(1, max_batch);
     let held: usize = prefetched
         .values()

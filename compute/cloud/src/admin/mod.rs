@@ -3825,7 +3825,10 @@ fn dispatch(
         }
     }
     if let Some(reply) = compact_reply {
-        let pending = reply == Some(true);
+        // Preserve a known compaction backlog when the stage worker does not answer before
+        // `DRAIN_AT`, so a busy/slow compaction turn keeps its catch-up cadence instead of
+        // falling back to `COMPACT_INTERVAL_S`.
+        let pending = reply.unwrap_or(jobs.compact.more_pending);
         jobs.compact = job_state(
             now,
             if reply.is_some() { "done" } else { "missed" },

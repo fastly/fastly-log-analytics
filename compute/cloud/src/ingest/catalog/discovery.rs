@@ -1,8 +1,8 @@
 use super::{
     admitted, already_sent,
     bundles::{self, COVERAGE_LIMIT},
-    day_start, fetch_batched, file_bounds, file_hour, head, validate_day, Block, Day, Head,
-    Prefetched, Reference, MANIFEST_LIMIT, VERSION,
+    day_start, file_bounds, file_hour, head, validate_day, Block, Day, Head, Prefetched, Reference,
+    MANIFEST_LIMIT, VERSION,
 };
 use crate::{
     ingest::{api::FILES_PAGE, rfc3339, storage::Store, worker::Output, WATERMARK_KEY},
@@ -131,6 +131,32 @@ pub fn page<R: Runtime>(
     )
 }
 
+/// Like [`page`], stopping catalog reads while at least `reserve` backend calls remain so callers
+/// (such as request compaction) always keep budget for their own writes and state persistence.
+pub fn page_reserving<R: Runtime>(
+    store: &Store<'_, R>,
+    from: i64,
+    to: i64,
+    summary: bool,
+    include_summaries: bool,
+    checkpoint: Option<&str>,
+    reserve: u32,
+) -> Result<Page, String> {
+    let state = if let Some(token) = checkpoint {
+        load(store, token, from, to, summary, (from, to))?
+    } else {
+        fresh(store, None, from, to, summary, (from, to))?
+    };
+    walk(
+        store,
+        state,
+        include_summaries,
+        (from, to),
+        Prefetched::new(),
+        reserve,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn pinned_page<R: Runtime>(
     store: &Store<'_, R>,
@@ -156,16 +182,25 @@ pub fn pinned_page<R: Runtime>(
 /// Most catalog objects one discovery round sends concurrently.
 const PREFETCH_LIMIT: usize = 16;
 
-/// Reads `key` with the walk's upcoming reads alongside it; see [`super::fetch_batched`].
+/// Reads `key` with the walk's upcoming reads alongside it; see [`super::fetch_batched_reserving`].
 fn fetch<R: Runtime>(
     store: &Store<'_, R>,
     prefetched: &mut Prefetched,
     key: &str,
     limit: usize,
+    reserve: u32,
     upcoming: impl FnOnce() -> Vec<(String, usize)>,
 ) -> Result<Vec<u8>, String> {
-    fetch_batched(store, prefetched, key, limit, PREFETCH_LIMIT, upcoming)?
-        .ok_or_else(|| "catalog_object_not_visible".into())
+    super::fetch_batched_reserving(
+        store,
+        prefetched,
+        key,
+        limit,
+        PREFETCH_LIMIT,
+        reserve,
+        upcoming,
+    )?
+    .ok_or_else(|| "catalog_object_not_visible".into())
 }
 
 /// The bundle and head-block reads the walk makes from the current hour on, in walk order,
@@ -251,6 +286,7 @@ pub fn pinned_page_precise<R: Runtime>(
         include_summaries,
         summary_bounds,
         Prefetched::new(),
+        3,
     )
 }
 
@@ -376,12 +412,13 @@ fn walk<R: Runtime>(
     include_summaries: bool,
     summary_bounds: (i64, i64),
     mut prefetched: Prefetched,
+    reserve: u32,
 ) -> Result<Page, String> {
     let (from, to, summary) = (state.from, state.to, state.summary);
     let mut files = Vec::new();
     let mut summaries = Vec::new();
     let affordable = |prefetched: &Prefetched, key: &str| {
-        (already_sent(store, prefetched, key) || store.runtime.admin_remaining_calls() > 3)
+        (already_sent(store, prefetched, key) || store.runtime.admin_remaining_calls() > reserve)
             && admitted(store)
     };
     while files.len() < FILES_PAGE && summaries.len() < FILES_PAGE {
@@ -395,7 +432,14 @@ fn walk<R: Runtime>(
             if !affordable(&prefetched, &key) {
                 break;
             }
-            let bytes = fetch(store, &mut prefetched, &key, MANIFEST_LIMIT, Vec::new)?;
+            let bytes = fetch(
+                store,
+                &mut prefetched,
+                &key,
+                MANIFEST_LIMIT,
+                reserve,
+                Vec::new,
+            )?;
             let index: Day =
                 serde_json::from_slice(&bytes).map_err(|_| "catalog_object_invalid")?;
             validate_day(&index, &store.service.service_id)?;
@@ -415,6 +459,7 @@ fn walk<R: Runtime>(
                     &mut prefetched,
                     &reference.key,
                     COVERAGE_LIMIT,
+                    reserve,
                     || upcoming(&state, include_summaries, summary_bounds),
                 )?;
                 let coverage = bundles::parse(&bytes)?;
@@ -461,6 +506,7 @@ fn walk<R: Runtime>(
                     &mut prefetched,
                     &reference.key,
                     COVERAGE_LIMIT,
+                    reserve,
                     || upcoming(&state, include_summaries, summary_bounds),
                 )?;
                 let coverage = bundles::parse(&bytes)?;
@@ -518,6 +564,7 @@ fn walk<R: Runtime>(
             &mut prefetched,
             &reference.key,
             MANIFEST_LIMIT,
+            reserve,
             || upcoming(&state, include_summaries, summary_bounds),
         )?;
         let manifest: Block =
@@ -665,6 +712,7 @@ pub fn forked_page<R: Runtime>(
             include_summaries,
             summary_bounds,
             Prefetched::new(),
+            3,
         )
         .map(Start::Page);
     }
@@ -703,7 +751,7 @@ pub fn forked_page<R: Runtime>(
             {
                 return Err("backend_budget_exhausted".into());
             }
-            let bytes = fetch(store, &mut prefetched, key, MANIFEST_LIMIT, || {
+            let bytes = fetch(store, &mut prefetched, key, MANIFEST_LIMIT, 3, || {
                 keys[n + 1..].to_vec()
             })?;
             let index: Day =
@@ -726,16 +774,30 @@ pub fn forked_page<R: Runtime>(
                     days: Vec::new(),
                     ..base
                 });
-                return walk(store, state, include_summaries, summary_bounds, prefetched)
-                    .map(Start::Page);
+                return walk(
+                    store,
+                    state,
+                    include_summaries,
+                    summary_bounds,
+                    prefetched,
+                    3,
+                )
+                .map(Start::Page);
             }
             for (key, bytes) in day_bytes {
                 prefetched.insert(key, Ok(Some(bytes)));
             }
             let mut state = base;
             state.days = non_empty_days;
-            return walk(store, state, include_summaries, summary_bounds, prefetched)
-                .map(Start::Page);
+            return walk(
+                store,
+                state,
+                include_summaries,
+                summary_bounds,
+                prefetched,
+                3,
+            )
+            .map(Start::Page);
         }
         let max_forks = MAX_HOUR_FORKS.max(days.len());
         let mut size = total.div_ceil(max_forks).max(MIN_HOURS_PER_FORK);
@@ -771,7 +833,15 @@ pub fn forked_page<R: Runtime>(
                 ..base
             },
         };
-        return walk(store, state, include_summaries, summary_bounds, prefetched).map(Start::Page);
+        return walk(
+            store,
+            state,
+            include_summaries,
+            summary_bounds,
+            prefetched,
+            3,
+        )
+        .map(Start::Page);
     }
     let generation = base.generation;
     let body = serde_json::to_vec(&shards).map_err(|e| e.to_string())?;

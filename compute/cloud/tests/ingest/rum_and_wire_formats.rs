@@ -3357,6 +3357,43 @@ mod request_compaction {
         );
     }
 
+    #[test]
+    fn large_multi_hour_catalog_reserves_budget_to_release_lease_and_compact() {
+        let fake = Fake::new(NOW);
+        // 30 distinct hours with 2 windows each creates >30 catalog blocks, which previously
+        // caused `catalog::discovery::page` to exhaust the 32-call budget inside `Run::scan`,
+        // fail the final state write with `call_budget`, and strand a 70 s lease with 0 compacts.
+        for hour in 0..30 {
+            for i in 0..2 {
+                window(&fake, HOUR + hour * 3600 - 3 * 86_400 + i * 60, &["x"]);
+            }
+        }
+        let mut compacted_total = 0u32;
+        for _ in 0..40 {
+            let report = run(&fake, TARGET);
+            assert!(fake.calls.get() <= BUDGET);
+            assert_ne!(
+                report.stopped.as_deref(),
+                Some("lease_held"),
+                "pass must never strand its 70s lease on call_budget exhaustion"
+            );
+            let state: compaction::State =
+                serde_json::from_value(fake.kv.borrow()[compaction::STATE_KEY].1.clone()).unwrap();
+            assert_eq!(
+                state.lease_until, 0,
+                "standalone pass must always keep enough call budget to release its lease"
+            );
+            compacted_total += report.compacts;
+            if !report.more_pending {
+                break;
+            }
+        }
+        assert!(
+            compacted_total >= 1,
+            "multi-hour catalog must make compaction progress instead of livelocking"
+        );
+    }
+
     fn ticks(fake: &Fake, enabled: bool) -> Vec<String> {
         tick_runtime(fake);
         if enabled {

@@ -49,7 +49,7 @@ pub fn maint_catching_up(previous: bool, bundle_pending: Option<bool>) -> bool {
 /// Request compaction runs on its own job, apart from the maintenance rotation: every
 /// `COMPACT_INTERVAL_S` when it has caught up, `COMPACT_CATCHUP_S` after a run that left work.
 pub const COMPACT_INTERVAL_S: u64 = 30;
-pub const COMPACT_CATCHUP_S: u64 = 10;
+pub const COMPACT_CATCHUP_S: u64 = 2;
 /// How often an idle schedule re-reads KV, so config changes (log period, a new install) and
 /// writes made off the shield reach the mirror without a job running.
 pub const REFRESH_S: u64 = 60;

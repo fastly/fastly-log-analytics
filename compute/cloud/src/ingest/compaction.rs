@@ -1298,13 +1298,14 @@ impl<R: Runtime> Run<'_, '_, R> {
             }
             if self.state.catalog_objects.is_empty() {
                 let to = *self.state.catalog_to.get_or_insert(i64::MAX);
-                let page = match super::catalog::discovery::page(
+                let page = match super::catalog::discovery::page_reserving(
                     self.store,
                     0,
                     to,
                     false,
                     false,
                     self.state.catalog_cursor.as_deref(),
+                    self.tail + COMMIT_RESERVE,
                 ) {
                     Ok(page) => page,
                     Err(error) if error == "catalog_cursor_expired" => {

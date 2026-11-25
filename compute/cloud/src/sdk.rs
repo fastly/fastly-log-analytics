@@ -61,6 +61,29 @@ struct KvCoordState {
     last_written_value: Option<Value>,
 }
 
+/// Picks the fresher of a KV REST API read (`api`) and a local Compute `KVStore::lookup` (`local`).
+/// Prefers `local` when it carries a strictly newer `_kv_written_ms`, or when `api` returned a
+/// known-dead generation and `local` has a different generation at least as new.
+fn pick_fresher_record(
+    api: crate::admin::Record,
+    local: Option<crate::admin::Record>,
+    dead_gen: Option<&str>,
+) -> crate::admin::Record {
+    let Some(local) = local else {
+        return api;
+    };
+    let api_ts = api.value["_kv_written_ms"].as_u64().unwrap_or(0);
+    let local_ts = local.value["_kv_written_ms"].as_u64().unwrap_or(0);
+    if local_ts > api_ts
+        || (dead_gen == Some(api.generation.as_str())
+            && local.generation != api.generation
+            && local_ts >= api_ts)
+    {
+        return local;
+    }
+    api
+}
+
 impl FastlyRuntime {
     pub fn backend_budget(&self) -> crate::admin::BackendBudget {
         self.budget.clone()
@@ -966,16 +989,27 @@ impl Runtime for FastlyRuntime {
             "runtime_service_id": std::env::var("FASTLY_SERVICE_ID").ok(),
             "runtime_service_version": std::env::var("FASTLY_SERVICE_VERSION").ok(),
         }));
-        let fallback_local_kv = || -> Option<crate::admin::Record> {
-            let expected = expected_ts?;
+        let coordinated = Self::is_coordinated_kv_key(key);
+        let coord = coordinated.then(|| self.kv_coord_get(key)).flatten();
+        let min_expected_ts = expected_ts
+            .into_iter()
+            .chain(coord.as_ref().map(|c| c.last_write_ms).filter(|&ts| ts > 0))
+            .max();
+        let dead_gen = coord.as_ref().and_then(|c| c.dead_generation.as_deref());
+        let read_local_kv = || -> Option<crate::admin::Record> {
             let kv = self.kv.as_ref()?;
             let mut local = kv.lookup(key).ok()?;
             let generation = local.current_generation().to_string();
             let value = bounded_json_with_limit(local.take_body(), KV_VALUE_MAX_BYTES).ok()?;
-            value["_kv_written_ms"]
+            Some(crate::admin::Record { generation, value })
+        };
+        let fallback_local_kv = || -> Option<crate::admin::Record> {
+            let expected = min_expected_ts?;
+            let record = read_local_kv()?;
+            record.value["_kv_written_ms"]
                 .as_u64()
                 .is_some_and(|ts| ts >= expected)
-                .then_some(crate::admin::Record { generation, value })
+                .then_some(record)
         };
         if status == 404 {
             if let Some(record) = fallback_local_kv() {
@@ -1003,8 +1037,18 @@ impl Runtime for FastlyRuntime {
             .map_err(|_| "admin_state_generation_invalid")?
             .to_string();
         let value = bounded_json_with_limit(response.take_body(), KV_VALUE_MAX_BYTES)?;
-        if expected_ts.is_some_and(|expected| {
-            value["_kv_written_ms"]
+        let api_record = crate::admin::Record { generation, value };
+        if coordinated {
+            // Compare the KV REST API response against Compute's local KVStore lookup and pick
+            // whichever carries the newer `_kv_written_ms` (or escapes a known dead generation).
+            // This prevents a stale REST API edge response from pinning `lease_generation` across
+            // ticks when Compute's KVStore already has the fresher generation.
+            let local_record = read_local_kv();
+            let record = pick_fresher_record(api_record, local_record, dead_gen);
+            return Ok(Some(record));
+        }
+        if min_expected_ts.is_some_and(|expected| {
+            api_record.value["_kv_written_ms"]
                 .as_u64()
                 .is_none_or(|ts| ts < expected)
         }) {
@@ -1017,16 +1061,15 @@ impl Runtime for FastlyRuntime {
                 }
                 return Ok(Some(record));
             }
-            return Ok(Some(crate::admin::Record { generation, value }));
+            return Ok(Some(api_record));
         }
-        let record = crate::admin::Record { generation, value };
         if Self::is_cacheable_kv_key(key) {
             self.kv_cache
                 .borrow_mut()
-                .insert(key.into(), Some(record.clone()));
-            self.kv_core_cache_put(key, Some(&record));
+                .insert(key.into(), Some(api_record.clone()));
+            self.kv_core_cache_put(key, Some(&api_record));
         }
-        Ok(Some(record))
+        Ok(Some(api_record))
     }
     fn admin_api(
         &self,
@@ -2556,5 +2599,40 @@ mod platform_metrics_tests {
         });
 
         assert_eq!(result.unwrap_err(), "platform_metrics_pagination_loop");
+    }
+
+    #[test]
+    fn pick_fresher_record_prefers_newer_local_kv_over_stale_api_generation() {
+        let stale_api = crate::admin::Record {
+            generation: "1795643318773026".into(),
+            value: json!({"lease_until": 100, "_kv_written_ms": 1_000}),
+        };
+        let fresh_local = crate::admin::Record {
+            generation: "1795643350000001".into(),
+            value: json!({"lease_until": 0, "_kv_written_ms": 2_000}),
+        };
+        let picked = pick_fresher_record(stale_api.clone(), Some(fresh_local.clone()), None);
+        assert_eq!(picked.generation, fresh_local.generation);
+
+        // When api is strictly newer than local, api wins.
+        let newer_api = crate::admin::Record {
+            generation: "1795643390000002".into(),
+            value: json!({"lease_until": 0, "_kv_written_ms": 3_000}),
+        };
+        let picked = pick_fresher_record(newer_api.clone(), Some(fresh_local.clone()), None);
+        assert_eq!(picked.generation, newer_api.generation);
+
+        // When api returns a known dead generation at the same timestamp, a different local
+        // generation wins.
+        let same_ts_local = crate::admin::Record {
+            generation: "1795643350000009".into(),
+            value: json!({"lease_until": 0, "_kv_written_ms": 1_000}),
+        };
+        let picked = pick_fresher_record(
+            stale_api.clone(),
+            Some(same_ts_local.clone()),
+            Some("1795643318773026"),
+        );
+        assert_eq!(picked.generation, same_ts_local.generation);
     }
 }
