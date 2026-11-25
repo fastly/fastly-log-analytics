@@ -2953,6 +2953,26 @@ it("SEC-T5-ITER40-FE-03: prevents non-contraction apostrophe mismatch and cross-
         ["HTTP", "403", "100", "MB", "session", "valid"],
         "Error: Runtime Error: [redacted]",
       ],
+      [
+        'Runtime Error: "Cookie": sid=123; https://example.com = 100ms; mode = server',
+        ["123", "example.com", "100ms", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": Digest a=1, https://example.com = 100ms, mode = server',
+        ["example.com", "100ms", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Cookie": sid = https://example.com = 100ms; mode = server',
+        ["example.com", "100ms", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": Digest uri = https://example.com = 100ms, response = cache',
+        ["example.com", "100ms", "response", "cache"],
+        "Error: Runtime Error: [redacted]",
+      ],
     ];
     for (const [msg, forbidden, expectedExact] of cases) {
       const err = new Error(msg);

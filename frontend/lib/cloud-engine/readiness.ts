@@ -1809,7 +1809,8 @@ function tryScanKeyValueParamEnd(
     }
   }
   let vEnd = scanSingleSecretValueEnd(line, vStart, true, true, isCookie, allowQuoted, escapeState);
-  if (vEnd > vStart && line.slice(vStart, vEnd).endsWith("[url]")) {
+  const valSlice = vEnd > vStart ? line.slice(vStart, vEnd) : "";
+  if (vEnd > vStart && (valSlice.endsWith("[url]") || (allowQuoted && valSlice.includes("://")))) {
     let afterUrl = vEnd;
     const afterUrlWsLimit = Math.min(len, vEnd + 16);
     while (afterUrl < afterUrlWsLimit && isInlineWs(line[afterUrl])) afterUrl += 1;
@@ -1862,7 +1863,16 @@ function scanContinuationParamsEnd(
       if (allowQuoted) {
         const rawUrlEnd = tryScanRawUrlEnd(line, next);
         if (rawUrlEnd !== -1) {
-          end = rawUrlEnd;
+          let ws = rawUrlEnd;
+          while (ws < len && isInlineWs(line[ws])) ws += 1;
+          if (line[ws] === "=") {
+            let vStart = ws + 1;
+            while (vStart < len && isInlineWs(line[vStart])) vStart += 1;
+            const vEnd = scanSingleSecretValueEnd(line, vStart, true, true, true, allowQuoted, escapeState);
+            end = vEnd > vStart ? vEnd : ws + 1;
+          } else {
+            end = rawUrlEnd;
+          }
           continue;
         }
       }
@@ -1913,7 +1923,16 @@ function scanContinuationParamsEnd(
       if (allowQuoted) {
         const rawUrlEnd = tryScanRawUrlEnd(line, next);
         if (rawUrlEnd !== -1) {
-          end = rawUrlEnd;
+          let ws = rawUrlEnd;
+          while (ws < len && isInlineWs(line[ws])) ws += 1;
+          if (line[ws] === "=") {
+            let vStart = ws + 1;
+            while (vStart < len && isInlineWs(line[vStart])) vStart += 1;
+            const vEnd = scanSingleSecretValueEnd(line, vStart, true, true, false, allowQuoted, escapeState);
+            end = vEnd > vStart ? vEnd : ws + 1;
+          } else {
+            end = rawUrlEnd;
+          }
           continue;
         }
       }
