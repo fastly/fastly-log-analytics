@@ -6118,7 +6118,8 @@ if (
   !rangeLoaderTs.includes('const wholeScope = options.serviceId ? `${scope}:${options.serviceId}` : scope;') ||
   !rangeLoaderTs.includes('wholeKey: wholeFileIdentity(wholeScope, file, datasets[index])') ||
   !projectedReadTs.includes('JSON.stringify([cacheScope ?? "", dataset, file.key, file.etag ?? "", file.size, file.schema_version ?? ""])') ||
-  !rangeLoaderTs.includes('fileSource.fetchFile(file.key, downloads.signal, { identity: file.wholeKey })') ||
+  !rangeLoaderTs.includes('fileSource.fetchFile(file.key, downloads.signal, {') ||
+  !rangeLoaderTs.includes('identity: file.wholeKey') ||
   !rangeLoaderTs.includes('fetched.bytes.byteLength !== file.size') ||
   rangeLoaderTs.includes('{ identity: file.key }')
 ) {

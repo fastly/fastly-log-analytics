@@ -1515,13 +1515,12 @@ def test_f6_cloud_rejects_secret_headers_in_vcl_conditions_and_rum_conditions(
 
 
 def test_f6_cloud_rum_tracker_js_escapes_service_id_via_json_encoding() -> None:
-    """SEC-20: compute/cloud logging/rum.rs escapes service_id via serde_json::to_string."""
+    """SEC-20 / SEC-22: compute/cloud logging/rum.rs omits service_id from client JS entirely."""
     payload = "svc'; alert(1); // */"
     js = cloud_rum_tracker_js(payload)
-    assert f"var SERVICE_ID = '{payload}';" not in js, (
-        "Cloud generate_rum_tracker_js interpolated unescaped service_id into JS literal"
-    )
-    assert json.dumps(payload) in js
+    assert "SERVICE_ID" not in js
+    assert payload not in js
+    assert json.dumps(payload) not in js
 
 
 def test_f6_cloud_audit_entries_enforces_internal_admin_check_and_http_403(
