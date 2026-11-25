@@ -13,7 +13,7 @@ import {
   type Scalar,
   type SearchFieldOptions,
 } from "./engine";
-import { clearManifestCache } from "./manifest";
+import { clearManifestCache, type Manifest } from "./manifest";
 import { clearRollupQueryCache } from "./rollup-query";
 import { browserSource, type BrowserSourceCallEvent } from "./sources";
 
@@ -77,6 +77,7 @@ type RollupMessage = {
   params: Record<string, unknown>;
   serviceId?: string;
   cacheScope?: string;
+  rawManifest?: Manifest;
 };
 
 export type WorkerRequest =
@@ -200,6 +201,7 @@ self.onmessage = createWorkerRpcHost<WorkerRequest>(async (msg, ctx) => {
       msg.params,
       rollupSource(msg.cacheScope, msg.serviceId),
       ctx.signal,
+      msg.rawManifest ? { rawManifest: msg.rawManifest } : undefined,
     );
     ctx.post({ id: msg.id, type: "rollupResult", result });
     return;

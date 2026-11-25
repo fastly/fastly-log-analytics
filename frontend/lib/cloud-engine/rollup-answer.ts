@@ -1,6 +1,7 @@
 import { assetsFromRollup, type AssetsRollupBody } from "./assets-rollup";
 import type { CmcdQueryParams } from "./cmcd";
 import { cmcdFromRollup } from "./cmcd-rollup";
+import type { Manifest } from "./dashboard/manifest";
 import type { RollupResult } from "./dashboard/rollup-query";
 import type { InsightsRequest } from "./insights";
 import { insightsBaselineFromRollup, insightsBaselineRollup, insightsFromRollup, type InsightsRollupRequest } from "./insights-rollup";
@@ -15,11 +16,16 @@ import { valueFromRollup, type ValueRollupBody } from "./value-rollup";
 
 export type RollupAnswerSource = Parameters<typeof networkFromRollup>[2];
 
+export type RollupAnswerOptions = {
+  rawManifest?: Manifest;
+};
+
 type Answer = (
   path: string,
   params: Record<string, unknown>,
   source: RollupAnswerSource,
   signal?: AbortSignal,
+  options?: RollupAnswerOptions,
 ) => Promise<unknown>;
 
 const network: Answer = (path, params, source, signal) =>
@@ -48,8 +54,8 @@ const ANSWERS: Record<string, Answer> = {
     assetsFromRollup(path, params as AssetsRollupBody, source, signal),
   "/api/cmcd/aggregates": (_path, params, source, signal) =>
     cmcdFromRollup(params as CmcdQueryParams, source, signal),
-  "/api/rum/analytics": (_path, params, source, signal) =>
-    queryRumWireFromRollup(source, { ...(params as RumQueryParams), signal }),
+  "/api/rum/analytics": (_path, params, source, signal, options) =>
+    queryRumWireFromRollup(source, { ...(params as RumQueryParams), signal }, options),
   "/api/value/summary": (path, params, source, signal) =>
     valueFromRollup(path, params as ValueRollupBody, source, signal),
   // The adapter passes only unfiltered baselines; the window is read raw on the page.
@@ -74,7 +80,8 @@ export function answerFromRollup(
   params: Record<string, unknown>,
   source: RollupAnswerSource,
   signal?: AbortSignal,
+  options?: RollupAnswerOptions,
 ): Promise<unknown> {
   const answer = ANSWERS[path];
-  return answer ? answer(path, params, source, signal) : Promise.resolve(null);
+  return answer ? answer(path, params, source, signal, options) : Promise.resolve(null);
 }

@@ -214,6 +214,7 @@ class DashboardWorkerClient extends BaseWorkerRpcClient<
     params: Record<string, unknown>,
     serviceId: string | undefined,
     signal?: AbortSignal,
+    options?: { rawManifest?: Manifest },
   ): Promise<unknown> | null {
     const worker = this.getWorker(this.handleMessage);
     if (!worker) return null;
@@ -233,6 +234,7 @@ class DashboardWorkerClient extends BaseWorkerRpcClient<
         params,
         serviceId,
         cacheScope: dashboardCacheScope(),
+        ...(options?.rawManifest ? { rawManifest: options.rawManifest } : {}),
       };
       worker.postMessage(req);
     });
@@ -421,8 +423,9 @@ export function answerRollupInWorker(
   params: Record<string, unknown>,
   serviceId: string | undefined,
   signal?: AbortSignal,
+  options?: { rawManifest?: Manifest },
 ): Promise<unknown> | null {
-  return getClient().answerRollup(path, params, serviceId, signal);
+  return getClient().answerRollup(path, params, serviceId, signal, options);
 }
 
 export function prewarmDashboardEngine(): void {

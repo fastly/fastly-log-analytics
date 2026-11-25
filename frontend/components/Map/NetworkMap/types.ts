@@ -2,6 +2,7 @@
 
 import { useEffect, type RefObject } from 'react'
 import * as maplibregl from 'maplibre-gl'
+import 'maplibre-gl/dist/maplibre-gl.css'
 import { type Map as MapLibreMap, type MapOptions } from 'maplibre-gl'
 import type { FeatureCollection } from 'geojson'
 import type { GeometryCollection, Topology } from 'topojson-specification'

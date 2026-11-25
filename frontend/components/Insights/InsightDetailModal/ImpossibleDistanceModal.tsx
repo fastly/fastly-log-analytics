@@ -3,6 +3,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Globe, Info, Zap } from 'lucide-react'
 import * as maplibregl from 'maplibre-gl'
+import 'maplibre-gl/dist/maplibre-gl.css'
 import { useTheme } from 'next-themes'
 import { addCountryBaseLayer, updateCountryBaseLayerTheme, useMapResize } from '@/components/Map/ChoroplethMap'
 import { CHART_COLORS, cn, formatCount } from '@/lib/utils'

@@ -524,7 +524,10 @@ export const PlotlyPrewarm = React.memo(PlotlyPrewarmImpl)
 
 const PrewarmMap = dynamic(
   async () => {
-    const maplibre = await import('maplibre-gl')
+    const [maplibre] = await Promise.all([
+      import('maplibre-gl'),
+      import('maplibre-gl/dist/maplibre-gl.css'),
+    ])
     maplibre.setWorkerUrl('/maplibre-gl-worker.mjs')
     const MaplibreMap: typeof MapLibreMap | undefined =
       maplibre.Map || (maplibre as { default?: { Map?: typeof MapLibreMap } }).default?.Map
