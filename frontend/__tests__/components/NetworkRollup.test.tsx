@@ -121,15 +121,45 @@ describe('NetworkClient on Cloud', () => {
     await waitFor(() => expect(sections).toContainEqual(['shielding_analysis']))
   })
 
-  it('keeps one raw core read, with no summary labels, when a filter is applied', async () => {
+  it('consolidates filtered Cloud reads into one /api/network/bundle request with no summary labels', async () => {
     setCloudModeRuntime(true)
     layout.filterPayload = { pop: { mode: 'include', values: ['LIS'] } }
-    const sections = recordNetworkHealth(coreResponse())
+    const healthCalls: string[][] = []
+    const qualityCalls: unknown[] = []
+    const bundleCalls: string[][] = []
+    server.use(
+      http.post(`${getApiBase()}/api/network-health`, async ({ request }) => {
+        const body = await request.json() as { sections: string[] }
+        healthCalls.push(body.sections)
+        return HttpResponse.json(coreResponse())
+      }),
+      http.post(`${getApiBase()}/api/network-quality`, async ({ request }) => {
+        qualityCalls.push(await request.json())
+        return HttpResponse.json({ available: true, has_data: true })
+      }),
+      http.post(`${getApiBase()}/api/network/bundle`, async ({ request }) => {
+        const body = await request.json() as { sections: string[] }
+        bundleCalls.push(body.sections)
+        return HttpResponse.json({
+          available: true,
+          health: {
+            ...coreResponse(),
+            cities: [{ name: 'Lisbon', lat: 38.7, lon: -9.1 }],
+            shielding_analysis: { has_data: false, rows: [] },
+          },
+          quality: { available: true, has_data: true, summary: { total_requests: 1234 } },
+          transport: { has_transport_data: true, tcp_rtt_p50_ms: 18.4, tcp_rtt_p95_ms: 42.1, protocol_distribution: [] },
+        })
+      }),
+    )
     renderWithQuery(<NetworkClient />, { withNuqs: true })
 
     expect(await screen.findByText('87/100')).toBeInTheDocument()
-    expect(sections.filter((s) => !s.includes('shielding_analysis')))
-      .toEqual([[...ROLLUP_SECTIONS, 'cities', 'map_buckets']])
+    expect(await screen.findByText('1 cities')).toBeInTheDocument()
+    expect(await screen.findByText('18.4')).toBeInTheDocument()
+    expect(bundleCalls).toEqual([[...ROLLUP_SECTIONS, 'cities', 'map_buckets', 'shielding_analysis', 'quality', 'transport']])
+    expect(healthCalls).toEqual([])
+    expect(qualityCalls).toEqual([])
     expect(screen.queryByText(/Data through/)).not.toBeInTheDocument()
     expect(screen.queryByTestId('rollup-data-through-slot')).not.toBeInTheDocument()
     expect(screen.getByText('1,234')).toBeInTheDocument()

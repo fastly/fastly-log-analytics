@@ -137,9 +137,11 @@ const PROTOCOL_COLORS = ['bg-emerald-500', 'bg-sky-500', 'bg-amber-500', 'bg-pur
 type TransportMetrics = components['schemas']['TransportMetrics']
 type TransportProtocolShare = components['schemas']['TransportProtocolShare']
 
-export function TransportSection({ activeServiceId, startTime, endTime, filterPayload }: {
+export function TransportSection({ activeServiceId, startTime, endTime, filterPayload, externalData, externalLoading }: {
   activeServiceId?: string | null; startTime?: string | null; endTime?: string | null; filterPayload?: FiltersPayload
+  externalData?: TransportMetrics | null; externalLoading?: boolean
 }) {
+  const useExternal = externalData !== undefined || externalLoading !== undefined
   const transportQuery = useServiceQuery(
     ['network', 'bundle', 'transport', activeServiceId, startTime, endTime, filterPayload],
     async ({ signal }) => {
@@ -152,12 +154,12 @@ export function TransportSection({ activeServiceId, startTime, endTime, filterPa
       }))
       return (data as { transport?: TransportMetrics } | undefined)?.transport ?? null
     },
-    { enabled: Boolean(activeServiceId && startTime && endTime) },
+    { enabled: !useExternal && Boolean(activeServiceId && startTime && endTime) },
     3,
   )
 
-  const transport = transportQuery.data
-  const isLoading = transportQuery.isLoading || (transportQuery.isFetching && !transport)
+  const transport = useExternal ? externalData : transportQuery.data
+  const isLoading = useExternal ? Boolean(externalLoading) : (transportQuery.isLoading || (transportQuery.isFetching && !transport))
   const missingFields = transport?.missing_fields ?? []
 
   return (

@@ -117,6 +117,57 @@ describe("Feature F24 — CMCD Streaming Media cloud-engine", () => {
     }
   });
 
+  it("consolidates raw CMCD queries into at most 3 table scans (and skips breakdowns when absent)", async () => {
+    const engine = new DuckDBAnalyticalEngine();
+    const executed: string[] = [];
+    const counted = new Proxy(engine, {
+      get(target, property, receiver) {
+        const value = Reflect.get(target, property, receiver);
+        if (property !== "executeSql") return typeof value === "function" ? value.bind(target) : value;
+        return (sql: string, ...rest: unknown[]) => {
+          executed.push(sql);
+          return (value as (...args: unknown[]) => unknown).call(target, sql, ...rest);
+        };
+      },
+    });
+    try {
+      // Empty window stops after 1 scan.
+      const empty = await queryCmcdAggregates({ engine: counted });
+      expect(empty.has_data).toBe(false);
+      expect(executed).toHaveLength(1);
+
+      // Minimal window (no cid/bs/bl) skips the breakdown scan -> 2 scans.
+      await engine.executeSql(`INSERT INTO requests (scoped_key, ts_ms, cmcd_sid, cmcd_ot)
+        VALUES ('native', 1700000100000, 's1', 'v')`);
+      executed.length = 0;
+      const minimal = await queryCmcdAggregates({ engine: counted, bucket_seconds: 300 });
+      expect(minimal.has_data).toBe(true);
+      expect(minimal.object_type_dist).toEqual([{ object_type: "v", request_count: 1, requests: 1, pct: 100 }]);
+      expect(executed).toHaveLength(2);
+
+      // Full window (with cid, bs, bl, country, asn, sf) runs at most 3 scans instead of 8.
+      await engine.executeSql(`INSERT INTO requests
+        (scoped_key, ts_ms, geo_country, client_asn, as_name, cmcd_sid, cmcd_cid, cmcd_br, cmcd_bl, cmcd_bs, cmcd_mtp, cmcd_ot, cmcd_sf, cmcd_su, ttfb_ms)
+        VALUES ('native', 1700000100000, 'US', 15169, 'Google', 's2', 'movie-1', 2000, 3000, false, 5000, 'v', 'h', true, 40),
+               ('native', 1700000160000, 'US', 15169, 'Google', 's2', 'movie-1', 4000, 1000, true, 3000, 'v', 'h', false, 20),
+               ('native', 1700000220000, 'CA', 64500, 'Example', 's3', 'movie-2', 1500, 2000, false, 4000, 'v', 'd', false, 30)`);
+      executed.length = 0;
+      const full = await queryCmcdAggregates({ engine: counted, bucket_seconds: 300 });
+      expect(executed).toHaveLength(3);
+      expect(full.overview).toMatchObject({ active_sessions: 3, avg_session_duration: 60 });
+      expect(full.top_content.map((r) => r.content_id)).toEqual(["movie-1", "movie-2"]);
+      expect(full.rebuffer_by_country.map((r) => r.country)).toEqual(["CA", "US"]);
+      expect(full.rebuffer_by_asn.map((r) => r.asn)).toEqual([15169, 64500]);
+      expect(full.streaming_format_dist.map((r) => r.format)).toEqual(["d", "h"]);
+      expect(full.session_duration_dist).toEqual([
+        expect.objectContaining({ bucket: "<30s", session_count: 2 }),
+        expect.objectContaining({ bucket: "30s–2m", session_count: 1 }),
+      ]);
+    } finally {
+      await engine.reset();
+    }
+  });
+
   it("classifies session durations into the High-Scale buckets", () => {
     expect(CMCD_SESSION_DURATION_BUCKETS).toEqual(["<30s", "30s–2m", "2–5m", "5–10m", "10–30m", "30m–1h", ">1h"]);
     expect(classifySessionDurationBucket(10)).toBe("<30s");

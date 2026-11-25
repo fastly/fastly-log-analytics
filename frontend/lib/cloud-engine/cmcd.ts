@@ -265,8 +265,12 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
   const topN = Math.max(1, Math.min(100, Math.floor(params.top_n ?? 30)));
   const nullable = (value: unknown) => value == null ? null : Number(value);
 
-  const summaryRows = await engine.executeSql<Record<string, unknown>>(
+  const coreRows = await engine.executeSql<Record<string, unknown>>(
     `SELECT
+      GROUPING(bucket_ms, ot_key, sf_key)::INTEGER AS grp,
+      bucket_ms,
+      ot_key,
+      sf_key,
       COUNT(*)::BIGINT AS total_requests,
       COUNT(DISTINCT NULLIF(cmcd_sid, ''))::BIGINT AS active_sessions,
       (COUNT(*) FILTER (WHERE cmcd_bs IS TRUE))::BIGINT AS rebuffer_events,
@@ -276,7 +280,6 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       AVG(cmcd_tb)::DOUBLE AS avg_top_bitrate_kbps,
       AVG(cmcd_bl)::DOUBLE AS avg_buffer_ms,
       AVG(cmcd_mtp)::DOUBLE AS avg_throughput_kbps,
-      QUANTILE_CONT(cmcd_mtp, 0.5)::DOUBLE AS median_throughput,
       COUNT(NULLIF(cmcd_ot, '')) AS has_ot,
       COUNT(cmcd_bl) AS has_bl,
       COUNT(cmcd_br) AS has_br,
@@ -284,19 +287,43 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       COUNT(cmcd_su) AS has_su,
       COUNT(NULLIF(cmcd_cid, '')) AS has_cid,
       AVG(cmcd_br) FILTER (WHERE cmcd_ot = 'v')::DOUBLE AS video_avg_bitrate,
+      AVG(cmcd_tb) FILTER (WHERE cmcd_ot = 'v')::DOUBLE AS video_avg_top_bitrate,
       AVG(cmcd_bl) FILTER (WHERE cmcd_ot = 'v')::DOUBLE AS video_avg_buffer,
-      QUANTILE_CONT(cmcd_mtp, 0.5) FILTER (WHERE cmcd_ot = 'v')::DOUBLE AS video_median_throughput,
-      MIN(ts_ms)::BIGINT AS min_ts,
-      MAX(ts_ms)::BIGINT AS max_ts
-    FROM requests
-    WHERE ${where}`,
+      AVG(cmcd_br / cmcd_tb) FILTER (WHERE cmcd_tb > 0)::DOUBLE AS all_utilization_ratio,
+      AVG(cmcd_br / cmcd_tb) FILTER (WHERE cmcd_ot = 'v' AND cmcd_tb > 0)::DOUBLE AS video_utilization_ratio,
+      QUANTILE_CONT(cmcd_bl, 0.1)::DOUBLE AS all_p10_buffer_ms,
+      QUANTILE_CONT(cmcd_bl, 0.5)::DOUBLE AS all_p50_buffer_ms,
+      QUANTILE_CONT(cmcd_bl, 0.95)::DOUBLE AS all_p95_buffer_ms,
+      QUANTILE_CONT(cmcd_bl, 0.1) FILTER (WHERE cmcd_ot = 'v')::DOUBLE AS video_p10_buffer_ms,
+      QUANTILE_CONT(cmcd_bl, 0.5) FILTER (WHERE cmcd_ot = 'v')::DOUBLE AS video_p50_buffer_ms,
+      QUANTILE_CONT(cmcd_bl, 0.95) FILTER (WHERE cmcd_ot = 'v')::DOUBLE AS video_p95_buffer_ms,
+      QUANTILE_CONT(cmcd_mtp, 0.5)::DOUBLE AS all_p50_throughput,
+      QUANTILE_CONT(cmcd_mtp, 0.95)::DOUBLE AS all_p95_throughput,
+      QUANTILE_CONT(cmcd_mtp, 0.99)::DOUBLE AS all_p99_throughput,
+      QUANTILE_CONT(cmcd_mtp, 0.5) FILTER (WHERE cmcd_ot = 'v')::DOUBLE AS video_p50_throughput,
+      QUANTILE_CONT(cmcd_mtp, 0.95) FILTER (WHERE cmcd_ot = 'v')::DOUBLE AS video_p95_throughput,
+      QUANTILE_CONT(cmcd_mtp, 0.99) FILTER (WHERE cmcd_ot = 'v')::DOUBLE AS video_p99_throughput,
+      (COUNT(*) FILTER (WHERE cmcd_su IS TRUE))::BIGINT AS startup_requests,
+      AVG(cmcd_bl) FILTER (WHERE cmcd_su IS TRUE)::DOUBLE AS avg_startup_buffer_ms,
+      AVG(COALESCE(ttfb_ms, ttfb * 1000.0, time_elapsed_usec / 1000.0, elapsed / 1000.0)) FILTER (WHERE cmcd_su IS TRUE)::DOUBLE AS avg_startup_ttfb_ms
+    FROM (
+      SELECT
+        (floor(ts_ms / ${bucketMs}) * ${bucketMs})::BIGINT AS bucket_ms,
+        NULLIF(cmcd_ot, '') AS ot_key,
+        NULLIF(cmcd_sf, '') AS sf_key,
+        cmcd_sid, cmcd_cid, cmcd_br, cmcd_bl, cmcd_bs, cmcd_mtp, cmcd_ot, cmcd_tb, cmcd_su,
+        ttfb_ms, ttfb, time_elapsed_usec, elapsed
+      FROM requests
+      WHERE ${where}
+    ) base
+    GROUP BY GROUPING SETS ((), (bucket_ms), (ot_key), (sf_key))`,
     [],
     params.signal,
   );
 
-  const s = summaryRows[0];
+  const s = coreRows.find((r) => Number(r.grp) === 7);
   const totalRequests = Number(s?.total_requests ?? 0);
-  if (totalRequests === 0) {
+  if (!s || totalRequests === 0) {
     return emptyCmcdAggregates();
   }
 
@@ -318,36 +345,27 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
   const utilizationRatio =
     avgTopBitrate > 0 ? roundTo((avgBitrate * 100) / avgTopBitrate, 2) : 0;
 
-  const bucketRows = await engine.executeSql<Record<string, unknown>>(
-    `SELECT
-      (floor(ts_ms / ${bucketMs}) * ${bucketMs})::BIGINT AS bucket_ms,
-      COUNT(*)::BIGINT AS reqs,
-      COUNT(DISTINCT NULLIF(cmcd_sid, ''))::BIGINT AS active_sessions,
-      (COUNT(*) FILTER (WHERE cmcd_bs IS TRUE))::BIGINT AS rebuffer_events,
-      COUNT(DISTINCT NULLIF(cmcd_sid, '')) FILTER (WHERE cmcd_bs IS TRUE) AS rebuffer_sessions,
-      COUNT(cmcd_bs) AS has_bs,
-      COUNT(cmcd_su) AS has_su,
-      AVG(cmcd_bl)::DOUBLE AS avg_buffer_ms,
-      QUANTILE_CONT(cmcd_bl, 0.1) FILTER (WHERE ${video})::DOUBLE AS p10_buffer_ms,
-      QUANTILE_CONT(cmcd_bl, 0.5) FILTER (WHERE ${video})::DOUBLE AS p50_buffer_ms,
-      QUANTILE_CONT(cmcd_bl, 0.95) FILTER (WHERE ${video})::DOUBLE AS p95_buffer_ms,
-      AVG(cmcd_br) FILTER (WHERE ${video})::DOUBLE AS avg_encoded_bitrate,
-      AVG(cmcd_tb) FILTER (WHERE ${video})::DOUBLE AS avg_top_bitrate,
-      AVG(cmcd_br / cmcd_tb) FILTER (WHERE ${video} AND cmcd_tb > 0)::DOUBLE AS utilization_ratio,
-      AVG(cmcd_mtp)::DOUBLE AS avg_throughput_kbps,
-      QUANTILE_CONT(cmcd_mtp, 0.5) FILTER (WHERE ${video})::DOUBLE AS p50_throughput,
-      QUANTILE_CONT(cmcd_mtp, 0.95) FILTER (WHERE ${video})::DOUBLE AS p95_throughput,
-      QUANTILE_CONT(cmcd_mtp, 0.99) FILTER (WHERE ${video})::DOUBLE AS p99_throughput,
-      (COUNT(*) FILTER (WHERE cmcd_su IS TRUE))::BIGINT AS startup_requests,
-      AVG(cmcd_bl) FILTER (WHERE cmcd_su IS TRUE)::DOUBLE AS avg_startup_buffer_ms,
-      AVG(COALESCE(ttfb_ms, ttfb * 1000.0, time_elapsed_usec / 1000.0, elapsed / 1000.0)) FILTER (WHERE cmcd_su IS TRUE)::DOUBLE AS avg_startup_ttfb_ms
-    FROM requests
-    WHERE ${where}
-    GROUP BY 1
-    ORDER BY 1`,
-    [],
-    params.signal,
-  );
+  const bucketRows = coreRows
+    .filter((r) => Number(r.grp) === 3)
+    .sort((a, b) => Number(a.bucket_ms ?? 0) - Number(b.bucket_ms ?? 0));
+  const otRows = coreRows
+    .filter((r) => Number(r.grp) === 5 && r.ot_key != null)
+    .sort((a, b) => {
+      const diff = Number(b.total_requests ?? 0) - Number(a.total_requests ?? 0);
+      if (diff !== 0) return diff;
+      const ak = String(a.ot_key);
+      const bk = String(b.ot_key);
+      return ak < bk ? -1 : ak > bk ? 1 : 0;
+    });
+  const sfRows = coreRows
+    .filter((r) => Number(r.grp) === 6 && r.sf_key != null)
+    .sort((a, b) => {
+      const diff = Number(b.active_sessions ?? 0) - Number(a.active_sessions ?? 0);
+      if (diff !== 0) return diff;
+      const ak = String(a.sf_key);
+      const bk = String(b.sf_key);
+      return ak < bk ? -1 : ak > bk ? 1 : 0;
+    });
 
   let peakViewers = 0;
   const sessions_ts: Record<string, unknown>[] = [];
@@ -360,10 +378,19 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
     const tsIso = new Date(Number(b.bucket_ms ?? 0)).toISOString();
     const sess = Number(b.active_sessions ?? 0);
     if (sess > peakViewers) peakViewers = sess;
-    const reqs = Number(b.reqs ?? 0);
+    const reqs = Number(b.total_requests ?? 0);
     const rebuf = Number(b.rebuffer_events ?? 0);
-    const encBr = Number(b.avg_encoded_bitrate ?? 0);
-    const topBr = Number(b.avg_top_bitrate ?? 0);
+    const rawEncBr = hasOt ? b.video_avg_bitrate : b.avg_bitrate_kbps;
+    const rawTopBr = hasOt ? b.video_avg_top_bitrate : b.avg_top_bitrate_kbps;
+    const rawUtil = hasOt ? b.video_utilization_ratio : b.all_utilization_ratio;
+    const p10Buf = hasOt ? b.video_p10_buffer_ms : b.all_p10_buffer_ms;
+    const p50Buf = hasOt ? b.video_p50_buffer_ms : b.all_p50_buffer_ms;
+    const p95Buf = hasOt ? b.video_p95_buffer_ms : b.all_p95_buffer_ms;
+    const p50Mtp = hasOt ? b.video_p50_throughput : b.all_p50_throughput;
+    const p95Mtp = hasOt ? b.video_p95_throughput : b.all_p95_throughput;
+    const p99Mtp = hasOt ? b.video_p99_throughput : b.all_p99_throughput;
+    const encBr = Number(rawEncBr ?? 0);
+    const topBr = Number(rawTopBr ?? 0);
     const mtp = Number(b.avg_throughput_kbps ?? 0);
 
     sessions_ts.push({
@@ -378,28 +405,28 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
     });
     buffer_health_ts.push({
       bucket: tsIso,
-      p50_buffer: nullable(b.p50_buffer_ms),
-      p95_buffer: nullable(b.p95_buffer_ms),
+      p50_buffer: nullable(p50Buf),
+      p95_buffer: nullable(p95Buf),
       starvation_rate: hasBsEffective && reqs > 0 ? roundTo(rebuf * 100 / reqs, 2) : null,
       timestamp: tsIso,
       avg_buffer_ms: roundTo(Number(b.avg_buffer_ms ?? 0), 1),
-      p10_buffer_ms: roundTo(Number(b.p10_buffer_ms ?? 0), 1),
-      p50_buffer_ms: roundTo(Number(b.p50_buffer_ms ?? 0), 1),
+      p10_buffer_ms: roundTo(Number(p10Buf ?? 0), 1),
+      p50_buffer_ms: roundTo(Number(p50Buf ?? 0), 1),
       rebuffer_events: rebuf,
     });
     bitrate_ts.push({
       bucket: tsIso,
-      avg_bitrate: nullable(b.avg_encoded_bitrate),
+      avg_bitrate: nullable(rawEncBr),
       timestamp: tsIso,
       avg_encoded_bitrate: roundTo(encBr, 1),
       avg_top_bitrate: roundTo(topBr, 1),
-      utilization_ratio: b.utilization_ratio == null ? null : roundTo(Number(b.utilization_ratio), 2),
+      utilization_ratio: rawUtil == null ? null : roundTo(Number(rawUtil), 2),
     });
     throughput_ts.push({
       bucket: tsIso,
-      p50: nullable(b.p50_throughput),
-      p95: nullable(b.p95_throughput),
-      p99: nullable(b.p99_throughput),
+      p50: nullable(p50Mtp),
+      p95: nullable(p95Mtp),
+      p99: nullable(p99Mtp),
       timestamp: tsIso,
       avg_throughput_kbps: roundTo(mtp, 1),
       avg_bitrate_kbps: roundTo(encBr, 1),
@@ -415,43 +442,134 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
     });
   }
 
-  // Session durations & session_duration_dist
-  const sessionRows = await engine.executeSql<{
-    sid: string;
-    first_ts: number;
-    duration: number;
-  }>(
-    `SELECT
-      cmcd_sid AS sid,
-      MIN(ts_ms)::BIGINT AS first_ts,
-      (MAX(ts_ms) - MIN(ts_ms)) / 1000.0 AS duration
-    FROM requests
-    WHERE ${where} AND cmcd_sid IS NOT NULL AND cmcd_sid != ''
-    GROUP BY 1`,
-    [],
-    params.signal,
-  );
+  const rebufferRateSql = hasBsEffective
+    ? "COUNT(DISTINCT NULLIF(cmcd_sid, '')) FILTER (WHERE cmcd_bs IS TRUE) * 100.0 / NULLIF(COUNT(DISTINCT NULLIF(cmcd_sid, '')), 0)"
+    : "NULL";
 
-  const durationBucketCounts = new Map<string, number>();
-  for (const label of CMCD_SESSION_DURATION_BUCKETS) {
-    durationBucketCounts.set(label, 0);
-  }
-  let totalDurationSec = 0;
-  for (const sr of sessionRows) {
-    const dur = Number(sr.duration ?? 0);
-    totalDurationSec += dur;
-    const label = classifySessionDurationBucket(dur);
-    durationBucketCounts.set(label, (durationBucketCounts.get(label) ?? 0) + 1);
-  }
+  const wantCid = has("cid");
+  const wantGeo = hasBsEffective;
+  const breakdownSql = (() => {
+    if (!wantCid && !wantGeo) return null;
+    const grpSql = wantCid && wantGeo
+      ? "GROUPING(content_id, country_key, asn_key)::INTEGER"
+      : wantCid
+        ? "3::INTEGER"
+        : "(CASE GROUPING(country_key, asn_key) WHEN 1 THEN 5 ELSE 6 END)::INTEGER";
+    const groupBySql = wantCid && wantGeo
+      ? "GROUP BY GROUPING SETS ((content_id), (country_key), (asn_key, asn_name_key))"
+      : wantCid
+        ? "GROUP BY content_id"
+        : "GROUP BY GROUPING SETS ((country_key), (asn_key, asn_name_key))";
+    const havingSql = wantCid && wantGeo
+      ? "HAVING (GROUPING(content_id, country_key, asn_key) = 3 AND content_id IS NOT NULL) OR (GROUPING(content_id, country_key, asn_key) = 5 AND country_key IS NOT NULL) OR (GROUPING(content_id, country_key, asn_key) = 6 AND asn_key IS NOT NULL)"
+      : wantCid
+        ? "HAVING content_id IS NOT NULL"
+        : "HAVING (GROUPING(country_key, asn_key) = 1 AND country_key IS NOT NULL) OR (GROUPING(country_key, asn_key) = 2 AND asn_key IS NOT NULL)";
+    const cidCol = wantCid ? "content_id" : "NULL::VARCHAR AS content_id";
+    const geoCols = wantGeo
+      ? "country_key, asn_key, asn_name_key"
+      : "NULL::VARCHAR AS country_key, NULL::BIGINT AS asn_key, NULL::VARCHAR AS asn_name_key";
+    const tieBreak = wantCid && wantGeo
+      ? "asn_key ASC NULLS LAST, content_id ASC NULLS LAST, country_key ASC NULLS LAST"
+      : wantCid
+        ? "content_id ASC NULLS LAST"
+        : "asn_key ASC NULLS LAST, country_key ASC NULLS LAST";
+    return `SELECT
+      ${grpSql} AS grp,
+      ${cidCol},
+      ${geoCols},
+      COUNT(DISTINCT NULLIF(cmcd_sid, ''))::BIGINT AS sessions,
+      COUNT(*)::BIGINT AS requests,
+      (COUNT(*) FILTER (WHERE cmcd_bs IS TRUE))::BIGINT AS rebuffer_events,
+      AVG(cmcd_br) FILTER (WHERE ${video})::DOUBLE AS avg_bitrate,
+      AVG(cmcd_bl) FILTER (WHERE ${video})::DOUBLE AS avg_buffer_length,
+      ${wantGeo ? `QUANTILE_CONT(cmcd_mtp, 0.5) FILTER (WHERE ${video})::DOUBLE` : "NULL::DOUBLE"} AS median_throughput,
+      ${rebufferRateSql} AS rebuffer_rate,
+      AVG(cmcd_mtp)::DOUBLE AS avg_throughput_kbps
+    FROM (
+      SELECT
+        NULLIF(cmcd_cid, '') AS content_id,
+        COALESCE(NULLIF(geo_country, ''), NULLIF(country, '')) AS country_key,
+        COALESCE(client_asn, asn)::BIGINT AS asn_key,
+        COALESCE(NULLIF(as_name, ''), 'AS' || CAST(COALESCE(client_asn, asn) AS VARCHAR)) AS asn_name_key,
+        cmcd_sid, cmcd_bs, cmcd_br, cmcd_bl, cmcd_mtp, cmcd_ot
+      FROM requests
+      WHERE ${where}
+    ) base
+    ${groupBySql}
+    ${havingSql}
+    QUALIFY row_number() OVER (
+      PARTITION BY ${grpSql}
+      ORDER BY COUNT(DISTINCT NULLIF(cmcd_sid, '')) DESC, ${tieBreak}
+    ) <= ${topN}
+    ORDER BY grp, sessions DESC, ${tieBreak}`;
+  })();
+
+  const [sessionAggRows, breakdownRows] = await Promise.all([
+    engine.executeSql<Record<string, unknown>>(
+      `WITH sessions AS (
+        SELECT
+          cmcd_sid AS sid,
+          (floor(MIN(ts_ms) / ${bucketMs}) * ${bucketMs})::BIGINT AS first_bucket_ms,
+          (MAX(ts_ms) - MIN(ts_ms)) / 1000.0 AS duration
+        FROM requests
+        WHERE ${where} AND cmcd_sid IS NOT NULL AND cmcd_sid != ''
+        GROUP BY 1
+      ),
+      classified AS (
+        SELECT
+          first_bucket_ms,
+          duration,
+          CASE
+            WHEN duration < 30 THEN '<30s'
+            WHEN duration < 120 THEN '30s–2m'
+            WHEN duration < 300 THEN '2–5m'
+            WHEN duration < 600 THEN '5–10m'
+            WHEN duration < 1800 THEN '10–30m'
+            WHEN duration < 3600 THEN '30m–1h'
+            ELSE '>1h'
+          END AS duration_bucket
+        FROM sessions
+      )
+      SELECT
+        GROUPING(first_bucket_ms, duration_bucket)::INTEGER AS grp,
+        first_bucket_ms,
+        duration_bucket,
+        COUNT(*)::BIGINT AS session_count,
+        SUM(duration)::DOUBLE AS total_duration_sec,
+        (COUNT(*) FILTER (WHERE duration > 0))::BIGINT AS positive_count,
+        SUM(duration) FILTER (WHERE duration > 0)::DOUBLE AS positive_duration_sec
+      FROM classified
+      GROUP BY GROUPING SETS ((), (first_bucket_ms), (duration_bucket))`,
+      [],
+      params.signal,
+    ),
+    breakdownSql == null
+      ? Promise.resolve([] as Record<string, unknown>[])
+      : engine.executeSql<Record<string, unknown>>(breakdownSql, [], params.signal),
+  ]);
+  await asnNamesReady;
+
+  const sessionSummary = sessionAggRows.find((r) => Number(r.grp) === 3);
+  const totalSessions = Number(sessionSummary?.session_count ?? 0);
+  const totalDurationSec = Number(sessionSummary?.total_duration_sec ?? 0);
+  const positiveCount = Number(sessionSummary?.positive_count ?? 0);
+  const positiveDurationSec = Number(sessionSummary?.positive_duration_sec ?? 0);
   const avgSessionDuration =
-    sessionRows.length > 0
-      ? roundTo(totalDurationSec / sessionRows.length, 1)
-      : 0;
-  const durations = sessionRows.map((row) => Number(row.duration)).filter((duration) => duration > 0);
+    totalSessions > 0 ? roundTo(totalDurationSec / totalSessions, 1) : 0;
+
   const newSessionsByBucket = new Map<string, number>();
-  for (const row of sessionRows) {
-    const bucketIso = new Date(Math.floor(Number(row.first_ts) / bucketMs) * bucketMs).toISOString();
-    newSessionsByBucket.set(bucketIso, (newSessionsByBucket.get(bucketIso) ?? 0) + 1);
+  const durationBucketCounts = new Map<string, number>();
+  for (const row of sessionAggRows) {
+    const grp = Number(row.grp);
+    if (grp === 1 && row.first_bucket_ms != null) {
+      newSessionsByBucket.set(
+        new Date(Number(row.first_bucket_ms)).toISOString(),
+        Number(row.session_count ?? 0),
+      );
+    } else if (grp === 2 && row.duration_bucket != null) {
+      durationBucketCounts.set(String(row.duration_bucket), Number(row.session_count ?? 0));
+    }
   }
   for (const point of sessions_ts) {
     point.new_sessions = newSessionsByBucket.get(String(point.bucket)) ?? 0;
@@ -464,86 +582,15 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       session_count: count,
       sessions: count,
       pct:
-        sessionRows.length > 0
-          ? roundTo((count * 100) / sessionRows.length, 2)
+        totalSessions > 0
+          ? roundTo((count * 100) / totalSessions, 2)
           : 0,
     };
   });
 
-  const rebufferRateSql = hasBsEffective
-    ? "COUNT(DISTINCT NULLIF(cmcd_sid, '')) FILTER (WHERE cmcd_bs IS TRUE) * 100.0 / NULLIF(COUNT(DISTINCT NULLIF(cmcd_sid, '')), 0)"
-    : "NULL";
-
-  const [
-    topContentRows,
-    countryRows,
-    asnRows,
-    otRows,
-    sfRows,
-  ] = await Promise.all([
-    engine.executeSql<Record<string, unknown>>(
-      `SELECT
-        cmcd_cid AS content_id,
-        COUNT(DISTINCT NULLIF(cmcd_sid, ''))::BIGINT AS sessions,
-        COUNT(*)::BIGINT AS requests,
-        AVG(cmcd_br) FILTER (WHERE ${video})::DOUBLE AS avg_bitrate_kbps,
-        AVG(cmcd_bl) FILTER (WHERE ${video})::DOUBLE AS avg_buffer_length,
-        ${rebufferRateSql} AS rebuffer_rate
-      FROM requests
-      WHERE ${where} AND cmcd_cid <> ''
-      GROUP BY 1
-      ORDER BY sessions DESC, content_id
-      LIMIT ${topN}`,
-      [],
-      params.signal,
-    ),
-    engine.executeSql<Record<string, unknown>>(
-      `SELECT
-        COALESCE(NULLIF(geo_country, ''), country) AS country,
-        COUNT(DISTINCT NULLIF(cmcd_sid, ''))::BIGINT AS sessions,
-        COUNT(*)::BIGINT AS requests,
-        (COUNT(*) FILTER (WHERE cmcd_bs IS TRUE))::BIGINT AS rebuffer_events,
-        QUANTILE_CONT(cmcd_mtp, 0.5) FILTER (WHERE ${video})::DOUBLE AS median_throughput,
-        ${rebufferRateSql} AS rebuffer_rate
-      FROM requests
-      WHERE ${where} AND COALESCE(NULLIF(geo_country, ''), NULLIF(country, '')) IS NOT NULL
-      GROUP BY 1
-      ORDER BY sessions DESC, country ASC
-      LIMIT ${topN}`,
-      [],
-      params.signal,
-    ),
-    engine.executeSql<Record<string, unknown>>(
-      `SELECT
-        COALESCE(client_asn, asn)::BIGINT AS asn,
-        COALESCE(NULLIF(as_name, ''), 'AS' || CAST(COALESCE(client_asn, asn) AS VARCHAR)) AS as_name,
-        COUNT(DISTINCT NULLIF(cmcd_sid, ''))::BIGINT AS sessions,
-        COUNT(*)::BIGINT AS requests,
-        (COUNT(*) FILTER (WHERE cmcd_bs IS TRUE))::BIGINT AS rebuffer_events,
-        AVG(cmcd_br) FILTER (WHERE ${video})::DOUBLE AS avg_bitrate,
-        AVG(cmcd_bl) FILTER (WHERE ${video})::DOUBLE AS avg_buffer_length,
-        ${rebufferRateSql} AS rebuffer_rate,
-        AVG(cmcd_mtp)::DOUBLE AS avg_throughput_kbps
-      FROM requests
-      WHERE ${where} AND COALESCE(client_asn, asn) IS NOT NULL
-      GROUP BY 1, 2
-      ORDER BY sessions DESC, asn ASC
-      LIMIT ${topN}`,
-      [],
-      params.signal,
-    ),
-    engine.executeSql<{ object_type: string; requests: number }>(
-      `SELECT cmcd_ot AS object_type, COUNT(*)::BIGINT AS requests FROM requests WHERE ${where} AND cmcd_ot <> '' GROUP BY 1 ORDER BY requests DESC, object_type`,
-      [],
-      params.signal,
-    ),
-    engine.executeSql<{ format: string; requests: number; sessions: number }>(
-      `SELECT cmcd_sf AS format, COUNT(*)::BIGINT AS requests, COUNT(DISTINCT NULLIF(cmcd_sid, ''))::BIGINT AS sessions FROM requests WHERE ${where} AND cmcd_sf <> '' GROUP BY 1 ORDER BY sessions DESC, format`,
-      [],
-      params.signal,
-    ),
-  ]);
-  await asnNamesReady;
+  const topContentRows = breakdownRows.filter((r) => Number(r.grp) === 3);
+  const countryRows = breakdownRows.filter((r) => Number(r.grp) === 5);
+  const asnRows = breakdownRows.filter((r) => Number(r.grp) === 6);
 
   return {
     available: true,
@@ -551,11 +598,11 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
     overview: {
       active_sessions: activeSessions,
       peak_viewers: peakViewers,
-      avg_session_duration: durations.length ? Math.round(durations.reduce((sum, duration) => sum + duration, 0) / durations.length) : null,
+      avg_session_duration: positiveCount > 0 ? Math.round(positiveDurationSec / positiveCount) : null,
       rebuffer_rate: hasBsEffective && activeSessions ? roundTo(Number(s.rebuffer_sessions) * 100 / activeSessions, 2) : null,
       avg_bitrate: nullable(hasOt ? s.video_avg_bitrate : s.avg_bitrate_kbps),
       avg_buffer_length: nullable(hasOt ? s.video_avg_buffer : s.avg_buffer_ms),
-      median_throughput: nullable(hasOt ? s.video_median_throughput : s.median_throughput),
+      median_throughput: nullable(hasOt ? s.video_p50_throughput : s.all_p50_throughput),
     },
     summary: {
       active_sessions: activeSessions,
@@ -581,18 +628,18 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       params.end_time,
       bucketMs,
     ),
-    top_content: !has("cid") ? [] : topContentRows.map((r) => ({
+    top_content: !wantCid ? [] : topContentRows.map((r) => ({
       content_id: String(r.content_id ?? "Unknown"),
       sessions: Number(r.sessions ?? 0),
       session_count: Number(r.sessions ?? 0),
       requests: Number(r.requests ?? 0),
-      avg_bitrate_kbps: roundTo(Number(r.avg_bitrate_kbps ?? 0), 1),
-      avg_bitrate: nullable(r.avg_bitrate_kbps),
+      avg_bitrate_kbps: roundTo(Number(r.avg_bitrate ?? 0), 1),
+      avg_bitrate: nullable(r.avg_bitrate),
       avg_buffer_length: nullable(r.avg_buffer_length),
       rebuffer_rate: nullable(r.rebuffer_rate),
     })),
-    rebuffer_by_country: !hasBsEffective ? [] : countryRows.map((r) => ({
-      country: String(r.country ?? "Unknown"),
+    rebuffer_by_country: !wantGeo ? [] : countryRows.map((r) => ({
+      country: String(r.country_key ?? "Unknown"),
       session_count: Number(r.sessions ?? 0),
       median_throughput: nullable(r.median_throughput),
       sessions: Number(r.sessions ?? 0),
@@ -600,9 +647,9 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       rebuffer_events: Number(r.rebuffer_events ?? 0),
       rebuffer_rate: nullable(r.rebuffer_rate),
     })),
-    rebuffer_by_asn: !hasBsEffective ? [] : asnRows.map((r) => {
-      const asn = Number(r.asn ?? 0);
-      const rawName = String(r.as_name ?? "").trim();
+    rebuffer_by_asn: !wantGeo ? [] : asnRows.map((r) => {
+      const asn = Number(r.asn_key ?? 0);
+      const rawName = String(r.asn_name_key ?? "").trim();
       const label = formatAsnDisplayLabel(asn, rawName);
       return {
         asn,
@@ -619,22 +666,22 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       };
     }),
     object_type_dist: otRows.map((r) => ({
-      object_type: String(r.object_type ?? "unknown"),
-      request_count: Number(r.requests ?? 0),
-      requests: Number(r.requests ?? 0),
+      object_type: String(r.ot_key ?? "unknown"),
+      request_count: Number(r.total_requests ?? 0),
+      requests: Number(r.total_requests ?? 0),
       pct:
         totalRequests > 0
-          ? roundTo((Number(r.requests ?? 0) * 100) / totalRequests, 2)
+          ? roundTo((Number(r.total_requests ?? 0) * 100) / totalRequests, 2)
           : 0,
     })),
     streaming_format_dist: sfRows.map((r) => ({
-      format: String(r.format ?? "unknown"),
-      streaming_format: String(r.format ?? "unknown"),
-      session_count: Number(r.sessions ?? 0),
-      requests: Number(r.requests ?? 0),
+      format: String(r.sf_key ?? "unknown"),
+      streaming_format: String(r.sf_key ?? "unknown"),
+      session_count: Number(r.active_sessions ?? 0),
+      requests: Number(r.total_requests ?? 0),
       pct:
         totalRequests > 0
-          ? roundTo((Number(r.requests ?? 0) * 100) / totalRequests, 2)
+          ? roundTo((Number(r.total_requests ?? 0) * 100) / totalRequests, 2)
           : 0,
     })),
     session_duration_dist,

@@ -75,11 +75,16 @@ const NetworkMap = dynamic(() => import('@/components/Map/NetworkMap').then((mod
 })
 
 type NetworkHealthResponse = components['schemas']['NetworkHealthResponse']
+type NetworkBundleResponse = components['schemas']['NetworkBundleResponse']
 type NetworkSections = NonNullable<components['schemas']['NetworkHealthRequest']['sections']>
+type NetworkBundleSections = NonNullable<components['schemas']['NetworkBundleRequest']['sections']>
 const NETWORK_ROLLUP_SECTIONS: NetworkSections = ['summary', 'leaderboard', 'metro_leaderboard', 'heatmap', 'buckets']
 const NETWORK_CORE_SECTIONS: NetworkSections = [...NETWORK_ROLLUP_SECTIONS, 'cities', 'map_buckets']
 const NETWORK_MAP_SECTIONS: NetworkSections = ['buckets', 'cities', 'map_buckets']
 const NETWORK_SHIELDING_SECTIONS: NetworkSections = ['shielding_analysis']
+const NETWORK_CLOUD_FILTERED_BUNDLE_SECTIONS: NetworkBundleSections = [
+  ...NETWORK_CORE_SECTIONS, ...NETWORK_SHIELDING_SECTIONS, 'quality', 'transport',
+]
 
 function defaultStepSecondsForWindow(startIso?: string | null, endIso?: string | null): number | null {
   if (!startIso || !endIso) return null
@@ -121,6 +126,9 @@ function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: Rep
   // Cloud answers these sections from summaries only when unfiltered; the map needs raw rows, so it is
   // read apart rather than holding the summary-served core behind a raw scan.
   const rollupFirst = isCloudMode() && Object.keys(filterPayload ?? {}).length === 0
+  // When filtered on Cloud, consolidate health + shielding + quality + transport into one bundle scan so
+  // the raw Parquet files are projected and loaded once instead of evicted and re-fetched four times.
+  const cloudFiltered = isCloudMode() && !rollupFirst
 
   const windowKey = `${relativeRange ?? ''}|${startTime ?? ''}|${endTime ?? ''}`
   if (windowKey !== seenWindowKey) {
@@ -144,9 +152,24 @@ function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: Rep
       },
     }))
 
+  const filteredBundleQuery = useAnalyticsReportQuery<NetworkBundleResponse>({
+    namespace: ['network', 'bundle', 'filtered'], serviceId: activeServiceId, filterPayload, range,
+    keyParts: [animBucketSeconds, regionCountry],
+    queryOptions: { enabled: cloudFiltered },
+    queryFn: ({ rangeToken, signal }) => unwrapClient(client.POST('/api/network/bundle', {
+      signal,
+      body: {
+        start_time: startTime!, end_time: endTime!, filters: filterPayload ?? {}, metric,
+        bucket_seconds: animBucketSeconds, top_n: 30, map_asn: 'all', region_country: regionCountry,
+        sections: NETWORK_CLOUD_FILTERED_BUNDLE_SECTIONS, range_token: rangeToken, anchor,
+      },
+    })),
+  })
+
   const coreQuery = useAnalyticsReportQuery<NetworkHealthResponse>({
     namespace: ['network', 'health', 'core'], serviceId: activeServiceId, filterPayload, range,
     keyParts: [animBucketSeconds],
+    queryOptions: { enabled: !cloudFiltered },
     queryFn: ({ rangeToken, signal }) => postNetworkHealth(rollupFirst ? NETWORK_ROLLUP_SECTIONS : NETWORK_CORE_SECTIONS, rangeToken, signal, 'all'),
   })
 
@@ -163,7 +186,7 @@ function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: Rep
   const shieldingEnabled = !rollupFirst || shieldingNear
   const shieldingQuery = useAnalyticsReportQuery<NetworkHealthResponse>({
     namespace: ['network', 'health', 'shielding'], serviceId: activeServiceId, filterPayload, range,
-    queryOptions: { enabled: shieldingEnabled },
+    queryOptions: { enabled: !cloudFiltered && shieldingEnabled },
     queryFn: ({ rangeToken, signal }) => postNetworkHealth(NETWORK_SHIELDING_SECTIONS, rangeToken, signal, mapAsn),
   })
 
@@ -172,19 +195,32 @@ function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: Rep
     async ({ signal }) => unwrapClient(client.POST('/api/network-quality', {
       signal, body: { start_time: startTime!, end_time: endTime!, filters: filterPayload, region_country: regionCountry },
     })),
+    { enabled: !cloudFiltered },
   )
 
-  const data = coreQuery.data
+  const data = cloudFiltered ? (filteredBundleQuery.data?.health ?? undefined) : coreQuery.data
+  const coreError = cloudFiltered ? filteredBundleQuery.error : coreQuery.error
+  const coreIsFetching = cloudFiltered ? filteredBundleQuery.isFetching : coreQuery.isFetching
   const rollup = readRollupMeta(data)
   const mapFromCore = mapAsn === 'all' && !rollupFirst
-  const mapData = mapFromCore ? coreQuery.data : (mapQuery.data ?? (rollupFirst ? undefined : coreQuery.data))
-  const qualityData = qualityQuery.data
-  const isCoreLoadingInitial = coreQuery.isLoading || (coreQuery.isFetching && !coreQuery.data)
+  const mapData = mapFromCore ? data : (mapQuery.data ?? (rollupFirst ? undefined : data))
+  const qualityData = cloudFiltered ? (filteredBundleQuery.data?.quality ?? undefined) : qualityQuery.data
+  const qualityError = cloudFiltered ? filteredBundleQuery.error : qualityQuery.error
+  const qualityIsFetching = cloudFiltered ? filteredBundleQuery.isFetching : qualityQuery.isFetching
+  const isCoreLoadingInitial = cloudFiltered
+    ? (filteredBundleQuery.isLoading || (filteredBundleQuery.isFetching && !filteredBundleQuery.data))
+    : (coreQuery.isLoading || (coreQuery.isFetching && !coreQuery.data))
   const isMapLoadingInitial = !mapData && (mapFromCore ? isCoreLoadingInitial : mapQuery.isLoading || (mapQuery.isFetching && !mapQuery.data))
-  const isShieldingLoadingInitial = !shieldingEnabled || shieldingQuery.isLoading || (shieldingQuery.isFetching && !shieldingQuery.data)
-  const isQualityLoadingInitial = qualityQuery.isLoading || (qualityQuery.isFetching && !qualityQuery.data)
+  const isShieldingLoadingInitial = cloudFiltered
+    ? isCoreLoadingInitial
+    : (!shieldingEnabled || shieldingQuery.isLoading || (shieldingQuery.isFetching && !shieldingQuery.data))
+  const isQualityLoadingInitial = cloudFiltered
+    ? isCoreLoadingInitial
+    : (qualityQuery.isLoading || (qualityQuery.isFetching && !qualityQuery.data))
 
-  const shieldingData = shieldingQuery.data?.shielding_analysis
+  const shieldingData = cloudFiltered ? filteredBundleQuery.data?.health?.shielding_analysis : shieldingQuery.data?.shielding_analysis
+  const shieldingError = cloudFiltered ? filteredBundleQuery.error : shieldingQuery.error
+  const shieldingIsFetching = cloudFiltered ? filteredBundleQuery.isFetching : shieldingQuery.isFetching
   const adjustedShieldingRows = React.useMemo(
     () => adjustShieldingRows(shieldingData?.rows ?? [], minRequests),
     [shieldingData?.rows, minRequests],
@@ -237,22 +273,22 @@ function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: Rep
 
   return (
     <>
-      {coreQuery.error && !coreQuery.data && (
+      {coreError && !data && (
         <div className="rounded-lg border border-destructive/50 bg-destructive/10 text-destructive p-3 text-sm flex items-start gap-2">
           <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
           <div>
             <div className="font-medium">Network health unavailable</div>
             <div className="text-xs opacity-80">
-              {coreQuery.error instanceof Error ? coreQuery.error.message : 'The backend returned an error. Leaderboards below may show incorrect "fields not enabled" hints.'}
+              {coreError instanceof Error ? coreError.message : 'The backend returned an error. Leaderboards below may show incorrect "fields not enabled" hints.'}
             </div>
           </div>
         </div>
       )}
       <RollupDataThroughSlot reserve={rollupFirst} meta={rollup} />
-      <RawWindowNote window={readRawWindow(data)} />
+      <RawWindowNote window={readRawWindow(cloudFiltered ? filteredBundleQuery.data : data)} />
       <NetworkMap
         data={mapData} isLoading={isMapLoadingInitial}
-        error={mapFromCore ? coreQuery.error : mapQuery.error}
+        error={mapFromCore ? coreError : mapQuery.error}
         metric={metric} onMetricChange={setMetric}
         bucketSeconds={animBucketSeconds} onBucketChange={setAnimBucketSeconds}
         mapAsn={mapAsn} onAsnChange={setMapAsn} asnOptions={asnOptions}
@@ -260,7 +296,11 @@ function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: Rep
 
       <NetworkKpiGrid summary={data?.summary} isCoreLoadingInitial={isCoreLoadingInitial} rollup={rollup} />
 
-      <TransportSection activeServiceId={activeServiceId} startTime={startTime} endTime={endTime} filterPayload={filterPayload} />
+      <TransportSection
+        activeServiceId={activeServiceId} startTime={startTime} endTime={endTime} filterPayload={filterPayload}
+        externalData={cloudFiltered ? (filteredBundleQuery.data?.transport ?? null) : undefined}
+        externalLoading={cloudFiltered ? isCoreLoadingInitial : undefined}
+      />
 
       <div className="my-6 min-h-[280px] [contain-intrinsic-size:280px]">
         {activeServiceId && <PopHealthHeatmap serviceId={activeServiceId} startTime={startTime} endTime={endTime} filterPayload={filterPayload} />}
@@ -269,7 +309,7 @@ function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: Rep
       {heatmapData && (
         <AnalyticsCard
           title="ASN Health Score over Time" helpTitle="ASN Health Score over Time" helpContent={<HeatmapHelp />}
-          isFetching={coreQuery.isFetching} error={coreQuery.error as AnalyticsCardError | null}
+          isFetching={coreIsFetching} error={coreError as AnalyticsCardError | null}
           className="[contain-intrinsic-size:380px]"
         >
           <PlotlyChart
@@ -281,14 +321,14 @@ function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: Rep
         </AnalyticsCard>
       )}
 
-      <div ref={shieldingRef} className={shieldingData || isShieldingLoadingInitial || shieldingQuery.error ? 'min-h-[460px]' : undefined}>
-      {(shieldingData || isShieldingLoadingInitial || shieldingQuery.error) && (
+      <div ref={shieldingRef} className={shieldingData || isShieldingLoadingInitial || shieldingError ? 'min-h-[460px]' : undefined}>
+      {(shieldingData || isShieldingLoadingInitial || shieldingError) && (
         <ShieldingSection
           shieldingData={shieldingData}
           adjustedShieldingRows={adjustedShieldingRows}
           isShieldingLoadingInitial={isShieldingLoadingInitial}
-          isFetching={shieldingQuery.isFetching}
-          error={shieldingQuery.error}
+          isFetching={shieldingIsFetching}
+          error={shieldingError}
           minRequests={minRequests}
           setMinRequests={setMinRequests}
           shieldingVisibility={shieldingVisibility}
@@ -302,17 +342,17 @@ function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: Rep
       <NetworkLeaderboardsSection
         data={data}
         isCoreLoadingInitial={isCoreLoadingInitial}
-        isFetching={coreQuery.isFetching}
-        error={coreQuery.error}
+        isFetching={coreIsFetching}
+        error={coreError}
         isFieldActive={isFieldActive}
       />
 
-      {(isQualityLoadingInitial || qualityData?.available || qualityQuery.error) && (
+      {(isQualityLoadingInitial || qualityData?.available || qualityError) && (
         <NetworkQualitySection
           qualityData={qualityData}
           isQualityLoadingInitial={isQualityLoadingInitial}
-          isFetching={qualityQuery.isFetching}
-          error={qualityQuery.error}
+          isFetching={qualityIsFetching}
+          error={qualityError}
           regionCountry={regionCountry}
           setRegionCountry={setRegionCountry}
           qualityScatterTrace={qualityScatterTrace}
