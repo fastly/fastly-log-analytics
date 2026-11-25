@@ -1,3 +1,5 @@
+import { createSharedRequests } from "../shared-request";
+
 export class OpsRangeUnsupportedError extends Error {
   constructor(message: string) {
     super(message);
@@ -7,8 +9,11 @@ export class OpsRangeUnsupportedError extends Error {
 
 const MAX_DECODED_PARQUET_ENTRIES = 512;
 const decodedParquetCache = new Map<string, Record<string, unknown>[]>();
+const sharedDecodedParquet = createSharedRequests<Record<string, unknown>[]>();
+let decodedCacheGeneration = 0;
 
 export function clearOpsDecodedCache(): void {
+  decodedCacheGeneration += 1;
   decodedParquetCache.clear();
 }
 
@@ -52,8 +57,43 @@ export function setDecodedParquet(
 }
 
 export function deleteDecodedParquet(scope: string, key: string): void {
+  decodedCacheGeneration += 1;
   const prefix = `${scope}\0${key}\0`;
   for (const cacheKey of [...decodedParquetCache.keys()]) {
     if (cacheKey.startsWith(prefix)) decodedParquetCache.delete(cacheKey);
   }
+}
+
+/**
+ * Returns decoded Parquet rows from cache or coalesces concurrent in-flight loads for the
+ * same `(scope, key, columnsKey)` so overlapping ops reads share one fetch and decode.
+ */
+export async function loadDecodedParquet(
+  scope: string,
+  key: string,
+  columnsKey: string,
+  loader: (signal: AbortSignal) => Promise<Record<string, unknown>[]>,
+  signal?: AbortSignal,
+): Promise<{ rows: Record<string, unknown>[]; coalesced: boolean }> {
+  signal?.throwIfAborted();
+  const cached = getDecodedParquet(scope, key, columnsKey);
+  if (cached !== undefined) {
+    return { rows: cached, coalesced: true };
+  }
+  const gen = decodedCacheGeneration;
+  const inFlightKey = `${gen}\0${decodedCacheKey(scope, key, columnsKey)}`;
+  let started = false;
+  const rows = await sharedDecodedParquet(
+    inFlightKey,
+    async (sharedSignal) => {
+      started = true;
+      const decoded = await loader(sharedSignal);
+      if (decodedCacheGeneration === gen) {
+        setDecodedParquet(scope, key, columnsKey, decoded);
+      }
+      return decoded;
+    },
+    { signal },
+  );
+  return { rows, coalesced: !started };
 }

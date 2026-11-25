@@ -26,8 +26,7 @@ import {
   OpsRangeUnsupportedError,
   clearOpsDecodedCache,
   deleteDecodedParquet,
-  getDecodedParquet,
-  setDecodedParquet,
+  loadDecodedParquet,
 } from "./decoded-cache";
 
 export { OpsRangeUnsupportedError, clearOpsDecodedCache };
@@ -36,10 +35,18 @@ export { fnv1a32 };
 export type { LogRow, LogsRange, LogsResult, LogsStats, OpsKind };
 export type LogResult = LogsResult;
 
-/** Uncached ops Parquet files larger than this use HTTP Range projection when `columns` is set. */
-export const OPS_PROJECTED_MIN_BYTES = 48 * 1024;
-/** Initial tail probe size for ops Parquet footers (1 row group, compact metadata). */
-export const OPS_FOOTER_PROBE_BYTES = 16 * 1024;
+/**
+ * Uncached ops Parquet files larger than this may use HTTP Range projection when `columns`
+ * is set. Smaller files are fetched whole in a single request so they populate the persistent
+ * Browser Cache API instead of paying 2–3 HTTP 206 round-trips on every load.
+ */
+export const OPS_PROJECTED_MIN_BYTES = 512 * 1024;
+/** Initial tail probe size for large ops Parquet footers. */
+export const OPS_FOOTER_PROBE_BYTES = 64 * 1024;
+/** Maximum fraction of a file's bytes a projected Range read may transfer before falling back to whole-file GET. */
+export const OPS_PROJECTED_MAX_RATIO = 0.5;
+/** Maximum extra data Range requests allowed per projected ops Parquet file. */
+export const OPS_PROJECTED_MAX_RANGES = 4;
 
 export type OpsSource = {
   /** Optional cache partition key enabling in-memory reuse of decoded immutable ops Parquet files. */
@@ -389,18 +396,10 @@ export async function readLogs(
   stats.evicted = evictions.length;
 
   const fileRows: Record<string, unknown>[] = [];
-  const load = async (file: ManifestFile) => {
-    if (source.cacheScope) {
-      const decoded = getDecodedParquet(source.cacheScope, file.key, columnsKey);
-      if (decoded !== undefined) {
-        stats.cached++;
-        stats.read++;
-        progress.cached++;
-        progress.done++;
-        onProgress?.({ ...progress });
-        return decoded;
-      }
-    }
+  const fetchAndDecode = async (
+    file: ManifestFile,
+    loadSignal?: AbortSignal,
+  ): Promise<Record<string, unknown>[]> => {
     if (
       requestedColumns !== null &&
       source.fetchRange &&
@@ -413,7 +412,7 @@ export async function readLogs(
         let downloaded = 0;
         let cachedBytes = 0;
         const fetchRangeBytes = async (start: number, end: number) => {
-          const part = await source.fetchRange!(file, start, end, signal);
+          const part = await source.fetchRange!(file, start, end, loadSignal);
           if (part.cached) {
             cachedBytes += part.bytes.byteLength;
           } else {
@@ -430,10 +429,11 @@ export async function readLogs(
         );
         const projection = planParquetProjection(footer, new Set(requestedColumns));
         const tailStart = footer.tail?.start ?? file.size;
-        const extraBytes = projection.ranges.reduce((sum, r) => {
-          if (r.start >= tailStart) return sum;
-          return sum + (Math.min(r.end, tailStart) - r.start);
-        }, 0);
+        const extraRanges = projection.ranges.filter((r) => r.start < tailStart);
+        const extraBytes = extraRanges.reduce(
+          (sum, r) => sum + (Math.min(r.end, tailStart) - r.start),
+          0,
+        );
         const tailBytes = footer.tail ? footer.tail.bytes.byteLength : 0;
         if (projection.chunks.length === 0) {
           const rows = Array.from(
@@ -446,14 +446,14 @@ export async function readLogs(
           if (!anyNetwork) progress.cached++;
           progress.cachedBytes += cachedBytes;
           progress.downloadedBytes += downloaded;
-          if (source.cacheScope) {
-            setDecodedParquet(source.cacheScope, file.key, columnsKey, rows);
-          }
           progress.done++;
           onProgress?.({ ...progress });
           return rows;
         }
-        if (extraBytes + tailBytes < file.size * 0.9) {
+        if (
+          extraBytes + tailBytes < file.size * OPS_PROJECTED_MAX_RATIO &&
+          extraRanges.length <= OPS_PROJECTED_MAX_RANGES
+        ) {
           const rangeBytes = await fetchProjectedRanges(projection, fetchRangeBytes);
           const projected = assembleProjectedParquet(projection, rangeBytes);
           const rows = await readRows(projected, requestedColumns);
@@ -463,18 +463,15 @@ export async function readLogs(
           if (!anyNetwork) progress.cached++;
           progress.cachedBytes += cachedBytes;
           progress.downloadedBytes += downloaded;
-          if (source.cacheScope) {
-            setDecodedParquet(source.cacheScope, file.key, columnsKey, rows);
-          }
           progress.done++;
           onProgress?.({ ...progress });
           return rows;
         }
       } catch (err) {
-        if (signal?.aborted || isAbortOrAuthError(err)) throw err;
+        if (loadSignal?.aborted || isAbortOrAuthError(err)) throw err;
       }
     }
-    const { bytes, cached, cdn } = await source.fetchFile(file.key, signal);
+    const { bytes, cached, cdn } = await source.fetchFile(file.key, loadSignal);
     if (cached) stats.cached++;
     if (isCdnHit(cdn)) stats.cdnHits++;
     stats.read++;
@@ -485,11 +482,28 @@ export async function readLogs(
       progress.downloadedBytes += bytes.byteLength;
     }
     const rows = await readRows(bytes, requestedColumns ?? undefined);
-    if (source.cacheScope) {
-      setDecodedParquet(source.cacheScope, file.key, columnsKey, rows);
-    }
     progress.done++;
     onProgress?.({ ...progress });
+    return rows;
+  };
+  const load = async (file: ManifestFile) => {
+    if (!source.cacheScope) {
+      return fetchAndDecode(file, signal);
+    }
+    const { rows, coalesced } = await loadDecodedParquet(
+      source.cacheScope,
+      file.key,
+      columnsKey,
+      (sharedSignal) => fetchAndDecode(file, sharedSignal),
+      signal,
+    );
+    if (coalesced) {
+      stats.cached++;
+      stats.read++;
+      progress.cached++;
+      progress.done++;
+      onProgress?.({ ...progress });
+    }
     return rows;
   };
 

@@ -647,7 +647,7 @@ describe("tagged compact files (Rust parity)", () => {
 
   it("uses projected Range reads for large uncached ops Parquet files and skips full fetchFile", async () => {
     clearOpsDecodedCache();
-    const rowCount = 2_500;
+    const rowCount = 16_000;
     const baseTs = DAY_MS + 10 * 3_600_000;
     const bigParquet = parquetWriteBuffer({
       columnData: [
@@ -661,7 +661,7 @@ describe("tagged compact files (Rust parity)", () => {
           type: "STRING",
           data: Array.from(
             { length: rowCount },
-            (_, i) => `evt-${String(i).padStart(6, "0")}-${(i * 2654435761).toString(16)}`,
+            (_, i) => `evt-${String(i).padStart(6, "0")}-${(i * 2654435761).toString(16)}-${(i * 1597334677).toString(16)}`,
           ),
         },
         {
@@ -669,7 +669,7 @@ describe("tagged compact files (Rust parity)", () => {
           type: "STRING",
           data: Array.from(
             { length: rowCount },
-            (_, i) => `run-${String(i).padStart(6, "0")}-${(i * 1597334677).toString(16)}`,
+            (_, i) => `run-${String(i).padStart(6, "0")}-${(i * 1597334677).toString(16)}-${(i * 2246822519).toString(16)}`,
           ),
         },
         {
@@ -687,7 +687,7 @@ describe("tagged compact files (Rust parity)", () => {
     });
     expect(bigParquet.byteLength).toBeGreaterThan(OPS_PROJECTED_MIN_BYTES);
 
-    const key = "processed/ops/ingest_files/year=2026/month=10/day=29/compact=100-200-c2-n2500.parquet";
+    const key = "processed/ops/ingest_files/year=2026/month=10/day=29/compact=100-200-c2-n16000.parquet";
     const rangeCalls: Array<{ start: number; end: number }> = [];
     const { src, log } = source({
       live: noLive,
@@ -738,7 +738,7 @@ describe("tagged compact files (Rust parity)", () => {
 
   it("falls back to fetchFile when fetchRange throws OpsRangeUnsupportedError", async () => {
     clearOpsDecodedCache();
-    const rowCount = 3_000;
+    const rowCount = 16_000;
     const baseTs = DAY_MS + 10 * 3_600_000;
     const bigParquet = parquetWriteBuffer({
       columnData: [
@@ -750,7 +750,7 @@ describe("tagged compact files (Rust parity)", () => {
         {
           name: "event_id",
           type: "STRING",
-          data: Array.from({ length: rowCount }, (_, i) => `evt-${i}-${(i * 9973).toString(16)}`),
+          data: Array.from({ length: rowCount }, (_, i) => `evt-${i}-${(i * 9973).toString(16)}-${(i * 2654435761).toString(16)}`),
         },
         {
           name: "raw_key",
@@ -848,13 +848,13 @@ describe("tagged compact files (Rust parity)", () => {
 
   it("ignores missing projected columns on older Parquet schemas for both ranged and full-file reads", async () => {
     clearOpsDecodedCache();
-    const rowCount = 3_000;
+    const rowCount = 16_000;
     const baseTs = DAY_MS + 10 * 3_600_000;
     const oldSchemaBig = parquetWriteBuffer({
       columnData: [
         { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: rowCount }, (_, i) => new Date(baseTs + i * 1000)) },
-        { name: "event_id", type: "STRING", data: Array.from({ length: rowCount }, (_, i) => `evt-${i}-${(i * 9973).toString(16)}`) },
-        { name: "raw_key", type: "STRING", data: Array.from({ length: rowCount }, (_, i) => `raw/old-${i}.log.gz`) },
+        { name: "event_id", type: "STRING", data: Array.from({ length: rowCount }, (_, i) => `evt-${i}-${(i * 9973).toString(16)}-${(i * 2654435761).toString(16)}`) },
+        { name: "raw_key", type: "STRING", data: Array.from({ length: rowCount }, (_, i) => `raw/old-${i % 20}.log.gz`) },
         { name: "output_keys_json", type: "STRING", data: Array.from({ length: rowCount }, (_, i) => `["processed/requests/year=2026/month=10/day=29/hour=10/part-${i}-${(i * 7919).toString(16)}.parquet"]`) },
       ],
       codec: "SNAPPY",
@@ -901,5 +901,222 @@ describe("tagged compact files (Rust parity)", () => {
     expect(res.rows).toHaveLength(rowCount + 1);
     expect(res.rows.some((r) => r.raw_key === "raw/old-0.log.gz")).toBe(true);
     expect(res.rows.some((r) => r.raw_key === "raw/tiny-old.log.gz")).toBe(true);
+  });
+
+  it("fetches medium ops Parquet files (<= 512 KiB) whole in one request instead of multi-round-trip Range reads", async () => {
+    clearOpsDecodedCache();
+    const rowCount = 2_500;
+    const baseTs = DAY_MS + 10 * 3_600_000;
+    const mediumParquet = parquetWriteBuffer({
+      columnData: [
+        {
+          name: "timestamp",
+          type: "TIMESTAMP",
+          data: Array.from({ length: rowCount }, (_, i) => new Date(baseTs + i * 1000)),
+        },
+        {
+          name: "event_id",
+          type: "STRING",
+          data: Array.from(
+            { length: rowCount },
+            (_, i) => `evt-${String(i).padStart(6, "0")}-${(i * 2654435761).toString(16)}`,
+          ),
+        },
+        {
+          name: "raw_key",
+          type: "STRING",
+          data: Array.from({ length: rowCount }, (_, i) => `raw/f-${i % 20}.log.gz`),
+        },
+        {
+          name: "raw_size",
+          type: "INT64",
+          data: Array.from({ length: rowCount }, (_, i) => BigInt(1024 + (i % 10))),
+        },
+      ],
+      codec: "SNAPPY",
+    });
+    expect(mediumParquet.byteLength).toBeGreaterThan(48 * 1024);
+    expect(mediumParquet.byteLength).toBeLessThanOrEqual(512 * 1024);
+
+    const key = "processed/ops/storage_inventory/year=2026/month=10/day=29/hour=10/window=100-105-ab12-n2500.parquet";
+    const rangeCalls: Array<{ start: number; end: number }> = [];
+    const { src, log } = source({
+      live: noLive,
+      manifest: [
+        {
+          files: [
+            {
+              key,
+              start: "2026-10-29T10:00:00Z",
+              end: "2026-10-29T11:00:00Z",
+              size: mediumParquet.byteLength,
+              rows: rowCount,
+            },
+          ],
+          next_cursor: null,
+        },
+      ],
+      files: { [key]: mediumParquet },
+    });
+    src.fetchRange = async (_file, start, end) => {
+      rangeCalls.push({ start, end });
+      return { bytes: mediumParquet.slice(start, end), cached: false, cdn: "HIT" };
+    };
+
+    const result = await readLogs(src, {
+      kind: "storage_inventory",
+      ...range,
+      columns: ["timestamp", "raw_key", "raw_size"],
+      dedupe: false,
+      sort: false,
+    });
+
+    expect(rangeCalls).toEqual([]);
+    expect(log.files).toEqual([key]);
+    expect(result.rows).toHaveLength(rowCount);
+    expect(result.rows[0].event_id).toBeUndefined();
+    expect(result.rows[0].raw_key).toBe("raw/f-0.log.gz");
+  });
+
+  it("falls back to whole-file fetchFile when projected bytes exceed 50% of a >512 KiB ops Parquet file", async () => {
+    clearOpsDecodedCache();
+    const rowCount = 16_000;
+    const baseTs = DAY_MS + 10 * 3_600_000;
+    const largeParquet = parquetWriteBuffer({
+      columnData: [
+        {
+          name: "timestamp",
+          type: "TIMESTAMP",
+          data: Array.from({ length: rowCount }, (_, i) => new Date(baseTs + i * 1000)),
+        },
+        {
+          name: "event_id",
+          type: "STRING",
+          data: Array.from(
+            { length: rowCount },
+            (_, i) => `evt-${String(i).padStart(6, "0")}-${(i * 2654435761).toString(16)}`,
+          ),
+        },
+        {
+          name: "output_keys_json",
+          type: "STRING",
+          data: Array.from(
+            { length: rowCount },
+            (_, i) => `["processed/requests/year=2026/month=10/day=29/hour=10/part-${i}-${(i * 7919).toString(16)}.parquet"]`,
+          ),
+        },
+      ],
+      codec: "SNAPPY",
+    });
+    expect(largeParquet.byteLength).toBeGreaterThan(512 * 1024);
+
+    const key = "processed/ops/ingest_files/year=2026/month=10/day=29/compact=100-200-c2-n16000.parquet";
+    const rangeCalls: Array<{ start: number; end: number }> = [];
+    const { src, log } = source({
+      live: noLive,
+      manifest: [
+        {
+          files: [
+            {
+              key,
+              start: "2026-10-29T10:00:00Z",
+              end: "2026-10-29T11:00:00Z",
+              size: largeParquet.byteLength,
+              rows: rowCount,
+            },
+          ],
+          next_cursor: null,
+        },
+      ],
+      files: { [key]: largeParquet },
+    });
+    src.fetchRange = async (_file, start, end) => {
+      rangeCalls.push({ start, end });
+      return { bytes: largeParquet.slice(start, end), cached: false, cdn: "HIT" };
+    };
+
+    // Requesting timestamp + output_keys_json reads > 50% of the file; should fall back to fetchFile
+    // after the footer probe instead of issuing data range requests.
+    const result = await readLogs(src, {
+      kind: "ingest_files",
+      ...range,
+      columns: ["timestamp", "output_keys_json"],
+      dedupe: false,
+      sort: false,
+    });
+
+    expect(rangeCalls).toHaveLength(1);
+    expect(log.files).toEqual([key]);
+    expect(result.rows).toHaveLength(rowCount);
+    expect(result.rows[0].event_id).toBeUndefined();
+  });
+
+  it("coalesces concurrent in-flight Parquet loads for the same cacheScope, key, and columns with abort isolation", async () => {
+    clearOpsDecodedCache();
+    const key = "processed/ops/ingest_files/shared-inflight.parquet";
+    const bytes = parquet([row(1, "e1"), row(2, "e2")]);
+    let fetchCount = 0;
+    let releaseFetch!: () => void;
+    const fetchGate = new Promise<void>((resolve) => {
+      releaseFetch = resolve;
+    });
+
+    const { src } = source({
+      live: noLive,
+      manifest: [
+        {
+          files: [{ ...entry(key, 2), size: bytes.byteLength }],
+          next_cursor: null,
+        },
+      ],
+      files: { [key]: bytes },
+    });
+    src.cacheScope = "scope-inflight-test";
+    src.fetchFile = async (_k, signal) => {
+      fetchCount += 1;
+      await fetchGate;
+      signal?.throwIfAborted();
+      return { bytes: bytes.slice(0), cached: false, cdn: "HIT" };
+    };
+
+    const abortFirst = new AbortController();
+    const p1 = readLogs(src, {
+      kind: "ingest_files",
+      ...range,
+      columns: ["timestamp", "op"],
+      dedupe: false,
+      sort: false,
+      signal: abortFirst.signal,
+    });
+    const p2 = readLogs(src, {
+      kind: "ingest_files",
+      ...range,
+      columns: ["timestamp", "op"],
+      dedupe: false,
+      sort: false,
+    });
+    const p3 = readLogs(src, {
+      kind: "ingest_files",
+      ...range,
+      columns: ["timestamp", "op"],
+      dedupe: false,
+      sort: false,
+    });
+
+    // Wait a tick for all three readLogs calls to reach load(file).
+    await new Promise((r) => setTimeout(r, 10));
+    expect(fetchCount).toBe(1);
+
+    // Aborting caller 1 must not abort callers 2 and 3.
+    abortFirst.abort();
+    await expect(p1).rejects.toThrow();
+
+    releaseFetch();
+    const [r2, r3] = await Promise.all([p2, p3]);
+    expect(fetchCount).toBe(1);
+    expect(r2.rows).toHaveLength(2);
+    expect(r3.rows).toHaveLength(2);
+    expect(r2.stats.cached).toBe(1);
+    expect(r3.stats.cached).toBe(1);
   });
 });
