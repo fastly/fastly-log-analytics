@@ -103,7 +103,9 @@ def test_full_evaluation_consolidates_queries_by_at_least_half() -> None:
     assert len(client.calls) <= 10, (
         f"Expected <= 10 ClickHouse queries, got {len(client.calls)}: {list(client.queries())}"
     )
-    assert evaluator._MAX_WORKERS >= 8
+    assert 1 <= evaluator._MAX_WORKERS <= 2
+    assert evaluator._BACKGROUND_MAX_WORKERS == 1
+    assert evaluator._COLD_POOL._max_workers == 1
 
 
 def test_batched_rollup_queries_use_rollup_table_and_preserve_visibility_fence() -> None:

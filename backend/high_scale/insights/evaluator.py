@@ -80,8 +80,8 @@ from .sql_queries import Detection, _base_sql, _detection_for
 
 logger = logging.getLogger(__name__)
 
-_MAX_WORKERS = 4
-_BACKGROUND_MAX_WORKERS = 2
+_MAX_WORKERS = 2
+_BACKGROUND_MAX_WORKERS = 1
 _INSIGHT_MARKER_RE = re.compile(r"^\s*/\*\s*insight:\w+\s*\*/\s*")
 _MULTIPLEX_GROUPS: tuple[tuple[str, frozenset[str]], ...] = (
     ("group_rollup_batches", frozenset({"batch_misc", "batch_geo", "batch_asn", "batch_url_cache"})),
@@ -122,7 +122,7 @@ _CacheRegistry.register("high_scale.insights._INSIGHTS_LAST_RESULT", _INSIGHTS_L
 _CacheRegistry.register("high_scale.insights._INSIGHTS_REFRESH_FAILURES", _INSIGHTS_REFRESH_FAILURES)
 # Shapes with no result yet (a page is waiting) get their own pool, so prewarms and stale refreshes
 # queued in _REFRESH_POOL never hold them back.
-_COLD_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-insights-cold")
+_COLD_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hs-insights-cold")
 _REFRESH_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hs-insights-refresh")
 _JOBS_LOCK = threading.Lock()
 

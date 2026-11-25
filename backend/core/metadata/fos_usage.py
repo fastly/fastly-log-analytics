@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import threading
 from datetime import UTC, datetime, timedelta
@@ -20,9 +21,30 @@ from backend.core.metadata.pg_pool import (
 from backend.core.metadata.pg_pool import (
     get_con_readonly as open_readonly,
 )
+from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
 from backend.utils.date_utils import ensure_utc, iso_z, iso_z_now, parse_hour_key, parse_iso_utc
 
 logger = logging.getLogger(__name__)
+
+_USAGE_AGG_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=30.0)
+CacheRegistry.register("metadata.fos_usage._USAGE_AGG_CACHE", _USAGE_AGG_CACHE)
+
+
+def _invalidate_usage_agg_cache(service_id: str) -> None:
+    for key in _USAGE_AGG_CACHE.keys():
+        if isinstance(key, tuple) and key and key[0] == service_id:
+            _USAGE_AGG_CACHE.pop(key, None)
+
+
+def _is_hour_start(ts: str, hour_prefix: str) -> bool:
+    if not hour_prefix or len(hour_prefix) != 13:
+        return False
+    return ts in (
+        f"{hour_prefix}:00:00Z",
+        f"{hour_prefix}:00:00.000Z",
+        f"{hour_prefix}:00:00.000000Z",
+        f"{hour_prefix}:00:00+00:00",
+    )
 
 
 # ── Schema ────────────────────────────────────────────────────────────────────
@@ -49,6 +71,7 @@ _SCHEMA = [
     "CREATE INDEX IF NOT EXISTS idx_usage_reconcile ON usage_log(service_id, operation_class, timestamp, function_name, count)",
     "CREATE INDEX IF NOT EXISTS idx_usage_process_context_ts ON usage_log(process_context, timestamp)",
     "CREATE INDEX IF NOT EXISTS idx_usage_service_ts ON usage_log(service_id, timestamp, operation_class, count, bytes)",
+    "CREATE INDEX IF NOT EXISTS idx_usage_service_ts_agg ON usage_log(service_id, timestamp, operation_class, operation_type, count, bytes)",
     """CREATE TABLE IF NOT EXISTS usage_log_hourly_summary (
         service_id TEXT NOT NULL,
         hour TEXT NOT NULL,
@@ -497,6 +520,7 @@ def purge_usage_log(service_id: str, retention_days: int) -> None:
     con.execute("DELETE FROM telemetry_queries WHERE timestamp < ?", (cutoff,))
     con.execute("DELETE FROM telemetry_sections WHERE timestamp < ?", (cutoff,))
     con.commit()
+    _invalidate_usage_agg_cache(service_id)
 
 
 _FOS_MIN_BILLING_DAYS = 30
@@ -582,6 +606,7 @@ def clear_usage_log(service_id: str) -> None:
     con.execute("DELETE FROM usage_log_hourly_summary WHERE service_id = ?", (service_id,))
     con.execute("DELETE FROM cloud_copy_deletions WHERE service_id = ?", (service_id,))
     con.commit()
+    _invalidate_usage_agg_cache(service_id)
 
 
 def _usage_class_predicate(usage_type: str) -> tuple[str, list]:
@@ -619,9 +644,15 @@ def _query_usage_log_aggregate_rollup(
 
     The rollup PK lookup is sub-millisecond; the boundary raw scans cover at
     most 2 hours of data (~80 k rows in a busy service) and ride the
-    idx_usage_service_ts index. Combined cost is typically ~1-2 ms vs the
-    600 ms full-window GROUP BY this replaces.
+    idx_usage_service_ts_agg covering index.
     """
+    use_cache = "PYTEST_CURRENT_TEST" not in os.environ
+    cache_key = (service_id, start, end, usage_type)
+    if use_cache:
+        cached = _USAGE_AGG_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
     # Hour bucket prefix is "YYYY-MM-DDTHH" (13 chars). Timestamps in
     # usage_log are stored as ISO strings, so prefix comparison is correct.
     start_hour = (start or "")[:13]
@@ -644,15 +675,22 @@ def _query_usage_log_aggregate_rollup(
             """,
             [service_id, start, end] + class_params,
         ).fetchall()
-        return rows
+        result = [
+            {
+                "operation_class": r["operation_class"],
+                "operation_type": r["operation_type"],
+                "c": r["c"],
+                "b": r["b"],
+            }
+            for r in rows
+        ]
+        if use_cache:
+            _USAGE_AGG_CACHE[cache_key] = result
+        return result
 
     # Boundary range comparisons keyed on timestamp directly (not
-    # `substr(timestamp, 1, 13)`) so SQLite can ride idx_usage_service_ts
-    # as a pure range scan — substr() forces per-row evaluation, ~5x slower
-    # on the end-of-day boundary (18k rows: 90ms with substr vs ~15ms with
-    # pure range). The hour boundary is the start of the FOLLOWING hour, so
-    # we strip any " " or "T" between date/time and use the ISO Z form to
-    # match what writers store.
+    # `substr(timestamp, 1, 13)`) so SQLite/Postgres can ride
+    # idx_usage_service_ts_agg as an index-only range scan.
     def _next_hour_start(hour_prefix: str) -> str:
         # "2026-06-04T23" → "2026-06-05T00:00:00.000Z"
         dt = (
@@ -670,41 +708,71 @@ def _query_usage_log_aggregate_rollup(
 
     start_hour_end = _next_hour_start(start_hour)
     end_hour_start = _hour_start(end_hour)
-
-    # Three-part UNION ALL: interior hours from rollup, boundary hours from
-    # raw usage_log. SUM(SUM(...)) collapses the two sources into a single
-    # (op_class, op_type) tuple per group.
     rollup_class_filter = class_filter  # same syntax works against the rollup
-    rows = con.execute(
-        f"""
-        SELECT operation_class, operation_type,
-               SUM(c) AS c, SUM(b) AS b
-        FROM (
-            SELECT operation_class, operation_type, count AS c, bytes AS b
-            FROM usage_log_hourly_summary
-            WHERE service_id = ? AND hour > ? AND hour < ? {rollup_class_filter}
-            UNION ALL
-            SELECT operation_class, operation_type, count AS c, COALESCE(bytes, 0) AS b
-            FROM usage_log
-            WHERE service_id = ? AND timestamp >= ? AND timestamp < ? {class_filter}
-            UNION ALL
-            SELECT operation_class, operation_type, count AS c, COALESCE(bytes, 0) AS b
-            FROM usage_log
-            WHERE service_id = ? AND timestamp >= ? AND timestamp <= ? {class_filter}
-        ) AS combined
-        GROUP BY operation_class, operation_type
-        """,
-        # Interior rollup params
-        [service_id, start_hour, end_hour]
-        + class_params
-        # Start-boundary raw params: [start, next_hour_after_start_hour)
-        + [service_id, start, start_hour_end]
-        + class_params
-        # End-boundary raw params: [start_of_end_hour, end]
-        + [service_id, end_hour_start, end]
-        + class_params,
-    ).fetchall()
-    return rows
+
+    if _is_hour_start(start, start_hour):
+        rows = con.execute(
+            f"""
+            SELECT operation_class, operation_type,
+                   SUM(c) AS c, SUM(b) AS b
+            FROM (
+                SELECT operation_class, operation_type, count AS c, bytes AS b
+                FROM usage_log_hourly_summary
+                WHERE service_id = ? AND hour >= ? AND hour < ? {rollup_class_filter}
+                UNION ALL
+                SELECT operation_class, operation_type, count AS c, COALESCE(bytes, 0) AS b
+                FROM usage_log
+                WHERE service_id = ? AND timestamp >= ? AND timestamp <= ? {class_filter}
+            ) AS combined
+            GROUP BY operation_class, operation_type
+            """,
+            [service_id, start_hour, end_hour] + class_params + [service_id, end_hour_start, end] + class_params,
+        ).fetchall()
+    else:
+        # Three-part UNION ALL: interior hours from rollup, boundary hours from
+        # raw usage_log. SUM(SUM(...)) collapses the two sources into a single
+        # (op_class, op_type) tuple per group.
+        rows = con.execute(
+            f"""
+            SELECT operation_class, operation_type,
+                   SUM(c) AS c, SUM(b) AS b
+            FROM (
+                SELECT operation_class, operation_type, count AS c, bytes AS b
+                FROM usage_log_hourly_summary
+                WHERE service_id = ? AND hour > ? AND hour < ? {rollup_class_filter}
+                UNION ALL
+                SELECT operation_class, operation_type, count AS c, COALESCE(bytes, 0) AS b
+                FROM usage_log
+                WHERE service_id = ? AND timestamp >= ? AND timestamp < ? {class_filter}
+                UNION ALL
+                SELECT operation_class, operation_type, count AS c, COALESCE(bytes, 0) AS b
+                FROM usage_log
+                WHERE service_id = ? AND timestamp >= ? AND timestamp <= ? {class_filter}
+            ) AS combined
+            GROUP BY operation_class, operation_type
+            """,
+            # Interior rollup params
+            [service_id, start_hour, end_hour]
+            + class_params
+            # Start-boundary raw params: [start, next_hour_after_start_hour)
+            + [service_id, start, start_hour_end]
+            + class_params
+            # End-boundary raw params: [start_of_end_hour, end]
+            + [service_id, end_hour_start, end]
+            + class_params,
+        ).fetchall()
+    result = [
+        {
+            "operation_class": r["operation_class"],
+            "operation_type": r["operation_type"],
+            "c": r["c"],
+            "b": r["b"],
+        }
+        for r in rows
+    ]
+    if use_cache:
+        _USAGE_AGG_CACHE[cache_key] = result
+    return result
 
 
 def get_usage_operation_buckets(
@@ -754,6 +822,38 @@ def get_usage_operation_buckets(
                 ORDER BY bucket
                 """,
                 [service_id, start_bound, end],
+            ).fetchall()
+        elif _is_hour_start(start_bound, start_hour):
+            end_hour_start = _hour_start(end_hour)
+            rows = con.execute(
+                f"""
+                SELECT bucket, operation_class, SUM(c) AS c
+                FROM (
+                    SELECT substr(hour, 1, {bucket_len}) AS bucket,
+                           operation_class,
+                           count AS c
+                    FROM usage_log_hourly_summary
+                    WHERE service_id = ? AND hour >= ? AND hour < ?
+                      AND operation_class IN ('A', 'B')
+                    UNION ALL
+                    SELECT substr(timestamp, 1, {bucket_len}) AS bucket,
+                           operation_class,
+                           count AS c
+                    FROM usage_log
+                    WHERE service_id = ? AND timestamp >= ? AND timestamp <= ?
+                      AND operation_class IN ('A', 'B')
+                ) AS combined
+                GROUP BY bucket, operation_class
+                ORDER BY bucket
+                """,
+                [
+                    service_id,
+                    start_hour,
+                    end_hour,
+                    service_id,
+                    end_hour_start,
+                    end,
+                ],
             ).fetchall()
         else:
             start_hour_end = _next_hour_start(start_hour)

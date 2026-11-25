@@ -245,9 +245,18 @@ def test_origin_aggregates_batches_dimensions_into_single_scan_and_minute_caches
     sections = {"summary", "slow_urls", "status_codes", "path_breakdown", "pop_latency", "ip_health"}
     res = origin_aggregates(svc, req, "2026-11-24T10:57:10.100Z", "2026-11-25T10:57:10.100Z", sections=sections)
 
-    dim_scans = [sql for sql, _ in client.calls if "FROM origin_minute_dimensions" in sql]
-    assert len(dim_scans) == 1
-    assert "origin:dimensions_batch" in dim_scans[0]
+    dim_calls = [(sql, params) for sql, params in client.calls if "FROM origin_minute_dimensions" in sql]
+    assert len(dim_calls) == 1
+    dim_sql, dim_params = dim_calls[0]
+    assert "origin:dimensions_batch" in dim_sql
+    assert "Array(String)" not in dim_sql
+    assert "LIMIT {" not in dim_sql
+    assert "LIMIT 100 BY dimension" in dim_sql
+    assert "dimension IN ({dim_0:String}" in dim_sql
+    assert "toFloat64(ifNotFinite(latency_q[2], -1.0))" in dim_sql
+    assert "dims" not in dim_params
+    assert "per_dim_limit" not in dim_params
+    assert {dim_params[k] for k in dim_params if k.startswith("dim_")} == {"url", "status", "edge", "pop", "oip"}
     assert res["slow_urls"]["rows"][0]["url"] == "/slow"
     assert res["status_codes"]["rows"][0] == {"status": 200, "count": 98, "pct": 98.0}
     assert res["path_breakdown"]["shielding_detected"] is True
@@ -289,6 +298,87 @@ def test_log_accounting_index_and_invalidation_scope() -> None:
 def test_insights_evaluator_concurrency_caps() -> None:
     from backend.high_scale.insights import evaluator as _ev
 
-    assert _ev._MAX_WORKERS <= 4
-    assert _ev._BACKGROUND_MAX_WORKERS <= 2
+    assert _ev._MAX_WORKERS <= 2
+    assert _ev._BACKGROUND_MAX_WORKERS == 1
+    assert _ev._COLD_POOL._max_workers == 1
     assert _ev._REFRESH_POOL._max_workers == 1
+
+
+@pytest.mark.no_postgres
+def test_insights_url_batches_avoid_double_scan_subquery() -> None:
+    from backend.high_scale.insights import batches as _b
+
+    sql_perf, _ = _b._build_url_perf(
+        {"url_latency_regression", "compression_drop"},
+        present={"url", "elapsed", "content_type", "resp_bytes", "compression"},
+        rollup_span=None,
+        filter_clause="",
+    )
+    sql_cache, _ = _b._build_url_cache(
+        {"cache_collapse", "pass_rate_surge"},
+        present={"url", "cache_status"},
+        rollup_span=None,
+        filter_clause="",
+    )
+    assert "WHERE url IN (SELECT url FROM base" not in sql_perf
+    assert "WHERE url IN (SELECT url FROM base" not in sql_cache
+
+
+@pytest.mark.no_postgres
+def test_usage_log_covering_index_hour_aligned_skip_and_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    from backend.core.metadata import fos_usage as _fu
+
+    assert any(
+        "idx_usage_service_ts_agg" in stmt
+        and "(service_id, timestamp, operation_class, operation_type, count, bytes)" in stmt
+        for stmt in _fu._SCHEMA
+    )
+
+    class _FakeCursor:
+        def __init__(self, rows: list[dict[str, Any]]) -> None:
+            self._rows = rows
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            return self._rows
+
+    class _FakeCon:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, list[Any]]] = []
+
+        def execute(self, sql: str, params: list[Any]) -> _FakeCursor:
+            self.calls.append((sql, list(params)))
+            return _FakeCursor([{"operation_class": "A", "operation_type": "list_objects", "c": 42, "b": 1024}])
+
+    _fu._USAGE_AGG_CACHE.clear()
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    con = _FakeCon()
+
+    # Hour-aligned start should skip start-boundary raw scan (only 1 usage_log branch, hour >= ?)
+    rows1 = _fu._query_usage_log_aggregate_rollup(
+        con, "svc-u1", "2026-11-24T12:00:00.000Z", "2026-11-25T12:15:00.000Z", ""
+    )
+    assert len(con.calls) == 1
+    sql_aligned = con.calls[0][0]
+    assert "hour >= ? AND hour < ?" in sql_aligned
+    assert sql_aligned.count("FROM usage_log\n") == 1
+    assert rows1 == [{"operation_class": "A", "operation_type": "list_objects", "c": 42, "b": 1024}]
+
+    # Identical second call hits _USAGE_AGG_CACHE (dedupes /admin/usage-log page_size=50 + 500)
+    rows2 = _fu._query_usage_log_aggregate_rollup(
+        con, "svc-u1", "2026-11-24T12:00:00.000Z", "2026-11-25T12:15:00.000Z", ""
+    )
+    assert len(con.calls) == 1
+    assert rows2 == rows1
+
+    # Cache invalidation for service_id clears entry
+    _fu._invalidate_usage_agg_cache("svc-u1")
+    _fu._query_usage_log_aggregate_rollup(con, "svc-u1", "2026-11-24T12:00:00.000Z", "2026-11-25T12:15:00.000Z", "")
+    assert len(con.calls) == 2
+
+    # Non-hour-aligned start still uses 3-part UNION ALL (2 usage_log branches, hour > ?)
+    _fu._query_usage_log_aggregate_rollup(con, "svc-u1", "2026-11-24T12:05:00.000Z", "2026-11-25T12:15:00.000Z", "")
+    assert len(con.calls) == 3
+    sql_unaligned = con.calls[2][0]
+    assert "hour > ? AND hour < ?" in sql_unaligned
+    assert sql_unaligned.count("FROM usage_log\n") == 2
+    _fu._USAGE_AGG_CACHE.clear()

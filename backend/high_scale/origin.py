@@ -383,23 +383,27 @@ def _dimensions_batch_rows(
     min_requests: int,
     per_dim_limit: int,
 ) -> dict[str, list[dict[str, Any]]]:
+    if not dimensions:
+        return {}
     where, params = _where(service.service_id, "origin_dimensions", start_time, end_time)
-    params["dims"] = dimensions
+    dim_placeholders = ", ".join(f"{{dim_{i}:String}}" for i in range(len(dimensions)))
+    for i, dim in enumerate(dimensions):
+        params[f"dim_{i}"] = dim
     params["min_requests"] = int(min_requests)
-    params["per_dim_limit"] = int(per_dim_limit)
+    limit_val = max(1, int(per_dim_limit))
     rows = service.client.execute(
         "/* origin:dimensions_batch */ "
         "SELECT dimension, value, "
         "sum(origin_minute_dimensions.requests) AS requests, "
         "sum(origin_5xx) AS origin_5xx, "
         f"{_sketch_select('latency', 'latency', (0.5, 0.95, 0.99))} "
-        f"FROM origin_minute_dimensions WHERE {where} AND dimension IN {{dims:Array(String)}} "
+        f"FROM origin_minute_dimensions WHERE {where} AND dimension IN ({dim_placeholders}) "
         "GROUP BY dimension, value "
         "HAVING (dimension != 'url' OR sum(origin_minute_dimensions.requests) >= {min_requests:UInt64}) "
         "AND (dimension != 'oip' OR sum(origin_minute_dimensions.requests) >= 10) "
         "ORDER BY dimension ASC, "
-        "if(dimension = 'status', toFloat64(requests), ifNotFinite(latency_q[2], -1.0)) DESC "
-        "LIMIT {per_dim_limit:UInt32} BY dimension",
+        "if(dimension = 'status', toFloat64(requests), toFloat64(ifNotFinite(latency_q[2], -1.0))) DESC "
+        f"LIMIT {limit_val} BY dimension",
         params,
     )
     grouped: dict[str, list[dict[str, Any]]] = {dim: [] for dim in dimensions}
