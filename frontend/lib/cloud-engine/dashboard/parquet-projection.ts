@@ -11,17 +11,27 @@ export const FOOTER_PROBE_BYTES = 64 * 1024;
  */
 export const RANGE_MERGE_GAP = 8 * 1024;
 /**
- * What one more range request costs, in bytes of transfer. The gap widens from
- * [`RANGE_MERGE_GAP`] while that lowers `bytes + ranges × cost`: a 6 h window of
- * compacts otherwise needs 100+ requests per file, which under load takes
- * longer than reading the unneeded columns would.
+ * What one more range request costs, in bytes of transfer. Any gap up to this
+ * size merges unconditionally, eliminating small intra-row-group splits without
+ * pulling in wide unneeded columns.
  */
 export const RANGE_REQUEST_COST_BYTES = 32 * 1024;
 /**
- * Upper bound on HTTP ranges issued for a single projected Parquet file.
- * Heavily compacted files can hold 30–60+ row groups; 64 ranges (4 waves at
- * RANGE_CONCURRENCY = 16) avoids browser-queue stalls while letting multi-row-group
- * raw compacts keep projected reads instead of collapsing across wide unneeded columns.
+ * Soft target for HTTP ranges per projected file. Above this count, gaps up to
+ * [`SOFT_MERGE_MAX_GAP`] are merged greedily while planned bytes stay within
+ * [`SOFT_MERGE_MAX_FILE_RATIO`] of the file size, reducing HTTP 206 counts
+ * without swallowing wide unneeded columns.
+ */
+export const TARGET_RANGES_PER_FILE = 32;
+/** Largest gap merged when reducing a file's ranges toward [`TARGET_RANGES_PER_FILE`]. */
+export const SOFT_MERGE_MAX_GAP = 96 * 1024;
+/** Maximum fraction of file size Pass 2 may reach while coalescing toward [`TARGET_RANGES_PER_FILE`]. */
+export const SOFT_MERGE_MAX_FILE_RATIO = 0.40;
+/**
+ * Hard upper bound on HTTP ranges issued for a single projected Parquet file
+ * (4 waves at RANGE_CONCURRENCY = 16). Preserves projected byte savings on
+ * heavily compacted files with wide unneeded columns while capping worst-case
+ * HTTP 206 fan-out.
  */
 export const MAX_RANGES_PER_FILE = 64;
 
@@ -150,6 +160,121 @@ export function timestampRowGroupFilter(
   };
 }
 
+/** Exact-value include/exclude filter predicate used for Parquet row-group statistics pruning. */
+export type RowGroupFilterPredicate = {
+  field: string;
+  mode: "include" | "exclude";
+  values: readonly string[];
+};
+
+const utf8Encoder = new TextEncoder();
+const NUMERIC_LITERAL = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/;
+const INTEGER_LITERAL = /^[+-]?\d+$/;
+
+function compareUtf8(a: string, b: string): number {
+  if (a === b) return 0;
+  // Fast path for pure ASCII: JS UTF-16 code units equal UTF-8 bytes.
+  let ascii = true;
+  for (let i = 0; i < a.length; i++) if (a.charCodeAt(i) > 0x7f) { ascii = false; break; }
+  if (ascii) {
+    for (let i = 0; i < b.length; i++) if (b.charCodeAt(i) > 0x7f) { ascii = false; break; }
+  }
+  if (ascii) return a < b ? -1 : 1;
+  const ab = utf8Encoder.encode(a);
+  const bb = utf8Encoder.encode(b);
+  const len = Math.min(ab.length, bb.length);
+  for (let i = 0; i < len; i++) {
+    if (ab[i] !== bb[i]) return ab[i] < bb[i] ? -1 : 1;
+  }
+  return ab.length < bb.length ? -1 : ab.length > bb.length ? 1 : 0;
+}
+
+function numericInRange(raw: string, min: number | bigint, max: number | bigint): boolean {
+  const trimmed = raw.trim();
+  if (!NUMERIC_LITERAL.test(trimmed)) return false;
+  if (typeof min === "bigint" && typeof max === "bigint" && INTEGER_LITERAL.test(trimmed)) {
+    try {
+      const value = BigInt(trimmed);
+      return value >= min && value <= max;
+    } catch {
+      return false;
+    }
+  }
+  const value = Number(trimmed);
+  return Number.isFinite(value) && value >= Number(min) && value <= Number(max);
+}
+
+function numericEquals(raw: string, target: number | bigint): boolean {
+  const trimmed = raw.trim();
+  if (!NUMERIC_LITERAL.test(trimmed)) return false;
+  if (typeof target === "bigint" && INTEGER_LITERAL.test(trimmed)) {
+    try {
+      return BigInt(trimmed) === target;
+    } catch {
+      return false;
+    }
+  }
+  const value = Number(trimmed);
+  return Number.isFinite(value) && value === Number(target);
+}
+
+/**
+ * Whether a row group may hold a row matching all exact-value `filters`: false
+ * only when Parquet column chunk statistics prove zero rows can match. Groups
+ * lacking statistics, missing the column, or using wildcards are conservatively kept.
+ */
+export function filterRowGroupFilter(
+  metadata: FileMetaData,
+  filters: readonly RowGroupFilterPredicate[],
+): (rowGroup: number) => boolean {
+  const active = filters.filter(
+    (f) => f.values.length > 0 && f.field !== "conn_requests" && f.values.every((v) => v.length > 0 && !v.includes("*")),
+  );
+  if (active.length === 0) return () => true;
+  return (rowGroup) => {
+    const group = metadata.row_groups[rowGroup];
+    if (!group) return true;
+    for (const predicate of active) {
+      const chunk = group.columns.find(
+        (column) => column.meta_data?.path_in_schema.length === 1 && column.meta_data.path_in_schema[0] === predicate.field,
+      );
+      const meta = chunk?.meta_data;
+      const stats = meta?.statistics;
+      if (!meta || !stats) continue;
+      const nullCount = stats.null_count;
+      const numValues = meta.num_values;
+      if (predicate.mode === "include" && nullCount !== undefined && numValues !== undefined && BigInt(nullCount) >= BigInt(numValues)) {
+        return false;
+      }
+      const min = stats.min_value;
+      const max = stats.max_value;
+      if (min === undefined || max === undefined || min === null || max === null) continue;
+      const zeroNulls = nullCount !== undefined && BigInt(nullCount) === BigInt(0);
+      if (typeof min === "string" && typeof max === "string") {
+        if (predicate.mode === "include") {
+          if (!predicate.values.some((v) => compareUtf8(v, min) >= 0 && compareUtf8(v, max) <= 0)) return false;
+        } else if (min === max && zeroNulls && predicate.values.includes(min)) {
+          return false;
+        }
+      } else if ((typeof min === "number" || typeof min === "bigint") && (typeof max === "number" || typeof max === "bigint")) {
+        if (predicate.mode === "include") {
+          if (!predicate.values.some((v) => numericInRange(v, min, max))) return false;
+        } else if (min === max && zeroNulls && predicate.values.some((v) => numericEquals(v, min))) {
+          return false;
+        }
+      } else if (typeof min === "boolean" && typeof max === "boolean") {
+        const parsed = predicate.values.flatMap((v) => v === "true" ? [true] : v === "false" ? [false] : []);
+        if (predicate.mode === "include") {
+          if (parsed.length === 0 || (min === max && !parsed.includes(min))) return false;
+        } else if (min === max && zeroNulls && parsed.includes(min)) {
+          return false;
+        }
+      }
+    }
+    return true;
+  };
+}
+
 /**
  * The column chunks of `columns` to fetch, in the row groups `keepRowGroup`
  * accepts (every row group by default), coalesced into byte ranges.
@@ -172,7 +297,7 @@ export function planParquetProjection(
     if (!(start >= 4 && length > 0 && start + length <= dataEnd)) throw new Error("Parquet column chunk is outside the file");
     chunks.push({ rowGroup, column, start, length });
   }));
-  const ranges = coalesceRanges([...chunks].sort((a, b) => a.start - b.start));
+  const ranges = coalesceRanges([...chunks].sort((a, b) => a.start - b.start), size);
   const neededBytes = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
   return {
     footer, columns, rowGroups, chunks, ranges, neededBytes,
@@ -185,7 +310,10 @@ export function planParquetProjection(
  * The cheapest coalescing of the chunks (sorted by start) by bytes plus request cost,
  * subject to at most [`MAX_RANGES_PER_FILE`] ranges.
  */
-function coalesceRanges(chunks: readonly { start: number; length: number }[]): { start: number; end: number }[] {
+function coalesceRanges(
+  chunks: readonly { start: number; length: number }[],
+  fileSize: number,
+): { start: number; end: number }[] {
   if (chunks.length === 0) return [];
   // Merging any gap <= max(RANGE_MERGE_GAP, RANGE_REQUEST_COST_BYTES) strictly lowers or
   // preserves `bytes + ranges * RANGE_REQUEST_COST_BYTES` without pulling in large gaps.
@@ -199,9 +327,29 @@ function coalesceRanges(chunks: readonly { start: number; length: number }[]): {
       ranges.push({ start: chunk.start, end: chunk.start + chunk.length });
     }
   }
-  // If still above MAX_RANGES_PER_FILE, greedily merge only the smallest remaining gap.
-  // This avoids the power-of-2 cliff that collapses uniform row-group compacts into one
-  // whole-file range.
+  let totalBytes = ranges.reduce((sum, r) => sum + (r.end - r.start), 0);
+  const maxSoftBytes = Math.floor(fileSize * SOFT_MERGE_MAX_FILE_RATIO);
+  // Pass 2 (soft target): while above TARGET_RANGES_PER_FILE, merge the smallest
+  // remaining gap as long as it stays <= SOFT_MERGE_MAX_GAP and planned bytes stay
+  // within SOFT_MERGE_MAX_FILE_RATIO of the file size.
+  while (ranges.length > TARGET_RANGES_PER_FILE) {
+    let minIndex = 0;
+    let minGap = Infinity;
+    for (let i = 0; i < ranges.length - 1; i++) {
+      const gap = ranges[i + 1].start - ranges[i].end;
+      if (gap < minGap) {
+        minGap = gap;
+        minIndex = i;
+      }
+    }
+    if (minGap > SOFT_MERGE_MAX_GAP || totalBytes + minGap > maxSoftBytes) break;
+    ranges[minIndex].end = ranges[minIndex + 1].end;
+    ranges.splice(minIndex + 1, 1);
+    totalBytes += minGap;
+  }
+  // Pass 3 (hard cap): if still above MAX_RANGES_PER_FILE, greedily merge only the
+  // smallest remaining gap. This avoids the power-of-2 cliff that collapses uniform
+  // row-group compacts into one whole-file range.
   while (ranges.length > MAX_RANGES_PER_FILE) {
     let minIndex = 0;
     let minGap = Infinity;
@@ -253,7 +401,7 @@ export async function fetchCoalescedProjectedRanges(
   const spans = plans
     .flatMap((plan) => plan.ranges.map((r) => ({ start: r.start, length: r.end - r.start })))
     .sort((a, b) => a.start - b.start || a.length - b.length);
-  const unified = coalesceRanges(spans);
+  const unified = coalesceRanges(spans, plans[0].footer.size);
   const tail = plans[0].footer.tail;
   const fetched = await Promise.all(
     unified.map(({ start, end }) => fetchRangeWithTail(tail, start, end, fetchRange)),

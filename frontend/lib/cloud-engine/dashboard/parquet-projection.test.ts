@@ -4,8 +4,9 @@ import { parquetMetadata, type SchemaElement } from "hyparquet";
 import { parquetWriteBuffer } from "hyparquet-writer";
 import { createNodeBackend } from "./duckdb";
 import {
-  assembleProjectedParquet, fetchProjectedRanges, FOOTER_PROBE_BYTES, MAX_RANGES_PER_FILE, parquetQuerySchema,
-  planParquetProjection, readParquetFooter, RANGE_MERGE_GAP, RANGE_REQUEST_COST_BYTES,
+  assembleProjectedParquet, fetchProjectedRanges, filterRowGroupFilter, FOOTER_PROBE_BYTES, MAX_RANGES_PER_FILE,
+  parquetQuerySchema, planParquetProjection, readParquetFooter, RANGE_MERGE_GAP, RANGE_REQUEST_COST_BYTES,
+  TARGET_RANGES_PER_FILE,
 } from "./parquet-projection";
 import { projectedReader } from "./projected-read";
 
@@ -303,6 +304,120 @@ describe("column-projected Parquet", () => {
     const plannedBytes = plan.ranges.reduce((sum, range) => sum + (range.end - range.start), 0);
     expect(plan.ranges.length).toBeLessThanOrEqual(MAX_RANGES_PER_FILE);
     expect(plannedBytes).toBeLessThan(bytes.byteLength * 0.45);
+  });
+
+  it("coalesces medium inter-chunk gaps down to TARGET_RANGES_PER_FILE to cut HTTP 206s", async () => {
+    // 44 row groups where each unneeded column chunk is ~80 KiB (above baseGap, below SOFT_MERGE_MAX_GAP):
+    // two-tier coalescing should merge down to TARGET_RANGES_PER_FILE (32) rather than issuing 44+ HTTP 206s.
+    const rowGroupSize = 500;
+    const rowGroups = 44;
+    const count = rowGroupSize * rowGroups;
+    const bytes = parquetWriteBuffer({
+      codec: "SNAPPY",
+      rowGroupSize,
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: count }, (_, i) => new Date(1700000000000 + i * 1000)) },
+        { name: "status", type: "INT32", data: Array.from({ length: count }, () => 200) },
+        { name: "medium_unneeded", type: "STRING", data: Array.from({ length: count }, () => noise(160)) },
+      ],
+    });
+    const footer = await readParquetFooter(bytes.byteLength, ranged(bytes).fetchRange);
+    expect(footer.metadata.row_groups).toHaveLength(rowGroups);
+    const plan = planParquetProjection(footer, new Set(["timestamp", "status"]));
+    expect(plan.ranges.length).toBeLessThanOrEqual(TARGET_RANGES_PER_FILE);
+  });
+
+  it("prunes row groups using Parquet column chunk statistics for include/exclude filters", async () => {
+    const rowGroupSize = 200;
+    // 4 row groups with distinct pop, status, edge, and nullable tag values.
+    const pops = [
+      ...Array.from({ length: rowGroupSize }, () => "AMS"),
+      ...Array.from({ length: rowGroupSize }, () => "IAD"),
+      ...Array.from({ length: rowGroupSize }, () => "SJC"),
+      ...Array.from({ length: rowGroupSize }, () => "SJC"),
+    ];
+    const statuses = [
+      ...Array.from({ length: rowGroupSize }, () => 200),
+      ...Array.from({ length: rowGroupSize }, () => 503),
+      ...Array.from({ length: rowGroupSize }, () => 200),
+      ...Array.from({ length: rowGroupSize }, () => 404),
+    ];
+    const edges = [
+      ...Array.from({ length: rowGroupSize }, () => true),
+      ...Array.from({ length: rowGroupSize }, () => true),
+      ...Array.from({ length: rowGroupSize }, () => false),
+      ...Array.from({ length: rowGroupSize }, () => true),
+    ];
+    const tags = [
+      ...Array.from({ length: rowGroupSize }, () => null),
+      ...Array.from({ length: rowGroupSize }, () => "canary"),
+      ...Array.from({ length: rowGroupSize }, () => null),
+      ...Array.from({ length: rowGroupSize }, () => "prod"),
+    ];
+    const bytes = parquetWriteBuffer({
+      codec: "SNAPPY",
+      rowGroupSize,
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: rowGroupSize * 4 }, (_, i) => new Date(1700000000000 + i * 1000)) },
+        { name: "pop", type: "STRING", data: pops },
+        { name: "status", type: "INT32", data: statuses },
+        { name: "edge", type: "BOOLEAN", data: edges },
+        { name: "tag", type: "STRING", data: tags },
+      ],
+    });
+    const footer = await readParquetFooter(bytes.byteLength, ranged(bytes).fetchRange);
+    expect(footer.metadata.row_groups).toHaveLength(4);
+
+    // String include: only RG 1 has pop = "IAD"
+    const byPop = planParquetProjection(
+      footer,
+      new Set(["timestamp", "pop"]),
+      filterRowGroupFilter(footer.metadata, [{ field: "pop", mode: "include", values: ["IAD"] }]),
+    );
+    expect(byPop.rowGroups).toEqual([1]);
+
+    // Numeric include: only RG 1 has status = 503
+    const byStatus = planParquetProjection(
+      footer,
+      new Set(["timestamp", "status"]),
+      filterRowGroupFilter(footer.metadata, [{ field: "status", mode: "include", values: ["503"] }]),
+    );
+    expect(byStatus.rowGroups).toEqual([1]);
+
+    // Boolean include: RG 2 is all-false so edge=true prunes RG 2
+    const byEdge = planParquetProjection(
+      footer,
+      new Set(["timestamp", "edge"]),
+      filterRowGroupFilter(footer.metadata, [{ field: "edge", mode: "include", values: ["true"] }]),
+    );
+    expect(byEdge.rowGroups).toEqual([0, 1, 3]);
+
+    // String exclude on constant non-null RG: exclude SJC prunes RG 2 and RG 3
+    const excludeSjc = planParquetProjection(
+      footer,
+      new Set(["timestamp", "pop"]),
+      filterRowGroupFilter(footer.metadata, [{ field: "pop", mode: "exclude", values: ["SJC"] }]),
+    );
+    expect(excludeSjc.rowGroups).toEqual([0, 1]);
+
+    // All-null RG pruned by include filter on nullable column
+    const byTag = planParquetProjection(
+      footer,
+      new Set(["timestamp", "tag"]),
+      filterRowGroupFilter(footer.metadata, [{ field: "tag", mode: "include", values: ["prod"] }]),
+    );
+    expect(byTag.rowGroups).toEqual([3]);
+
+    // Wildcard, missing column, and empty value list conservatively keep all row groups
+    const wildcard = planParquetProjection(
+      footer,
+      new Set(["timestamp", "pop"]),
+      filterRowGroupFilter(footer.metadata, [
+        { field: "pop", mode: "include", values: ["IA*"] },
+        { field: "missing_col", mode: "include", values: ["x"] },
+      ]),
+    );
+    expect(wildcard.rowGroups).toEqual([0, 1, 2, 3]);
   });
 
   it("rejects a footer whose chunk offsets fall outside the file", async () => {

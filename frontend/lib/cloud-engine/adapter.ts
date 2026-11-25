@@ -85,6 +85,7 @@ import {
 import { sseResponse, type SseEmit } from "./sse-response";
 import { captureCloudQueryContext, measureCloudQuery, publishCloudWorkerTelemetry, type CloudQueryContext } from "./readiness";
 import { compileFiltersToSql, FIELD_DUCKDB_TYPES, getDuckDBEngine, type DuckDBReadContext } from "./dashboard/duckdb";
+import type { RowGroupFilterPredicate } from "./dashboard/parquet-projection";
 import type { components } from "@/types/api.generated";
 import { handleSecurityRequest, securityMaskIps, securityScanColumns, threatIntelScanColumns } from "./security";
 import { shareAuditRows } from "./share-audit";
@@ -1112,6 +1113,48 @@ async function cloudInsightAvailability(request: Request, entryMetaEpoch: number
   return jsonResponse(handleInsightAvailability(serviceId ? String(serviceId) : undefined, enabled), request);
 }
 
+function extractRowGroupFilters(params: Record<string, unknown>): RowGroupFilterPredicate[] {
+  for (const raw of [params.filters, params.custom_filters]) {
+    let obj: unknown = raw;
+    if (typeof obj === "string" && obj.trim()) {
+      try { obj = JSON.parse(obj); } catch { obj = null; }
+    }
+    if (obj && typeof obj === "object" && !Array.isArray(obj) && (obj as { filter_mode?: unknown }).filter_mode === "or") {
+      return [];
+    }
+  }
+  const grouped = new Map<string, { field: string; mode: "include" | "exclude"; values: string[] }>();
+  const add = (field: string, mode: "include" | "exclude", value: string) => {
+    if (!value) return;
+    const key = `${field}\0${mode}`;
+    const entry = grouped.get(key) ?? { field, mode, values: [] };
+    if (!entry.values.includes(value)) entry.values.push(value);
+    grouped.set(key, entry);
+  };
+  for (const pred of filtersPayloadToPredicates(
+    params.filters as Parameters<typeof filtersPayloadToPredicates>[0],
+    params.custom_filters as Parameters<typeof filtersPayloadToPredicates>[1],
+  )) {
+    add(pred.field, pred.mode, pred.value);
+  }
+  const scalarMap: readonly [string, string][] = [
+    ["filter_country", "country"],
+    ["filter_pop", "pop"],
+    ["filter_asn", "asn"],
+    ["filter_sf", "cmcd_sf"],
+    ["filter_ot", "cmcd_ot"],
+    ["filter_st", "cmcd_st"],
+    ["filter_cid", "cmcd_cid"],
+  ];
+  for (const [paramKey, col] of scalarMap) {
+    const val = params[paramKey];
+    if (val !== undefined && val !== null && String(val) !== "") {
+      add(col, "include", String(val));
+    }
+  }
+  return [...grouped.values()];
+}
+
 async function prepareCloudScan(
   request: Request,
   insightBaseline?: RollupResult,
@@ -1242,6 +1285,7 @@ async function prepareCloudScan(
   const followUp = Boolean(detectors) && url.pathname === "/api/insights";
   const widenFollowUp = followUp && !insightsSummaryWindows.includes(insightsWindowKey(decodedServiceId, end));
   const firstFrom = sessionsFrom > Date.parse(scanStart) ? new Date(sessionsFrom).toISOString() : scanStart;
+  const rowGroupFilters = !insights && scanColumns ? extractRowGroupFilters(params) : [];
   const loadRange = (wider: boolean, from = firstFrom) => ensureCloudRange(
     from, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
     serviceId: decodedServiceId, customFields,
@@ -1256,6 +1300,7 @@ async function prepareCloudScan(
     } } : scanColumns ? { projection: {
       columns: scanColumns,
       ...url.pathname === "/api/cmcd/aggregates" ? { requireAnyColumns: CMCD_REQUIRED_ANY_COLUMNS } : {},
+      ...rowGroupFilters.length ? { filters: rowGroupFilters } : {},
     } } : {},
   });
   // A range over budget is answered exactly over the widest newest window that fits

@@ -8,8 +8,9 @@ import {
   type DerivedFile,
 } from "./dashboard/sources";
 import {
-  assembleProjectedParquet, fetchProjectedRanges, planParquetProjection, readParquetFooter, readsWholeFirst,
-  readWholeParquetFooter, type ParquetProjection,
+  assembleProjectedParquet, fetchProjectedRanges, filterRowGroupFilter, planParquetProjection, readParquetFooter,
+  readsWholeFirst, readWholeParquetFooter, timestampRowGroupFilter, type ParquetFooter, type ParquetProjection,
+  type RowGroupFilterPredicate,
 } from "./dashboard/parquet-projection";
 import { wholeFileIdentity } from "./dashboard/projected-read";
 import { beginCloudLoading } from "./loading-progress";
@@ -135,6 +136,8 @@ export async function ensureCloudRange(
       columns: readonly string[];
       /** Skip files whose schema has none of these columns without downloading their data ranges. */
       requireAnyColumns?: readonly string[];
+      /** Exact-value include/exclude filters used to prune non-matching Parquet row groups via footer statistics. */
+      filters?: readonly RowGroupFilterPredicate[];
       maxBytes?: number;
       wider?: { from: string; columns: readonly string[] };
     };
@@ -180,8 +183,9 @@ export async function ensureCloudRange(
     const files = manifests.flatMap((manifest, index) =>
       manifest.files.map((file) => {
         const identity = fileIdentity(scope, options.serviceId, datasets[index], file);
-        const columns = widerColumns && Date.parse(file.end) > widerFromMs ? widerColumns : projectedColumns;
-        return { ...file, dataset: datasets[index], columns,
+        const isWider = Boolean(widerColumns && Date.parse(file.end) > widerFromMs);
+        const columns = isWider ? widerColumns : projectedColumns;
+        return { ...file, dataset: datasets[index], identity, isWider, columns,
           wholeKey: wholeFileIdentity(wholeScope, file, datasets[index]),
           footerKey: JSON.stringify([...identity, "footer"]),
           scopedKey: JSON.stringify([...identity,
@@ -189,6 +193,20 @@ export async function ensureCloudRange(
         };
       }),
     );
+    const rangeFromMs = Date.parse(from);
+    const rangeToMs = Date.parse(to);
+    const rowGroupFilters = projection?.filters?.length ? projection.filters : null;
+    const planForFile = (file: typeof files[number], footer: ParquetFooter): ParquetProjection => {
+      const winFrom = file.isWider && Number.isFinite(widerFromMs)
+        ? Math.min(rangeFromMs, widerFromMs) : rangeFromMs;
+      const byTime = Number.isFinite(winFrom) && Number.isFinite(rangeToMs)
+        ? timestampRowGroupFilter(footer.metadata, winFrom, rangeToMs) : null;
+      const byFilters = rowGroupFilters ? filterRowGroupFilter(footer.metadata, rowGroupFilters) : null;
+      const keep = byTime && byFilters
+        ? (rg: number) => byTime(rg) && byFilters(rg)
+        : byTime ?? byFilters ?? undefined;
+      return planParquetProjection(footer, file.columns!, keep);
+    };
     const fileLimit = datasets.every((dataset) => dataset === "rum") ? MAX_RUM_RANGE_FILES : MAX_RANGE_FILES;
     if (files.length > fileLimit) throw overBudget({ unit: "files", needed: files.length, limit: fileLimit });
     const wholeBytes = files.reduce((total, file) => total + file.size, 0);
@@ -264,14 +282,40 @@ export async function ensureCloudRange(
           const stored = await fileSource.readDerivedFile(file.key, file.scopedKey);
           generation.assertCurrent();
           downloads.signal.throwIfAborted();
-          if (stored) persisted.set(file.scopedKey, stored);
-          else if (wholeFirst.has(file.scopedKey)) {
-            const whole = await fetchWhole(file);
+          if (stored) {
+            persisted.set(file.scopedKey, stored);
+            return;
+          }
+          let whole: Awaited<ReturnType<typeof fetchWhole>> | undefined;
+          let footer: ParquetFooter;
+          if (wholeFirst.has(file.scopedKey)) {
+            whole = await fetchWhole(file);
             generation.assertCurrent();
             downloads.signal.throwIfAborted();
-            wholes.set(file.scopedKey, whole);
-            plans.set(file.scopedKey, planParquetProjection(await readWholeParquetFooter(whole.bytes), file.columns!));
-          } else plans.set(file.scopedKey, planParquetProjection(await readFooter(file), file.columns!));
+            footer = await readWholeParquetFooter(whole.bytes);
+          } else {
+            footer = await readFooter(file);
+          }
+          const plan = planForFile(file, footer);
+          if (plan.rowGroups.length === 0) {
+            skippedKeys.add(file.scopedKey);
+            return;
+          }
+          if (plan.rowGroups.length < footer.metadata.row_groups.length) {
+            file.scopedKey = JSON.stringify([
+              ...file.identity, "projection", ...[...file.columns!].sort(), { rowGroups: plan.rowGroups },
+            ]);
+            if (engine.getFileMeta(file.scopedKey)) return;
+            const prunedStored = await fileSource.readDerivedFile(file.key, file.scopedKey);
+            generation.assertCurrent();
+            downloads.signal.throwIfAborted();
+            if (prunedStored) {
+              persisted.set(file.scopedKey, prunedStored);
+              return;
+            }
+          }
+          if (whole) wholes.set(file.scopedKey, whole);
+          plans.set(file.scopedKey, plan);
         }));
         generation.assertCurrent();
         signal.throwIfAborted();
@@ -355,9 +399,9 @@ export async function ensureCloudRange(
         // Resident at the budget check but evicted since.
         if (!plan && readsWholeFirst(file)) {
           held = await fetchWhole(file);
-          plan = planParquetProjection(await readWholeParquetFooter(held.bytes), file.columns!);
+          plan = planForFile(file, await readWholeParquetFooter(held.bytes));
         }
-        plan ??= planParquetProjection(await readFooter(file), file.columns!);
+        plan ??= planForFile(file, await readFooter(file));
         const plannedRangeBytes = plan.ranges.reduce((sum, r) => sum + (r.end - r.start), 0);
         // When coalesced ranges already cover most of a file (e.g. heavily compacted multi-row-group
         // files), fetch the file once via `fileSource.fetchFile` so concurrent page sections share a

@@ -1201,4 +1201,76 @@ describe("Cloud first-page analytical range loading", () => {
     );
     expect(projCalls).toEqual([]);
   });
+
+  it("prunes out-of-window and non-matching row groups during projected scans without poisoning wider windows", async () => {
+    const startMs = Date.parse(from);
+    const rgRows = 500;
+    // 4 row groups spanning 40 minutes (10m each), each with a large unneeded column so ranges stay distinct.
+    const pad = "x".repeat(320);
+    const timestamps = Array.from({ length: rgRows * 4 }, (_, i) => {
+      const rg = Math.floor(i / rgRows);
+      return new Date(startMs + rg * 600_000 + (i % rgRows) * 1000);
+    });
+    const pops = Array.from({ length: rgRows * 4 }, (_, i) => ["AMS", "IAD", "FRA", "SJC"][Math.floor(i / rgRows)]);
+    const bytes = parquetWriteBuffer({
+      codec: "UNCOMPRESSED",
+      rowGroupSize: rgRows,
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: timestamps },
+        { name: "pop", type: "STRING", data: pops },
+        { name: "wide", type: "STRING", data: Array.from({ length: rgRows * 4 }, (_, i) => `${i}-${pad}`) },
+      ],
+    });
+    // Open-hour file above 256 KiB so it uses footer-planned range reads.
+    expect(bytes.byteLength).toBeGreaterThan(512 * 1024);
+    const openEnd = new Date(Date.now() + 60_000).toISOString();
+    const entry = { ...file, key: "processed/request/pruned-rgs.parquet", end: openEnd, size: bytes.byteLength };
+    vi.mocked(fetchManifest).mockResolvedValue({ files: [entry], complete: true });
+
+    let dataRangeCalls = 0;
+    let dataRangeBytes = 0;
+    source.fetchRange.mockImplementation(async (_entry: ManifestFile, start: number, end: number) => {
+      const chunk = bytes.slice(start, end);
+      if (end < bytes.byteLength) {
+        dataRangeCalls += 1;
+        dataRangeBytes += chunk.byteLength;
+      }
+      return chunk;
+    });
+
+    // 1. Filter pop="IAD" (only RG 1 matches): should fetch far fewer ranges/bytes and return only IAD rows.
+    const filteredRead = await ensureCloudRange(from, to, signal, ["request"], {
+      projection: {
+        columns: ["timestamp", "pop"],
+        filters: [{ field: "pop", mode: "include", values: ["IAD"] }],
+      },
+    });
+    expect(await filteredRead.executeSql("SELECT pop, count(*)::INT AS n FROM requests GROUP BY pop"))
+      .toEqual([{ pop: "IAD", n: rgRows }]);
+    expect(dataRangeCalls).toBe(1);
+    const filteredBytes = dataRangeBytes;
+    filteredRead.release?.();
+
+    // 2. Filter matching ZERO row groups skips data range reads completely and returns 0 rows.
+    dataRangeCalls = 0;
+    const emptyRead = await ensureCloudRange(from, to, signal, ["request"], {
+      projection: {
+        columns: ["timestamp", "pop"],
+        filters: [{ field: "pop", mode: "include", values: ["NRT"] }],
+      },
+    });
+    expect(dataRangeCalls).toBe(0);
+    expect(await emptyRead.executeSql("SELECT count(*)::INT AS n FROM requests")).toEqual([{ n: 0 }]);
+    emptyRead.release?.();
+
+    // 3. Unfiltered wider read on the same file must NOT reuse the pruned RG-1-only cache entry.
+    dataRangeCalls = 0;
+    dataRangeBytes = 0;
+    const fullRead = await ensureCloudRange(from, to, signal, ["request"], {
+      projection: { columns: ["timestamp", "pop"] },
+    });
+    expect(await fullRead.executeSql("SELECT count(*)::INT AS n FROM requests")).toEqual([{ n: rgRows * 4 }]);
+    expect(dataRangeBytes).toBeGreaterThan(filteredBytes * 2);
+    fullRead.release?.();
+  });
 });

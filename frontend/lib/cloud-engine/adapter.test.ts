@@ -2200,7 +2200,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     // A section reads only its own columns: the summary needs no URL, POP, origin IP or leg.
     const summaryColumns = ORIGIN_SCAN_COLUMNS.aggregates.filter((c) => !["edge", "url", "pop", "oip"].includes(c));
     expect(await options("/api/origin/aggregates", { filters, sections: ["summary"] }))
-      .toEqual({ columns: [...summaryColumns, "host"] });
+      .toEqual({ columns: [...summaryColumns, "host"], filters: [{ field: "host", mode: "include", values: ["example.com"] }] });
     expect(await options("/api/origin/slow-urls")).toEqual({ columns: ["timestamp", "ts_ms", "ottfb", "ttfb", "url"] });
     expect(await options("/api/origin/shielding-analysis", {}))
       .toEqual({ columns: [...ORIGIN_SCAN_COLUMNS["shielding-analysis"]] });
@@ -2210,7 +2210,8 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     const overview = await options("/api/value/summary", { sections: ["overview"], custom_filters: team });
     expect(overview?.columns).toEqual(expect.arrayContaining(["cache", "elapsed", "resp_bytes", "team"]));
     expect(overview?.columns).not.toContain("url");
-    expect(await options("/api/value/summary", { custom_filters: team })).toEqual({ columns: [...VALUE_SCAN_COLUMNS, "team"] });
+    expect(await options("/api/value/summary", { custom_filters: team }))
+      .toEqual({ columns: [...VALUE_SCAN_COLUMNS, "team"], filters: [{ field: "team", mode: "include", values: ["a"] }] });
     expect(await options("/api/assets/aggregates", { filters: [{ column: "host", operator: "=", value: "a" }] }))
       .toEqual({ columns: [...ASSETS_SCAN_COLUMNS, "host"] });
     expect(await options("/api/origin/aggregates", { filters: [filters] })).toBeUndefined();
@@ -2220,7 +2221,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect(tables?.columns).toEqual(expect.arrayContaining(["url", "resp_bytes", "ttl", "cache"]));
     expect(tables?.columns).not.toContain("ttfb");
     expect(await options("/api/performance/aggregates", { filters, sort_by: "p99" }))
-      .toEqual({ columns: [...PERFORMANCE_SCAN_COLUMNS, "host"] });
+      .toEqual({ columns: [...PERFORMANCE_SCAN_COLUMNS, "host"], filters: [{ field: "host", mode: "include", values: ["example.com"] }] });
     expect(await options("/api/performance", {})).toEqual({ columns: [...PERFORMANCE_SCAN_COLUMNS] });
     expect(await options("/api/performance/aggregates", { filters: [filters] })).toBeUndefined();
     const range = { start_time: "2026-11-05T00:00:00Z", end_time: "2026-11-06T00:00:00Z" };
