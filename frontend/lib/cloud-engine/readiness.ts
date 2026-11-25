@@ -1772,7 +1772,7 @@ function scanParamKeyEnd(
   p: number,
   allowQuoted: boolean,
   escapeState?: QuoteEscapeState,
-): { end: number; keyLower: string } {
+): { end: number; keyLower: string; keySegments: number } {
   const len = line.length;
   let k = p;
   let keyLower = "";
@@ -1848,7 +1848,7 @@ function scanParamKeyEnd(
     }
     break;
   }
-  return { end: k, keyLower: keySegments === 1 ? keyLower : "" };
+  return { end: k, keyLower: keySegments === 1 ? keyLower : "", keySegments };
 }
 
 function tryScanKeyValueParamEnd(
@@ -1953,15 +1953,14 @@ function scanContinuationParamsEnd(
         end = kvNext;
         continue;
       }
-      const { end: itemEnd } = scanParamKeyEnd(line, next, allowQuoted, escapeState);
+      const { end: itemEnd, keySegments } = scanParamKeyEnd(line, next, allowQuoted, escapeState);
       if (itemEnd > next) {
         let ws = itemEnd;
         while (ws < len && isInlineWs(line[ws])) ws += 1;
         const itemSlice = line.slice(next, itemEnd);
         const hasUrl = itemSlice.includes("[url]") || (allowQuoted && itemSlice.includes("://"));
-        const startsQuotedOrSentinel = line[next] === '"' || line[next] === "'" || line[next] === "`"
-          || line.startsWith("[redacted]", next);
-        const hasGluedSentinelOrQuote = !startsQuotedOrSentinel && (
+        const isJsonMemberKey = itemSlice.endsWith(":") || line[ws] === ":";
+        const hasGluedSentinelOrQuote = keySegments > 1 && !isJsonMemberKey && (
           itemSlice.includes("[redacted]")
           || (allowQuoted && /['"`]/.test(itemSlice))
         );

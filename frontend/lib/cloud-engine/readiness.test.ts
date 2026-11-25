@@ -3268,6 +3268,26 @@ it("SEC-T5-ITER40-FE-03: prevents non-contraction apostrophe mismatch and cross-
         ["mode", "closed"],
         "Error: Runtime Error: [redacted]",
       ],
+      [
+        'Runtime Error: Authorization: Digest a=1, "secret"100ms',
+        ["secret", "100ms"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": Digest a=1, "secret"100ms',
+        ["secret", "100ms"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: Authorization: Digest a=1, "x"mode',
+        ["mode"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": Digest a=1, "x"mode',
+        ["mode"],
+        "Error: Runtime Error: [redacted]",
+      ],
     ];
     for (const [msg, forbidden, expectedExact] of cases) {
       const err = new Error(msg);
