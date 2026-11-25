@@ -737,6 +737,42 @@ describe('ShareLogin & Sessions Pages', () => {
       expect(safeReturnTarget(undefined)).toBeNull()
       expect(safeReturnTarget('')).toBeNull()
     })
+
+    it('rejects C0 control-character smuggled redirects, case-varied /share-login, and javascript: schemes', () => {
+      for (const target of [
+        '/\x00/evil.com',
+        '/\x01/evil.com',
+        '/\x1f/evil.com',
+        '/\x7f/evil.com',
+        ' /dashboard',
+        '/dashboard\r\nSet-Cookie: a=b',
+        '/SHARE-LOGIN',
+        '/Share-Login/acknowledge',
+        'javascript:alert(1)',
+        '///evil.com',
+      ]) {
+        expect(safeReturnTarget(target), `expected null for ${JSON.stringify(target)}`).toBeNull()
+      }
+    })
+
+    it('sanitizes server-returned data.redirect on login so external or javascript: URLs fall back to /dashboard', async () => {
+      server.use(
+        http.get('/api/share/auth-config', () => HttpResponse.json({ passcode_enabled: true, providers: [] })),
+        http.post('/api/share/login', () =>
+          HttpResponse.json({ ok: true, tos_pending: false, redirect: 'https://evil.example/phish' }),
+        ),
+      )
+      useMockShareSearchParams = true
+      mockSearchParams = new URLSearchParams()
+      const user = userEvent.setup()
+      renderWithQuery(<ShareLoginForm />)
+      const emailInput = await screen.findByLabelText(/email/i)
+      const passInput = screen.getByLabelText(/^passcode$/i)
+      await user.type(emailInput, 'analyst@example.com')
+      await user.type(passInput, 'secret-passcode')
+      await user.click(screen.getByRole('button', { name: /sign in/i }))
+      await waitFor(() => expect(locationAssignSpy).toHaveBeenCalledWith('/dashboard'))
+    })
   })
 
   function makeRow(overrides: Partial<SessionRow> = {}): SessionRow {

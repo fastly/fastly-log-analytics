@@ -209,6 +209,48 @@ function shouldGateAdminRequest(request: NextRequest, rawSocketUntrusted = false
 // Node.js runtime, so moving it here reads the real env on every call.
 const API_PROXY_PREFIXES = ['/api/', '/js/']
 
+function decodePercentSafely(input: string): string {
+  let current = input
+  for (let pass = 0; pass < 3; pass++) {
+    const decoded = current.replace(/%[0-9a-fA-F]{2}/g, (match) => {
+      const code = Number.parseInt(match.slice(1), 16)
+      return String.fromCharCode(code)
+    })
+    if (decoded === current) break
+    current = decoded
+  }
+  return current
+}
+
+function normalizePathnameForGating(raw: string): string {
+  const decoded = decodePercentSafely(raw).replace(/\\/g, '/')
+  const segments: string[] = []
+  for (const seg of decoded.split('/')) {
+    if (!seg || seg === '.') continue
+    if (seg === '..') {
+      segments.pop()
+    } else {
+      segments.push(seg)
+    }
+  }
+  return `/${segments.join('/')}`.toLowerCase()
+}
+
+function isBlockedPagePath(normalizedPath: string): boolean {
+  return ANALYST_BLOCKED_PREFIXES.some(
+    p => normalizedPath === p || normalizedPath.startsWith(`${p}/`),
+  )
+}
+
+function isBlockedDataPath(normalizedPath: string): boolean {
+  return (
+    normalizedPath.startsWith('/_next/data/') &&
+    ANALYST_BLOCKED_PREFIXES.some(
+      p => normalizedPath.endsWith(`${p}.json`) || normalizedPath.includes(`${p}/`),
+    )
+  )
+}
+
 // Skip CSP rebuild on static-asset paths — they don't render HTML and
 // a stray Content-Security-Policy header on every chunk download is
 // just wire noise. The matcher below also excludes them; the
@@ -256,6 +298,7 @@ function buildCsp(nonce: string): string {
     `frame-ancestors 'none'`,
     `base-uri 'self'`,
     `form-action 'self'`,
+    `object-src 'none'`,
   ].join('; ')
 }
 
@@ -277,12 +320,28 @@ export function proxy(request: NextRequest) {
       hasNonEmptyHeader(request.headers, FRONTEND_PROXY_HEADER) ||
       hasExternalForwardedFor(request.headers))
 
+  let rawPathname = pathname
+  if (request.url) {
+    try {
+      rawPathname = new URL(request.url).pathname
+    } catch {
+      rawPathname = pathname
+    }
+  }
+  const normalizedPathname = normalizePathnameForGating(pathname)
+  const normalizedRawPathname = normalizePathnameForGating(rawPathname)
+
   // Bypass CSP/gating entirely -- those exist for HTML page renders, not
   // proxied API responses. Route Handlers under app/api/[...path]/route.ts
   // and app/js/[...path]/route.ts proxy to API_PROXY_URL with agent:false
   // and graceful SSE/disconnect handling (avoiding Next's internal httpxy
   // rewrite proxy which logs unhandled ECONNRESET on socket close).
-  if (API_PROXY_PREFIXES.some(p => pathname.startsWith(p))) {
+  // Only bypass when BOTH normalized paths remain inside /api/ or /js/ so
+  // traversal sequences like /api/%2e%2e/admin cannot slip past admin gating.
+  const isApiProxyPath =
+    API_PROXY_PREFIXES.some(p => normalizedPathname.startsWith(p)) &&
+    API_PROXY_PREFIXES.some(p => normalizedRawPathname.startsWith(p))
+  if (isApiProxyPath) {
     if (
       stampWireForwardedProxy ||
       request.headers.has(RAW_SOCKET_UNTRUSTED_HEADER) ||
@@ -299,14 +358,17 @@ export function proxy(request: NextRequest) {
     return NextResponse.next()
   }
 
-  const rawPathname = request.url ? new URL(request.url).pathname : pathname
   const contentType = request.headers.get('content-type') || ''
   const isServerAction = request.headers.has('next-action') || (request.method === 'POST' && contentType.toLowerCase().includes('multipart/form-data'))
   const isDataRequest =
-    (pathname.startsWith('/_next/data/') && ANALYST_BLOCKED_PREFIXES.some(p => pathname.endsWith(`${p}.json`) || pathname.includes(`${p}/`))) ||
-    (rawPathname.startsWith('/_next/data/') && ANALYST_BLOCKED_PREFIXES.some(p => rawPathname.endsWith(`${p}.json`) || rawPathname.includes(`${p}/`)))
+    isBlockedDataPath(normalizedPathname) ||
+    isBlockedDataPath(normalizedRawPathname)
 
-  const isGatedPath = ANALYST_BLOCKED_PREFIXES.some(p => pathname === p || pathname.startsWith(`${p}/`)) || isServerAction || isDataRequest
+  const isGatedPath =
+    isBlockedPagePath(normalizedPathname) ||
+    isBlockedPagePath(normalizedRawPathname) ||
+    isServerAction ||
+    isDataRequest
 
   if (isGatedPath) {
     if (shouldGateAdminRequest(request, rawSocketUntrusted)) {
@@ -374,7 +436,6 @@ export function proxy(request: NextRequest) {
   }
 
   response.headers.set('Content-Security-Policy', buildCsp(nonce))
-  response.headers.set('x-nonce', nonce)
   return response
 }
 

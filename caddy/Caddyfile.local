@@ -38,6 +38,15 @@
 # user maps in /etc/hosts (e.g. fastly.analytics). The friendly names must also
 # be in the backend's Host allowlist — see LOCAL_HOSTS in docker-compose.yml.
 :80 {
+	header {
+		-Server
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+		Cross-Origin-Opener-Policy "same-origin"
+		?Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+	}
 	# Even the optional local public entry cannot impersonate the mTLS gateway.
 	request_header -X-Admin-Gateway-Token
 	request_header -X-FLA-Admin-Gateway

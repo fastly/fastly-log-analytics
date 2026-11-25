@@ -473,4 +473,93 @@ describe('SEC-02 & SEC-10.3 frontend proxy gating and cookie hardening', () => {
     const csp = res.headers.get('content-security-policy') || ''
     expect(csp).toContain("'wasm-unsafe-eval'")
   })
+
+  it('Campaign B3: enforces object-src none CSP parity and strips x-nonce from HTTP responses while forwarding it on SSR request headers', () => {
+    const nextSpy = vi.spyOn(NextResponse, 'next')
+    try {
+      const req = new NextRequest('https://share.example.com/dashboard', {
+        headers: { 'x-proxied-by-caddy': 'true' },
+      })
+      const res = proxy(req)
+      expect(res.status).toBe(200)
+
+      // Response CSP must include object-src 'none', base-uri 'self', frame-ancestors 'none', form-action 'self'
+      const csp = res.headers.get('content-security-policy') || ''
+      expect(csp).toContain("object-src 'none'")
+      expect(csp).toContain("base-uri 'self'")
+      expect(csp).toContain("frame-ancestors 'none'")
+      expect(csp).toContain("form-action 'self'")
+
+      // Nonce must be forwarded internally on request headers for Next.js SSR, and NEVER leaked on response headers
+      const forwardedHeaders = nextSpy.mock.calls[0]?.[0]?.request?.headers as Headers | undefined
+      const reqNonce = forwardedHeaders?.get('x-nonce')
+      expect(reqNonce).toBeTruthy()
+      expect(csp).toContain(`'nonce-${reqNonce}'`)
+      expect(res.headers.get('x-nonce')).toBeNull()
+    } finally {
+      nextSpy.mockRestore()
+    }
+  })
+
+  it('Campaign B3: gates encoded, case-varied, double-slash, dot-traversal, backslash, and rawPathname-divergent admin paths', () => {
+    const gatedPagePaths = [
+      '/%61dmin',
+      '/%41dmin/settings',
+      '/admin%2fsettings',
+      '/%2561dmin',
+      '/Admin',
+      '/ADMIN/share',
+      '/Alerts',
+      '/Usage',
+      '/High-Scale',
+      '/LOGS',
+      '//admin',
+      '///admin/settings',
+      '/./admin',
+      '/dashboard/../admin',
+      '/dashboard/%2e%2e/admin',
+      '/api/%2e%2e/admin',
+      '/js/%2e%2e/logs',
+      '/admin%5csettings',
+      '/%5cadmin',
+    ]
+    for (const p of gatedPagePaths) {
+      const req = new NextRequest(`https://share.example.com${p}`, {
+        headers: { 'x-proxied-by-caddy': 'true' },
+      })
+      expect(proxy(req).status, `expected 307 for ${p}`).toBe(307)
+    }
+
+    const gatedDataPaths = [
+      '/_next/data/build1/%61dmin.json',
+      '/_next/data/build1/Admin.json',
+      '/_next//data/build1/admin.json',
+      '/_next/data/build1/admin%2fsettings.json',
+      '/_next/data/build1/Logs.json',
+    ]
+    for (const p of gatedDataPaths) {
+      const req = new NextRequest(`https://share.example.com${p}`, {
+        headers: { 'x-proxied-by-caddy': 'true' },
+      })
+      expect(proxy(req).status, `expected 403 for ${p}`).toBe(403)
+    }
+
+    // Divergent rawPathname (request.url) vs request.nextUrl.pathname must still gate
+    const divergentReq = new NextRequest('https://share.example.com/dashboard', {
+      headers: { 'x-proxied-by-caddy': 'true' },
+    })
+    Object.defineProperty(divergentReq, 'url', {
+      value: 'https://share.example.com/%61dmin',
+      configurable: true,
+    })
+    expect(proxy(divergentReq).status).toBe(307)
+
+    // Normal analyst paths and API paths remain accessible
+    for (const allowed of ['/dashboard', '/query', '/api/services']) {
+      const req = new NextRequest(`https://share.example.com${allowed}`, {
+        headers: { 'x-proxied-by-caddy': 'true' },
+      })
+      expect(proxy(req).status, `expected 200 for ${allowed}`).toBe(200)
+    }
+  })
 })

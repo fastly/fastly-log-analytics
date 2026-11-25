@@ -629,7 +629,8 @@ _HTML_CSP_DEFAULT = (
     "connect-src 'self'; "
     "frame-ancestors 'none'; "
     "base-uri 'self'; "
-    "form-action 'self'"
+    "form-action 'self'; "
+    "object-src 'none'"
 )
 _API_CSP_DEFAULT = "default-src 'none'; frame-ancestors 'none'"
 

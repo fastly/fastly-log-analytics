@@ -55,7 +55,15 @@ export function SSEProgressView({
   // enabled). The error event is captured in `lines` even though it's filtered
   // out of the main feed below, so read its `link` here.
   const errorLine = [...lines].reverse().find(l => l.type === 'error')
-  const errorLink = typeof errorLine?.link === 'string' ? errorLine.link : null
+  const errorLink = (() => {
+    if (typeof errorLine?.link !== 'string') return null
+    try {
+      const parsed = new URL(errorLine.link)
+      return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? errorLine.link : null
+    } catch {
+      return null
+    }
+  })()
 
   const lastProgressLine = [...lines].reverse().find(l => l.type === 'progress')
   const lastStepStatusLine = [...lines].reverse().find(l =>
@@ -148,7 +156,7 @@ export function SSEProgressView({
                   <a
                     href={errorLink}
                     target="_blank"
-                    rel="noreferrer"
+                    rel="noopener noreferrer"
                     className="underline underline-offset-2 hover:opacity-80"
                   >
                     Open Fastly to enable it

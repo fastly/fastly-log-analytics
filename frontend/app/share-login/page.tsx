@@ -56,6 +56,10 @@ const OAUTH_ERROR_DEFAULT = 'Sign-in failed. Please try again.'
 // back to the server-suggested redirect.
 export function safeReturnTarget(raw: string | null | undefined): string | null {
   if (!raw) return null
+  // Reject ASCII C0 control characters, DEL, and leading/trailing whitespace.
+  // Browsers strip C0 controls (not just \s) during URL parsing, so `/\x01/evil.com`
+  // would bypass a \s-only check and resolve to protocol-relative `//evil.com`.
+  if (/[\u0000-\u001f\u007f]/.test(raw) || raw !== raw.trim()) return null
   // Strip whitespace before the prefix check. The browser removes embedded
   // tabs/newlines/CRs when resolving a URL, so `/\t/evil.com` would slip past
   // an exact-prefix blocklist and then resolve to the protocol-relative
@@ -64,7 +68,14 @@ export function safeReturnTarget(raw: string | null | undefined): string | null 
   const normalized = raw.replace(/\s/g, '')
   if (!normalized.startsWith('/')) return null
   if (normalized.startsWith('//') || normalized.startsWith('/\\')) return null
-  if (normalized.startsWith('/share-login')) return null
+  try {
+    const parsed = new URL(raw, 'https://fla.invalid')
+    if (parsed.origin !== 'https://fla.invalid') return null
+    const lcPath = parsed.pathname.toLowerCase()
+    if (lcPath === '/share-login' || lcPath.startsWith('/share-login/')) return null
+  } catch {
+    return null
+  }
   return raw
 }
 
@@ -252,7 +263,7 @@ export function ShareLoginForm() {
         // Hard reload to bypass the React Query bootstrap cache that was
         // populated BEFORE the session cookie was set (otherwise AppLayout
         // sees stale needs_login=true and bounces back here).
-        window.location.assign(returnTarget ?? data.redirect ?? '/dashboard')
+        window.location.assign(returnTarget ?? safeReturnTarget(data.redirect) ?? '/dashboard')
       }
     } catch (err) {
       setError(err instanceof Error && err.message ? err.message : 'Network error reaching the server.')

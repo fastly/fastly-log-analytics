@@ -720,3 +720,60 @@ def test_caddyfile_route_order_nonpublic_fcip_and_refresh_fastly_cidrs_compat() 
     local_caddy = (REPO_ROOT / "caddy/Caddyfile.local").read_text(encoding="utf-8")
     assert "request_header -X-FLA-Frontend-Proxy" in local_caddy
     assert "X-Proxied-By-Caddy" not in local_caddy.splitlines()[35:]
+
+
+@pytest.mark.security_regression
+def test_campaign_b3_edge_csp_parity_and_object_src_none(tmp_path: pathlib.Path) -> None:
+    from backend.utils import remote_access
+
+    # Every edge Caddyfile and K8s public-gateway template must emit fallback CSP with
+    # object-src 'none', base-uri 'self', frame-ancestors 'none', and form-action 'self'.
+    for rel in (
+        "Caddyfile",
+        "caddy/Caddyfile.local",
+        "caddy/Caddyfile.multipod",
+        "caddy/local-public-https.caddy",
+        "deploy/chart/fastly-log-analytics/templates/public-gateway.yaml",
+    ):
+        txt = (REPO_ROOT / rel).read_text(encoding="utf-8")
+        assert "?Content-Security-Policy" in txt, rel
+        csp_lines = [line for line in txt.splitlines() if "?Content-Security-Policy" in line]
+        assert csp_lines, rel
+        for line in csp_lines:
+            for directive in (
+                "object-src 'none'",
+                "base-uri 'self'",
+                "frame-ancestors 'none'",
+                "form-action 'self'",
+            ):
+                assert directive in line, f"{rel} missing {directive}: {line}"
+        assert 'X-Content-Type-Options "nosniff"' in txt, rel
+        assert 'X-Frame-Options "DENY"' in txt, rel
+        assert 'Cross-Origin-Opener-Policy "same-origin"' in txt, rel
+        assert "-Server" in txt, rel
+
+    # Local plain-HTTP Caddyfile.local must NOT emit Strict-Transport-Security on :80
+    local_caddy = (REPO_ROOT / "caddy/Caddyfile.local").read_text(encoding="utf-8")
+    assert "Strict-Transport-Security" not in local_caddy
+
+    # Backend HTML CSP fallback must also include object-src 'none'
+    for directive in (
+        "object-src 'none'",
+        "base-uri 'self'",
+        "frame-ancestors 'none'",
+        "form-action 'self'",
+    ):
+        assert directive in remote_access._HTML_CSP_DEFAULT, directive
+
+    # Validate Caddy syntax if caddy binary is installed
+    caddy_bin = shutil.which("caddy")
+    if caddy_bin:
+        for rel in ("caddy/Caddyfile.local", "caddy/Caddyfile.multipod"):
+            proc = subprocess.run(
+                [caddy_bin, "adapt", "--config", str(REPO_ROOT / rel), "--adapter", "caddyfile"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            assert proc.returncode == 0, f"{rel}: {proc.stderr}"

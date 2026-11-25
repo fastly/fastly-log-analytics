@@ -393,8 +393,9 @@ function Node({ node, prefix, level, type, forceExpand }: TreeProps & { node: Tr
                 onClick={(e) => {
                   e.stopPropagation()
                   window.open(
-                    `/api/download-folder?service=${activeServiceId}&root=${type}&prefix=${encodeURIComponent(node.prefix || prefix + node.name)}`,
+                    `/api/download-folder?service=${encodeURIComponent(activeServiceId ?? '')}&root=${encodeURIComponent(type)}&prefix=${encodeURIComponent(node.prefix || prefix + node.name)}`,
                     '_blank',
+                    'noopener,noreferrer',
                   )
                 }}
               >
@@ -480,7 +481,7 @@ function Node({ node, prefix, level, type, forceExpand }: TreeProps & { node: Tr
                 e.stopPropagation()
                 window.open(IS_CLOUD_MODE
                   ? `/api/file?service_id=${encodeURIComponent(activeServiceId ?? '')}&key=${encodeURIComponent(node.key as string)}`
-                  : `/api/download?service=${activeServiceId}&key=${encodeURIComponent(node.key as string)}`, '_blank')
+                  : `/api/download?service=${encodeURIComponent(activeServiceId ?? '')}&key=${encodeURIComponent(node.key as string)}`, '_blank', 'noopener,noreferrer')
               }}
             >
               <Download className="h-3.5 w-3.5" />
