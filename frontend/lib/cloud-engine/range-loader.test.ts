@@ -742,6 +742,60 @@ describe("Cloud first-page analytical range loading", () => {
     expect(source.fetchJson).toHaveBeenCalledTimes(2);
   });
 
+  it("skips data fetches for files lacking all requireAnyColumns", async () => {
+    Object.assign(wholeReadLimits, DEFAULT_WHOLE_READ_LIMITS);
+    const withCmcd = parquetWriteBuffer({
+      codec: "SNAPPY",
+      rowGroupSize: 500,
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: 1000 }, (_, i) => new Date(Date.parse(from) + i * 1000)) },
+        { name: "status", type: "INT32", data: Array.from({ length: 1000 }, () => 200) },
+        { name: "url", type: "STRING", data: Array.from({ length: 1000 }, (_, i) => `/wide/${"x".repeat(200)}/${i}`) },
+        { name: "cmcd_sid", type: "STRING", data: Array.from({ length: 1000 }, (_, i) => `s${i % 3}`) },
+      ],
+    });
+    const withoutCmcd = parquetWriteBuffer({
+      codec: "SNAPPY",
+      rowGroupSize: 500,
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: 1000 }, (_, i) => new Date(Date.parse(from) + i * 1000)) },
+        { name: "status", type: "INT32", data: Array.from({ length: 1000 }, () => 200) },
+        { name: "url", type: "STRING", data: Array.from({ length: 1000 }, (_, i) => `/p/${i}`) },
+      ],
+    });
+    const files = [
+      { ...file, key: "processed/request/has-cmcd.parquet", size: withCmcd.byteLength, etag: "c1" },
+      { ...file, key: "processed/request/no-cmcd.parquet", size: withoutCmcd.byteLength, etag: "c2" },
+    ];
+    const buffers = new Map([
+      [files[0].key, withCmcd],
+      [files[1].key, withoutCmcd],
+    ]);
+    vi.mocked(fetchManifest).mockResolvedValue({ complete: true, files });
+    const rangeKeys: string[] = [];
+    source.fetchRange.mockImplementation(async (entry: { key: string }, start: number, end: number) => {
+      rangeKeys.push(entry.key);
+      return buffers.get(entry.key)!.slice(start, end);
+    });
+    const wholeKeys: string[] = [];
+    source.fetchFile.mockImplementation(async (key: string) => {
+      wholeKeys.push(key);
+      return { bytes: buffers.get(key)!.slice(0), cached: false };
+    });
+    await ensureCloudRange(from, to, signal, ["request"], {
+      serviceId: "fixture-service",
+      projection: {
+        columns: ["timestamp", "status", "cmcd_sid"],
+        requireAnyColumns: ["cmcd_sid", "cmcd_br", "cmcd_bl", "cmcd_ot"],
+      },
+    });
+    // no-cmcd.parquet only gets a single footer probe, never a whole-file fetch or data ranges.
+    expect(wholeKeys).not.toContain(files[1].key);
+    expect(rangeKeys.filter((k) => k === files[1].key)).toHaveLength(1);
+    const rows = await getDuckDBEngine().executeSql("SELECT count(*) AS count FROM requests");
+    expect(rows).toEqual([{ count: 1000 }]);
+  });
+
   it("removes replaced, retired and other-service rows before using a new manifest", async () => {
     const original = parquetFixture([
       { timestamp: Date.parse(from) + 1000, status: 200, cache: "HIT", resp_bytes: 10 },

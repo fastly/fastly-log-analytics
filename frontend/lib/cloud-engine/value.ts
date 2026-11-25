@@ -502,7 +502,7 @@ export function valueScanColumns(
   for (const filters of [params.filters, params.custom_filters]) {
     if (filters == null || filters === "") continue;
     if (typeof filters !== "object" || Array.isArray(filters)) return null;
-    fields.push(...Object.keys(filters).map((key) => key.replace(/_\d+$/, "")));
+    fields.push(...Object.keys(filters).filter((key) => key !== "filter_mode").map((key) => key.replace(/_\d+$/, "")));
   }
   return [...new Set(fields)];
 }

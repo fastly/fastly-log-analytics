@@ -2,7 +2,7 @@
  * @vitest-environment jsdom
  */
 import { renderWithQuery } from '@/__tests__/helpers/page-smoke'
-import { cleanup, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { http, HttpResponse } from 'msw/http'
 import { server } from '@/__tests__/helpers/msw/handlers'
@@ -39,7 +39,8 @@ const ALL_SECTIONS = [
   'ngwaf_verified_bots', 'ngwaf_verified_bots_ts', 'wellknown_bots', 'bot_efficiency', 'tls_fingerprints',
   'fingerprint_coverage', 'req_size_dist', 'top_ips_header', 'ipv6_adoption', 'proxy_dist', 'conn_reuse_dist', 'proxies',
 ]
-const RAW_SECTIONS = ['wellknown_bots', 'bot_efficiency', 'top_ips_header', 'proxies']
+const WAF_ACTIVITY_SECTIONS = ALL_SECTIONS.filter((s) => s !== 'proxies')
+const WAF_ACTIVITY_RAW_SECTIONS = ['wellknown_bots', 'bot_efficiency', 'top_ips_header']
 
 const summaryAnswer = {
   ngwaf_configured: false, ngwaf_verified_bots: [], ngwaf_verified_bots_ts: [],
@@ -96,8 +97,8 @@ describe('SecurityClient on Cloud', () => {
     expect(screen.getByText('Connection Reuse (Requests per Connection)')).toBeInTheDocument()
     expect(screen.getAllByTestId('plot').map((plot) => plot.textContent)).toContain(JSON.stringify([['0-256B'], [7]]))
     expect(sections).toEqual(expect.arrayContaining([
-      ALL_SECTIONS.filter((s) => !RAW_SECTIONS.includes(s)),
-      RAW_SECTIONS,
+      WAF_ACTIVITY_SECTIONS.filter((s) => !WAF_ACTIVITY_RAW_SECTIONS.includes(s)),
+      WAF_ACTIVITY_RAW_SECTIONS,
     ]))
     expect(screen.getByText('Loading well-known bots...')).toBeInTheDocument()
     expect(screen.getByText('Loading oversized request headers...')).toBeInTheDocument()
@@ -132,8 +133,22 @@ describe('SecurityClient on Cloud', () => {
     expect(within(row).getByText('12')).toBeInTheDocument()
     expect(within(row).getByText('1,234')).toBeInTheDocument()
     expect(screen.getByText('Request Header Size Distribution')).toBeInTheDocument()
-    expect(sections).toEqual([ALL_SECTIONS])
+    expect(sections).toEqual([WAF_ACTIVITY_SECTIONS])
     expect(screen.queryByText(/Data through/)).not.toBeInTheDocument()
     expect(screen.queryByTestId('rollup-data-through-slot')).not.toBeInTheDocument()
+  })
+
+  it('defers proxies section until the Proxy Watchdog tab is active on Cloud', async () => {
+    setCloudModeRuntime(true)
+    layout.filterPayload = { pop: { mode: 'include', values: ['LIS'] } }
+    const sections = recordPosts(() => ({ ...summaryAnswer, wellknown_bots: [], bot_efficiency: [], top_ips_header: [], proxies: [] }))
+    renderWithQuery(<SecurityClient />, { withNuqs: true })
+
+    await screen.findByText('abc123')
+    expect(sections).toEqual([WAF_ACTIVITY_SECTIONS])
+    fireEvent.click(screen.getByRole('tab', { name: 'VPN & Proxy Watchdog' }))
+    await waitFor(() => {
+      expect(sections).toContainEqual(['proxies'])
+    })
   })
 })

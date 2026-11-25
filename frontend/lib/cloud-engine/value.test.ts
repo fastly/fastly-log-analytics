@@ -5,9 +5,22 @@ import {
   emptyValueSummary,
   handleValueRequest,
   queryValueSummary,
+  valueScanColumns,
 } from "./value";
 
 describe("Feature F22 — Fastly Value cloud-engine", () => {
+  it("excludes wide columns and filter_mode from summary-section projections", () => {
+    const cols = valueScanColumns({
+      sections: ["overview", "caching", "network"],
+      filters: { status: { mode: "include", values: ["200"] }, filter_mode: "and" },
+    });
+    expect(cols).not.toBeNull();
+    expect(cols).toContain("status");
+    for (const excluded of ["url", "ua", "waf_sig", "content_type", "filter_mode"]) {
+      expect(cols).not.toContain(excluded);
+    }
+  });
+
   it("serves populated page sections and chart buckets from physical short fields", async () => {
     const engine = new DuckDBAnalyticalEngine();
     const queries = vi.spyOn(engine, "executeSql");

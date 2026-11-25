@@ -12,7 +12,7 @@ z.config({ jitless: true });
 import { assetsScanColumns, handleAssetsRequest, type AssetsQueryParams } from "./assets";
 import { assetsRollupEligible } from "./assets-rollup";
 import { classifyUserAgentCounts } from "./bots/classify";
-import { cmcdScanColumns, handleCmcdRequest, type CmcdQueryParams } from "./cmcd";
+import { CMCD_REQUIRED_ANY_COLUMNS, cmcdScanColumns, handleCmcdRequest, type CmcdQueryParams } from "./cmcd";
 import { cmcdRollupEligible } from "./cmcd-rollup";
 import { formatAsnDisplayLabel, getCachedAsnName, loadAsnNames } from "./asn-names";
 import type { MinuteBucket } from "./dashboard/engine";
@@ -1253,7 +1253,10 @@ async function prepareCloudScan(
         from: new Date(Date.parse(end) - Number(params.window_size_hrs ?? 24) * 3_600_000).toISOString(),
         columns: insightScanColumns(filters),
       } } : {},
-    } } : scanColumns ? { projection: { columns: scanColumns } } : {},
+    } } : scanColumns ? { projection: {
+      columns: scanColumns,
+      ...url.pathname === "/api/cmcd/aggregates" ? { requireAnyColumns: CMCD_REQUIRED_ANY_COLUMNS } : {},
+    } } : {},
   });
   // A range over budget is answered exactly over the widest newest window that fits
   // (1h, then 4x wider, as /api/query widens), rather than refused.

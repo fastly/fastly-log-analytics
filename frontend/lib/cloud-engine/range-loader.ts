@@ -25,8 +25,8 @@ const MAX_RANGE_BYTES = MAX_REGISTERED_BYTES;
 const PREFETCH_CONCURRENCY = 6;
 // Projected ranges are mostly a few KiB, so their round trips, not bandwidth, bound a cold load.
 const RANGE_CONCURRENCY = 16;
-// Fall back to a whole-file fetch only when coalesced column ranges would already transfer 75%+ of the file.
-const WHOLE_FALLBACK_RANGE_RATIO = 0.75;
+// Fall back to a whole-file fetch only when coalesced column ranges would already transfer 85%+ of the file.
+const WHOLE_FALLBACK_RANGE_RATIO = 0.85;
 const source = browserSource("");
 const requestReads = new WeakMap<Request, DuckDBReadContext>();
 const activeRangeDownloads = new Set<AbortController>();
@@ -133,6 +133,8 @@ export async function ensureCloudRange(
      */
     projection?: {
       columns: readonly string[];
+      /** Skip files whose schema has none of these columns without downloading their data ranges. */
+      requireAnyColumns?: readonly string[];
       maxBytes?: number;
       wider?: { from: string; columns: readonly string[] };
     };
@@ -142,6 +144,7 @@ export async function ensureCloudRange(
   if (projection && datasets.some((dataset) => dataset !== "request"))
     throw new Error("Cloud column projection applies to request files only");
   const projectedColumns = projection ? new Set(projection.columns) : null;
+  const requiredAnyColumns = projection?.requireAnyColumns?.length ? new Set(projection.requireAnyColumns) : null;
   const wider = projection?.wider;
   const widerColumns = wider ? new Set([...projection.columns, ...wider.columns]) : null;
   // The same second-floored bound as the listing below.
@@ -243,12 +246,15 @@ export async function ensureCloudRange(
       // are read whole only when together they fit the budget.
       const wholeFirst = new Set<string>();
       const wholes = new Map<string, Awaited<ReturnType<typeof fetchWhole>>>();
+      const skippedKeys = new Set<string>();
       if (projectedColumns) {
         loading.update({ stage: "files" });
         const unknown = files.filter((file) => !engine.getFileMeta(file.scopedKey));
         if (unknown.some((file) => !(file.size > 0))) throw new Error("Cloud file listing has no file size to project");
         const now = Date.now();
-        const candidates = unknown.filter((file) => readsWholeFirst(file, now));
+        // When `requireAnyColumns` is set, read the footer first so files lacking all required
+        // columns are skipped without downloading them whole.
+        const candidates = requiredAnyColumns ? [] : unknown.filter((file) => readsWholeFirst(file, now));
         if (candidates.reduce((total, file) => total + file.size, 0) <= byteLimit) {
           for (const file of candidates) wholeFirst.add(file.scopedKey);
         }
@@ -269,10 +275,33 @@ export async function ensureCloudRange(
         }));
         generation.assertCurrent();
         signal.throwIfAborted();
-        const needed = files.reduce((total, file) => total + (plans.get(file.scopedKey)?.projectedBytes
+        if (requiredAnyColumns) {
+          for (const file of files) {
+            const plan = plans.get(file.scopedKey);
+            if (plan && !plan.presentColumns.some((col) => requiredAnyColumns.has(col))) {
+              skippedKeys.add(file.scopedKey);
+              continue;
+            }
+            const stored = persisted.get(file.scopedKey);
+            if (stored) {
+              try {
+                const cols: unknown = JSON.parse(stored.meta);
+                if (Array.isArray(cols) && !cols.some((col) => typeof col === "string" && requiredAnyColumns.has(col))) {
+                  skippedKeys.add(file.scopedKey);
+                }
+              } catch {
+                // Malformed cached metadata will be rejected when read below.
+              }
+            }
+          }
+        }
+      }
+      const activeFiles = skippedKeys.size ? files.filter((file) => !skippedKeys.has(file.scopedKey)) : files;
+      if (projectedColumns) {
+        const needed = activeFiles.reduce((total, file) => total + (plans.get(file.scopedKey)?.projectedBytes
           ?? persisted.get(file.scopedKey)?.byteLength ?? engine.getFileMeta(file.scopedKey)?.byteLength ?? 0), 0);
         if (needed > byteLimit) throw overBudget({ unit: "bytes", needed, limit: byteLimit });
-        const wireNeeded = files.reduce((total, file) => {
+        const wireNeeded = activeFiles.reduce((total, file) => {
           const plan = plans.get(file.scopedKey);
           if (!plan) return total;
           const held = wholes.get(file.scopedKey);
@@ -286,23 +315,23 @@ export async function ensureCloudRange(
         }, 0);
         if (wireNeeded > byteLimit) throw overBudget({ unit: "bytes", needed: wireNeeded, limit: byteLimit });
       }
-      const progress = { phase: "files" as const, cached: 0, toFetch: files.length,
+      const progress = { phase: "files" as const, cached: 0, toFetch: activeFiles.length,
         toDecode: 0, done: 0, downloadedBytes: 0, cachedBytes: 0 };
       loading.update({ stage: "files", progress: { ...progress } });
       const kind = (file: typeof files[number]) => file.dataset !== "rum" ? "request"
         : file.key.includes("/client_vitals/") ? "vitals"
           : file.key.includes("/client_errors/") ? "errors" : null;
-      if (files.some((file) => kind(file) === null)) throw new Error("Unrecognized Cloud RUM file kind");
+      if (activeFiles.some((file) => kind(file) === null)) throw new Error("Unrecognized Cloud RUM file kind");
       await engine.retainFiles({
-        request: files.filter((file) => kind(file) === "request").map((file) => file.scopedKey),
-        vitals: files.filter((file) => kind(file) === "vitals").map((file) => file.scopedKey),
-        errors: files.filter((file) => kind(file) === "errors").map((file) => file.scopedKey),
+        request: activeFiles.filter((file) => kind(file) === "request").map((file) => file.scopedKey),
+        vitals: activeFiles.filter((file) => kind(file) === "vitals").map((file) => file.scopedKey),
+        errors: activeFiles.filter((file) => kind(file) === "errors").map((file) => file.scopedKey),
       }, signal);
       generation.assertCurrent();
       const customFields = options.customFields?.filter((field) => !ALL_TABLE_FIELDS.includes(field.id)) ?? [];
       const lease = engine.lease(customFields);
       const residentBytesByKey = new Map<string, number>();
-      for (const file of files) {
+      for (const file of activeFiles) {
         const fileKind = kind(file);
         if (!fileKind) throw new Error("Unrecognized Cloud RUM file kind");
         const meta = lease.getFileMeta(file.scopedKey, fileKind);
@@ -310,7 +339,7 @@ export async function ensureCloudRange(
       }
       let bytes = 0;
       let handedOff = false;
-      const pending = files.filter((file) => !residentBytesByKey.has(file.scopedKey));
+      const pending = activeFiles.filter((file) => !residentBytesByKey.has(file.scopedKey));
       const fetchProjected = async (file: typeof files[number]) => {
         const stored = persisted.get(file.scopedKey);
         if (stored) {
@@ -376,7 +405,7 @@ export async function ensureCloudRange(
       };
       try {
         prefetch();
-        for (const file of files) {
+        for (const file of activeFiles) {
           signal.throwIfAborted();
           const fileKind = kind(file);
           if (!fileKind) throw new Error("Unrecognized Cloud RUM file kind");

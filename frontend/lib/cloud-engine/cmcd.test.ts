@@ -3,7 +3,9 @@ import { parquetWriteBuffer } from "hyparquet-writer";
 import { describe, expect, it } from "vitest";
 import {
   classifySessionDurationBucket,
+  CMCD_REQUIRED_ANY_COLUMNS,
   CMCD_SESSION_DURATION_BUCKETS,
+  cmcdScanColumns,
   emptyCmcdAggregates,
   handleCmcdRequest,
   queryCmcdAggregates,
@@ -19,6 +21,13 @@ import {
 } from "./dashboard/test-fixtures";
 
 describe("Feature F24 — CMCD Streaming Media cloud-engine", () => {
+  it("projects CMCD columns plus filter columns without filter_mode and names required CMCD columns", () => {
+    const cols = cmcdScanColumns({ country: { mode: "include", values: ["US"] }, filter_mode: "and" });
+    expect(cols).toContain("country");
+    expect(cols).not.toContain("filter_mode");
+    expect(CMCD_REQUIRED_ANY_COLUMNS).toEqual(["cmcd_sid", "cmcd_br", "cmcd_bl", "cmcd_ot"]);
+  });
+
   it("does not fabricate missing optional streaming measurements", async () => {
     const engine = new DuckDBAnalyticalEngine();
     try {

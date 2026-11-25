@@ -19,21 +19,21 @@ export const RANGE_MERGE_GAP = 8 * 1024;
 export const RANGE_REQUEST_COST_BYTES = 32 * 1024;
 /**
  * Upper bound on HTTP ranges issued for a single projected Parquet file.
- * Heavily compacted files can hold 30–60+ row groups; 32 ranges (2 waves at
+ * Heavily compacted files can hold 30–60+ row groups; 64 ranges (4 waves at
  * RANGE_CONCURRENCY = 16) avoids browser-queue stalls while letting multi-row-group
- * raw compacts keep projected reads instead of collapsing across large gaps.
+ * raw compacts keep projected reads instead of collapsing across wide unneeded columns.
  */
-export const MAX_RANGES_PER_FILE = 32;
+export const MAX_RANGES_PER_FILE = 64;
 
 /**
  * Projected reads of files up to these sizes fetch the whole file in one request instead of two
  * footer reads and then up to [`MAX_RANGES_PER_FILE`] column ranges. Any file up to
  * `anyUpToBytes` costs little more than its footer probe. A closed hour's compacted files up to
  * `closedHourUpToBytes` held many row groups that needed 15–17 requests for about half their
- * bytes; larger compacts (5–22 MiB) keep ranges, where a dashboard projection reads about a
- * third. Open-hour compacts above `anyUpToBytes` keep ranges too.
+ * bytes; larger compacts keep ranges, where a dashboard projection reads far fewer bytes.
+ * Open-hour compacts above `anyUpToBytes` keep ranges too.
  */
-export const wholeReadLimits = { anyUpToBytes: 256 * 1024, closedHourUpToBytes: 3 * 1024 * 1024 };
+export const wholeReadLimits = { anyUpToBytes: 256 * 1024, closedHourUpToBytes: 2 * 1024 * 1024 };
 
 const HOUR_MS = 3_600_000;
 

@@ -245,11 +245,14 @@ export const CMCD_SCAN_COLUMNS = [
   "as_name", "ttfb_ms", "ttfb", "time_elapsed_usec", "elapsed",
 ] as const;
 
+/** A Parquet file must contain at least one of these columns to satisfy `buildCmcdWhere`. */
+export const CMCD_REQUIRED_ANY_COLUMNS = ["cmcd_sid", "cmcd_br", "cmcd_bl", "cmcd_ot"] as const;
+
 /** The columns a projected /api/cmcd/aggregates load needs, or null when the filters can't name theirs. */
 export function cmcdScanColumns(filters: unknown): string[] | null {
   if (filters == null || filters === "") return [...CMCD_SCAN_COLUMNS];
   if (typeof filters !== "object" || Array.isArray(filters)) return null;
-  return [...new Set([...CMCD_SCAN_COLUMNS, ...Object.keys(filters)])];
+  return [...new Set([...CMCD_SCAN_COLUMNS, ...Object.keys(filters).filter((key) => key !== "filter_mode")])];
 }
 
 export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {

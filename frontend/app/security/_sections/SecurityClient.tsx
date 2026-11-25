@@ -45,6 +45,9 @@ const SECURITY_SECTIONS: SecuritySections = [
 // bot, header-IP and proxy summary rows when unfiltered, or from raw Parquet when summaries predate them.
 const RAW_SECTIONS: SecuritySections = ['wellknown_bots', 'bot_efficiency', 'top_ips_header', 'proxies']
 const SUMMARY_SECTIONS = SECURITY_SECTIONS.filter((s) => !RAW_SECTIONS.includes(s))
+const WAF_ACTIVITY_SECTIONS: SecuritySections = SECURITY_SECTIONS.filter((s) => s !== 'proxies')
+const WAF_ACTIVITY_RAW_SECTIONS: SecuritySections = ['wellknown_bots', 'bot_efficiency', 'top_ips_header']
+const PROXIES_SECTIONS: SecuritySections = ['proxies']
 
 type SecurityFilters = components['schemas']['SecurityAggregatesRequest']['filters']
 
@@ -83,11 +86,12 @@ function SecurityBody({
   const [botEfficiencyVisibility, setBotEfficiencyVisibility, onBotEfficiencyVisChange] = useColumnVisibility()
   const [ngwafBotVisibility, setNgwafBotVisibility] = useColumnVisibility()
 
+  const cloudMode = isCloudMode()
   const unfiltered = !hasFilterValues(filterPayload)
-  const rollupFirst = isCloudMode() && unfiltered
+  const rollupFirst = cloudMode && unfiltered
   const range = { relativeRange, isAutoRange, startTime, endTime, anchor }
   const fetchSecurity = async (sections: SecuritySections, rangeBody: RangeWire['rangeBody'], signal: AbortSignal | undefined) => {
-    if (!isCloudMode() && unfiltered) {
+    if (!cloudMode && unfiltered) {
       type BundleQuery = NonNullable<
         operations['security_bundle_get_api_security_bundle_get']['parameters']['query']
       > & { sections?: SecuritySections }
@@ -111,13 +115,28 @@ function SecurityBody({
     return data
   }
 
+  // On Cloud, defer the `proxies` section (10 geo/RTT columns) until the Proxy Watchdog tab is active.
+  const mainSections = cloudMode
+    ? (rollupFirst ? WAF_ACTIVITY_RAW_SECTIONS : WAF_ACTIVITY_SECTIONS)
+    : SECURITY_SECTIONS
+
   const securityQuery = useAnalyticsReportQuery<SecurityData | undefined>({
     namespace: ['security', 'aggregates'],
     serviceId: activeServiceId,
     filterPayload,
     range,
-    keyParts: rollupFirst ? [bucketSeconds, RAW_SECTIONS] : [bucketSeconds],
-    queryFn: ({ rangeBody, signal }) => fetchSecurity(rollupFirst ? RAW_SECTIONS : SECURITY_SECTIONS, rangeBody, signal),
+    keyParts: cloudMode ? [bucketSeconds, mainSections] : [bucketSeconds],
+    queryFn: ({ rangeBody, signal }) => fetchSecurity(mainSections, rangeBody, signal),
+  })
+
+  const proxiesQuery = useAnalyticsReportQuery<SecurityData | undefined>({
+    namespace: ['security', 'aggregates', 'proxies'],
+    serviceId: activeServiceId,
+    filterPayload,
+    range,
+    keyParts: [bucketSeconds],
+    queryOptions: { enabled: cloudMode && activeTab === 'proxy-watchdog' },
+    queryFn: ({ rangeBody, signal }) => fetchSecurity(PROXIES_SECTIONS, rangeBody, signal),
   })
 
   const rollupQuery = useAnalyticsReportQuery<SecurityData | undefined>({
@@ -205,12 +224,16 @@ function SecurityBody({
       </TabsContent>
 
       <TabsContent value="proxy-watchdog">
-        <RollupDataThroughSlot reserve={rollupFirst} meta={rowRollup} className="mb-6" />
+        <RollupDataThroughSlot
+          reserve={rollupFirst}
+          meta={cloudMode ? readRollupMeta(proxiesQuery.data) : rowRollup}
+          className="mb-6"
+        />
         <ProxyWatchdogSection
-          data={securityQuery.data}
-          rollup={rowRollup}
-          isLoading={securityQuery.isLoading}
-          error={securityQuery.error ?? null}
+          data={cloudMode ? proxiesQuery.data : securityQuery.data}
+          rollup={cloudMode ? readRollupMeta(proxiesQuery.data) : rowRollup}
+          isLoading={cloudMode ? proxiesQuery.isLoading : securityQuery.isLoading}
+          error={cloudMode ? (proxiesQuery.error ?? null) : (securityQuery.error ?? null)}
           startTime={startTime}
           endTime={endTime}
           activeServiceId={activeServiceId}

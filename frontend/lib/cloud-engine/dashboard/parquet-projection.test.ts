@@ -277,6 +277,34 @@ describe("column-projected Parquet", () => {
       .toEqual([{ n: BigInt(count), errors: BigInt(count / 10) }]);
   });
 
+  it("avoids swallowing wide unneeded columns on multi-row-group Cloud-shaped compacts", async () => {
+    const rowGroupSize = 500;
+    const rowGroups = 36;
+    const count = rowGroupSize * rowGroups;
+    const bytes = parquetWriteBuffer({
+      codec: "SNAPPY",
+      rowGroupSize,
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: count }, (_, i) => new Date(1700000000000 + i * 1000)) },
+        { name: "cache", type: "STRING", data: Array.from({ length: count }, (_, i) => i % 2 ? "HIT" : "MISS") },
+        { name: "url", type: "STRING", data: Array.from({ length: count }, () => noise(60)) },
+        { name: "proto", type: "STRING", data: Array.from({ length: count }, () => "HTTP/3") },
+        { name: "ua", type: "STRING", data: Array.from({ length: count }, () => noise(80)) },
+        { name: "referer", type: "STRING", data: Array.from({ length: count }, () => noise(60)) },
+        { name: "digest", type: "STRING", data: Array.from({ length: count }, () => noise(64)) },
+        { name: "edge", type: "STRING", data: Array.from({ length: count }, () => "1") },
+        { name: "rid", type: "STRING", data: Array.from({ length: count }, () => noise(48)) },
+        { name: "waf", type: "STRING", data: Array.from({ length: count }, () => "allow") },
+      ],
+    });
+    const footer = await readParquetFooter(bytes.byteLength, ranged(bytes).fetchRange);
+    expect(footer.metadata.row_groups).toHaveLength(rowGroups);
+    const plan = planParquetProjection(footer, new Set(["timestamp", "cache", "proto", "edge", "waf"]));
+    const plannedBytes = plan.ranges.reduce((sum, range) => sum + (range.end - range.start), 0);
+    expect(plan.ranges.length).toBeLessThanOrEqual(MAX_RANGES_PER_FILE);
+    expect(plannedBytes).toBeLessThan(bytes.byteLength * 0.45);
+  });
+
   it("rejects a footer whose chunk offsets fall outside the file", async () => {
     const bytes = fixture();
     const footer = await readParquetFooter(bytes.byteLength, ranged(bytes).fetchRange);
