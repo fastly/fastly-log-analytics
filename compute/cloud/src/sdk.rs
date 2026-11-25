@@ -61,29 +61,6 @@ struct KvCoordState {
     last_written_value: Option<Value>,
 }
 
-/// Picks the fresher of a KV REST API read (`api`) and a local Compute `KVStore::lookup` (`local`).
-/// Prefers `local` when it carries a strictly newer `_kv_written_ms`, or when `api` returned a
-/// known-dead generation and `local` has a different generation at least as new.
-fn pick_fresher_record(
-    api: crate::admin::Record,
-    local: Option<crate::admin::Record>,
-    dead_gen: Option<&str>,
-) -> crate::admin::Record {
-    let Some(local) = local else {
-        return api;
-    };
-    let api_ts = api.value["_kv_written_ms"].as_u64().unwrap_or(0);
-    let local_ts = local.value["_kv_written_ms"].as_u64().unwrap_or(0);
-    if local_ts > api_ts
-        || (dead_gen == Some(api.generation.as_str())
-            && local.generation != api.generation
-            && local_ts >= api_ts)
-    {
-        return local;
-    }
-    api
-}
-
 impl FastlyRuntime {
     pub fn backend_budget(&self) -> crate::admin::BackendBudget {
         self.budget.clone()
@@ -893,9 +870,16 @@ impl Runtime for FastlyRuntime {
                                 .filter(|c| c.dead_generation.as_deref() == Some(g_str))
                                 .map(|c| c.dead_since_ms)
                                 .unwrap_or(0);
-                            if dead_since > 0
-                                && now_ms.saturating_sub(dead_since) >= 2_000
-                                && self.budget.remaining() > 0
+                            if crate::admin::transport::allow_stale_pop_overwrite(
+                                key,
+                                coord
+                                    .as_ref()
+                                    .is_some_and(|c| c.last_written_value.is_some()),
+                                coord.as_ref().and_then(|c| c.dead_generation.as_deref()),
+                                dead_since,
+                                g_str,
+                                now_ms,
+                            ) && self.budget.remaining() > 0
                             {
                                 std::thread::sleep(std::time::Duration::from_millis(1_100));
                                 self.budget.charge()?;
@@ -1044,7 +1028,8 @@ impl Runtime for FastlyRuntime {
             // This prevents a stale REST API edge response from pinning `lease_generation` across
             // ticks when Compute's KVStore already has the fresher generation.
             let local_record = read_local_kv();
-            let record = pick_fresher_record(api_record, local_record, dead_gen);
+            let record =
+                crate::admin::transport::pick_fresher_record(api_record, local_record, dead_gen);
             return Ok(Some(record));
         }
         if min_expected_ts.is_some_and(|expected| {
@@ -2599,40 +2584,5 @@ mod platform_metrics_tests {
         });
 
         assert_eq!(result.unwrap_err(), "platform_metrics_pagination_loop");
-    }
-
-    #[test]
-    fn pick_fresher_record_prefers_newer_local_kv_over_stale_api_generation() {
-        let stale_api = crate::admin::Record {
-            generation: "1795643318773026".into(),
-            value: json!({"lease_until": 100, "_kv_written_ms": 1_000}),
-        };
-        let fresh_local = crate::admin::Record {
-            generation: "1795643350000001".into(),
-            value: json!({"lease_until": 0, "_kv_written_ms": 2_000}),
-        };
-        let picked = pick_fresher_record(stale_api.clone(), Some(fresh_local.clone()), None);
-        assert_eq!(picked.generation, fresh_local.generation);
-
-        // When api is strictly newer than local, api wins.
-        let newer_api = crate::admin::Record {
-            generation: "1795643390000002".into(),
-            value: json!({"lease_until": 0, "_kv_written_ms": 3_000}),
-        };
-        let picked = pick_fresher_record(newer_api.clone(), Some(fresh_local.clone()), None);
-        assert_eq!(picked.generation, newer_api.generation);
-
-        // When api returns a known dead generation at the same timestamp, a different local
-        // generation wins.
-        let same_ts_local = crate::admin::Record {
-            generation: "1795643350000009".into(),
-            value: json!({"lease_until": 0, "_kv_written_ms": 1_000}),
-        };
-        let picked = pick_fresher_record(
-            stale_api.clone(),
-            Some(same_ts_local.clone()),
-            Some("1795643318773026"),
-        );
-        assert_eq!(picked.generation, same_ts_local.generation);
     }
 }

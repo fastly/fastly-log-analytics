@@ -53,6 +53,52 @@ pub fn kv_write_delay_ms(last: u64, now: u64) -> Result<u64, String> {
     let delay = last.saturating_add(1100).saturating_sub(now);
     Ok(delay.min(1100))
 }
+
+/// Picks the fresher of a KV REST API read (`api`) and a local Compute `KVStore::lookup` (`local`).
+/// Prefers `local` when it carries a strictly newer `_kv_written_ms`, or when `api` returned a
+/// known-dead generation and `local` has a different generation at least as new.
+pub fn pick_fresher_record(api: Record, local: Option<Record>, dead_gen: Option<&str>) -> Record {
+    let Some(local) = local else {
+        return api;
+    };
+    let api_ts = api.value["_kv_written_ms"].as_u64().unwrap_or(0);
+    let local_ts = local.value["_kv_written_ms"].as_u64().unwrap_or(0);
+    if local_ts > api_ts
+        || (dead_gen == Some(api.generation.as_str())
+            && local.generation != api.generation
+            && local_ts >= api_ts)
+    {
+        return local;
+    }
+    api
+}
+
+/// Whether `admin_cas` may heal a stuck local POP KV cache via `InsertMode::Overwrite` after
+/// `ItemPreconditionFailed`.
+///
+/// Watermark keys (`ingest:watermark`, `ingest:rum:watermark`, etc.) hold the committed catalog
+/// head pointer and have concurrent writers across POPs (ingest, compaction, summary_bundle,
+/// retention). A blind `Overwrite` from a stale read rolls back the catalog head and permanently
+/// orphans committed Parquet files whose raw logs have already been deleted, so watermark keys
+/// must never use `InsertMode::Overwrite`. Other coordinated keys may only heal when this POP's
+/// Core Cache actually recorded a prior write (`has_local_write`), so an unverified conflict
+/// against another POP's commit never clobbers it.
+pub fn allow_stale_pop_overwrite(
+    key: &str,
+    has_local_write: bool,
+    dead_generation: Option<&str>,
+    dead_since_ms: u64,
+    tried_gen: &str,
+    now_ms: u64,
+) -> bool {
+    if key == crate::ingest::WATERMARK_KEY || key.ends_with(":watermark") {
+        return false;
+    }
+    has_local_write
+        && dead_generation == Some(tried_gen)
+        && dead_since_ms > 0
+        && now_ms.saturating_sub(dead_since_ms) >= 2_000
+}
 impl Default for BackendBudget {
     fn default() -> Self {
         Self(Rc::new(Cell::new(0)), Rc::new(Cell::new((false, 0))))
@@ -1089,5 +1135,85 @@ mod tests {
         // Cross-POP clock skew where `now < last` clamps to 1,100ms instead of failing.
         assert_eq!(super::kv_write_delay_ms(1_000, 995).unwrap(), 1_100);
         assert_eq!(super::kv_write_delay_ms(10_000, 0).unwrap(), 1_100);
+    }
+
+    #[test]
+    fn pick_fresher_record_prefers_newer_local_kv_over_stale_api_generation() {
+        let stale_api = super::Record {
+            generation: "1795643318773026".into(),
+            value: serde_json::json!({"lease_until": 100, "_kv_written_ms": 1_000}),
+        };
+        let fresh_local = super::Record {
+            generation: "1795643350000001".into(),
+            value: serde_json::json!({"lease_until": 0, "_kv_written_ms": 2_000}),
+        };
+        let picked = super::pick_fresher_record(stale_api.clone(), Some(fresh_local.clone()), None);
+        assert_eq!(picked.generation, fresh_local.generation);
+
+        let newer_api = super::Record {
+            generation: "1795643390000002".into(),
+            value: serde_json::json!({"lease_until": 0, "_kv_written_ms": 3_000}),
+        };
+        let picked = super::pick_fresher_record(newer_api.clone(), Some(fresh_local.clone()), None);
+        assert_eq!(picked.generation, newer_api.generation);
+
+        let same_ts_local = super::Record {
+            generation: "1795643350000009".into(),
+            value: serde_json::json!({"lease_until": 0, "_kv_written_ms": 1_000}),
+        };
+        let picked = super::pick_fresher_record(
+            stale_api,
+            Some(same_ts_local.clone()),
+            Some("1795643318773026"),
+        );
+        assert_eq!(picked.generation, same_ts_local.generation);
+    }
+
+    #[test]
+    fn allow_stale_pop_overwrite_blocks_watermarks_and_unverified_cross_pop_conflicts() {
+        // Never allow blind Overwrite on request or RUM watermark keys.
+        assert!(!super::allow_stale_pop_overwrite(
+            crate::ingest::WATERMARK_KEY,
+            true,
+            Some("100"),
+            1_000,
+            "100",
+            5_000,
+        ));
+        assert!(!super::allow_stale_pop_overwrite(
+            "ingest:rum:watermark",
+            true,
+            Some("100"),
+            1_000,
+            "100",
+            5_000,
+        ));
+        // Never allow Overwrite on other keys without a local POP write in coord cache.
+        assert!(!super::allow_stale_pop_overwrite(
+            crate::ingest::compaction::STATE_KEY,
+            false,
+            Some("100"),
+            1_000,
+            "100",
+            5_000,
+        ));
+        // Allow Overwrite on non-watermark coordinated keys when local write + >=2s dead gen.
+        assert!(super::allow_stale_pop_overwrite(
+            crate::ingest::compaction::STATE_KEY,
+            true,
+            Some("100"),
+            1_000,
+            "100",
+            3_000,
+        ));
+        // Too soon (< 2s) still waits.
+        assert!(!super::allow_stale_pop_overwrite(
+            crate::ingest::compaction::STATE_KEY,
+            true,
+            Some("100"),
+            1_000,
+            "100",
+            2_999,
+        ));
     }
 }
