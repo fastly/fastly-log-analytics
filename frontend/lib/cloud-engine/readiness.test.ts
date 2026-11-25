@@ -3457,6 +3457,130 @@ it("SEC-T5-ITER40-FE-03: prevents non-contraction apostrophe mismatch and cross-
         ["Authorization", "Digest", "error", "="],
         "Error: Runtime Error: [redacted]",
       ],
+      // Wave 59 / Iter 60: Bypass A — Nameless = value as FIRST item in Cookie / Set-Cookie / Multi-Param Auth
+      [
+        "Runtime Error: Cookie: = error; sid = cache",
+        ["Cookie", "error", "sid", "cache", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Cookie": = error; sid = cache',
+        ["Cookie", "error", "sid", "cache", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Set-Cookie: = error, b = cache",
+        ["Set-Cookie", "error", "cache", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Digest = error, b = cache",
+        ["Authorization", "Digest", "error", "cache", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": Digest = error, b = cache',
+        ["Authorization", "Digest", "error", "cache", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Cookie: = 1234s; b = 500ms",
+        ["Cookie", "1234s", "500ms", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 59 / Iter 60: Bypass B — Comma-folded Set-Cookie / Cookie with no space after , and unknown boolean attr before ,
+      [
+        "Runtime Error: Set-Cookie: a=1,b = error",
+        ["Set-Cookie", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Set-Cookie: a=1; Path=/,b = error",
+        ["Set-Cookie", "Path", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Set-Cookie": a=1,b = error',
+        ["Set-Cookie", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Cookie: a=1,b = error",
+        ["Cookie", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Set-Cookie: a=1,b = 1234s",
+        ["Set-Cookie", "1234s", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Set-Cookie: a=1; CustomFlag, b = error",
+        ["Set-Cookie", "CustomFlag", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 59 / Iter 60: Bypass C — AUTH_SCHEMES followed by spaced =
+      [
+        "Runtime Error: Authorization: Bearer = error",
+        ["Authorization", "Bearer", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Basic = error",
+        ["Authorization", "Basic", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Bearer = 256 KiB",
+        ["Authorization", "Bearer", "256", "KiB", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: X-Token: Bearer = error",
+        ["Token", "Bearer", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "token": Bearer = error',
+        ["token", "Bearer", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization:Bearer = error",
+        ["Authorization", "Bearer", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 59 / Iter 60: Bypass D — unescapeJsonKey + hasKeyStemSegment non-alphanumeric separator gap
+      [
+        'Runtime Error: {"\\"token\\"": error}',
+        ["token", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: {"\\"Cookie\\"": a=1; b = error}',
+        ["Cookie", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: {"[token]": error}',
+        ["token", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: {"token\\u0000": error}',
+        ["token", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: &token = error",
+        ["token", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: <token>: error",
+        ["token", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
     ];
     for (const [msg, forbidden, expectedExact] of cases) {
       const err = new Error(msg);
