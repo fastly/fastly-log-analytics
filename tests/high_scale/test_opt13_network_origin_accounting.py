@@ -79,7 +79,8 @@ def test_pop_health_24h_uses_rollup_errors_and_skips_fact_tdigest(monkeypatch: p
 
     assert len(client.calls) == 1
     sql = client.calls[0][0]
-    assert "intDiv(toUnixTimestamp(event_timestamp), 30) % 20 = 0" in sql
+    assert "event_timestamp >= toDateTime(" in sql
+    assert "% 20 = 0" not in sql
     assert "cityHash64(event_id)" not in sql
     assert "quantileTDigest" not in sql
     assert "sum(errors)" in sql

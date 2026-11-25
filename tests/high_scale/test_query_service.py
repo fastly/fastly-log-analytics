@@ -1614,7 +1614,8 @@ def test_network_health_real_ch_uses_rollups_subminute_sampling_and_fast_shieldi
 
     # Heatmap uses single-pass WITH + quantileTDigest + position(..., 'HIT'), and granule-skipping time-block sampling.
     ((heatmap_sql, _),) = client.matching("AS throughput_bps")
-    assert "intDiv(toUnixTimestamp(event_timestamp), 15) % 20 = 0" in heatmap_sql
+    assert "event_timestamp >= toDateTime(" in heatmap_sql
+    assert "% 20 = 0" not in heatmap_sql
     assert "toMinute" not in heatmap_sql and "toSecond" not in heatmap_sql
     assert "quantileTDigest(0.5)" in heatmap_sql
     assert "position(custom_fields['cache'], 'HIT') > 0" in heatmap_sql
