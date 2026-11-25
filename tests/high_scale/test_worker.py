@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections import Counter
 from dataclasses import dataclass, field
 from threading import Event
@@ -466,11 +467,19 @@ def test_bounded_worker_run_closes_the_metadata_pool_it_opened(
     monkeypatch.setattr(worker, "build_worker_from_environment", lambda **_: _Loop())
     monkeypatch.setattr("sys.argv", ["worker", "--once"])
 
-    if run_fails:
-        with pytest.raises(RuntimeError, match="pg down"):
-            worker.main()
-    else:
-        assert worker.main() == 0
+    prev_pool_max = os.environ.get("METADATA_PG_POOL_MAX")
+    try:
+        if run_fails:
+            with pytest.raises(RuntimeError, match="pg down"):
+                worker.main()
+        else:
+            assert worker.main() == 0
+    finally:
+        if prev_pool_max is None:
+            os.environ.pop("METADATA_PG_POOL_MAX", None)
+        else:
+            os.environ["METADATA_PG_POOL_MAX"] = prev_pool_max
+    assert os.environ.get("METADATA_PG_POOL_MAX") == prev_pool_max
     assert len(opened) == 1 and opened[0].closed
     assert pg_pool._pool is None
 
