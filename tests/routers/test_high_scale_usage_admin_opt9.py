@@ -1,4 +1,4 @@
-"""Focused unit tests for Round 9 Elevation scoring/config, usage/current-storage, and admin/celery/status optimizations."""
+"""Focused unit tests for Round 9 High-Scale scoring/config, usage/current-storage, and admin/celery/status optimizations."""
 
 from __future__ import annotations
 

@@ -37,4 +37,27 @@ describe('AnalyticsCard loading copy', () => {
 
     expect(screen.getByRole('status')).toHaveTextContent('Loading Active Viewers...')
   })
+
+  it('marks hidden children inert when empty so focusable controls cannot receive focus', () => {
+    const { rerender } = render(
+      <AnalyticsCard title="ABR Bitrate Ladder" isEmpty>
+        <button type="button">Sort column</button>
+      </AnalyticsCard>,
+    )
+
+    const button = screen.getByRole('button', { name: 'Sort column', hidden: true })
+    const wrapper = button.parentElement
+    expect(wrapper).toHaveAttribute('aria-hidden', 'true')
+    expect(wrapper).toHaveAttribute('inert')
+
+    rerender(
+      <AnalyticsCard title="ABR Bitrate Ladder" isEmpty={false}>
+        <button type="button">Sort column</button>
+      </AnalyticsCard>,
+    )
+
+    const activeWrapper = screen.getByRole('button', { name: 'Sort column' }).parentElement
+    expect(activeWrapper).not.toHaveAttribute('aria-hidden')
+    expect(activeWrapper).not.toHaveAttribute('inert')
+  })
 })

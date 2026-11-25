@@ -543,7 +543,10 @@ def test_session_filters_fencing_sorting_paging_and_flags() -> None:
     assert params["flt_0_0"] == "US" and params["flt_k1"] == "pop" and params["flt_1_0"] == "SJC" and params["service_id"] == "svc"  # fmt: skip
     assert "publication_state='visible'" in sql and "high_scale_batch_publications FINAL" in sql
     assert "domain='request'" in sql and "event_timestamp >= {start_time:DateTime64(3)}" in sql
-    assert "lower(edge) IN ('1', 'true')" in sql and "lower(edge) IN ('0', 'false')" in sql
+    assert (
+        "lower(custom_fields['edge']) IN ('1', 'true')" in sql
+        and "lower(custom_fields['edge']) IN ('0', 'false')" in sql
+    )
 
     c_sort, c_bad_sort, c_page, c_flags, c_stream = _SessClient(), _SessClient(), _SessClient(), _SessClient(), _SessClient()  # fmt: skip
     _run_sess(c_sort, sort_by="req_count", sort_dir="asc")

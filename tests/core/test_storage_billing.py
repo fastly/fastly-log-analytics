@@ -422,9 +422,13 @@ def test_postgres_control_plane_storage_billing_summary_runs_table_scans_concurr
     assert (live_gb_h, deleted_gb_h, min_gb_h, complete) == (5.0, 7.0, 9.0, True)
     assert len(seen_sql) == 2
     # WHERE predicates must be sargable (no GREATEST(... + make_interval(...)) in WHERE)
+    import re
+
     for sql in seen_sql:
-        where_clause = sql.split("WHERE ", 1)[1]
-        assert "GREATEST(" not in where_clause
+        where_clauses = re.findall(r"\bWHERE\s+(.*?)(?=\s+UNION ALL\b|\)\s*AS\b|$)", sql, flags=re.DOTALL)
+        assert len(where_clauses) == 3
+        for where_clause in where_clauses:
+            assert "GREATEST(" not in where_clause
     assert "high_scale_source_objects_discovered_idx" in cp_mod.SCHEMA_DDL
     assert "high_scale_source_objects_updated_idx" in cp_mod.SCHEMA_DDL
     assert "high_scale_archive_manifests_expired_idx" in cp_mod.SCHEMA_DDL

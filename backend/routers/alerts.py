@@ -66,7 +66,7 @@ def validate_webhook_url(url: str) -> str:
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
-            detail={"error": "invalid_webhook_url", "message": str(exc)},
+            detail={"error": "invalid_webhook_url", "message": redact_error_text(str(exc))},
         ) from exc
 
 

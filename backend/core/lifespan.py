@@ -224,11 +224,12 @@ def _background_startup():
 
                 executor = ThreadPoolExecutor(max_workers=4)
                 futures = [executor.submit(_initialize_service, cfg) for cfg in configs]
-                try:
-                    _celery_mod = importlib.import_module("backend.celery_app")
-                    futures.append(executor.submit(_celery_mod.prewarm_celery_status))
-                except Exception as e:
-                    logging.warning("[fastapi] Celery status pre-warm scheduling failed: %s", e)
+                if configs and not os.environ.get("PYTEST_CURRENT_TEST"):
+                    try:
+                        _celery_mod = importlib.import_module("backend.celery_app")
+                        futures.append(executor.submit(_celery_mod.prewarm_celery_status))
+                    except Exception as e:
+                        logging.warning("[fastapi] Celery status pre-warm scheduling failed: %s", e)
                 from concurrent.futures import wait as _futures_wait
 
                 done, not_done = _futures_wait(futures, timeout=1.0)

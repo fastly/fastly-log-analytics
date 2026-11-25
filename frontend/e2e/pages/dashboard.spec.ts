@@ -371,6 +371,10 @@ function populatedPayload() {
     object_type_dist: [{ object_type: 'v', request_count: 900 }],
     streaming_format_dist: [{ streaming_format: 'h', session_count: 700 }],
     session_duration_dist: [{ duration_bucket: '1-5 min', session_count: 300 }],
+    bitrate_ladder: [
+      { bitrate_kbps: 3200, request_count: 600, session_count: 77, share_pct: 66.7, avg_throughput_kbps: 28000, avg_buffer_ms: 14500 },
+    ],
+    stream_type_dist: [{ stream_type: 'v', session_count: 700, request_count: 900 }],
   }
 }
 

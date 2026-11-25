@@ -91,18 +91,30 @@ def test_high_scale_celery_status_full_payload(client):
         con, cur = MagicMock(), MagicMock()
 
         def _exec(sql: str, params=()):
-            assert "WHERE service_id = ?" in sql and params == (sid,)
-            cur.fetchall.return_value = ledger_rows_by_svc.get(sid, [])
+            if "WHERE service_id IN (" in sql:
+                totals: dict[str, int] = {}
+                for item_sid in params:
+                    for status, count in ledger_rows_by_svc.get(item_sid, []):
+                        totals[status] = totals.get(status, 0) + count
+                cur.fetchall.return_value = list(totals.items())
+            elif "WHERE service_id = ?" in sql:
+                assert params == (sid,)
+                cur.fetchall.return_value = ledger_rows_by_svc.get(sid, [])
+            else:
+                raise AssertionError(f"unexpected SQL: {sql}")
 
         cur.execute.side_effect = _exec
         con.cursor.return_value = cur
         return con
+
+    from backend.utils.bounded_cache import CacheRegistry
 
     svcs = [{"service_id": "svc-a"}, {"service_id": "svc-b"}]
     with _patches(
         ("backend.config.list_configs", svcs),
         ("backend.core.metadata.base.get_con", {"side_effect": _fake_get_con}),
     ):
+        CacheRegistry.clear_all()
         resp = client.get("/api/admin/celery/status", headers={"X-Service-Id": "svc-a"})
         assert resp.status_code == 200
         data = resp.json()

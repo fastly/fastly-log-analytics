@@ -457,7 +457,12 @@ export function AnalyticsCard({
         ) : null}
         <div
           aria-hidden={showEmpty || undefined}
-          className={cn("h-full", isFetching && !showLoading && "opacity-40 pointer-events-none transition-opacity")}
+          inert={showEmpty || undefined}
+          className={cn(
+            "h-full",
+            showEmpty && "pointer-events-none",
+            isFetching && !showLoading && "opacity-40 pointer-events-none transition-opacity",
+          )}
         >
           {children}
         </div>

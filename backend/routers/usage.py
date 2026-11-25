@@ -838,7 +838,7 @@ def usage_current_storage(
 
                         pg_pool.release_thread_connection()
                     except Exception:
-                        pass
+                        logger.debug("usage_current_storage: thread connection release failed", exc_info=True)
 
             with ThreadPoolExecutor(max_workers=4, thread_name_prefix="usage-storage") as pool:
                 fut_stats = pool.submit(
