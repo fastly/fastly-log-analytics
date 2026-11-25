@@ -11,6 +11,7 @@ import {
 } from 'lucide-react'
 
 import { client, extractApiError, unwrapClient } from '@/lib/api'
+import { readCloudSessionReference } from '@/lib/cloud-engine/session-reference'
 import { useEffectiveServiceId, useBootstrapResolved } from '@/hooks/useBootstrap'
 import { NoServiceSelected } from '@/components/ReportLayout'
 import { PageHeader, StatCard } from '@/components/ui/confirm-dialog'
@@ -256,13 +257,21 @@ function StreamDetailClient() {
     // Fallback when NuqsAdapter is not mounted in unit tests
   }
   const token = nuqsToken ?? searchParams.get('token')
+  const reference = searchParams.get('ref')
+  const hasSession = Boolean(token || reference)
   const activeServiceId = useEffectiveServiceId() ?? null
   const bootstrapResolved = useBootstrapResolved()
 
   const { data: detailData, isLoading, isError, error, refetch } = useQuery({
-    queryKey: ['stream-detail', activeServiceId, token],
-    queryFn: async ({ signal }) => unwrapClient(client.POST('/api/sessions/detail', { signal, body: { session_token: token! } })),
-    enabled: !!activeServiceId && !!token,
+    queryKey: ['stream-detail', activeServiceId, reference, token],
+    queryFn: async ({ signal }) => {
+      const sessionToken = reference ? readCloudSessionReference(reference) : token
+      if (!sessionToken) {
+        throw new Error('Stream link unavailable. Reopen Stream Details from the Sessions list in this tab.')
+      }
+      return unwrapClient(client.POST('/api/sessions/detail', { signal, body: { session_token: sessionToken } }))
+    },
+    enabled: !!activeServiceId && hasSession,
     retry: false,
   })
 
@@ -272,7 +281,7 @@ function StreamDetailClient() {
     return <NoServiceSelected icon={Film} message="Select a service to view stream details." />
   }
 
-  if (!token) {
+  if (!hasSession) {
     return (
       <div className="space-y-6">
         <PageHeader title="Stream Details" icon={Film} />

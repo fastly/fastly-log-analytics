@@ -130,45 +130,47 @@ export interface SessionTokenPayload {
   svc: string;
 }
 
-function toBase64Url(input: string): string {
-  const bytes = new TextEncoder().encode(input);
-  let binary = "";
-  for (const b of bytes) binary += String.fromCharCode(b);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const SESSION_TOKEN_STORE_MAX = 4096;
+const _sessionTokenStore = new Map<string, SessionTokenPayload>();
+
+function generateOpaqueSessionToken(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return `fls_${crypto.randomUUID().replace(/-/g, "")}`;
+  }
+  const bytes = new Uint8Array(16);
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+  }
+  return `fls_${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}`;
 }
 
-function fromBase64Url(token: string): string {
-  const padded = token.replace(/-/g, "+").replace(/_/g, "/");
-  const binary = atob(padded);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return new TextDecoder().decode(bytes);
+export function clearSessionTokens(): void {
+  _sessionTokenStore.clear();
 }
 
 export function sealSessionToken(payload: SessionTokenPayload): string {
-  return toBase64Url(JSON.stringify(payload));
+  const token = generateOpaqueSessionToken();
+  if (_sessionTokenStore.size >= SESSION_TOKEN_STORE_MAX) {
+    const oldest = _sessionTokenStore.keys().next().value;
+    if (oldest !== undefined) _sessionTokenStore.delete(oldest);
+  }
+  _sessionTokenStore.set(token, {
+    ip: payload.ip,
+    ja4: typeof payload.ja4 === "string" ? payload.ja4 : null,
+    s: payload.s,
+    e: payload.e,
+    svc: typeof payload.svc === "string" ? payload.svc : "",
+  });
+  return token;
 }
 
 export function openSessionToken(token: string): SessionTokenPayload | null {
-  try {
-    const parsed = JSON.parse(fromBase64Url(token)) as Partial<SessionTokenPayload>;
-    if (
-      typeof parsed?.ip !== "string" ||
-      typeof parsed?.s !== "string" ||
-      typeof parsed?.e !== "string"
-    ) {
-      return null;
-    }
-    return {
-      ip: parsed.ip,
-      ja4: typeof parsed.ja4 === "string" ? parsed.ja4 : null,
-      s: parsed.s,
-      e: parsed.e,
-      svc: typeof parsed.svc === "string" ? parsed.svc : "",
-    };
-  } catch {
-    return null;
-  }
+  if (typeof token !== "string" || !token.startsWith("fls_")) return null;
+  const entry = _sessionTokenStore.get(token);
+  if (!entry) return null;
+  return { ...entry };
 }
 
 /** Every request column the /api/sessions list reads, over both passes. */

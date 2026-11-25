@@ -24,9 +24,8 @@ export function buildFilterNavigationHref(
   return `${target.pathname}${target.search}${target.hash}`
 }
 
-export function buildStreamDetailUrl(token: string, serviceId?: string | null): string {
-  const base = `/sessions/stream?token=${encodeURIComponent(token)}`
-  return serviceId ? `${base}&service=${encodeURIComponent(serviceId)}` : base
+export function buildStreamDetailUrl(reference: string, serviceId?: string | null, parameter: 'token' | 'ref' = 'token'): string {
+  return buildServiceHref(`/sessions/stream?${parameter}=${encodeURIComponent(reference)}`, serviceId)
 }
 
 export function buildSessionDetailUrl(reference: string, serviceId?: string | null, parameter: 'token' | 'ref' = 'token'): string {

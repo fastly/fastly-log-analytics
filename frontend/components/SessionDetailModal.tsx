@@ -66,6 +66,31 @@ export interface SessionDetailProps {
   onFlagged: () => void
 }
 
+function StreamDetailLink({ token, serviceId }: { token: string; serviceId: string | null }) {
+  const [reference] = React.useState(() => isCloudMode() ? crypto.randomUUID() : null)
+  const [storageFailed, setStorageFailed] = React.useState(false)
+  return (
+    <>
+      <Link
+        href={buildStreamDetailUrl(reference ?? token, serviceId, reference ? 'ref' : 'token')}
+        onClick={(event) => {
+          if (!reference) return
+          try {
+            saveCloudSessionReference(reference, token)
+          } catch {
+            event.preventDefault()
+            setStorageFailed(true)
+          }
+        }}
+        className="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-md bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 hover:bg-blue-500/20 transition-colors"
+      >
+        <Film className="h-3 w-3" />Stream Details<ExternalLink className="h-3 w-3" />
+      </Link>
+      {storageFailed && <span role="alert" className="text-xs text-destructive">Allow browser storage to open Stream Details.</span>}
+    </>
+  )
+}
+
 function RequestTraceLink({ token, serviceId }: { token: string; serviceId: string | null }) {
   const [reference] = React.useState(() => isCloudMode() ? crypto.randomUUID() : null)
   const [storageFailed, setStorageFailed] = React.useState(false)
@@ -190,12 +215,7 @@ export function SessionDetail({
             Session: {selectedSession?.ip}
             {selectedSession?.is_streaming && <Film className="h-4 w-4 text-blue-500" />}
             {selectedSession?.is_streaming && selectedSession.session_token && (
-              <Link
-                href={buildStreamDetailUrl(selectedSession.session_token, activeServiceId)}
-                className="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-md bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 hover:bg-blue-500/20 transition-colors"
-              >
-                <Film className="h-3 w-3" />Stream Details<ExternalLink className="h-3 w-3" />
-              </Link>
+              <StreamDetailLink key={selectedSession.session_token} token={selectedSession.session_token} serviceId={activeServiceId} />
             )}
             {selectedSession && !selectedSession.is_streaming && selectedSession.session_token && (
               <RequestTraceLink key={selectedSession.session_token} token={selectedSession.session_token} serviceId={activeServiceId} />

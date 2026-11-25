@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time as _time
 from concurrent.futures import ThreadPoolExecutor
@@ -24,7 +25,6 @@ from backend.core.request_context import (
     require_admin,
     seal_session_token,
 )
-from backend.core.sql_validator import escape_sql_literal
 from backend.models.analytics import (
     ScoringAnalyticsResponse,
     ScoringComplianceBreakdownResponse,
@@ -303,7 +303,13 @@ def _fetch_session_events(
     if not sids:
         return {}
     src = _scoring_source(_safe_table_name(service_id), _table_columns(service_id))
-    sids_in = ", ".join(escape_sql_literal(str(s)) for s in sids)
+    params: dict[str, str] = {}
+    sid_placeholders: list[str] = []
+    for idx, raw_sid in enumerate(sids):
+        key = f"sid_{idx}"
+        params[key] = str(raw_sid)
+        sid_placeholders.append(f"{{{key}:String}}")
+    sids_in = ", ".join(sid_placeholders)
     where_ts = ts_predicate or f"timestamp >= now() - INTERVAL {int(since_days)} DAY"
     per_sid_cap = int(limit_per_sid)
     sql = f"""
@@ -320,7 +326,7 @@ def _fetch_session_events(
         WHERE _rn <= {per_sid_cap}
         ORDER BY edge_sid, ts
     """
-    rows = query_logs(service_id, sql)
+    rows = query_logs(service_id, sql, params)
     grouped: dict[str, list[dict]] = {}
     for r in rows:
         sid = r.get("edge_sid")
@@ -612,11 +618,21 @@ def _threshold_preview_counts(
     service_id: str, src: str, ts_pred: str, threshold: int, labeled_pairs: list[tuple[str, str]]
 ) -> dict:
     threshold_int = int(threshold)
+    params: dict[str, str] = {}
     if labeled_pairs:
-        good_sids = [escape_sql_literal(str(s)) for s, lbl in labeled_pairs if lbl == "good"]
-        bad_sids = [escape_sql_literal(str(s)) for s, lbl in labeled_pairs if lbl == "bad"]
-        good_cond = f"edge_sid IN ({', '.join(good_sids)})" if good_sids else "0 = 1"
-        bad_cond = f"edge_sid IN ({', '.join(bad_sids)})" if bad_sids else "0 = 1"
+        good_placeholders: list[str] = []
+        bad_placeholders: list[str] = []
+        for idx, (raw_sid, lbl) in enumerate(labeled_pairs):
+            if lbl == "good":
+                key = f"good_sid_{idx}"
+                params[key] = str(raw_sid)
+                good_placeholders.append(f"{{{key}:String}}")
+            elif lbl == "bad":
+                key = f"bad_sid_{idx}"
+                params[key] = str(raw_sid)
+                bad_placeholders.append(f"{{{key}:String}}")
+        good_cond = f"edge_sid IN ({', '.join(good_placeholders)})" if good_placeholders else "0 = 1"
+        bad_cond = f"edge_sid IN ({', '.join(bad_placeholders)})" if bad_placeholders else "0 = 1"
         sql = f"""
             SELECT
                 count() AS total,
@@ -648,7 +664,7 @@ def _threshold_preview_counts(
                 GROUP BY edge_sid
             )
         """
-    rows = query_logs(service_id, sql)
+    rows = query_logs(service_id, sql, params)
     return rows[0] if rows else {}
 
 
@@ -715,10 +731,18 @@ def scoring_labels_create(
 
     require_service_in_scope(request, service_id)
     _strip_pii_fields_for_analyst(request, body)
+    clean_sid = body.sid.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", clean_sid):
+        raise HTTPException(
+            status_code=400,
+            detail=make_error(
+                "invalid_label", "Session id must be 1-64 alphanumeric, underscore, or hyphen characters"
+            ),
+        )
     try:
         row = _labels.save_label(
             service_id,
-            sid=body.sid.strip(),
+            sid=clean_sid,
             label=body.label.strip(),
             notes=body.notes,
             flagged_by=body.flagged_by,
@@ -1076,6 +1100,11 @@ def scoring_session_events(
 ) -> dict:
     """Return the event timeline for a single session (up to 500 events)."""
     _enforce_scoring_service_scope(request, service_id)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", sid):
+        raise HTTPException(
+            status_code=400,
+            detail=make_error("invalid_sid", "Session id must be 1-64 alphanumeric, underscore, or hyphen characters"),
+        )
     analyst_session = getattr(getattr(request, "state", None), "analyst_session", None)
     if mask_ips_for(analyst_session):
         raise HTTPException(

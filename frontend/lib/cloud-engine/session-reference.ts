@@ -1,3 +1,5 @@
+import { clearSessionTokens } from './sessions'
+
 const STORAGE_KEY = 'fla.cloud-session-references'
 const LIMIT = 16
 
@@ -24,6 +26,7 @@ export function readCloudSessionReference(reference: string): string | null {
 }
 
 export function clearCloudSessionReferences(): void {
+  clearSessionTokens()
   try {
     if (typeof sessionStorage !== 'undefined') {
       sessionStorage.removeItem(STORAGE_KEY)
