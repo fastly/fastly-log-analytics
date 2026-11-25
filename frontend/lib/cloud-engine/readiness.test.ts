@@ -4434,6 +4434,134 @@ it("SEC-T5-ITER40-FE-03: prevents non-contraction apostrophe mismatch and cross-
         ["Authorization", "Bearer", "clientId1234567", "error", "="],
         "Error: Runtime Error: [redacted]",
       ],
+      // Wave 66 / Iter 67: Verifier 5 Bypass A — Spaced separators after Bearer/Basic before KV params
+      [
+        "Runtime Error: Authorization: Bearer : realm = local",
+        ["Authorization", "Bearer", "realm", "local", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Bearer: : realm = local",
+        ["Authorization", "Bearer", "realm", "local", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Bearer => realm = local, scope = error",
+        ["Authorization", "Bearer", "realm", "local", "scope", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Bearer := realm = local",
+        ["Authorization", "Bearer", "realm", "local", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": Bearer : realm = local',
+        ["Authorization", "Bearer", "realm", "local", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": Bearer => realm = local, scope = error',
+        ["Authorization", "Bearer", "realm", "local", "scope", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Basic : realm = local",
+        ["Authorization", "Basic", "realm", "local", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": Basic : realm = local',
+        ["Authorization", "Basic", "realm", "local", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: X-Token: Bearer : realm = local",
+        ["X-Token", "Bearer", "realm", "local", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 66 / Iter 67: Verifier 5 Bypass B — Prefixed / compound Basic, Digest, and OAuth credential keys
+      [
+        "Runtime Error: X-Basic: error",
+        ["X-Basic", "Basic", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "X-Basic": error',
+        ["X-Basic", "Basic", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: http_basic = error",
+        ["http_basic", "basic", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: X-Digest: realm = error, scope = timeout",
+        ["X-Digest", "Digest", "realm", "error", "scope", "timeout", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "X-Digest": realm = error, scope = timeout',
+        ["X-Digest", "Digest", "realm", "error", "scope", "timeout", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: X-OAuth: realm = error, scope = timeout",
+        ["X-OAuth", "OAuth", "realm", "error", "scope", "timeout", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "X-OAuth": realm = error, scope = timeout',
+        ["X-OAuth", "OAuth", "realm", "error", "scope", "timeout", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: oauth2: error",
+        ["oauth2", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "oauth2": error',
+        ["oauth2", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: config[0].x_basic = error",
+        ["x_basic", "basic", "error", "="],
+        "Error: Runtime Error: config[[redacted]][redacted]",
+      ],
+      [
+        "Runtime Error: config[0].x_digest: realm = error",
+        ["x_digest", "digest", "realm", "error", "="],
+        "Error: Runtime Error: config[[redacted]][redacted]",
+      ],
+      [
+        "Runtime Error: config[0].oauth2: error",
+        ["oauth2", "error"],
+        "Error: Runtime Error: config[[redacted]][redacted]",
+      ],
+      // Wave 66 / Iter 67: Verifier 5 Bypass C — scanCookieExpiresValueEnd 1-digit TZ offset, 12h AM/PM, slash dates
+      [
+        "Runtime Error: Set-Cookie: sid=1; Expires=Thu, 01 Jan 2099 00:00:00 UTC+2, path = error",
+        ["Set-Cookie", "sid", "Expires", "2099", "UTC", "path", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Set-Cookie: sid=1; Expires=Thu, 01 Jan 2099 12:00:00 AM GMT, path = error",
+        ["Set-Cookie", "sid", "Expires", "2099", "GMT", "path", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Set-Cookie: sid=1; Expires=01/Jan/2099 00:00:00 GMT, path = error",
+        ["Set-Cookie", "sid", "Expires", "2099", "GMT", "path", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Set-Cookie: sid=1; Expires=2099/01/01 00:00:00 GMT, path = error",
+        ["Set-Cookie", "sid", "Expires", "2099", "GMT", "path", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
     ];
     for (const [msg, forbidden, expectedExact] of cases) {
       const err = new Error(msg);

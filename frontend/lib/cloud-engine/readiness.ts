@@ -213,17 +213,71 @@ const AUTH_HEADER_KEY_STEMS = new Set<string>(["authorization", "authenticate"])
 const MULTI_PARAM_AUTH_KEY_STEMS = new Set<string>(["authorization", "authenticate", "digest", "oauth", "hmac", "aws4-hmac-sha256"]);
 const MULTI_PARAM_AUTH_SCHEMES = new Set<string>(["digest", "oauth", "hmac", "aws4-hmac-sha256"]);
 
-function extractAuthSchemeFromKey(key: string): string {
+function extractAuthSchemeFromKey(key: string, allowSpace = false): string {
   if (!key) return "";
   const bare = key.startsWith(".") ? key.replace(/^\.+/, "") : key;
   if (!bare) return "";
-  const lastSeg = bare.slice(bare.lastIndexOf(".") + 1).toLowerCase();
-  return AUTH_SCHEMES.has(lastSeg) ? lastSeg : "";
+  const bareLower = bare.toLowerCase();
+  if (bareLower.length >= 3 && bareLower.length <= 24 && AUTH_SCHEMES.has(bareLower)) {
+    return bareLower;
+  }
+  const len = bare.length;
+  let matched = "";
+  let segStart = 0;
+  let prevKind = 0; // 0=other, 1=lower, 2=upper, 3=digit
+  for (let i = 0; i <= len; i += 1) {
+    const code = i < len ? bare.charCodeAt(i) : -1;
+    const kind = code >= 97 && code <= 122
+      ? 1
+      : code >= 65 && code <= 90
+        ? 2
+        : code >= 48 && code <= 57
+          ? 3
+          : 0;
+    const isWs = kind === 0 && i < len && (
+      code <= 32
+        ? (code === 32 || (code >= 9 && code <= 13))
+        : (code >= 0x80 && /\s/.test(bare[i]!))
+    );
+    const isSep = i === len || (kind === 0 && (allowSpace || !isWs));
+    if (isSep) {
+      const segLen = i - segStart;
+      if (segLen >= 3 && segLen <= 24) {
+        const segLower = bare.slice(segStart, i).toLowerCase();
+        if (AUTH_SCHEMES.has(segLower)) matched = segLower;
+      }
+      segStart = i + 1;
+      prevKind = 0;
+      continue;
+    }
+    if (i > segStart && kind !== 0 && prevKind !== 0) {
+      const nextCode = i + 1 < len ? bare.charCodeAt(i + 1) : -1;
+      const nextLower = nextCode >= 97 && nextCode <= 122;
+      const isOAuthAcronym = prevKind === 2 && kind === 2 && nextLower
+        && i - segStart === 1
+        && bare.slice(segStart, segStart + 5).toLowerCase() === "oauth"
+        && !isAsciiLower(bare[segStart + 5]);
+      const boundary = (prevKind === 1 && kind === 2)
+        || (prevKind === 2 && kind === 2 && nextLower && !isOAuthAcronym)
+        || (prevKind === 3 && (kind === 1 || kind === 2))
+        || ((prevKind === 1 || prevKind === 2) && kind === 3);
+      if (boundary) {
+        const segLen = i - segStart;
+        if (segLen >= 3 && segLen <= 24) {
+          const segLower = bare.slice(segStart, i).toLowerCase();
+          if (AUTH_SCHEMES.has(segLower)) matched = segLower;
+        }
+        segStart = i;
+      }
+    }
+    prevKind = kind;
+  }
+  return matched;
 }
 
 function isSecretJsonKey(decodedKey: string): boolean {
   if (!decodedKey) return false;
-  return hasKeyStemSegment(decodedKey, SECRET_STEMS, true) || extractAuthSchemeFromKey(decodedKey) !== "";
+  return hasKeyStemSegment(decodedKey, SECRET_STEMS, true) || extractAuthSchemeFromKey(decodedKey, true) !== "";
 }
 
 function scanCookieExpiresValueEnd(line: string, vStart: number): number {
@@ -247,16 +301,35 @@ function scanCookieExpiresValueEnd(line: string, vStart: number): number {
   };
   const scanTzOffset = (pos: number): number => {
     if (pos >= len || (line[pos] !== "+" && line[pos] !== "-")) return -1;
-    const hEnd = scanDigits(pos + 1, 2, 2);
+    const hEnd = scanDigits(pos + 1, 1, 2);
     if (hEnd === -1) return -1;
-    const mStart = line[hEnd] === ":" ? hEnd + 1 : hEnd;
-    return scanDigits(mStart, 2, 2);
+    if (line[hEnd] === ":") {
+      const mEnd = scanDigits(hEnd + 1, 2, 2);
+      return mEnd !== -1 && !isAsciiDigit(line[mEnd]) ? mEnd : -1;
+    }
+    if (hEnd - (pos + 1) === 2 && isAsciiDigit(line[hEnd])) {
+      const mEnd = scanDigits(hEnd, 2, 2);
+      return mEnd !== -1 && !isAsciiDigit(line[mEnd]) ? mEnd : -1;
+    }
+    return !isAsciiDigit(line[hEnd]) ? hEnd : -1;
   };
   const scanOptionalTzAndParen = (pos: number): number => {
     let p = pos;
     const isTzDelim = (idx: number): boolean => (
       idx >= len || isInlineWs(line[idx]) || line[idx] === ";" || line[idx] === ","
     );
+    const afterMeridiemWs = skipWs(p);
+    if (afterMeridiemWs + 2 <= len) {
+      const m0 = line[afterMeridiemWs]!;
+      const m1 = line[afterMeridiemWs + 1]!;
+      if (
+        (m0 === "A" || m0 === "a" || m0 === "P" || m0 === "p")
+        && (m1 === "M" || m1 === "m")
+        && isTzDelim(afterMeridiemWs + 2)
+      ) {
+        p = afterMeridiemWs + 2;
+      }
+    }
     const afterWs1 = skipWs(p);
     if (afterWs1 > p && afterWs1 < len) {
       let tzEnd = -1;
@@ -379,12 +452,13 @@ function scanCookieExpiresValueEnd(line: string, vStart: number): number {
     return isInlineWs(ch) || ch === ";" || ch === "," || ch === "\r" || ch === "\n" || (allowColon && ch === ":");
   };
 
-  // 1. ISO-8601 date / date-time: YYYY-MM-DD([T ]HH:MM(:SS)?(.fff)?(Z|±HH:?MM)?)?
+  // 1. ISO-8601 date / date-time: YYYY(-|/)MM(-|/)DD([T ]HH:MM(:SS)?(.fff)?(Z|±HH:?MM)?)?
   const isoY = scanDigits(vStart, 4, 4);
-  if (isoY !== -1 && line[isoY] === "-") {
-    const isoM = scanDigits(isoY + 1, 2, 2);
-    if (isoM !== -1 && line[isoM] === "-") {
-      const isoD = scanDigits(isoM + 1, 2, 2);
+  if (isoY !== -1 && (line[isoY] === "-" || line[isoY] === "/")) {
+    const isoSep = line[isoY];
+    const isoM = scanDigits(isoY + 1, 1, 2);
+    if (isoM !== -1 && line[isoM] === isoSep) {
+      const isoD = scanDigits(isoM + 1, 1, 2);
       if (isoD !== -1) {
         let p = isoD;
         let hasTime = false;
@@ -427,7 +501,7 @@ function scanCookieExpiresValueEnd(line: string, vStart: number): number {
         const looksLikeDayMonth = (() => {
           const dEnd = scanDigits(afterWdWs, 1, 2);
           if (dEnd === -1) return false;
-          const sepEnd = line[dEnd] === "-" ? dEnd + 1 : skipWs(dEnd);
+          const sepEnd = (line[dEnd] === "-" || line[dEnd] === "/") ? dEnd + 1 : skipWs(dEnd);
           return sepEnd > dEnd && scanAlpha(sepEnd, 3, 9) !== -1;
         })();
         const looksLikeMonthDay = (() => {
@@ -444,14 +518,14 @@ function scanCookieExpiresValueEnd(line: string, vStart: number): number {
   }
 
   let dateEnd = -1;
-  // Form A: DD(-|ws+)Mon(-|ws+)YYYY
+  // Form A: DD(-|/|ws+)Mon(-|/|ws+)YYYY
   const dEndA = scanDigits(p, 1, 2);
   if (dEndA !== -1) {
-    const sep1 = line[dEndA] === "-" ? dEndA + 1 : skipWs(dEndA);
+    const sep1 = (line[dEndA] === "-" || line[dEndA] === "/") ? dEndA + 1 : skipWs(dEndA);
     if (sep1 > dEndA) {
       const mEndA = scanAlpha(sep1, 3, 9);
       if (mEndA !== -1) {
-        const sep2 = line[mEndA] === "-" ? mEndA + 1 : skipWs(mEndA);
+        const sep2 = (line[mEndA] === "-" || line[mEndA] === "/") ? mEndA + 1 : skipWs(mEndA);
         if (sep2 > mEndA) {
           const yEndA = scanDigits(sep2, 2, 4);
           if (yEndA !== -1 && !isAsciiDigit(line[yEndA])) {
@@ -599,8 +673,12 @@ function hasKeyStemSegment(
     if (i > segStart && kind !== 0 && prevKind !== 0) {
       const nextCode = i + 1 < len ? raw.charCodeAt(i + 1) : -1;
       const nextLower = nextCode >= 97 && nextCode <= 122;
+      const isOAuthAcronym = prevKind === 2 && kind === 2 && nextLower
+        && i - segStart === 1
+        && raw.slice(segStart, segStart + 5).toLowerCase() === "oauth"
+        && !isAsciiLower(raw[segStart + 5]);
       const boundary = (prevKind === 1 && kind === 2)
-        || (prevKind === 2 && kind === 2 && nextLower)
+        || (prevKind === 2 && kind === 2 && nextLower && !isOAuthAcronym)
         || (prevKind === 3 && (kind === 1 || kind === 2))
         || ((prevKind === 1 || prevKind === 2) && kind === 3);
       if (boundary) {
@@ -1705,7 +1783,7 @@ function consumeJsonSecretValueAfterQuote(
   if (afterSep === p) return pos;
   const decodedKey = unescapeJsonKey(keyCandidate, isSqlUnicodeEscape);
   if (!isSecretJsonKey(decodedKey)) return pos;
-  const keyAuthScheme = extractAuthSchemeFromKey(decodedKey);
+  const keyAuthScheme = extractAuthSchemeFromKey(decodedKey, true);
   p = afterSepVal;
   if (
     p >= len
@@ -1756,10 +1834,21 @@ function consumeJsonSecretValueAfterQuote(
     valEnd = scanSecretHeaderOrValueEnd(line1, valStart, decodedKey, matchedScheme, true, true, escapeState);
   } else if (line1[valStart] === "=" || (line1[valStart] === ":" && !line1.startsWith("://", valStart))) {
     const { afterLastSep, vStart } = advancePastSpacedSepRun(line1, valStart);
-    valEnd = scanJsonValueEnd(line1, vStart, escapeState);
-    if (valEnd === vStart) valEnd = afterLastSep;
-    if (matchedScheme !== "" && valEnd > valStart) {
-      valEnd = scanContinuationParamsEnd(line1, valEnd, false, true, true, escapeState);
+    let kvEnd = -1;
+    if (matchedScheme !== "" && vStart < len) {
+      const { end: k, keyLower } = scanParamKeyEnd(line1, vStart, true, escapeState);
+      if (k > vStart && isNonBase64KvParamAfterKey(line1, vStart, k, matchedScheme, true, escapeState)) {
+        kvEnd = tryFinishKeyValueParamEnd(line1, k, keyLower, false, true, escapeState);
+      }
+    }
+    if (kvEnd !== -1) {
+      valEnd = scanContinuationParamsEnd(line1, kvEnd, false, true, true, escapeState);
+    } else {
+      valEnd = scanJsonValueEnd(line1, vStart, escapeState);
+      if (valEnd === vStart) valEnd = afterLastSep;
+      if (matchedScheme !== "" && valEnd > valStart) {
+        valEnd = scanContinuationParamsEnd(line1, valEnd, false, true, true, escapeState);
+      }
     }
   } else if (matchedScheme !== "") {
     const { end: k, keyLower } = scanParamKeyEnd(line1, valStart, true, escapeState);
@@ -2849,10 +2938,22 @@ function scanSecretHeaderOrValueEnd(
     }
   } else if (line[p] === "=" || (line[p] === ":" && !line.startsWith("://", p))) {
     const { afterLastSep, vStart } = advancePastSpacedSepRun(line, p);
-    end = scanSingleSecretValueEnd(line, vStart, allowRedacted, false, allowQuoted, escapeState);
-    if (end === vStart) end = afterLastSep;
-    if (authScheme !== "") {
+    let kvEnd = -1;
+    if (authScheme !== "" && vStart < line.length) {
+      const { end: k, keyLower } = scanParamKeyEnd(line, vStart, allowQuoted, escapeState);
+      if (k > vStart && isNonBase64KvParamAfterKey(line, vStart, k, authScheme, allowQuoted, escapeState)) {
+        kvEnd = tryFinishKeyValueParamEnd(line, k, keyLower, false, allowQuoted, escapeState);
+      }
+    }
+    if (kvEnd !== -1) {
+      end = kvEnd;
       authParamMode = true;
+    } else {
+      end = scanSingleSecretValueEnd(line, vStart, allowRedacted, false, allowQuoted, escapeState);
+      if (end === vStart) end = afterLastSep;
+      if (authScheme !== "") {
+        authParamMode = true;
+      }
     }
   } else if (authScheme !== "") {
     const { end: k, keyLower } = scanParamKeyEnd(line, p, allowQuoted, escapeState);
@@ -3316,31 +3417,29 @@ function emitAllowlistedTokens(line: string): string {
       continue;
     }
     const rawLower = rawTok.toLowerCase();
-    const bareTok = rawTok.startsWith(".") ? rawTok.replace(/^\.+/, "") : rawTok;
-    const lastDotIdx = bareTok.lastIndexOf(".");
-    const lastSeg = lastDotIdx === -1 ? bareTok : bareTok.slice(lastDotIdx + 1);
-    const lastSegLower = lastSeg.toLowerCase();
+    const tokAuthScheme = extractAuthSchemeFromKey(rawTok);
     let afterWs = i;
     while (afterWs < len && isInlineWs(line[afterWs])) afterWs += 1;
     const { afterLastSep: afterExplicitSep, vStart: afterExplicitSepVal } = advancePastSpacedSepRun(line, afterWs);
     const hasExplicitSep = afterExplicitSep > afterWs;
     const isSqlKeyPhrase = rawLower === "key" && !hasExplicitSep && SAFE_KEY_PREFIX_WORDS.has(prevTokLower);
     const isBenignBareVocabStem = !hasExplicitSep && (rawLower === "session" || rawLower === "sessions" || rawLower === "keys");
-    const isBareAuthScheme = (
-      (lastSegLower === "basic" || lastSegLower === "digest" || lastSegLower === "oauth" || lastSegLower === "negotiate")
-      && (lastSeg !== lastSegLower || hasExplicitSep)
-    ) || (
-      MULTI_PARAM_AUTH_SCHEMES.has(lastSegLower)
-      && (
-        lastSeg !== lastSegLower
-        || hasExplicitSep
-        || (afterWs < len && tryScanKeyValueParamEnd(line, afterWs, false, false, undefined, true) !== -1)
+    const isBenignBareAuthWord = !hasExplicitSep
+      && (rawLower === "basic" || rawLower === "digest" || rawLower === "oauth" || rawLower === "negotiate")
+      && rawTok === rawLower;
+    const isBareAuthScheme = tokAuthScheme !== "" && (
+      hasExplicitSep
+      || !isBenignBareAuthWord
+      || (
+        MULTI_PARAM_AUTH_SCHEMES.has(tokAuthScheme)
+        && afterWs < len
+        && tryScanKeyValueParamEnd(line, afterWs, false, false, undefined, true) !== -1
       )
     );
 
     if ((isSecretKeyStem(rawTok) && !isSqlKeyPhrase && !isBenignBareVocabStem) || isBareAuthScheme) {
       let p = hasExplicitSep ? afterExplicitSepVal : afterWs;
-      let matchedScheme = isBareAuthScheme || AUTH_SCHEMES.has(lastSegLower) ? lastSegLower : "";
+      let matchedScheme = tokAuthScheme;
       if ((hasExplicitSep || !isBareAuthScheme) && p < len && !line.startsWith("[redacted]", p) && !line.startsWith("[url]", p)) {
         const sEnd = scanAuthSchemeTokenEnd(line, p);
         const rawScheme = line.slice(p, sEnd);
