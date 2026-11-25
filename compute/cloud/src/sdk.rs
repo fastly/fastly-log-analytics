@@ -761,10 +761,11 @@ impl Runtime for FastlyRuntime {
                                 .map(|opt| opt.filter(|t| !t.is_empty()))
                             {
                                 if let Ok(Some(fresh)) = self.admin_get_fresh(key, &token) {
-                                    let cur_ts = value["_kv_written_ms"].as_u64().unwrap_or(0);
-                                    let fresh_ts =
-                                        fresh.value["_kv_written_ms"].as_u64().unwrap_or(0);
-                                    if fresh_ts > cur_ts || (cur_ts == 0 && fresh.value != value) {
+                                    if crate::admin::transport::should_adopt_fresh_record(
+                                        &generation,
+                                        &value,
+                                        &fresh,
+                                    ) {
                                         return Ok(Some(fresh));
                                     }
                                 }

@@ -73,6 +73,19 @@ pub fn pick_fresher_record(api: Record, local: Option<Record>, dead_gen: Option<
     api
 }
 
+/// Whether `admin_get`'s `admin_get_fresh` fallback should replace the local KV record (whose
+/// body may already have been refreshed from Core Cache `last_written_value` while keeping the
+/// stale local `generation`). Accepting `fresh_ts == cur_ts` when `fresh.generation` differs lets
+/// `admin_get` adopt the real post-write generation instead of discarding it and returning the
+/// dead generation.
+pub fn should_adopt_fresh_record(cur_generation: &str, cur_value: &Value, fresh: &Record) -> bool {
+    let cur_ts = cur_value["_kv_written_ms"].as_u64().unwrap_or(0);
+    let fresh_ts = fresh.value["_kv_written_ms"].as_u64().unwrap_or(0);
+    fresh_ts > cur_ts
+        || (fresh_ts == cur_ts && fresh.generation != cur_generation)
+        || (cur_ts == 0 && fresh.value != *cur_value)
+}
+
 /// Whether `admin_cas` may heal a stuck local POP KV cache via `InsertMode::Overwrite` after
 /// `ItemPreconditionFailed`.
 ///
@@ -1214,6 +1227,35 @@ mod tests {
             1_000,
             "100",
             2_999,
+        ));
+    }
+
+    #[test]
+    fn should_adopt_fresh_record_adopts_new_generation_at_same_written_ms() {
+        let cached_val =
+            serde_json::json!({"catalog": {"generation": 42}, "_kv_written_ms": 2_000});
+        let fresh = super::Record {
+            generation: "200".into(),
+            value: cached_val.clone(),
+        };
+        // Core Cache already substituted `cached_val` into `value`, so `fresh_ts == cur_ts`,
+        // but `fresh.generation` ("200") escapes the dead local generation ("100").
+        assert!(super::should_adopt_fresh_record("100", &cached_val, &fresh));
+        // Same generation and same timestamp needs no replacement.
+        assert!(!super::should_adopt_fresh_record(
+            "200",
+            &cached_val,
+            &fresh
+        ));
+        // Older API response must never replace a newer cached value.
+        let older_api = super::Record {
+            generation: "150".into(),
+            value: serde_json::json!({"catalog": {"generation": 41}, "_kv_written_ms": 1_000}),
+        };
+        assert!(!super::should_adopt_fresh_record(
+            "100",
+            &cached_val,
+            &older_api
         ));
     }
 }
