@@ -507,8 +507,13 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     expect(screen.queryByText('Compute Requests')).not.toBeInTheDocument()
   })
 
-  test('Cloud usage defers below-the-fold estimator prefill and log-fields queries until estimator enters view', async () => {
+  test('Cloud usage defers below-the-fold estimator prefill, log-fields, and rum-breakdown queries until entering view', async () => {
     setCloudModeRuntime(true)
+    useServiceStore.setState({
+      activeServiceId: 'test-svc',
+      isInitialized: true,
+      services: [{ id: 'test-svc', name: 'Test', rum_enabled: true }],
+    })
     vi.stubGlobal('IntersectionObserver', class {
       observe() {}
       disconnect() {}
@@ -523,6 +528,7 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
       expect(mockGet).not.toHaveBeenCalledWith('/api/usage/prefill', expect.anything())
       expect(mockGet).not.toHaveBeenCalledWith('/api/services/{service_id}/log-fields', expect.anything())
       expect(mockGet).not.toHaveBeenCalledWith('/api/log-fields/catalog', expect.anything())
+      expect(mockGet).not.toHaveBeenCalledWith('/api/usage/rum-breakdown', expect.anything())
     } finally {
       vi.unstubAllGlobals()
     }

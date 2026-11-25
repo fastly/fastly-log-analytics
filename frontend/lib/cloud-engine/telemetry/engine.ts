@@ -117,6 +117,13 @@ export type ReadLogsOptions = {
   latestCompleteSnapshotOnly?: boolean;
   /** Optional column subset to decode (and Range-project on large uncached files). */
   columns?: readonly string[];
+  /**
+   * Whether large uncached Parquet files (> `OPS_PROJECTED_MIN_BYTES`) should attempt
+   * HTTP Range projection when `columns` is set (default `true`). Callers requesting
+   * wide column subsets that exceed `OPS_PROJECTED_MAX_RATIO` can set `false` to avoid
+   * a wasted 64 KiB footer probe round-trip before falling back to `fetchFile`.
+   */
+  rangeProject?: boolean;
   /** Deduplicate rows by `event_id` (default `true`). */
   dedupe?: boolean;
   /** Sort rows by `timestamp` descending, then `event_id` (default `true`). */
@@ -322,6 +329,7 @@ export async function readLogs(
     signal?: AbortSignal;
     latestCompleteSnapshotOnly?: boolean;
     columns?: readonly string[];
+    rangeProject?: boolean;
     dedupe?: boolean;
     sort?: boolean;
   },
@@ -334,6 +342,7 @@ export async function readLogs(
     signal?: AbortSignal;
     latestCompleteSnapshotOnly?: boolean;
     columns?: readonly string[];
+    rangeProject?: boolean;
     dedupe?: boolean;
     sort?: boolean;
   } = {},
@@ -351,6 +360,10 @@ export async function readLogs(
     typeof kindOrOptions === "string"
       ? optionsArg.latestCompleteSnapshotOnly === true
       : kindOrOptions.latestCompleteSnapshotOnly === true;
+  const rangeProject =
+    typeof kindOrOptions === "string"
+      ? optionsArg.rangeProject !== false
+      : kindOrOptions.rangeProject !== false;
   const dedupe =
     typeof kindOrOptions === "string"
       ? optionsArg.dedupe !== false
@@ -379,7 +392,7 @@ export async function readLogs(
     evicted: 0,
     liveRows: 0,
   };
-  const [live, manifest] = await Promise.all([
+  const [live, manifest, cachedKeyList] = await Promise.all([
     readLive(source, kind, fromMs, signal),
     fetchManifest(
       source.fetchJson,
@@ -388,6 +401,7 @@ export async function readLogs(
       signal,
       `ops:${kind}`,
     ),
+    source.cachedKeys(),
   ]);
   if (!manifest.complete) {
     throw new Error(
@@ -397,7 +411,7 @@ export async function readLogs(
   stats.listed = manifest.files.length;
 
   const listed = new Set(manifest.files.map((file) => file.key));
-  const cachedKeys = new Set(await source.cachedKeys());
+  const cachedKeys = new Set(cachedKeyList);
   const evictions = [...cachedKeys].filter((key) => {
     if (listed.has(key) || !key.startsWith(`processed/ops/${kind}/`))
       return false;
@@ -420,6 +434,7 @@ export async function readLogs(
     loadSignal?: AbortSignal,
   ): Promise<Record<string, unknown>[]> => {
     if (
+      rangeProject &&
       requestedColumns !== null &&
       source.fetchRange &&
       file.size > OPS_PROJECTED_MIN_BYTES &&
@@ -795,9 +810,10 @@ export async function readIngestLifecycle(
     liveRows: 0,
   };
 
-  const [live, manifest] = await Promise.all([
+  const [live, manifest, cachedKeyList] = await Promise.all([
     readLive(source, "ingest_files", fromMs, signal),
     fetchManifest(source.fetchJson, from, to, signal, "ops:ingest_files"),
+    source.cachedKeys(),
   ]);
   if (!manifest.complete) {
     throw new Error(
@@ -807,7 +823,7 @@ export async function readIngestLifecycle(
   stats.listed = manifest.files.length;
 
   const listed = new Set(manifest.files.map((file) => file.key));
-  const cachedKeys = new Set(await source.cachedKeys());
+  const cachedKeys = new Set(cachedKeyList);
   const evictions = [...cachedKeys].filter((key) => {
     if (listed.has(key) || !key.startsWith("processed/ops/ingest_files/")) {
       return false;
@@ -825,82 +841,15 @@ export async function readIngestLifecycle(
   );
   stats.evicted = evictions.length;
 
+  // INGEST_LIFECYCLE_COLUMNS includes raw_key and output_keys_json, which dominate
+  // ingest_files Parquet files (>50% of bytes), so always fetch whole files in one
+  // request to avoid wasted 64 KiB Range footer probes and populate Browser Cache API.
   const fetchAndFold = async (
     file: ManifestFile,
     loadSignal: AbortSignal | undefined,
     filterFrom?: number,
     filterTo?: number,
   ): Promise<IngestLifecycleFold> => {
-    if (
-      source.fetchRange &&
-      file.size > OPS_PROJECTED_MIN_BYTES &&
-      !cachedKeys.has(file.key)
-    ) {
-      try {
-        let anyNetwork = false;
-        let anyCdnHit = false;
-        let downloaded = 0;
-        let cachedBytes = 0;
-        const fetchRangeBytes = async (start: number, end: number) => {
-          const part = await source.fetchRange!(file, start, end, loadSignal);
-          if (part.cached) {
-            cachedBytes += part.bytes.byteLength;
-          } else {
-            anyNetwork = true;
-            downloaded += part.bytes.byteLength;
-          }
-          if (isCdnHit(part.cdn)) anyCdnHit = true;
-          return part.bytes;
-        };
-        const footer = await readParquetFooter(
-          file.size,
-          fetchRangeBytes,
-          OPS_FOOTER_PROBE_BYTES,
-        );
-        const projection = planParquetProjection(footer, new Set(columns));
-        const tailStart = footer.tail?.start ?? file.size;
-        const extraRanges = projection.ranges.filter((r) => r.start < tailStart);
-        const extraBytes = extraRanges.reduce(
-          (sum, r) => sum + (Math.min(r.end, tailStart) - r.start),
-          0,
-        );
-        const tailBytes = footer.tail ? footer.tail.bytes.byteLength : 0;
-        if (projection.chunks.length === 0) {
-          const empty = createIngestLifecycleFold();
-          empty.rowCount = Number(footer.metadata.num_rows);
-          if (!anyNetwork) stats.cached++;
-          if (anyCdnHit) stats.cdnHits++;
-          stats.read++;
-          if (!anyNetwork) progress.cached++;
-          progress.cachedBytes += cachedBytes;
-          progress.downloadedBytes += downloaded;
-          progress.done++;
-          onProgress?.({ ...progress });
-          return empty;
-        }
-        if (
-          extraBytes + tailBytes < file.size * OPS_PROJECTED_MAX_RATIO &&
-          extraRanges.length <= OPS_PROJECTED_MAX_RANGES
-        ) {
-          const rangeBytes = await fetchProjectedRanges(projection, fetchRangeBytes);
-          const projected = assembleProjectedParquet(projection, rangeBytes);
-          const decoded = await readColumns(projected, columns);
-          const fold = createIngestLifecycleFold();
-          foldIngestColumns(fold, decoded, filterFrom, filterTo);
-          if (!anyNetwork) stats.cached++;
-          if (anyCdnHit) stats.cdnHits++;
-          stats.read++;
-          if (!anyNetwork) progress.cached++;
-          progress.cachedBytes += cachedBytes;
-          progress.downloadedBytes += downloaded;
-          progress.done++;
-          onProgress?.({ ...progress });
-          return fold;
-        }
-      } catch (err) {
-        if (loadSignal?.aborted || isAbortOrAuthError(err)) throw err;
-      }
-    }
     const { bytes, cached, cdn } = await source.fetchFile(file.key, loadSignal);
     if (cached) stats.cached++;
     if (isCdnHit(cdn)) stats.cdnHits++;

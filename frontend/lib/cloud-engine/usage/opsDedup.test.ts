@@ -310,5 +310,26 @@ describe("Cloud /usage ops deduplication and memoization", () => {
     expect(fosJobs).toHaveLength(1);
     expect(Date.parse(fosJobs[0].from)).toBe(deletionFrom);
     expect(Date.parse(fosJobs[0].to)).toBe(FLOOR_NOW);
+
+    const postedByKind = Object.fromEntries(
+      MockWorker.instances[0].posted
+        .filter((msg) => "options" in msg)
+        .map((msg) => {
+          const opts = msg.options as {
+            kind: string;
+            columns?: string[];
+            rangeProject?: boolean;
+            sort?: boolean;
+          };
+          return [opts.kind, opts];
+        }),
+    );
+    expect(postedByKind.fos_usage.rangeProject).toBe(false);
+    expect(postedByKind.fos_usage.sort).toBe(false);
+    expect(postedByKind.api_telemetry.rangeProject).toBe(false);
+    expect(postedByKind.api_telemetry.sort).toBe(false);
+    expect(postedByKind.api_telemetry.columns).toContain("vcpu_ms");
+    expect(postedByKind.api_telemetry.columns).not.toContain("details_json");
+    expect(postedByKind.cron_runs.rangeProject).toBe(false);
   });
 });

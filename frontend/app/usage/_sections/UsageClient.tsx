@@ -95,6 +95,8 @@ export function UsagePageContent({
   const activityBy = config.effectiveInterval.split(' ')[1] || 'hour'
   const estimatorRef = useRef<HTMLDivElement>(null)
   const estimatorVisible = useInViewOnce(estimatorRef, { rootMargin: '100px' })
+  const rumCardRef = useRef<HTMLDivElement>(null)
+  const rumVisible = useInViewOnce(rumCardRef, { rootMargin: '100px' })
   const cloudMode = isCloudMode()
 
   // The Cost Estimator lives below the fold; defer /api/usage/prefill until it nears
@@ -203,6 +205,9 @@ export function UsagePageContent({
     staleTime: 60_000,
   })
 
+  // RUM Operations sits at the bottom of the charts grid (below the fold); defer
+  // /api/usage/rum-breakdown until it nears the viewport so initial Cloud /usage loads
+  // avoid booting DuckDB-WASM and fetching raw RUM Parquet files.
   const {
     data: rumBreakdown,
     isLoading: loadingRumBreakdown,
@@ -220,7 +225,7 @@ export function UsagePageContent({
         }),
       )
     },
-    enabled: isReady && isRumEnabled,
+    enabled: isReady && isRumEnabled && rumVisible,
     staleTime: 60_000,
   })
 
@@ -370,6 +375,8 @@ export function UsagePageContent({
         loadingRumBreakdown={loadingRumBreakdown}
         fetchingRumBreakdown={fetchingRumBreakdown}
         errorRumBreakdown={errorRumBreakdown}
+        rumCardRef={rumCardRef}
+        rumVisible={rumVisible}
         isRumEnabled={isRumEnabled}
         isFetchingAny={isFetchingAny}
         isLoadingInitial={isLoadingInitial}

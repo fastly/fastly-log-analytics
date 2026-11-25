@@ -6,6 +6,7 @@ import {
   fnv1a32,
   OPS_PROJECTED_MIN_BYTES,
   OpsRangeUnsupportedError,
+  readIngestLifecycle,
   readLogs,
   type OpsSource,
 } from "./engine";
@@ -1118,5 +1119,167 @@ describe("tagged compact files (Rust parity)", () => {
     expect(r3.rows).toHaveLength(2);
     expect(r2.stats.cached).toBe(1);
     expect(r3.stats.cached).toBe(1);
+  });
+
+  it("skips HTTP Range footer probes when readLogs sets rangeProject: false", async () => {
+    clearOpsDecodedCache();
+    const rowCount = 26_000;
+    const baseTs = DAY_MS + 10 * 3_600_000;
+    const bigParquet = parquetWriteBuffer({
+      columnData: [
+        {
+          name: "timestamp",
+          type: "TIMESTAMP",
+          data: Array.from({ length: rowCount }, (_, i) => new Date(baseTs + i * 1000)),
+        },
+        {
+          name: "event_id",
+          type: "STRING",
+          data: Array.from(
+            { length: rowCount },
+            (_, i) => `evt-${String(i).padStart(6, "0")}-${(i * 9973).toString(16)}-${(i * 2654435761).toString(16)}`,
+          ),
+        },
+        {
+          name: "op",
+          type: "STRING",
+          data: Array.from({ length: rowCount }, () => "GET"),
+        },
+      ],
+      codec: "SNAPPY",
+    });
+    expect(bigParquet.byteLength).toBeGreaterThan(OPS_PROJECTED_MIN_BYTES);
+
+    const key = `processed/ops/fos_usage/year=2026/month=10/day=29/compact=100-200-c2-n${rowCount}.parquet`;
+    const rangeCalls: Array<{ start: number; end: number }> = [];
+    const { src, log } = source({
+      live: noLive,
+      manifest: [
+        {
+          files: [
+            {
+              key,
+              start: "2026-10-29T10:00:00Z",
+              end: "2026-10-29T11:00:00Z",
+              size: bigParquet.byteLength,
+              rows: rowCount,
+            },
+          ],
+          next_cursor: null,
+        },
+      ],
+      files: { [key]: bigParquet },
+    });
+    src.fetchRange = async (_file, start, end) => {
+      rangeCalls.push({ start, end });
+      return { bytes: bigParquet.slice(start, end), cached: false, cdn: "HIT" };
+    };
+
+    const result = await readLogs(src, {
+      kind: "fos_usage",
+      ...range,
+      columns: ["timestamp", "op"],
+      rangeProject: false,
+      dedupe: false,
+      sort: false,
+    });
+
+    expect(rangeCalls).toHaveLength(0);
+    expect(log.files).toEqual([key]);
+    expect(result.rows).toHaveLength(rowCount);
+    expect(result.rows[0].event_id).toBeUndefined();
+  });
+
+  it("readIngestLifecycle fetches large files directly without Range footer probes", async () => {
+    clearOpsDecodedCache();
+    const rowCount = 18_000;
+    const baseTs = DAY_MS + 10 * 3_600_000;
+    const bigIngest = parquetWriteBuffer({
+      columnData: [
+        {
+          name: "timestamp",
+          type: "TIMESTAMP",
+          data: Array.from({ length: rowCount }, (_, i) => new Date(baseTs + i * 1000)),
+        },
+        {
+          name: "raw_key",
+          type: "STRING",
+          data: Array.from(
+            { length: rowCount },
+            (_, i) => `raw/logs/year=2026/month=10/day=29/raw-${i}-${(i * 9973).toString(16)}-${(i * 2654435761).toString(16)}.log.gz`,
+          ),
+        },
+        {
+          name: "raw_size",
+          type: "INT64",
+          data: Array.from({ length: rowCount }, () => BigInt(1024)),
+        },
+        {
+          name: "status",
+          type: "STRING",
+          data: Array.from({ length: rowCount }, () => "converted"),
+        },
+        {
+          name: "state_version",
+          type: "INT64",
+          data: Array.from({ length: rowCount }, () => BigInt(2)),
+        },
+        {
+          name: "output_keys_json",
+          type: "STRING",
+          data: Array.from(
+            { length: rowCount },
+            (_, i) => `["processed/requests/year=2026/month=10/day=29/part-${i}.parquet"]`,
+          ),
+        },
+        {
+          name: "raw_deleted",
+          type: "BOOLEAN",
+          data: Array.from({ length: rowCount }, () => true),
+        },
+        {
+          name: "raw_deleted_at",
+          type: "TIMESTAMP",
+          data: Array.from({ length: rowCount }, (_, i) => new Date(baseTs + i * 1000 + 60_000)),
+        },
+      ],
+      codec: "SNAPPY",
+    });
+    expect(bigIngest.byteLength).toBeGreaterThan(OPS_PROJECTED_MIN_BYTES);
+
+    const key = `processed/ops/ingest_files/year=2026/month=10/day=29/compact=100-200-c2-n${rowCount}.parquet`;
+    const rangeCalls: Array<{ start: number; end: number }> = [];
+    const { src, log } = source({
+      live: noLive,
+      manifest: [
+        {
+          files: [
+            {
+              key,
+              start: "2026-10-29T10:00:00Z",
+              end: "2026-10-29T11:00:00Z",
+              size: bigIngest.byteLength,
+              rows: rowCount,
+            },
+          ],
+          next_cursor: null,
+        },
+      ],
+      files: { [key]: bigIngest },
+    });
+    src.fetchRange = async (_file, start, end) => {
+      rangeCalls.push({ start, end });
+      return { bytes: bigIngest.slice(start, end), cached: false, cdn: "HIT" };
+    };
+
+    const result = await readIngestLifecycle(src, {
+      ...range,
+      minimumBilledDays: 30,
+    });
+
+    expect(rangeCalls).toHaveLength(0);
+    expect(log.files).toEqual([key]);
+    expect(result.intervals).toHaveLength(rowCount);
+    expect(result.complete).toBe(true);
   });
 });

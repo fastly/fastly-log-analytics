@@ -78,6 +78,8 @@ export function UsageChartsGrid({
   loadingRumBreakdown,
   fetchingRumBreakdown,
   errorRumBreakdown,
+  rumCardRef,
+  rumVisible = true,
   isRumEnabled,
   isFetchingAny,
   isLoadingInitial,
@@ -109,6 +111,8 @@ export function UsageChartsGrid({
   loadingRumBreakdown: boolean
   fetchingRumBreakdown: boolean
   errorRumBreakdown: unknown
+  rumCardRef?: React.RefObject<HTMLDivElement | null>
+  rumVisible?: boolean
   isRumEnabled: boolean
   isFetchingAny: boolean
   isLoadingInitial: boolean
@@ -530,16 +534,18 @@ export function UsageChartsGrid({
           </AnalyticsCard>
         </>
       )}
-      {isRumEnabled && Boolean(rumBreakdown || loadingRumBreakdown || errorRumBreakdown) && (
-        <AnalyticsCard
-          title="Real User Monitoring (RUM) Operations"
-          description="RUM beacon volume and estimated FOS Class A operation cost"
-          isLoading={loadingRumBreakdown}
-          isFetching={fetchingRumBreakdown}
-          error={errorRumBreakdown as AnalyticsCardError | null}
-          isEmpty={!rumBreakdown?.data || rumBreakdown.data.length === 0}
-          className="min-h-[360px]"
-        >
+      {isRumEnabled && (
+        <div ref={rumCardRef} className={!rumVisible ? 'min-h-[360px]' : undefined}>
+          {Boolean(rumBreakdown || loadingRumBreakdown || errorRumBreakdown) && (
+            <AnalyticsCard
+              title="Real User Monitoring (RUM) Operations"
+              description="RUM beacon volume and estimated FOS Class A operation cost"
+              isLoading={loadingRumBreakdown}
+              isFetching={fetchingRumBreakdown}
+              error={errorRumBreakdown as AnalyticsCardError | null}
+              isEmpty={!rumBreakdown?.data || rumBreakdown.data.length === 0}
+              className="min-h-[360px]"
+            >
           <div className="space-y-4 p-4">
             {!rumBreakdown ? null : rumBreakdown.total_beacons === 0 ? (
               <div className="text-center py-8 text-muted-foreground">
@@ -587,7 +593,9 @@ export function UsageChartsGrid({
               </div>
             )}
           </div>
-        </AnalyticsCard>
+            </AnalyticsCard>
+          )}
+        </div>
       )}
     </div>
   )

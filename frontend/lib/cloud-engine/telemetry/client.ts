@@ -470,6 +470,7 @@ function startOpsRead(
   latestCompleteSnapshotOnly: boolean | undefined,
   columns: string[] | null,
   columnsKey: string,
+  rangeProject: boolean,
   dedupe: boolean,
   sort: boolean,
 ): Promise<LogsResult> {
@@ -501,6 +502,7 @@ function startOpsRead(
           ? { latestCompleteSnapshotOnly: true }
           : {}),
         ...(columns ? { columns } : {}),
+        ...(rangeProject ? {} : { rangeProject: false }),
         ...(dedupe ? {} : { dedupe: false }),
         ...(sort ? {} : { sort: false }),
         onProgress: (progress) => {
@@ -558,6 +560,7 @@ async function sharedRead(
     onProgress,
     latestCompleteSnapshotOnly,
     columns,
+    rangeProject: rawRangeProject,
     dedupe: rawDedupe,
     sort: rawSort,
   }: ReadLogsOptions,
@@ -566,6 +569,7 @@ async function sharedRead(
   if (signal?.aborted) throw abortError();
   const identity = currentOpsIdentity(scope);
   const startEpoch = currentOpsCacheEpoch();
+  const rangeProject = rawRangeProject !== false;
   const dedupe = rawDedupe !== false;
   const sort = rawSort !== false;
   const normalizedColumns = normalizeOpsColumns(columns, dedupe);
@@ -628,6 +632,7 @@ async function sharedRead(
         latestCompleteSnapshotOnly,
         normalizedColumns,
         columnsKey,
+        rangeProject,
         dedupe,
         sort,
       );
@@ -651,6 +656,7 @@ async function sharedRead(
     latestCompleteSnapshotOnly,
     normalizedColumns,
     columnsKey,
+    rangeProject,
     dedupe,
     sort,
   );
@@ -666,6 +672,7 @@ export function readLogs(
     signal?: AbortSignal;
     latestCompleteSnapshotOnly?: boolean;
     columns?: readonly string[];
+    rangeProject?: boolean;
     dedupe?: boolean;
     sort?: boolean;
   },
@@ -679,6 +686,7 @@ export function readLogs(
     signal?: AbortSignal;
     latestCompleteSnapshotOnly?: boolean;
     columns?: readonly string[];
+    rangeProject?: boolean;
     dedupe?: boolean;
     sort?: boolean;
   },
@@ -692,6 +700,7 @@ export function readLogs(
         signal: options?.signal,
         latestCompleteSnapshotOnly: options?.latestCompleteSnapshotOnly,
         columns: options?.columns,
+        rangeProject: options?.rangeProject,
         dedupe: options?.dedupe,
         sort: options?.sort,
       },

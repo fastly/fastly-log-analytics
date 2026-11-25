@@ -113,6 +113,15 @@ const FOS_USAGE_COLUMNS = [
   "est_cost_usd",
 ] as const;
 
+const API_TELEMETRY_COLUMNS = [
+  "timestamp",
+  "event_id",
+  "source",
+  "path",
+  "vcpu_ms",
+  "files_fetched",
+] as const;
+
 const INITIAL_INVENTORY_LOOKBACK_DAYS = 2;
 const DEFAULT_INVENTORY_LOOKBACK_DAYS = 30;
 const INVENTORY_TTL_MS = 60_000;
@@ -154,6 +163,7 @@ export async function fetchCloudStorageInventory(
         signal,
         latestCompleteSnapshotOnly: true,
         columns: STORAGE_INVENTORY_COLUMNS,
+        rangeProject: false,
         dedupe: false,
         sort: false,
       },
@@ -1637,6 +1647,7 @@ export type UsageLogReader = (
     signal?: AbortSignal;
     latestCompleteSnapshotOnly?: boolean;
     columns?: readonly string[];
+    rangeProject?: boolean;
     dedupe?: boolean;
     sort?: boolean;
   },
@@ -1824,12 +1835,23 @@ export async function fetchUsageInput(
               ...resolvedIdentity,
               signal,
               columns: FOS_USAGE_COLUMNS,
+              rangeProject: false,
+              sort: false,
             }),
           )
-        : read(kind, kind === "cron_runs" ? cronRunsRange : range, {
-            ...resolvedIdentity,
-            signal,
-          }),
+        : kind === "api_telemetry"
+          ? read(kind, range, {
+              ...resolvedIdentity,
+              signal,
+              columns: API_TELEMETRY_COLUMNS,
+              rangeProject: false,
+              sort: false,
+            })
+          : read(kind, cronRunsRange, {
+              ...resolvedIdentity,
+              signal,
+              rangeProject: false,
+            }),
     ),
   ]);
   assertOpsEpoch(startOpsEpoch, signal);
@@ -1898,7 +1920,12 @@ export async function fetchUsageKindWithCoverage<K extends UsageKind>(
     {
       ...resolvedIdentity,
       signal,
-      ...(kind === "fos_usage" ? { columns: FOS_USAGE_COLUMNS } : {}),
+      rangeProject: false,
+      ...(kind === "fos_usage"
+        ? { columns: FOS_USAGE_COLUMNS, sort: false }
+        : kind === "api_telemetry"
+          ? { columns: API_TELEMETRY_COLUMNS, sort: false }
+          : {}),
     },
   );
   assertOpsEpoch(startOpsEpoch, signal);
