@@ -139,7 +139,7 @@ const LIVE_LIMIT = 2000;
 const LIVE_SOURCE_CURSOR = "source-v1";
 const MAX_LIVE_RESTARTS = 2;
 const MAX_LIVE_PAGES = 50;
-const CONCURRENCY = 16;
+const CONCURRENCY = 24;
 const MINUTE_MS = 60_000;
 
 const KEY_PATTERN =
@@ -491,32 +491,56 @@ export async function readLogs(
       waveSize = 4;
     }
   } else {
-    queueProgress(validCompacts.map(({ file }) => file));
+    const potentiallyCovered = new Set<string>();
+    for (const { parsed } of validCompacts) {
+      for (const { file: w } of coveredBy(parsed)) potentiallyCovered.add(w.key);
+    }
+    const rest = [...windows.values()].flat().map(({ file }) => file);
+    const uncoveredWindows = rest.filter((file) => !potentiallyCovered.has(file.key));
+    const coveredWindows = rest.filter((file) => potentiallyCovered.has(file.key));
+
+    type FirstWaveItem =
+      | { kind: "compact"; file: ManifestFile; parsed: ParsedKey }
+      | { kind: "file"; file: ManifestFile };
+    const firstWave: FirstWaveItem[] = [
+      ...validCompacts.map(({ file, parsed }) => ({
+        kind: "compact" as const,
+        file,
+        parsed,
+      })),
+      ...plain.map((file) => ({ kind: "file" as const, file })),
+      ...uncoveredWindows.map((file) => ({ kind: "file" as const, file })),
+    ];
+
+    queueProgress(firstWave.map((item) => item.file));
     await mapLimit(
-      validCompacts,
-      async ({ file, parsed }) => {
-        const rows = await load(file);
-        if (rows.length !== parsed.rows) {
-          stats.ignoredCompact++;
-          return;
+      firstWave,
+      async (item) => {
+        const rows = await load(item.file);
+        if (item.kind === "compact") {
+          if (rows.length !== item.parsed.rows) {
+            stats.ignoredCompact++;
+            return;
+          }
+          for (const { file: w } of coveredBy(item.parsed)) covered.add(w.key);
         }
         fileRows.push(...rows);
-        for (const { file: w } of coveredBy(parsed)) covered.add(w.key);
       },
       signal,
     );
 
-    const rest = [...windows.values()].flat().map(({ file }) => file);
-    const toRead = [...plain, ...rest.filter((file) => !covered.has(file.key))];
-    stats.skippedCovered = rest.length - (toRead.length - plain.length);
-    queueProgress(toRead);
-    await mapLimit(
-      toRead,
-      async (file) => {
-        fileRows.push(...(await load(file)));
-      },
-      signal,
-    );
+    const fallbackWindows = coveredWindows.filter((file) => !covered.has(file.key));
+    stats.skippedCovered = coveredWindows.length - fallbackWindows.length;
+    if (fallbackWindows.length > 0) {
+      queueProgress(fallbackWindows);
+      await mapLimit(
+        fallbackWindows,
+        async (file) => {
+          fileRows.push(...(await load(file)));
+        },
+        signal,
+      );
+    }
   }
 
   progress.phase = "aggregate";

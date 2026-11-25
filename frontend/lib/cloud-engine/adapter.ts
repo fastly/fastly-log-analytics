@@ -197,6 +197,13 @@ async function storageBillingIntervals(
   signal: AbortSignal,
   checkUsageEpoch: () => void,
 ): Promise<CloudStorageBillingResult> {
+  const identity = currentOpsIdentity();
+  const inventoryRead = fetchCloudStorageInventory({
+    now: toMs,
+    identity,
+    signal,
+  });
+  inventoryRead.catch(() => {});
   const settings = await fetchUsageSettings(signal);
   checkUsageEpoch();
   const minBilledDays = settings.min_billed_days;
@@ -205,13 +212,6 @@ async function storageBillingIntervals(
     toMs < now
       ? { from: fromMs - minWindowMs, to: toMs }
       : { from: Math.min(fromMs, now - minWindowMs), to: now };
-  const identity = currentOpsIdentity();
-  const inventoryRead = fetchCloudStorageInventory({
-    now: toMs,
-    identity,
-    signal,
-  });
-  inventoryRead.catch(() => {});
   const ingestRead = fetchIngestDeletedIntervals(
     deletionWindow,
     identity,

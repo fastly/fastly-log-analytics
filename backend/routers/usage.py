@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextvars
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from typing import Any, Literal
@@ -358,6 +360,70 @@ def _compute_prefill_rates(
     return result, prov
 
 
+def _compute_prefill_metadata_averages(
+    source: dict[str, Any], *, rum_retention_days: int
+) -> tuple[int | None, int | None]:
+    """Compute (avg_nodes_per_flush, rum_beacons_per_day), running independent high-scale reads concurrently."""
+    svc_name = str(source.get("name") or "")
+    cached_meta = _PREFILL_META_CACHE.get(svc_name) if svc_name else None
+    if cached_meta is not None:
+        return cached_meta
+
+    from backend.core import metadata as metadata_db
+
+    hs_service = get_high_scale_service_registry().resolve(svc_name) if svc_name else None
+    if hs_service is not None:
+        from backend.high_scale.postgres_control import PostgresControlPlane
+        from backend.high_scale.rum import rum_beacons_by_date
+
+        rum_end = datetime.now(UTC)
+        rum_start = rum_end - timedelta(days=int(rum_retention_days))
+
+        def _read_nodes() -> tuple[int | None, bool]:
+            try:
+                avg = PostgresControlPlane().request_files_per_flush(svc_name)
+            except Exception:
+                logger.warning("prefill: high-scale nodes per flush unavailable for %s", svc_name, exc_info=True)
+                return None, True
+            return (round(avg) if avg else None), False
+
+        def _read_rum() -> tuple[int | None, bool]:
+            try:
+                per_day = rum_beacons_by_date(hs_service, rum_start.isoformat(), rum_end.isoformat())
+            except Exception:
+                logger.warning("prefill: high-scale RUM beacons per day unavailable for %s", svc_name, exc_info=True)
+                return None, True
+            return (round(sum(per_day.values()) / len(per_day)) if per_day else 0), False
+
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="usage-prefill-meta") as pool:
+            fut_nodes = pool.submit(contextvars.copy_context().run, _read_nodes)
+            fut_rum = pool.submit(contextvars.copy_context().run, _read_rum)
+            avg_nodes, nodes_failed = fut_nodes.result()
+            rum_beacons, rum_failed = fut_rum.result()
+        if svc_name and not (nodes_failed or rum_failed):
+            _PREFILL_META_CACHE[svc_name] = (avg_nodes, rum_beacons)
+        return avg_nodes, rum_beacons
+
+    avg_nodes = None
+    try:
+        avg = metadata_db.get_node_count_avg(source["name"])
+        if avg:
+            avg_nodes = round(float(avg))
+    except Exception:
+        logger.debug("_compute_prefill_rates: step failed (ignored)", exc_info=True)
+
+    rum_beacons = 0
+    try:
+        val = metadata_db.get_rum_beacons_avg_per_day(source["name"])
+        rum_beacons = round(val) if val is not None else 0
+    except Exception as e:
+        logger.debug("Failed to calculate rum_beacons_per_day: %s", e)
+
+    if svc_name:
+        _PREFILL_META_CACHE[svc_name] = (avg_nodes, rum_beacons)
+    return avg_nodes, rum_beacons
+
+
 @usage_router.get(
     "/prefill/rates",
     response_model=PrefillRatesResponse,
@@ -387,7 +453,7 @@ async def prefill(source: dict[str, Any] = Depends(get_source)) -> PrefillRespon
     timer = SectionTimer()
     section_timings = timer.entries
 
-    fast_result, prov = await asyncio.to_thread(_compute_prefill_rates, source)
+    fast_result, prov = _compute_prefill_rates(source, include_metadata_averages=False)
     result: dict[str, Any] = {
         "requests_per_day": None,
         "edge_requests_per_day": None,
@@ -395,85 +461,139 @@ async def prefill(source: dict[str, Any] = Depends(get_source)) -> PrefillRespon
         **fast_result,
     }
 
+    async def _fetch_metadata() -> tuple[int | None, int | None]:
+        return await asyncio.to_thread(
+            _compute_prefill_metadata_averages,
+            source,
+            rum_retention_days=int(result["rum_retention_days"]),
+        )
+
     api_key = api_key_or_mock(get_fastly_api_key(source["service_id"]))
-    if api_key:
+    now = datetime.now(UTC)
+
+    async def _resolve_endpoint_chain() -> dict[str, Any]:
+        if not api_key:
+            return {}
         from backend.core.fastly.client import find_condition, get_active_version, get_log_endpoint
 
         logging_svc_id = (
             source.get("logging_service_id") or source.get("service_id") or get_fastly_logging_service_id() or ""
         ).strip()
-        svc_id = logging_svc_id
-        now = datetime.now(UTC)
+        token_scope = sha256(api_key.encode()).hexdigest()[:16]
+        updates: dict[str, Any] = {}
+        try:
+            if not logging_svc_id:
+                return updates
+            endpoint_name = prov.get("endpoint_name", "Fastly Object Storage Logs")
+            ep_cache_key = (logging_svc_id, endpoint_name, token_scope)
+            cached_ep = _PREFILL_ENDPOINT_CACHE.get(ep_cache_key)
+            if cached_ep is not None:
+                return dict(cached_ep)
+            active_ver = await asyncio.to_thread(get_active_version, logging_svc_id, api_key)
+            if not active_ver:
+                return updates
+            current_ep = await asyncio.to_thread(get_log_endpoint, logging_svc_id, active_ver, endpoint_name, api_key)
+            if "period" in current_ep:
+                updates["log_period_seconds"] = int(current_ep["period"])
+            cond_name = current_ep.get("response_condition")
+            if cond_name == "Log Sampling":
+                import re
+
+                cond = await asyncio.to_thread(find_condition, cond_name, logging_svc_id, active_ver, api_key)
+                if cond:
+                    stmt = cond.get("statement", "")
+                    m = re.search(r"randombool\((\d+),", stmt)
+                    if m:
+                        updates["sample_rate"] = int(m.group(1))
+                    if "req.restarts == 0" in stmt:
+                        updates["edge_only"] = True
+            _PREFILL_ENDPOINT_CACHE[ep_cache_key] = dict(updates)
+        except Exception:
+            logger.debug("_resolve_endpoint_chain: step failed (ignored)", exc_info=True)
+        return updates
+
+    async def _fetch_stats() -> dict[str, Any] | None:
+        if not api_key:
+            return None
+        svc_id = (
+            source.get("logging_service_id") or source.get("service_id") or get_fastly_logging_service_id() or ""
+        ).strip()
         to_ts = (int(now.timestamp()) // 300) * 300
         from_ts = to_ts - 3 * 86_400
         by = "day"
-        token_scope = sha256(api_key.encode()).hexdigest()[:16]
-
-        async def _resolve_endpoint_chain() -> dict[str, Any]:
-            updates: dict[str, Any] = {}
-            try:
-                if not logging_svc_id:
-                    return updates
-                endpoint_name = prov.get("endpoint_name", "Fastly Object Storage Logs")
-                ep_cache_key = (logging_svc_id, endpoint_name, token_scope)
-                cached_ep = _PREFILL_ENDPOINT_CACHE.get(ep_cache_key)
-                if cached_ep is not None:
-                    return dict(cached_ep)
-                active_ver = await asyncio.to_thread(get_active_version, logging_svc_id, api_key)
-                if not active_ver:
-                    return updates
-                current_ep = await asyncio.to_thread(
-                    get_log_endpoint, logging_svc_id, active_ver, endpoint_name, api_key
-                )
-                if "period" in current_ep:
-                    updates["log_period_seconds"] = int(current_ep["period"])
-                cond_name = current_ep.get("response_condition")
-                if cond_name == "Log Sampling":
-                    import re
-
-                    cond = await asyncio.to_thread(find_condition, cond_name, logging_svc_id, active_ver, api_key)
-                    if cond:
-                        stmt = cond.get("statement", "")
-                        m = re.search(r"randombool\((\d+),", stmt)
-                        if m:
-                            updates["sample_rate"] = int(m.group(1))
-                        if "req.restarts == 0" in stmt:
-                            updates["edge_only"] = True
-                _PREFILL_ENDPOINT_CACHE[ep_cache_key] = dict(updates)
-            except Exception:
-                logger.debug("_resolve_endpoint_chain: step failed (ignored)", exc_info=True)
-            return updates
-
-        async def _fetch_stats() -> dict[str, Any] | None:
-            try:
-                if svc_id:
-                    return await asyncio.to_thread(
-                        _fastly_api,
-                        svc_id,
-                        by,
-                        from_ts,
-                        to_ts,
-                        ("requests", "edge_requests"),
-                        api_key,
-                    )
+        try:
+            if svc_id:
                 return await asyncio.to_thread(
                     _fastly_api,
-                    None,
+                    svc_id,
                     by,
                     from_ts,
                     to_ts,
                     ("requests", "edge_requests"),
                     api_key,
                 )
-            except Exception:
+            return await asyncio.to_thread(
+                _fastly_api,
+                None,
+                by,
+                from_ts,
+                to_ts,
+                ("requests", "edge_requests"),
+                api_key,
+            )
+        except Exception:
+            return None
+
+    cached_status = svcconfig.get_status(source["name"]) or {}
+    cached_edge_ratio = cached_status.get("edge_ratio")
+
+    async def _fetch_edge_ratio() -> float | None:
+        if cached_edge_ratio is not None:
+            return float(cached_edge_ratio)
+
+        def _edge_ratio_blocking() -> float | None:
+            service_id = str(source.get("service_id") or source["name"])
+            cached_ratio = _EDGE_RATIO_CACHE.get(service_id)
+            if cached_ratio is not None:
+                return float(cached_ratio)
+            hs_service = get_high_scale_service_registry().resolve(service_id)
+            client = hs_service.client if hs_service is not None else get_clickhouse_client()
+            if client is None:
                 return None
+            fence = visible_publication_fence_sql("request", client=client, service_id=service_id)
+            rows = client.execute(
+                f"SELECT countIf(lower(custom_fields['edge']) IN ('true', '1')) * 100.0 / nullIf(count(), 0) AS edge_ratio "
+                f"FROM request_facts WHERE service_id={{service_id:String}} AND {fence}",
+                {"service_id": service_id},
+            )
+            if rows and rows[0].get("edge_ratio") is not None:
+                val = round(float(rows[0]["edge_ratio"]), 2)
+                _EDGE_RATIO_CACHE[service_id] = val
+                return val
+            return None
 
         try:
-            _t = _time.perf_counter()
-            chain_updates, payload = await asyncio.gather(_resolve_endpoint_chain(), _fetch_stats())
-            timer.mark("fastly_chain_and_stats", _t)
-            result.update(chain_updates)
+            return await asyncio.to_thread(_edge_ratio_blocking)
+        except Exception:
+            logger.debug("prefill: step failed (ignored)", exc_info=True)
+            return None
 
+    _t = _time.perf_counter()
+    (avg_nodes, rum_beacons), chain_updates, payload, edge_ratio = await asyncio.gather(
+        _fetch_metadata(),
+        _resolve_endpoint_chain(),
+        _fetch_stats(),
+        _fetch_edge_ratio(),
+    )
+    timer.mark("prefill_parallel_io", _t)
+
+    if avg_nodes is not None:
+        result["avg_nodes_per_flush"] = avg_nodes
+    result["rum_beacons_per_day"] = rum_beacons
+
+    if api_key:
+        try:
+            result.update(chain_updates)
             daily_reqs: dict[str, int] = {}
             daily_edge: dict[str, int] = {}
             missing_edge_days: set[str] = set()
@@ -499,43 +619,10 @@ async def prefill(source: dict[str, Any] = Depends(get_source)) -> PrefillRespon
         except Exception:
             logger.debug("prefill: step failed (ignored)", exc_info=True)
 
+    if edge_ratio is not None:
+        result["edge_ratio"] = edge_ratio
+
     debug_queries: list[Any] = []
-    cached_status = svcconfig.get_status(source["name"]) or {}
-    cached_edge_ratio = cached_status.get("edge_ratio")
-    if cached_edge_ratio is not None:
-        result["edge_ratio"] = cached_edge_ratio
-    else:
-        try:
-
-            def _edge_ratio_blocking() -> float | None:
-                service_id = str(source.get("service_id") or source["name"])
-                cached_ratio = _EDGE_RATIO_CACHE.get(service_id)
-                if cached_ratio is not None:
-                    return float(cached_ratio)
-                hs_service = get_high_scale_service_registry().resolve(service_id)
-                client = hs_service.client if hs_service is not None else get_clickhouse_client()
-                if client is None:
-                    return None
-                fence = visible_publication_fence_sql("request", client=client, service_id=service_id)
-                rows = client.execute(
-                    f"SELECT countIf(lower(custom_fields['edge']) IN ('true', '1')) * 100.0 / nullIf(count(), 0) AS edge_ratio "
-                    f"FROM request_facts WHERE service_id={{service_id:String}} AND {fence}",
-                    {"service_id": service_id},
-                )
-                if rows and rows[0].get("edge_ratio") is not None:
-                    val = round(float(rows[0]["edge_ratio"]), 2)
-                    _EDGE_RATIO_CACHE[service_id] = val
-                    return val
-                return None
-
-            _t = _time.perf_counter()
-            edge_ratio = await asyncio.to_thread(_edge_ratio_blocking)
-            timer.mark("edge_ratio_query", _t)
-            if edge_ratio is not None:
-                result["edge_ratio"] = edge_ratio
-        except Exception:
-            logger.debug("prefill: step failed (ignored)", exc_info=True)
-
     resp: PrefillResponse = PrefillResponse.with_telemetry(
         debug_queries=debug_queries, section_timings=section_timings, **result
     )
@@ -663,14 +750,120 @@ def usage_current_storage(
             query_days = MIN_BILLING_DAYS if delete_after else retention_days
             retention_start_str = (now - timedelta(days=query_days)).strftime("%Y-%m-%d %H:%M:%S")
 
-            stats = _get_storage_stats(src, retention_start_str, retention_end_str)
+            cache_key = (src.get("name"), src.get("bucket"), src.get("prefix"))
+            cached_insp = _STORAGE_INSPECTION_CACHE.get(cache_key)
+
+            try:
+                high_scale_service = get_high_scale_service_registry().resolve(service_id)
+                archive_storage_complete = high_scale_service is None
+            except Exception:
+                high_scale_service = None
+                archive_storage_complete = False
+                logger.debug("usage_current_storage: archive applicability failed (ignored)", exc_info=True)
+
+            def _read_quarantine() -> int:
+                try:
+                    from backend.core.metadata.ingest_log import get_quarantine_storage_total
+
+                    return get_quarantine_storage_total(src["name"])
+                except Exception:
+                    logger.debug("usage_current_storage: get_quarantine_storage_total failed (ignored)", exc_info=True)
+                    return 0
+
+            def _read_archive() -> tuple[int, int, int, int, bool]:
+                try:
+                    from backend.high_scale.postgres_control import PostgresControlPlane
+
+                    summary = PostgresControlPlane().archive_storage_summary(service_id)
+                    return (
+                        summary["live_bytes"],
+                        summary["live_objects"],
+                        summary["expired_30d_bytes"],
+                        int(summary.get("live_rum_bytes", 0)),
+                        True,
+                    )
+                except Exception:
+                    logger.debug("usage_current_storage: archive summary failed (ignored)", exc_info=True)
+                    return 0, 0, 0, 0, False
+
+            def _read_cloud_copy_deleted() -> tuple[int, bool]:
+                try:
+                    from backend.core.metadata.usage_log import cloud_copy_deleted_bytes_in_billing_window
+
+                    return cloud_copy_deleted_bytes_in_billing_window(src["name"]), True
+                except Exception:
+                    logger.debug("usage_current_storage: cloud copy deletions failed (ignored)", exc_info=True)
+                    return 0, False
+
+            def _read_pg_billing() -> tuple[float, float, float, bool, list[str]]:
+                try:
+                    from backend.high_scale.postgres_control import PostgresControlPlane
+
+                    return PostgresControlPlane().storage_billing_summary(
+                        service_id, start_dt, end_dt, minimum_days=MIN_BILLING_DAYS
+                    )
+                except Exception:
+                    logger.debug("usage_current_storage: storage_billing_summary failed", exc_info=True)
+                    return 0.0, 0.0, 0.0, False, ["high-scale:postgres_unavailable"]
+
+            def _read_cloud_copy_intervals() -> tuple[list[dict[str, Any]], bool]:
+                try:
+                    from backend.core.metadata.fos_usage import cloud_copy_deletion_records_in_window
+
+                    return (
+                        cloud_copy_deletion_records_in_window(
+                            src["name"], start_dt, end_dt, minimum_days=MIN_BILLING_DAYS
+                        ),
+                        True,
+                    )
+                except Exception:
+                    logger.debug("usage_current_storage: cloud copy deletion records failed", exc_info=True)
+                    return [], False
+
+            with ThreadPoolExecutor(max_workers=6, thread_name_prefix="usage-storage") as pool:
+                fut_stats = pool.submit(
+                    contextvars.copy_context().run, _get_storage_stats, src, retention_start_str, retention_end_str
+                )
+                fut_quarantine = (
+                    pool.submit(contextvars.copy_context().run, _read_quarantine) if cached_insp is None else None
+                )
+                fut_archive = (
+                    pool.submit(contextvars.copy_context().run, _read_archive)
+                    if high_scale_service is not None
+                    else None
+                )
+                fut_cc_deleted = pool.submit(contextvars.copy_context().run, _read_cloud_copy_deleted)
+                fut_pg_billing = (
+                    pool.submit(contextvars.copy_context().run, _read_pg_billing)
+                    if high_scale_service is not None
+                    else None
+                )
+                fut_cc_intervals = (
+                    pool.submit(contextvars.copy_context().run, _read_cloud_copy_intervals)
+                    if high_scale_service is not None
+                    else None
+                )
+
+                stats = fut_stats.result()
+                quarantine_from_db = fut_quarantine.result() if fut_quarantine is not None else 0
+                if fut_archive is not None:
+                    (
+                        archive_bytes,
+                        archive_objects,
+                        archive_expired_bytes,
+                        archive_rum_bytes,
+                        archive_storage_complete,
+                    ) = fut_archive.result()
+                else:
+                    archive_bytes = archive_objects = archive_expired_bytes = archive_rum_bytes = 0
+                cloud_copy_deleted_bytes, cloud_copy_deleted_bytes_complete = fut_cc_deleted.result()
+                pg_billing_res = fut_pg_billing.result() if fut_pg_billing is not None else None
+                cc_intervals_res = fut_cc_intervals.result() if fut_cc_intervals is not None else None
 
             total_files = stats["total_files"]
             total_bytes = stats["total_bytes"]
             debug_queries = stats.get("debug_queries", [])
 
-            cache_key = (src.get("name"), src.get("bucket"), src.get("prefix"))
-            cached_insp = _STORAGE_INSPECTION_CACHE.get(cache_key)
             if cached_insp is not None:
                 storage_bytes, storage_files, quarantine_bytes, rum_bytes = cached_insp
             else:
@@ -685,13 +878,7 @@ def usage_current_storage(
                     storage_files = int(cached_if)
                     storage_info_success = True
 
-                quarantine_bytes = 0
-                try:
-                    from backend.core.metadata.ingest_log import get_quarantine_storage_total
-
-                    quarantine_bytes = get_quarantine_storage_total(src["name"])
-                except Exception:
-                    logger.debug("usage_current_storage: get_quarantine_storage_total failed (ignored)", exc_info=True)
+                quarantine_bytes = quarantine_from_db
 
                 rum_bytes = 0
                 rum_from_meta = "rum_bytes" in stats
@@ -724,37 +911,6 @@ def usage_current_storage(
                     rum_bytes,
                 )
 
-            archive_bytes = archive_objects = archive_expired_bytes = archive_rum_bytes = 0
-            try:
-                high_scale_service = get_high_scale_service_registry().resolve(service_id)
-                archive_storage_complete = high_scale_service is None
-            except Exception:
-                high_scale_service = None
-                archive_storage_complete = False
-                logger.debug("usage_current_storage: archive applicability failed (ignored)", exc_info=True)
-            if high_scale_service is not None:
-                try:
-                    from backend.high_scale.postgres_control import PostgresControlPlane
-
-                    summary = PostgresControlPlane().archive_storage_summary(service_id)
-                    archive_bytes, archive_objects = summary["live_bytes"], summary["live_objects"]
-                    archive_expired_bytes = summary["expired_30d_bytes"]
-                    archive_rum_bytes = int(summary.get("live_rum_bytes", 0))
-                    archive_storage_complete = True
-                except Exception:
-                    logger.debug("usage_current_storage: archive summary failed (ignored)", exc_info=True)
-
-            # Standard's cloud copy deletes superseded and expired files; FOS bills each for 30 days after deletion.
-            cloud_copy_deleted_bytes = 0
-            cloud_copy_deleted_bytes_complete = True
-            try:
-                from backend.core.metadata.usage_log import cloud_copy_deleted_bytes_in_billing_window
-
-                cloud_copy_deleted_bytes = cloud_copy_deleted_bytes_in_billing_window(src["name"])
-            except Exception:
-                cloud_copy_deleted_bytes_complete = False
-                logger.debug("usage_current_storage: cloud copy deletions failed (ignored)", exc_info=True)
-
             if "rum_bytes" in stats:
                 rum_bytes = int(stats["rum_bytes"])
             regular_log_bytes = total_bytes - rum_bytes
@@ -786,36 +942,9 @@ def usage_current_storage(
             storage_billing_provenance: list[str] = []
             storage_intervals: list[StorageBillingInterval] = []
 
-            if high_scale_service is not None:
-                pg_live = 0.0
-                pg_deleted = 0.0
-                pg_min = 0.0
-                pg_complete = False
-                pg_provenance: list[str] = []
-                try:
-                    from backend.high_scale.postgres_control import PostgresControlPlane
-
-                    pg_live, pg_deleted, pg_min, pg_complete, pg_provenance = (
-                        PostgresControlPlane().storage_billing_summary(
-                            service_id, start_dt, end_dt, minimum_days=MIN_BILLING_DAYS
-                        )
-                    )
-                except Exception:
-                    pg_complete = False
-                    pg_provenance = ["high-scale:postgres_unavailable"]
-                    logger.debug("usage_current_storage: storage_billing_summary failed", exc_info=True)
-
-                cloud_copy_intervals: list[dict[str, Any]] = []
-                cloud_copy_intervals_ok = True
-                try:
-                    from backend.core.metadata.fos_usage import cloud_copy_deletion_records_in_window
-
-                    cloud_copy_intervals = cloud_copy_deletion_records_in_window(
-                        src["name"], start_dt, end_dt, minimum_days=MIN_BILLING_DAYS
-                    )
-                except Exception:
-                    cloud_copy_intervals_ok = False
-                    logger.debug("usage_current_storage: cloud copy deletion records failed", exc_info=True)
+            if high_scale_service is not None and pg_billing_res is not None and cc_intervals_res is not None:
+                pg_live, pg_deleted, pg_min, pg_complete, pg_provenance = pg_billing_res
+                cloud_copy_intervals, cloud_copy_intervals_ok = cc_intervals_res
 
                 if end_ms >= start_ms:
                     cc_summary = calculate_storage_billing(cloud_copy_intervals, start_ms, end_ms)
@@ -911,26 +1040,27 @@ def platform_usage(
             reason="missing_token" if workspace_id else None,
         )
     else:
-        try:
-            storage_payload = _fastly_api(
-                None,
-                "day",
-                from_epoch,
-                to_epoch,
-                STORAGE_PLATFORM_METRICS,
-                token,
-            )
-        except Exception:
-            storage = PlatformStorageUsage(status="unavailable", scope="account", reason="request_failed")
-        else:
-            try:
-                storage = _platform_storage(storage_payload.get("data", []), from_epoch, to_epoch)
-            except Exception:
-                storage = PlatformStorageUsage(status="unavailable", scope="account", reason="invalid_data")
 
-        if not workspace_id:
-            ngwaf = PlatformNgwafUsage(status="not_configured")
-        else:
+        def _fetch_storage() -> PlatformStorageUsage:
+            try:
+                storage_payload = _fastly_api(
+                    None,
+                    "day",
+                    from_epoch,
+                    to_epoch,
+                    STORAGE_PLATFORM_METRICS,
+                    token,
+                )
+            except Exception:
+                return PlatformStorageUsage(status="unavailable", scope="account", reason="request_failed")
+            try:
+                return _platform_storage(storage_payload.get("data", []), from_epoch, to_epoch)
+            except Exception:
+                return PlatformStorageUsage(status="unavailable", scope="account", reason="invalid_data")
+
+        def _fetch_ngwaf() -> PlatformNgwafUsage:
+            if not workspace_id:
+                return PlatformNgwafUsage(status="not_configured")
             try:
                 ngwaf_payload = _fastly_api(
                     workspace_id,
@@ -941,20 +1071,29 @@ def platform_usage(
                     token,
                 )
             except Exception:
-                ngwaf = PlatformNgwafUsage(
+                return PlatformNgwafUsage(
                     status="unavailable",
                     scope="workspace",
                     reason="request_failed",
                 )
-            else:
-                try:
-                    ngwaf = _platform_ngwaf(ngwaf_payload.get("data", []))
-                except Exception:
-                    ngwaf = PlatformNgwafUsage(
-                        status="unavailable",
-                        scope="workspace",
-                        reason="invalid_data",
-                    )
+            try:
+                return _platform_ngwaf(ngwaf_payload.get("data", []))
+            except Exception:
+                return PlatformNgwafUsage(
+                    status="unavailable",
+                    scope="workspace",
+                    reason="invalid_data",
+                )
+
+        if workspace_id:
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="usage-platform") as pool:
+                fut_storage = pool.submit(contextvars.copy_context().run, _fetch_storage)
+                fut_ngwaf = pool.submit(contextvars.copy_context().run, _fetch_ngwaf)
+                storage = fut_storage.result()
+                ngwaf = fut_ngwaf.result()
+        else:
+            storage = _fetch_storage()
+            ngwaf = PlatformNgwafUsage(status="not_configured")
 
     statuses = (storage.status, ngwaf.status)
     source_status: Literal["fastly", "partial", "unavailable"]

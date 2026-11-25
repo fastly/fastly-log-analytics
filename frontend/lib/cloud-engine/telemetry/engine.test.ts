@@ -548,4 +548,93 @@ describe("tagged compact files (Rust parity)", () => {
     expect(log.files).toEqual([]);
     expect(result.rows.map((r) => r.event_id).sort()).toEqual(["live-done", "live-obj"]);
   });
+
+  it("fetches uncovered window and plain files concurrently with valid compacts in one wave", async () => {
+    const w1 = windowKey(10, a, 1);
+    const w2 = windowKey(10, a + 5, 1);
+    const late = windowKey(10, a + 15, 1);
+    const plain = "processed/ops/fos_usage/plain.parquet";
+    const compact = tagged(a + 30, 2, t1 + t2);
+
+    const compactBytes = await parquet([row(1, "a"), row(6, "b")]);
+    const lateBytes = await parquet([row(20, "late")]);
+    const plainBytes = await parquet([row(25, "plain")]);
+
+    let releaseCompact!: () => void;
+    const compactGate = new Promise<void>((resolve) => {
+      releaseCompact = resolve;
+    });
+    const started = new Set<string>();
+    const { src } = source({
+      live: noLive,
+      manifest: [
+        {
+          files: [
+            entry(w1, 1),
+            entry(w2, 1),
+            entry(late, 1),
+            entry(plain, 1),
+            entry(compact, 2),
+          ],
+          next_cursor: null,
+        },
+      ],
+      files: {},
+    });
+    src.fetchFile = async (key) => {
+      started.add(key);
+      if (key === compact) {
+        await compactGate;
+        return { bytes: compactBytes, cached: false, cdn: "MISS" };
+      }
+      if (key === late) return { bytes: lateBytes, cached: false, cdn: "MISS" };
+      if (key === plain) return { bytes: plainBytes, cached: false, cdn: "MISS" };
+      throw new Error(`Unexpected fetch of covered window: ${key}`);
+    };
+
+    const pending = readLogs(src, "fos_usage", range);
+    // Allow microtasks/manifest fetch to dispatch the first wave.
+    for (let i = 0; i < 10 && !started.has(late); i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    const startedBeforeCompactResolved = new Set(started);
+    releaseCompact();
+    const result = await pending;
+
+    expect(startedBeforeCompactResolved.has(compact)).toBe(true);
+    expect(startedBeforeCompactResolved.has(late)).toBe(true);
+    expect(startedBeforeCompactResolved.has(plain)).toBe(true);
+    expect(started.has(w1)).toBe(false);
+    expect(started.has(w2)).toBe(false);
+    expect(result.stats.skippedCovered).toBe(2);
+    expect(result.rows.map((r) => r.event_id).sort()).toEqual(["a", "b", "late", "plain"]);
+  });
+
+  it("falls back to reading covered windows when a compact fails its row-count check", async () => {
+    const w1 = windowKey(10, a, 1);
+    const w2 = windowKey(10, a + 5, 1);
+    const late = windowKey(10, a + 15, 1);
+    // Claims n2 rows in key, but parquet actually only has 1 row -> must fall back to w1 + w2.
+    const badCompact = tagged(a + 30, 2, t1 + t2);
+    const { src, log } = source({
+      live: noLive,
+      manifest: [
+        {
+          files: [entry(w1, 1), entry(w2, 1), entry(late, 1), entry(badCompact, 2)],
+          next_cursor: null,
+        },
+      ],
+      files: {
+        [badCompact]: await parquet([row(1, "truncated")]),
+        [w1]: await parquet([row(1, "w1")]),
+        [w2]: await parquet([row(6, "w2")]),
+        [late]: await parquet([row(20, "late")]),
+      },
+    });
+    const result = await readLogs(src, "fos_usage", range);
+    expect(result.stats.ignoredCompact).toBe(1);
+    expect(result.stats.skippedCovered).toBe(0);
+    expect([...log.files].sort()).toEqual([badCompact, late, w1, w2].sort());
+    expect(result.rows.map((r) => r.event_id).sort()).toEqual(["late", "w1", "w2"]);
+  });
 });

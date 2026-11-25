@@ -119,12 +119,6 @@ export async function readColumns(
   return { rows: totalRows, columns: decoded };
 }
 
-function normalize(value: unknown): unknown {
-  if (value instanceof Date) return value.getTime();
-  if (typeof value === "bigint") return Number(value);
-  return value;
-}
-
 export async function readParquetRows(
   buffer: ArrayBuffer,
   columns?: string[],
@@ -134,11 +128,15 @@ export async function readParquetRows(
     compressors,
     ...(columns ? { columns } : {}),
   })) as Record<string, unknown>[];
-  return rows.map((row) =>
-    Object.fromEntries(
-      Object.entries(row).map(([name, value]) => [name, normalize(value)]),
-    ),
-  );
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    for (const key in row) {
+      const value = row[key];
+      if (value instanceof Date) row[key] = value.getTime();
+      else if (typeof value === "bigint") row[key] = Number(value);
+    }
+  }
+  return rows;
 }
 
 export const readRows = readParquetRows;

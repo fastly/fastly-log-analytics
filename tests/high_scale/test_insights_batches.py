@@ -668,3 +668,62 @@ def test_remaining_batches_extract_and_shape_cards(monkeypatch: pytest.MonkeyPat
     ):
         assert cards[insight_id]["items"], f"{insight_id} expected non-empty items"
         assert cards[insight_id]["severity"] != "error", insight_id
+
+
+def test_non_rollup_detector_groups_overlap_rollup_coverage_read() -> None:
+    import threading
+
+    barrier = threading.Barrier(2, timeout=2.0)
+    non_rollup_started = threading.Event()
+
+    class _OverlapClient(_BatchFakeClient):
+        def execute(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+            marker = re.search(r"/\* insight:(\w+) \*/", sql)
+            name = marker.group(1) if marker else ""
+            if name == "rollup_coverage":
+                barrier.wait()
+            elif name == "group_window_perf" and not non_rollup_started.is_set():
+                non_rollup_started.set()
+                barrier.wait()
+            return super().execute(sql, params)
+
+    client = _OverlapClient(with_rollup=True)
+    cards = _cards(_run(client))
+    assert set(cards) == EVERY_CARD
+    assert non_rollup_started.is_set()
+    assert not barrier.broken
+
+
+def test_cache_collapse_detail_runs_three_queries_concurrently() -> None:
+    import threading
+
+    from backend.models.analytics import CacheCollapseDetailRequest
+
+    barrier = threading.Barrier(3, timeout=2.0)
+
+    class _DetailClient:
+        def execute(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+            barrier.wait()
+            if "insight:cache_collapse_rates" in sql:
+                return [
+                    {
+                        "w_hits": 10,
+                        "w_miss": 90,
+                        "w_pass": 0,
+                        "w_total": 100,
+                        "b_hits": 90,
+                        "b_miss": 10,
+                        "b_pass": 0,
+                        "b_total": 100,
+                    }
+                ]
+            return []
+
+    service = SimpleNamespace(service_id="svc-opt", client=_DetailClient())
+    req = CacheCollapseDetailRequest(url="/api/slow", window_size_hrs=24, baseline_hours=168)
+    resp = evaluator.cache_collapse_detail_endpoint(service, req, None, None)  # type: ignore[arg-type]
+    assert resp.url == "/api/slow"
+
+
+def test_cold_wait_seconds_is_bounded_below_p95_budget() -> None:
+    assert 0 < evaluator._COLD_WAIT_SECONDS <= 2.5

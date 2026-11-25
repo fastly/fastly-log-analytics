@@ -111,7 +111,7 @@ _CacheRegistry.register("high_scale.insights._INSIGHTS_PARTIAL_CACHE", _INSIGHTS
 # never run it themselves: they get the last result at once while a single background evaluation per
 # request shape refreshes it, and a cold shape answers with pending cards after a short wait.
 _STALE_MAX_SECONDS = 24 * 3600
-_COLD_WAIT_SECONDS = 5.0
+_COLD_WAIT_SECONDS = 2.0
 _META_WAIT_SECONDS = 15.0
 # A failed scan is raised to the next page request only while it is this recent; after that, retry.
 _FAILURE_REPLAY_SECONDS = 60.0
@@ -458,8 +458,6 @@ def _evaluate(
                 pending=True,
             )
         )
-    coverage = fut_coverage.result() if fut_coverage is not None else []
-    rollup_spans = _rollup_spans(history[0] if history else {}, coverage, baseline_start, window_start)
     cards_by_id: dict[str, dict[str, Any]] = {}
     eligible: list[tuple[InsightDefinition, Detection]] = []
     for definition, detection in candidates:
@@ -475,19 +473,52 @@ def _evaluate(
         else:
             eligible.append((definition, detection))
     batches, standalone = plan_execution(eligible, present)
-    units: list[_QueryUnit] = [
-        *(_prepare_batch(b, m) for b, m in batches),
-        *(_prepare_standalone(d, det) for d, det in standalone),
-    ]
-    grouped: dict[str, list[_QueryUnit]] = {}
-    for unit in units:
-        group_name = next((name for name, members in _MULTIPLEX_GROUPS if unit.key in members), "group_raw_standalone")
-        grouped.setdefault(group_name, []).append(unit)
-    tasks: list[Callable[[], list[tuple[str, dict[str, Any]]]]] = [
-        partial(_run_group, g, u) for g, u in grouped.items()
-    ]
+
+    def _group_name_for(unit_key: str) -> str:
+        return next((name for name, members in _MULTIPLEX_GROUPS if unit_key in members), "group_raw_standalone")
+
+    rollup_dependent_groups: set[str] = set()
+    for batch, _ in batches:
+        if batch.rollup_shape is not None:
+            rollup_dependent_groups.add(_group_name_for(f"batch_{batch.name}"))
+    for definition, _ in standalone:
+        if definition.id in ROLLUP_DETECTIONS:
+            rollup_dependent_groups.add(_group_name_for(definition.id))
+
+    rollup_spans: dict[str, tuple[datetime, datetime]] = {}
+    early_grouped: dict[str, list[_QueryUnit]] = {}
+    deferred_batches: list[tuple[DetectionBatch, list[tuple[InsightDefinition, Detection]]]] = []
+    deferred_standalone: list[tuple[InsightDefinition, Detection]] = []
+    for batch, members in batches:
+        gname = _group_name_for(f"batch_{batch.name}")
+        if gname in rollup_dependent_groups:
+            deferred_batches.append((batch, members))
+        else:
+            early_grouped.setdefault(gname, []).append(_prepare_batch(batch, members))
+    for definition, detection in standalone:
+        gname = _group_name_for(definition.id)
+        if gname in rollup_dependent_groups:
+            deferred_standalone.append((definition, detection))
+        else:
+            early_grouped.setdefault(gname, []).append(_prepare_standalone(definition, detection))
+
     with ThreadPoolExecutor(max_workers=_MAX_WORKERS, thread_name_prefix="hs-insights") as pool:
-        futures = [pool.submit(contextvars.copy_context().run, task) for task in tasks]
+        futures = [
+            pool.submit(contextvars.copy_context().run, partial(_run_group, g, u)) for g, u in early_grouped.items()
+        ]
+        coverage = fut_coverage.result() if fut_coverage is not None else []
+        rollup_spans = _rollup_spans(history[0] if history else {}, coverage, baseline_start, window_start)
+
+        deferred_grouped: dict[str, list[_QueryUnit]] = {}
+        for batch, members in deferred_batches:
+            gname = _group_name_for(f"batch_{batch.name}")
+            deferred_grouped.setdefault(gname, []).append(_prepare_batch(batch, members))
+        for definition, detection in deferred_standalone:
+            gname = _group_name_for(definition.id)
+            deferred_grouped.setdefault(gname, []).append(_prepare_standalone(definition, detection))
+        for g, u in deferred_grouped.items():
+            futures.append(pool.submit(contextvars.copy_context().run, partial(_run_group, g, u)))
+
         for future in futures:
             for insight_id, card in future.result():
                 cards_by_id[insight_id] = card
@@ -727,31 +758,35 @@ def cache_collapse_detail_endpoint(
     hit, miss, passed = (f"startsWith({cache}, '{kind}')" for kind in ("HIT", "MISS", "PASS"))
     is_w = "event_timestamp >= {window_start:DateTime64(3)}"
     is_b = "event_timestamp < {window_start:DateTime64(3)}"
-    rates_row = service.client.execute(
+    rates_sql = (
         "/* insight:cache_collapse_rates */ SELECT "
         f"countIf({is_w} AND {hit}) AS w_hits, countIf({is_w} AND {miss}) AS w_miss, "
         f"countIf({is_w} AND {passed}) AS w_pass, countIf({is_w}) AS w_total, "
         f"countIf({is_b} AND {hit}) AS b_hits, countIf({is_b} AND {miss}) AS b_miss, "
         f"countIf({is_b} AND {passed}) AS b_pass, countIf({is_b}) AS b_total "
-        f"FROM request_facts WHERE {scope}",
-        params,
-    )[0]
-    rates = tuple(
-        int(rates_row[key] or 0)
-        for key in ("w_hits", "w_miss", "w_pass", "w_total", "b_hits", "b_miss", "b_pass", "b_total")
+        f"FROM request_facts WHERE {scope}"
     )
-    timeline_rows = service.client.execute(
+    timeline_sql = (
         "/* insight:cache_collapse_timeline */ SELECT "
         f"toStartOfInterval(event_timestamp, {_bucket_interval(window_hours + baseline_hours)}) AS bucket, "
         f"count() AS total_requests, countIf({hit}) AS real_hits, countIf({miss}) AS misses "
-        f"FROM request_facts WHERE {scope} GROUP BY bucket ORDER BY bucket ASC",
-        params,
+        f"FROM request_facts WHERE {scope} GROUP BY bucket ORDER BY bucket ASC"
     )
-    miss_rows = service.client.execute(
+    miss_sql = (
         "/* insight:cache_collapse_misses */ SELECT event_timestamp AS timestamp, "
         f"{cache} AS cache, custom_fields['pop'] AS pop, client_ip AS ip, toInt32OrNull(custom_fields['status']) AS status "
-        f"FROM request_facts WHERE {scope} AND {miss} ORDER BY event_timestamp DESC LIMIT 50",
-        params,
+        f"FROM request_facts WHERE {scope} AND {miss} ORDER BY event_timestamp DESC LIMIT 50"
+    )
+    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="hs-cache-collapse") as pool:
+        fut_rates = pool.submit(contextvars.copy_context().run, service.client.execute, rates_sql, params)
+        fut_timeline = pool.submit(contextvars.copy_context().run, service.client.execute, timeline_sql, params)
+        fut_misses = pool.submit(contextvars.copy_context().run, service.client.execute, miss_sql, params)
+        rates_row = fut_rates.result()[0]
+        timeline_rows = fut_timeline.result()
+        miss_rows = fut_misses.result()
+    rates = tuple(
+        int(rates_row[key] or 0)
+        for key in ("w_hits", "w_miss", "w_pass", "w_total", "b_hits", "b_miss", "b_pass", "b_total")
     )
     return CacheCollapseDetailResponse.with_telemetry(
         **shape_cache_collapse_detail(

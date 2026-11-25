@@ -375,3 +375,90 @@ def test_usage_get_endpoints_emit_cache_control(monkeypatch):
         resp = client.get(path)
         assert resp.status_code == 200, (path, resp.text)
         assert resp.headers.get("cache-control") == usage._USAGE_CACHE_CONTROL
+
+
+def test_usage_current_storage_runs_independent_postgres_queries_concurrently(monkeypatch):
+    import threading
+
+    src = {"name": "svc-par", "service_id": "svc-par", "bucket": "b", "prefix": ""}
+    # Barrier of 4: source_storage_window, archive_storage_summary, storage_billing_summary,
+    # and cloud_copy_deleted_bytes_in_billing_window must all enter concurrently.
+    barrier = threading.Barrier(4, timeout=2.0)
+
+    class _ConcurrentPG:
+        def source_storage_window(self, sid: str, start: Any, end: Any) -> dict[str, int]:
+            barrier.wait()
+            return {"files": 10, "bytes": 5000, "rum_bytes": 500}
+
+        def archive_storage_summary(self, sid: str) -> dict[str, int]:
+            barrier.wait()
+            return {"live_bytes": 2000, "live_objects": 4, "expired_30d_bytes": 100, "live_rum_bytes": 200}
+
+        def storage_billing_summary(self, sid: str, start: Any, end: Any, *, minimum_days: int = 30) -> Any:
+            barrier.wait()
+            return (1.5, 0.5, 0.25, True, ["high-scale:postgres"])
+
+    def _cloud_copy_deleted(_name: str) -> int:
+        barrier.wait()
+        return 123
+
+    monkeypatch.setattr(usage, "get_high_scale_service_registry", lambda: _hs_registry({"svc-par"}))
+    monkeypatch.setattr(postgres_control, "PostgresControlPlane", _ConcurrentPG)
+    monkeypatch.setattr(svcconfig, "load_config", lambda _n: {})
+    monkeypatch.setattr(svcconfig, "get_status", lambda _n: {"storage_bytes": 1000, "storage_files": 2})
+    monkeypatch.setattr(usage_log, "cloud_copy_deleted_bytes_in_billing_window", _cloud_copy_deleted)
+    monkeypatch.setattr(fos_usage, "cloud_copy_deletion_records_in_window", lambda *_a, **_kw: [])
+    monkeypatch.setattr("backend.core.metadata.ingest_log.get_quarantine_storage_total", lambda _n: 0)
+
+    resp = usage.usage_current_storage(start="2026-11-24T10:00:05Z", end="2026-11-24T11:00:05Z", source=src)
+    assert resp.archive_bytes == 2000
+    assert resp.cloud_copy_deleted_bytes == 123
+    assert resp.storage_billing_complete is True
+
+
+def test_prefill_runs_metadata_fastly_and_edge_ratio_concurrently(monkeypatch):
+    import threading
+
+    source = svcconfig.config_to_source({"service_id": "svc-par-prefill", "cdn_service_id": "cdn-par"})
+    # Barrier of 4: request_files_per_flush, rum_beacons_by_date, fastly_platform_metrics, edge_ratio CH query.
+    barrier = threading.Barrier(4, timeout=2.0)
+
+    class _ConcurrentPG:
+        def request_files_per_flush(self, sid: str) -> float:
+            barrier.wait()
+            return 6.0
+
+    def _concurrent_rum(*_a: Any, **_kw: Any) -> dict[str, int]:
+        barrier.wait()
+        return {"2026-11-24": 250}
+
+    def _concurrent_metrics(**_kw: Any) -> dict[str, Any]:
+        barrier.wait()
+        return {"data": [{"start_time": 1_767_225_600, "requests": 1000, "edge_requests": 800}]}
+
+    class _ConcurrentCH:
+        def execute(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+            barrier.wait()
+            return [{"edge_ratio": 77.5}]
+
+    monkeypatch.setattr(usage, "get_fastly_api_key", lambda _sid: "tok-secret")
+    monkeypatch.setattr(usage, "api_key_or_mock", lambda k: k)
+    monkeypatch.setattr(fastly_client, "get_active_version", lambda *_a: None)
+    monkeypatch.setattr(fastly_client, "fastly_platform_metrics", _concurrent_metrics)
+    monkeypatch.setattr(
+        usage,
+        "get_high_scale_service_registry",
+        lambda: _hs_registry({"svc-par-prefill"}, _ConcurrentCH()),
+    )
+    monkeypatch.setattr(usage, "visible_publication_fence_sql", lambda *a, **kw: "1=1")
+    monkeypatch.setattr(svcconfig, "load_config", lambda _n: {})
+    monkeypatch.setattr(svcconfig, "get_status", lambda _n: {})
+    monkeypatch.setattr(svcconfig, "load_usage_logging_config", lambda: {})
+    monkeypatch.setattr(postgres_control, "PostgresControlPlane", _ConcurrentPG)
+    monkeypatch.setattr(hs_rum, "rum_beacons_by_date", _concurrent_rum)
+
+    resp = asyncio.run(usage.prefill(source))
+    assert resp.avg_nodes_per_flush == 6
+    assert resp.rum_beacons_per_day == 250
+    assert resp.requests_per_day == 1000
+    assert resp.edge_ratio == 77.5
