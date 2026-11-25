@@ -1747,7 +1747,7 @@ function consumeChainedUrlEquals(
   let curEnd = segEnd;
   while (curEnd > curStart) {
     const slice = line.slice(curStart, curEnd);
-    const hasUrl = slice.endsWith("[url]") || (allowQuoted && slice.includes("://"));
+    const hasUrl = slice.includes("[url]") || (allowQuoted && slice.includes("://"));
     if (!hasUrl) break;
     let afterUrl = curEnd;
     const afterUrlWsLimit = Math.min(len, curEnd + 16);
@@ -1786,44 +1786,14 @@ function tryScanKeyValueParamEnd(
     k = tryScanRawUrlEnd(line, p);
   } else if (allowQuoted && (line[p] === '"' || line[p] === "'" || line[p] === "`")) {
     const q = line[p]!;
-    const useBackslash = escapeState ? escapeState.backslashEscapesQuotes : true;
-    k = p + 1;
-    const keyLimit = Math.min(len, k + 64);
-    let consecutiveBackslashes = 0;
-    while (k < keyLimit) {
-      if (useBackslash) {
-        if (line[k] === "\\") {
-          const nextCh = k + 1 < len ? line[k + 1] : "";
-          k += nextCh === "\\" || nextCh === q ? 2 : 1;
-          continue;
-        }
-        if (line[k] === q) break;
-        k += 1;
-      } else {
-        if (line[k] === "\\") {
-          consecutiveBackslashes += 1;
-          k += 1;
-          continue;
-        }
-        if (line[k] === q) {
-          if ((consecutiveBackslashes & 1) === 1 && escapeState) {
-            escapeState.sawAmbiguousBackslashQuote = true;
-          }
-          break;
-        }
-        consecutiveBackslashes = 0;
-        k += 1;
-      }
-    }
-    if (k >= len || line[k] !== q || k === p + 1) return -1;
-    keyLower = line.slice(p + 1, k).toLowerCase();
-    k += 1;
+    k = scanQuotedLiteralEnd(line, p, q, escapeState);
+    if (k <= p + 1 || line[k - 1] !== q) return -1;
+    keyLower = line.slice(p + 1, k - 1).toLowerCase();
   } else {
     if (isCookie && line[k] === "$") k += 1;
     const keyStart = k;
-    const keyLimit = Math.min(len, k + 64);
     while (
-      k < keyLimit
+      k < len
       && (isAsciiAlpha(line[k]) || isAsciiDigit(line[k]) || line[k] === "_" || line[k] === "-" || line[k] === ".")
     ) {
       k += 1;
@@ -1899,6 +1869,10 @@ function scanContinuationParamsEnd(
         end = next + 10;
         continue;
       }
+      if (allowQuoted && (line[next] === '"' || line[next] === "'" || line[next] === "`")) {
+        end = scanQuotedLiteralEnd(line, next, line[next]!, escapeState);
+        continue;
+      }
       let attrEnd = next;
       while (attrEnd < len && (isAsciiAlpha(line[attrEnd]) || line[attrEnd] === "-")) attrEnd += 1;
       const attrLower = line.slice(next, attrEnd).toLowerCase();
@@ -1945,6 +1919,15 @@ function scanContinuationParamsEnd(
           continue;
         }
       }
+      if (allowQuoted && (line[next] === '"' || line[next] === "'" || line[next] === "`")) {
+        const afterQ = scanQuotedLiteralEnd(line, next, line[next]!, escapeState);
+        let ws = afterQ;
+        while (ws < len && isInlineWs(line[ws])) ws += 1;
+        if (line[ws] === ",") {
+          end = afterQ;
+          continue;
+        }
+      }
       break;
     }
   }
@@ -1970,6 +1953,20 @@ function scanSecretHeaderOrValueEnd(
       end = kvEnd;
     } else {
       end = scanSingleSecretValueEnd(line, p, allowRedacted, allowUrl, cookieMode && !allowQuoted, allowQuoted, escapeState);
+      while (
+        cookieMode
+        && allowQuoted
+        && line[end] === ","
+        && end + 1 < line.length
+        && !isInlineWs(line[end + 1])
+        && line[end + 1] !== '"'
+        && line[end + 1] !== "'"
+        && line[end + 1] !== "`"
+      ) {
+        const nextEnd = scanSingleSecretValueEnd(line, end + 1, allowRedacted, allowUrl, false, allowQuoted, escapeState);
+        if (nextEnd <= end + 1) break;
+        end = nextEnd;
+      }
       end = consumeChainedUrlEquals(line, p, end, cookieMode, allowQuoted, escapeState);
     }
   } else {

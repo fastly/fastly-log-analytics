@@ -3083,6 +3083,56 @@ it("SEC-T5-ITER40-FE-03: prevents non-contraction apostrophe mismatch and cross-
         ["user", "param", "100ms", "mode", "server"],
         "Error: Runtime Error: [redacted]",
       ],
+      [
+        "Runtime Error: Cookie: sid=https://a.com'x' = 100ms; mode = server",
+        ["a.com", "100ms", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: Authorization: Digest uri=https://a.com"x" = 100ms, mode = server',
+        ["a.com", "100ms", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: \"Cookie\": 'a''b' = 100ms; mode = server",
+        ["100ms", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": Digest "a""b" = 100ms, mode = server',
+        ["100ms", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Cookie": "" = 100ms; mode = server',
+        ["100ms", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Cookie": a=1; "opaque"; mode = server',
+        ["opaque", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": Digest realm=a, "opaque", response = memory rejected',
+        ["opaque", "response", "memory"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        `Runtime Error: Cookie: ${"a".repeat(65)} = 100ms; mode = server`,
+        ["100ms", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        `Runtime Error: "Cookie": "${"a".repeat(65)}" = 100ms; mode = server`,
+        ["100ms", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Cookie": foo,100ms; mode = server',
+        ["foo", "100ms", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
     ];
     for (const [msg, forbidden, expectedExact] of cases) {
       const err = new Error(msg);
