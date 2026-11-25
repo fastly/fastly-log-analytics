@@ -459,6 +459,23 @@ fn list_for_role_hides_views_with_pii_in_page_query_string() {
                 "pii-query-double-hash",
                 Some("/logs?status=200#section#client_ip=198.51.100.7"),
             ),
+            make_view("pii-hash-router-extra", Some("/#/logs?_extra=198.51.100.7")),
+            make_view(
+                "pii-hash-router-extra-dotted",
+                Some("/#/logs?_extra.custom_ip=198.51.100.7"),
+            ),
+            make_view(
+                "pii-frag-query-extra",
+                Some("/logs?status=200#section?_extra=198.51.100.7"),
+            ),
+            make_view(
+                "pii-frag-query-extra-dotted",
+                Some("/logs?status=200#section?_extra.custom_ip=198.51.100.7"),
+            ),
+            make_view(
+                "pii-encoded-delim-extra",
+                Some("/logs?status%3D200%26_extra=198.51.100.7"),
+            ),
         ],
     };
 
@@ -470,5 +487,5 @@ fn list_for_role_hides_views_with_pii_in_page_query_string() {
     );
 
     let admin = views::list_for_role(&store, "svc1", Role::Admin, 50).expect("list");
-    assert_eq!(admin.len(), 19);
+    assert_eq!(admin.len(), 24);
 }

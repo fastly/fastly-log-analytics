@@ -4449,7 +4449,9 @@ fn page_key_references_pii(key: &str) -> bool {
     }
     let decoded = decode_pii_url_twice(&key.replace('+', " "));
     let trimmed = trim_sql_ws(&decoded);
-    !trimmed.is_empty() && is_extra_column_ident(trimmed)
+    !trimmed.is_empty()
+        && (is_extra_column_ident(trimmed)
+            || trimmed.split(is_pii_split_outer).any(is_extra_column_ident))
 }
 
 fn page_value_references_pii(raw_val: &str) -> bool {
@@ -4465,12 +4467,12 @@ fn page_value_references_pii(raw_val: &str) -> bool {
     is_pii_identifier(trimmed)
         || is_pii_key_exact(trimmed)
         || is_extra_column_ident(trimmed)
+        || trimmed.split(is_pii_split_outer).any(is_extra_column_ident)
         || sql_or_filter_references_pii(trimmed)
 }
 
 fn page_segment_references_pii(segment: &str) -> bool {
-    segment.split(['&', ';', '#']).any(|raw_pair| {
-        let pair = raw_pair.trim_start_matches('?');
+    segment.split(['&', ';', '#', '?']).any(|pair| {
         if pair.is_empty() {
             return false;
         }
