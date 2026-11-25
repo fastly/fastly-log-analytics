@@ -1652,4 +1652,32 @@ describe("forked catalog listing", () => {
     expect(raw.summaryFiles).toBeUndefined();
     expect(keys(narrowed.files)).toEqual(keys([file(T0 + 8 * H), file(T0 + 16 * H)]));
   });
+
+  it("uses a forked snapshot instead of delta when the requested range does not overlap the saved snapshot", async () => {
+    const calls: URLSearchParams[] = [];
+    const fetchJson = Object.assign(
+      vi.fn(async (input: string) => {
+        const params = new URL(input, "http://x").searchParams;
+        calls.push(params);
+        return {
+          files: [file(Date.parse(params.get("from")!))],
+          next_cursor: null,
+          complete: true,
+          catalog_generation: 50,
+        };
+      }),
+      { manifestCacheScope: () => "disjoint-fork-scope" },
+    );
+
+    // Seed a saved snapshot for [T0 + 48h, T0 + 49h].
+    await fetchManifest(fetchJson, iso(T0 + 48 * H), iso(T0 + 49 * H));
+    calls.length = 0;
+
+    // Query a completely disjoint earlier range [T0, T0 + 17h].
+    await fetchManifest(fetchJson, iso(T0), iso(T0 + 17 * H));
+    expect(calls).toHaveLength(1);
+    expect(calls[0].has("since_generation")).toBe(false);
+    expect(calls[0].has("previous_from")).toBe(false);
+    expect(calls[0].get("fork")).toBe("1");
+  });
 });

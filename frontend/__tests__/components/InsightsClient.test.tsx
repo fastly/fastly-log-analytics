@@ -212,6 +212,30 @@ describe('InsightsClient layout stability while evaluating', () => {
     expect(tabCount('all')).toBe('0')
   })
 
+  it('starts the initial scan immediately when /api/log-extents resolves without waiting for the 400ms dropdown debounce', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: false })
+    const insightBodies: Array<{ window_size_hrs: number; baseline_hours: number }> = []
+    server.use(
+      http.get(`${getApiBase()}/api/log-extents`, () =>
+        HttpResponse.json({
+          earliest_log_at: new Date(Date.now() - 72 * 3600_000).toISOString(),
+          latest_log_at: new Date().toISOString(),
+        }),
+      ),
+      http.post(`${getApiBase()}/api/insights`, async ({ request }) => {
+        insightBodies.push((await request.json()) as { window_size_hrs: number; baseline_hours: number })
+        return HttpResponse.json(envelope({ computed_at: new Date().toISOString(), insights: [card('ddos', 'warning', 'Spike')] }))
+      }),
+    )
+    useServiceStore.setState({ activeServiceId: 'svc-1' })
+    renderWithQuery(<InsightsClient />, { withNuqs: true })
+
+    // Advance well under the 400ms debounce; initial history-adapted defaults should fire immediately.
+    await vi.advanceTimersByTimeAsync(50)
+    expect(insightBodies).toHaveLength(1)
+    expect(insightBodies[0]).toMatchObject({ window_size_hrs: 24, baseline_hours: 24 })
+  })
+
   it('keeps one status slot mounted from first paint through pending, error and final results', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     const calls = serveInsights([

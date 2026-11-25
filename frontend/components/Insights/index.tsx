@@ -522,15 +522,19 @@ export function InsightsClient({
   const monthHistory = historyHoursFromExtents(extentsData?.earliest_log_at)
   const prefetchMonthBaseline = monthHistory !== null && monthHistory >= 720
 
-  // Debounce window/baseline so chained dropdown changes (e.g. switching
-  // both window AND baseline in succession) only fire one /api/insights
-  // request instead of two. 400ms gives the user enough time to flip
-  // both selects without firing the intermediate query.
-  const appliedWindowHours = useDebounce(windowHours, 400)
-  const appliedBaselineHours = useDebounce(baselineHours, 400)
-  // Until the history-adapted defaults resolve (and the debounce catches up to
-  // them), the applied pair is the static 24h/7d fallback; scanning it would
-  // start a full-baseline scan that is cancelled moments later.
+  // Debounce user-initiated window/baseline changes so chained dropdown
+  // edits (e.g. switching both window AND baseline in succession) only fire
+  // one /api/insights request instead of two. Initial history-adapted
+  // defaults bypass the debounce so the first scan starts as soon as
+  // /api/log-extents resolves.
+  const debouncedWindowHours = useDebounce(windowHours, 400)
+  const debouncedBaselineHours = useDebounce(baselineHours, 400)
+  const userSelected = selectedWindow != null || selectedBaseline != null
+  const appliedWindowHours = userSelected ? debouncedWindowHours : windowHours
+  const appliedBaselineHours = userSelected ? debouncedBaselineHours : baselineHours
+  // Until the history-adapted defaults resolve, the active pair is the
+  // static 24h/7d fallback; scanning it would start a full-baseline scan
+  // that is cancelled moments later.
   const defaultsResolved = (selectedWindow != null && selectedBaseline != null) || !extentsPending
   const scanReady = defaultsResolved && appliedWindowHours === windowHours && appliedBaselineHours === baselineHours
 

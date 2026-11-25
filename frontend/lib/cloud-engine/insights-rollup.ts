@@ -576,9 +576,6 @@ export async function insightsFromRollup(
             isoFloor(startMs),
             isoCeil(endMs),
             signal,
-            undefined,
-            undefined,
-            true,
           );
           return raw.complete ? raw.files : null;
         } catch (error) {

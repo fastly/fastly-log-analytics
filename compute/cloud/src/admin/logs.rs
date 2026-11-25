@@ -451,8 +451,9 @@ fn sweep(runtime: &impl Runtime) -> Outcome {
             record.value["next"].as_u64().unwrap_or(0) as usize
         });
     let store = installed.store(runtime, Instant::now());
+    let reserve = retention::STAGE_CALL_RESERVE.max(AUDIT_TAIL);
     let report =
-        match retention::retention_sweep_from(&store, &settings, AUDIT_TAIL, None, resume_from) {
+        match retention::retention_sweep_from(&store, &settings, reserve, None, resume_from) {
             Ok(report) => report,
             Err(error) => return fail(502, &error),
         };
@@ -1140,7 +1141,8 @@ fn sweep_stage<R: Runtime>(
 ) -> Option<StageRow> {
     let runtime = store.runtime;
     caller(runtime, "cron:retention");
-    if !enough(runtime, 5) {
+    let reserve = retention::STAGE_CALL_RESERVE.max(TAIL + 1);
+    if !admit_stage(runtime.admin_remaining_calls(), reserve + 3) {
         return None;
     }
     let last = runtime.admin_get(LAST_SWEEP_KEY).ok()?;
@@ -1164,7 +1166,7 @@ fn sweep_stage<R: Runtime>(
     let span = VcpuSpan::start(runtime);
     let began = Instant::now();
     let before = runtime.admin_remaining_calls();
-    match retention::retention_sweep_from(store, settings, TAIL + 1, None, resume_from) {
+    match retention::retention_sweep_from(store, settings, reserve, None, resume_from) {
         Ok(report) => {
             if !report.deleted_keys.is_empty() {
                 write_parquet_deleted_logs(

@@ -889,14 +889,19 @@ async function fetchCatalogManifestUncached(
     }
     base = undefined;
   }
+  const deltaBase =
+    base &&
+    Math.min(toMs, Date.parse(base.to)) > Math.max(fromMs, Date.parse(base.from))
+      ? base
+      : undefined;
   const budget: ManifestBudget = { bytes: 0, identities: new Set() };
   let resynced = false;
   let result: Manifest;
   try {
-    result = base
+    result = deltaBase
       ? await delta(
           fetchJson,
-          base,
+          deltaBase,
           from,
           to,
           signal,
@@ -908,7 +913,7 @@ async function fetchCatalogManifestUncached(
       : await loadSnapshot(budget, false, signal);
   } catch (error) {
     if (
-      !base ||
+      !deltaBase ||
       !(
         error &&
         typeof error === "object" &&

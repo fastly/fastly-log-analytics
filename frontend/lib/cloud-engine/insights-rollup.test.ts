@@ -1248,6 +1248,7 @@ describe("insightsFromRollup summary-first multi-day manifest handling", () => {
     for (const url of rawCalls) {
       const p = new URL(url, "http://x").searchParams;
       expect(p.get("view")).toBeNull();
+      expect(p.get("summaries")).toBeNull();
       expect(Date.parse(p.get("to")!) - Date.parse(p.get("from")!)).toBeLessThanOrEqual(DAY);
     }
     const ranges = rawCalls.map((url) => {

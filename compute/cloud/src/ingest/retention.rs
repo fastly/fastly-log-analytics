@@ -26,6 +26,10 @@ pub const WORKER_KEYS: usize = 28;
 const DAY_S: i64 = 86_400;
 pub const SWEEP_INTERVAL_S: u64 = 6 * 3600;
 pub const VCPU_STOP_MS: u64 = 700;
+/// Backend calls kept in reserve by `admin::logs::sweep_stage` so each Compute execution
+/// stays well below Compute's 32-call limit (stopping sweep work at <= 20 calls, leaving
+/// 12 calls for `note_sweep` and the stage tail).
+pub const STAGE_CALL_RESERVE: u32 = 12;
 /// Present while expired objects were deleted but the front's edge copies are not yet purged.
 pub const PURGE_KEY: &str = "retention:purge";
 
@@ -643,7 +647,12 @@ pub fn retention_sweep_from<R: Runtime>(
     let room = |need: u32| store.within_wall() && runtime.admin_remaining_calls() >= reserve + need;
     let mut first_unfinished = None;
     let marked = Cell::new(false);
-    let catalog_grace = if room(5) {
+    // Only retire expired catalog entries at the start of a sweep (or a targeted single-dataset
+    // sweep). Resumed ticks (`from > 0`) already cleared `request` at index 0 after retirement
+    // succeeded, so repeating `retire_reserving` on every resumed tick wastes KV/FOS calls.
+    let catalog_grace = if from > 0 && only.is_none() {
+        0
+    } else if room(5) {
         super::catalog::retire_reserving(store, reserve)?
     } else {
         report.more_pending = true;

@@ -421,3 +421,67 @@ fn a_retention_sweep_after_an_earlier_stage_stops_at_the_execution_vcpu_bound() 
     assert!(report.more_pending, "{report:?}");
     assert!(fake.vcpu.get() <= 700 + 2 * 30, "{}", fake.vcpu.get());
 }
+
+#[test]
+fn stage_reserve_bounds_backend_calls_and_converges_across_ticks() {
+    let fake = LaggingKv::default();
+    let mut expired = 0u64;
+    for kind in LogKind::ALL {
+        for day in 1..3 {
+            fake.bucket.borrow_mut().insert(
+                format!(
+                    "processed/ops/{}/year=2026/month=01/day={day:02}/hour=00/part.parquet",
+                    kind.as_str()
+                ),
+                100,
+            );
+            expired += 1;
+        }
+    }
+    let live = "processed/ops/cron_runs/year=2027/month=01/day=15/hour=07/part.parquet";
+    fake.bucket.borrow_mut().insert(live.into(), 100);
+    let service = service();
+    let store = ingest::storage::Store {
+        runtime: &fake,
+        service: &service,
+        access_key: "ak".into(),
+        secret_key: "sk".into(),
+        started: Instant::now(),
+        vcpu_start: 0,
+    };
+    let mut resume_from = 0usize;
+    let mut total_deleted = 0u64;
+    let mut peak_calls = 0u32;
+    let mut ticks = 0u32;
+    let mut converged = false;
+    for _ in 0..20 {
+        ticks += 1;
+        fake.new_execution();
+        // Simulate cron startup + LAST_SWEEP_KEY read before sweep_stage invokes retention_sweep_from.
+        fake.calls.set(3);
+        let report = ingest::retention::retention_sweep_from(
+            &store,
+            &OperationalLogSettings::default(),
+            ingest::retention::STAGE_CALL_RESERVE,
+            None,
+            resume_from,
+        )
+        .unwrap();
+        let sweep_calls = fake.calls.get();
+        peak_calls = peak_calls.max(sweep_calls);
+        assert!(
+            sweep_calls <= 20,
+            "tick {ticks} used {sweep_calls} backend calls (expected <= 20)"
+        );
+        total_deleted += report.deleted;
+        resume_from = report.resume_from;
+        if !report.more_pending {
+            converged = true;
+            break;
+        }
+    }
+    assert!(converged, "retention_sweep failed to converge within 20 ticks");
+    assert_eq!(total_deleted, expired);
+    assert!(peak_calls <= 20, "peak_calls={peak_calls}");
+    assert_eq!(fake.bucket.borrow().keys().collect::<Vec<_>>(), vec![live]);
+}
