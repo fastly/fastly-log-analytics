@@ -81,6 +81,7 @@ from .sql_queries import Detection, _base_sql, _detection_for
 logger = logging.getLogger(__name__)
 
 _MAX_WORKERS = 8
+_BACKGROUND_MAX_WORKERS = 3
 _INSIGHT_MARKER_RE = re.compile(r"^\s*/\*\s*insight:\w+\s*\*/\s*")
 _MULTIPLEX_GROUPS: tuple[tuple[str, frozenset[str]], ...] = (
     ("group_rollup_batches", frozenset({"batch_misc", "batch_geo", "batch_asn", "batch_url_cache"})),
@@ -183,6 +184,8 @@ def _evaluate(
     filter_params: dict[str, Any],
     enabled_fields: frozenset[str],
     on_meta: Callable[[dict[str, Any]], None] | None = None,
+    *,
+    max_workers: int = _MAX_WORKERS,
 ) -> tuple[dict[str, Any], bool]:
     """Run every detection once; returns the envelope and whether any card is an error card.
 
@@ -502,7 +505,7 @@ def _evaluate(
         else:
             early_grouped.setdefault(gname, []).append(_prepare_standalone(definition, detection))
 
-    with ThreadPoolExecutor(max_workers=_MAX_WORKERS, thread_name_prefix="hs-insights") as pool:
+    with ThreadPoolExecutor(max_workers=max(1, max_workers), thread_name_prefix="hs-insights") as pool:
         futures = [
             pool.submit(contextvars.copy_context().run, partial(_run_group, g, u)) for g, u in early_grouped.items()
         ]
@@ -650,7 +653,11 @@ def insights_endpoint(
     )
     from backend.high_scale.ingest_controller import HighScaleService
 
-    def evaluate(on_meta: Callable[[dict[str, Any]], None] | None = None) -> tuple[dict[str, Any], bool]:
+    def evaluate(
+        on_meta: Callable[[dict[str, Any]], None] | None = None,
+        *,
+        max_workers: int = _MAX_WORKERS,
+    ) -> tuple[dict[str, Any], bool]:
         return _evaluate(
             service,
             window_hours,
@@ -662,14 +669,18 @@ def insights_endpoint(
             filter_params,
             enabled_fields,
             on_meta,
+            max_workers=max_workers,
         )
+
+    def evaluate_bg(on_meta: Callable[[dict[str, Any]], None] | None = None) -> tuple[dict[str, Any], bool]:
+        return evaluate(on_meta, max_workers=_BACKGROUND_MAX_WORKERS)
 
     if not isinstance(service, HighScaleService):
         get_queries()
         payload, _ = evaluate()
         return InsightsResponse.with_telemetry(**payload)
     if force_refresh:
-        return _job_result(cache_key, _start_or_join(cache_key, evaluate, interactive=False))
+        return _job_result(cache_key, _start_or_join(cache_key, evaluate_bg, interactive=False))
 
     cached = _INSIGHTS_CACHE.get(cache_key)
     cached_telemetry = _INSIGHTS_TELEMETRY_CACHE.get(cache_key)
@@ -683,7 +694,7 @@ def insights_endpoint(
     if (last := _INSIGHTS_LAST_RESULT.get(cache_key)) is not None:
         payload, last_queries, stored_at = last
         failure, _ = _INSIGHTS_REFRESH_FAILURES.get(cache_key) or (None, 0.0)
-        _start_or_join(cache_key, evaluate, interactive=False)
+        _start_or_join(cache_key, evaluate_bg, interactive=False)
         return InsightsResponse.with_telemetry(
             **payload,
             is_cached=True,

@@ -727,3 +727,52 @@ def test_cache_collapse_detail_runs_three_queries_concurrently() -> None:
 
 def test_cold_wait_seconds_is_bounded_below_p95_budget() -> None:
     assert 0 < evaluator._COLD_WAIT_SECONDS <= 2.5
+
+
+def test_background_insights_refresh_caps_concurrency_and_uses_tdigest(monkeypatch: pytest.MonkeyPatch) -> None:
+    from backend.high_scale.insights import batches as hs_batches
+
+    # batch_ip_outlier uses quantileTDigestIf instead of exact quantile
+    outlier_batch = next(b for b in hs_batches.DETECTION_BATCHES if b.name == "ip_outlier")
+    sql, _ = outlier_batch.build_sql(
+        {"request_smuggling_headers", "connection_abuse"},
+        present={"ip", "req_header_bytes", "conn_requests"},
+        rollup_span=None,
+        filter_clause="",
+    )
+    assert "quantileTDigestIf(0.95)" in sql
+    assert "quantileExactInclusiveIf" not in sql
+
+    # force_refresh (prewarmer) caps max_workers below interactive _MAX_WORKERS
+    assert 0 < evaluator._BACKGROUND_MAX_WORKERS < evaluator._MAX_WORKERS
+    seen_workers: list[int] = []
+
+    def fake_evaluate(*args: Any, max_workers: int = evaluator._MAX_WORKERS, **kwargs: Any):
+        seen_workers.append(max_workers)
+        return (
+            {
+                "insights": [],
+                "window_start": "2026-09-14T00:00:00+00:00",
+                "window_end": "2026-09-15T00:00:00+00:00",
+                "baseline_start": "2026-09-07T00:00:00+00:00",
+                "baseline_end": "2026-09-14T00:00:00+00:00",
+                "computed_at": "2026-09-15T00:00:00+00:00",
+                "window_hours": 24.0,
+                "baseline_hours": 168.0,
+                "window_total_requests": 0,
+            },
+            False,
+        )
+
+    from backend.high_scale.ingest_controller import HighScaleService
+
+    monkeypatch.setattr(evaluator, "_evaluate", fake_evaluate)
+    svc = HighScaleService(
+        service_id="svc-bg-workers",
+        client=SimpleNamespace(),  # type: ignore[arg-type]
+        cursor_secret=b"secret",
+        request_watermark=None,
+    )
+    req = SimpleNamespace(window_size_hrs=24.0, baseline_hours=168.0, filters=None)
+    evaluator.insights_endpoint(svc, req, None, None, force_refresh=True)
+    assert seen_workers == [evaluator._BACKGROUND_MAX_WORKERS]

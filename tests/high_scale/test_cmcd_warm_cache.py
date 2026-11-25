@@ -259,3 +259,14 @@ def test_cmcd_overview_only_skips_redundant_overview_scan() -> None:
     assert res["overview"]["rebuffer_rate"] == 25.0
     assert res["overview"]["peak_viewers"] == 4
     assert res["overview"]["avg_session_duration"] == 125
+
+
+def test_cmcd_breakdowns_consolidate_flat_dimensions_with_grouping_sets_and_no_star() -> None:
+    client = _FakeCmcdClient()
+    svc = SimpleNamespace(service_id="svc-flat-grouping", client=client)
+    req = CmcdRequest(bucket_seconds=300, top_n=10)
+
+    cmcd_aggregates(svc, req, "2026-09-14T10:00:00Z", "2026-09-14T10:20:00Z", ALL_SECTIONS, False)
+    breakdown_sql = next(sql for sql, _ in client.calls if "/* cmcd:breakdowns */" in sql)
+    assert "SELECT * FROM (" not in breakdown_sql
+    assert "GROUP BY GROUPING SETS ((ot), (sf))" in breakdown_sql

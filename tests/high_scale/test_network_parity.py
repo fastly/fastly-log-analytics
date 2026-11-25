@@ -129,10 +129,9 @@ def test_network_health_map_and_metro_scores_use_rtt_and_baseline(monkeypatch: p
     req = NetworkHealthRequest(start_time=start_s, end_time=end_s, bucket_seconds=3600, top_n=30)
     resp = network_health(svc, req, start_s, end_s)
 
-    # SQL for map selects quantileTDigest median + p10 RTT
+    # SQL for map selects combined quantilesTDigest(0.1, 0.5) RTT
     ((map_sql, _),) = client.matching("AS lat")
-    assert "quantileTDigest(0.5)(_rtt) AS rtt_med_us" in map_sql
-    assert "quantileTDigest(0.1)(_rtt) AS rtt_p10_us" in map_sql
+    assert "quantilesTDigest(0.1, 0.5)(_rtt) AS rtt_quants" in map_sql
 
     # sample_stride = 10 (cityHash64) on 24h window scales heatmap, map_buckets, metro_leaderboard, and summary
     assert resp.heatmap[0].buckets[0].reqs == 1000
@@ -202,8 +201,7 @@ def test_network_health_separate_metro_query_scales_and_uses_rtt(monkeypatch: py
     resp = network_health(svc, req, start_s, end_s)
 
     ((metro_sql, _),) = client.matching("AS total_reqs")
-    assert "quantileTDigest(0.5)(_rtt) AS rtt_med_us" in metro_sql
-    assert "quantileTDigest(0.1)(_rtt) AS rtt_p10_us" in metro_sql
+    assert "quantilesTDigest(0.1, 0.5)(_rtt) AS rtt_quants" in metro_sql
 
     assert resp.metro_leaderboard[0].total_reqs == 400
     assert resp.metro_leaderboard[0].health_score == 68.0
@@ -298,7 +296,7 @@ def test_network_health_no_periodic_minute_sampling_and_no_trailing_bucket(monke
     ((hm_sql, _),) = client.matching("AS throughput_bps")
     assert "toMinute" not in hm_sql
     assert "toSecond" not in hm_sql
-    assert "quantileTDigest(0.1)" in hm_sql
+    assert "quantilesTDigest(0.1, 0.5, 0.95, 0.99)(_rtt) AS rtt_quants" in hm_sql
     assert resp.heatmap[0].buckets[0].health_score == 68.0
     assert resp.summary is not None and resp.summary.worst_country is not None
     assert resp.summary.worst_country.label == "United States"
@@ -496,3 +494,98 @@ def test_network_page_query_consolidation_counts(monkeypatch: pytest.MonkeyPatch
     assert pop_resp.data[0].errors == 100
     assert pop_resp.data[0].p50_rtt_us == 25000.0
     assert pop_resp.data[0].p95_ttfb_ms == 80.0
+
+
+@pytest.mark.no_postgres
+def test_network_quality_avoids_star_subquery_and_scatter_full_sort(monkeypatch: pytest.MonkeyPatch) -> None:
+    from backend.high_scale.network import get_transport_metrics, network_quality
+    from backend.models.analytics import NetworkQualityRequest
+
+    _clear_network_caches()
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    start_s, end_s = "2026-09-14T12:00:00Z", "2026-09-14T18:00:00Z"
+
+    def responder(sql: str, params: dict[str, Any]):
+        if "FROM network_minute_dimensions" in sql:
+            return [{"dimension": "country", "label": "US", "rtt_ms": 30.0, "reqs": 100}]
+        if "cache_state" in sql:
+            # Return < 200 rows on the 1/64 sample to exercise fallback
+            return [{"rtt_ms": 20.0, "ttfb_ms": 40.0, "cache_state": "HIT"}] * 5
+        return []
+
+    client = _RecordingClient(responder)
+    svc = HighScaleService(service_id="svc-nq-opt12", client=client, cursor_secret=b"secret", request_watermark=None)
+    network_quality(svc, NetworkQualityRequest(), start_s, end_s)
+
+    ((bars_sql, _),) = client.matching("FROM network_minute_dimensions")
+    # Explicit column projection avoids has_star_subquery disabling _cf_* rewrite
+    assert "SELECT * FROM (" not in bars_sql
+    assert "SELECT dimension, label, rtt_ms, reqs FROM (" in bars_sql
+
+    scatter_calls = [sql for sql, _ in client.matching("cache_state")]
+    assert len(scatter_calls) == 2
+    assert "ORDER BY cityHash64(event_id)" not in scatter_calls[1]
+    assert "PREWHERE" in scatter_calls[1]
+
+    # Transport metrics uses quantilesTDigest instead of exact quantiles
+    tr_client = _RecordingClient(
+        lambda sql, params: [
+            {
+                "total_reqs": 10,
+                "total_bytes": 1000,
+                "rtt_quants": [10000.0, 20000.0, 30000.0, 40000.0],
+                "avg_retrans": 0.0,
+                "avg_ploss_pct": 0.0,
+                "avg_del_rate_mbps": 10.0,
+                "proto_map": {"HTTP/2": 10},
+            }
+        ]
+    )
+    tr_svc = HighScaleService(
+        service_id="svc-tr-opt12", client=tr_client, cursor_secret=b"secret", request_watermark=None
+    )
+    get_transport_metrics(tr_svc, start_s, end_s)
+    ((tr_sql, _),) = tr_client.matching("rtt_quants")
+    assert "quantilesTDigest(0.50, 0.90, 0.95, 0.99)" in tr_sql
+
+
+@pytest.mark.no_postgres
+def test_network_health_map_only_uses_fast_prewhere_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_network_caches()
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    start_s, end_s = "2026-09-14T12:00:00Z", "2026-09-14T18:00:00Z"
+    b0 = int(datetime(2026, 9, 14, 12, 0, tzinfo=UTC).timestamp())
+
+    def responder(sql: str, params: dict[str, Any]):
+        if "AS lat" in sql:
+            return [
+                {
+                    "country": "US",
+                    "city": "austin",
+                    "region": "Texas",
+                    "metro": "635",
+                    "bucket_ts": b0,
+                    "lat": "30.26",
+                    "lon": "-97.74",
+                    "rtt_quants": [20_000.0, 40_000.0],
+                    "avg_ploss": 0.0,
+                    "error_pct": 0.0,
+                    "reqs": 100,
+                }
+            ]
+        return []
+
+    client = _RecordingClient(responder)
+    svc = HighScaleService(service_id="svc-map-only", client=client, cursor_secret=b"secret", request_watermark=None)
+    req = NetworkHealthRequest(
+        start_time=start_s,
+        end_time=end_s,
+        bucket_seconds=3600,
+        sections=["buckets", "cities", "map_buckets"],
+    )
+    resp = network_health(svc, req, start_s, end_s)
+    assert len(client.calls) == 1
+    ((map_sql, _),) = client.matching("AS lat")
+    assert "PREWHERE" in map_sql
+    assert "quantilesTDigest(0.1, 0.5)(_rtt) AS rtt_quants" in map_sql
+    assert resp.map_buckets[0].cities[0].reqs == 100

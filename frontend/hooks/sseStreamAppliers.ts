@@ -108,6 +108,7 @@ export function applyShare(qc: QueryClient, data: unknown): void {
 }
 
 const INVALIDATION_COALESCE_MS = 100
+const MIN_SSE_REFETCH_AGE_MS = 2_000
 const STORAGE_MUTATING_TASKS = new Set(['commit', 'optimize', 'expire_snapshots', 'metadata_cleanup'])
 const SCHEMA_AFFECTING_TASKS = new Set(['sync', 'log_discovery', 'full_sync', 'commit'])
 
@@ -122,24 +123,31 @@ export function makeCronRunsApplier(qc: QueryClient, serviceId: string | null): 
   const pending = new Set<InvalidationKey>()
   let flushTimer: ReturnType<typeof setTimeout> | null = null
 
+  const notRecentlyFetched = (query: { state: { fetchStatus: string; dataUpdatedAt: number } }) => {
+    if (query.state.fetchStatus === 'fetching') return false
+    const updatedAt = query.state.dataUpdatedAt
+    return updatedAt <= 0 || Date.now() - updatedAt >= MIN_SSE_REFETCH_AGE_MS
+  }
+
   const flush = () => {
     flushTimer = null
     const due = new Set(pending)
     pending.clear()
     const opts = { cancelRefetch: false } as const
-    if (due.has('table')) qc.invalidateQueries({ queryKey: queryKeys.admin.cronLogsFor(serviceId) }, opts)
+    const guarded = (queryKey: readonly unknown[]) => ({ queryKey, predicate: notRecentlyFetched })
+    if (due.has('table')) qc.invalidateQueries(guarded(queryKeys.admin.cronLogsFor(serviceId)), opts)
     if (due.has('recent')) {
-      qc.invalidateQueries({ queryKey: queryKeys.admin.cronLogsRecent(serviceId) }, opts)
+      qc.invalidateQueries(guarded(queryKeys.admin.cronLogsRecent(serviceId)), opts)
       if (!due.has('table') && !qc.getQueryCache().find({ queryKey: queryKeys.admin.cronLogsRecent(serviceId) })?.getObserversCount()) {
-        qc.invalidateQueries({ queryKey: queryKeys.admin.cronLogs(serviceId, 'all', 'all') }, opts)
+        qc.invalidateQueries(guarded(queryKeys.admin.cronLogs(serviceId, 'all', 'all')), opts)
       }
     }
-    if (due.has('last-sync')) qc.invalidateQueries({ queryKey: queryKeys.lastSync(serviceId) }, opts)
-    if (due.has('storage')) qc.invalidateQueries({ queryKey: queryKeys.admin.storageAll() }, opts)
-    if (due.has('schedule')) qc.invalidateQueries({ queryKey: queryKeys.admin.cronSchedule(serviceId) }, opts)
-    if (due.has('audit')) qc.invalidateQueries({ queryKey: queryKeys.admin.auditLogsFor(serviceId) }, opts)
-    if (due.has('ingested')) qc.invalidateQueries({ queryKey: queryKeys.admin.ingestedFiles(serviceId) }, opts)
-    if (due.has('schema')) qc.invalidateQueries({ queryKey: queryKeys.admin.schema(serviceId) }, opts)
+    if (due.has('last-sync')) qc.invalidateQueries(guarded(queryKeys.lastSync(serviceId)), opts)
+    if (due.has('storage')) qc.invalidateQueries(guarded(queryKeys.admin.storageAll()), opts)
+    if (due.has('schedule')) qc.invalidateQueries(guarded(queryKeys.admin.cronSchedule(serviceId)), opts)
+    if (due.has('audit')) qc.invalidateQueries(guarded(queryKeys.admin.auditLogsFor(serviceId)), opts)
+    if (due.has('ingested')) qc.invalidateQueries(guarded(queryKeys.admin.ingestedFiles(serviceId)), opts)
+    if (due.has('schema')) qc.invalidateQueries(guarded(queryKeys.admin.schema(serviceId)), opts)
   }
 
   const schedule = (key: InvalidationKey) => {

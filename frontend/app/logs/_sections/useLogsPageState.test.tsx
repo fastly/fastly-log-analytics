@@ -167,4 +167,33 @@ describe('useLogsPageState cron deduplication and invalidation', () => {
       vi.useRealTimers()
     }
   })
+
+  it('skips redundant SSE refetch when cronLogs and cronSchedule were just fetched', async () => {
+    vi.useFakeTimers()
+    try {
+      const { makeCronRunsApplier } = await import('@/hooks/sseStreamAppliers')
+      const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      const cronKey = queryKeys.admin.cronLogs('svc-1', 'all', 'all')
+      const schedKey = queryKeys.admin.cronSchedule('svc-1')
+      qc.setQueryData(cronKey, { entries: [], total: 0 })
+      qc.setQueryData(schedKey, { tasks: [] })
+
+      const applier = makeCronRunsApplier(qc, 'svc-1')
+      // Immediate SSE event right after fresh data (< 2000ms) must not mark queries invalidated
+      applier.apply({ task: 'log_discovery', status: 'completed' })
+      vi.advanceTimersByTime(150)
+      expect(qc.getQueryState(cronKey)?.isInvalidated).toBe(false)
+      expect(qc.getQueryState(schedKey)?.isInvalidated).toBe(false)
+
+      // Once >= 2000ms have passed, SSE event invalidates normally
+      vi.advanceTimersByTime(2_100)
+      applier.apply({ task: 'log_discovery', status: 'completed' })
+      vi.advanceTimersByTime(150)
+      expect(qc.getQueryState(cronKey)?.isInvalidated).toBe(true)
+      expect(qc.getQueryState(schedKey)?.isInvalidated).toBe(true)
+      applier.cleanup()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

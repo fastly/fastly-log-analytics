@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextvars
 import json
+import os
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
@@ -15,15 +16,26 @@ from pydantic import TypeAdapter, ValidationError
 from backend.high_scale._common import (
     _row_timestamp,
     format_iso_utc_or_empty,
+    normalize_cache_bound,
     parse_time_window,
     range_value,
     visible_fact_clauses,
     visible_publication_fence_sql,
 )
 from backend.repositories.utils.filters import filter_spec_attr, normalize_filter_key
+from backend.repositories.utils.response_cache import (
+    ResponseMemo,
+    client_cache_token,
+    digest_cache_key,
+)
+from backend.utils.bounded_cache import CacheRegistry
 
 if TYPE_CHECKING:
     from backend.high_scale.ingest_controller import HighScaleService
+
+_HS_RUM_CACHE_TTL = float(os.getenv("HIGH_SCALE_RUM_CACHE_TTL_SECONDS", "30"))
+_rum_memo = ResponseMemo(ttl=max(_HS_RUM_CACHE_TTL, 1.0), maxsize=128, prewarmer=False)
+CacheRegistry.register("high_scale.rum._rum_memo", _rum_memo.cache)
 
 _iso = format_iso_utc_or_empty
 _FILTER_COLUMNS = frozenset({"browser", "os", "device", "country", "pathname", "city", "region", "pop", "tls"})
@@ -185,6 +197,45 @@ def rum_analytics(
     if end < start:
         raise ValueError("RUM end time precedes start time")
     filter_clauses, filter_params = _filter_clauses(filters)
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
+    memo_key: str | None = None
+    if _HS_RUM_CACHE_TTL > 0 and is_real_ch and start_time is not None and end_time is not None:
+        digest = digest_cache_key(
+            {
+                "ep": "hs_rum_analytics",
+                "cid": client_cache_token(service.client),
+                "s": normalize_cache_bound(start_time),
+                "e": normalize_cache_bound(end_time),
+                "f": sorted((str(k), v) for k, v in (filters or {}).items()),
+            },
+            {"name": service.service_id, "service_id": service.service_id},
+        )
+        memo_key = f"{service.service_id}:{digest}"
+        if (cached := _rum_memo.get_with_telemetry(memo_key)) is not None:
+            return dict(cached)
+
+    def _compute() -> dict[str, Any]:
+        if memo_key is not None and (cached_inner := _rum_memo.get_with_telemetry(memo_key)) is not None:
+            return dict(cached_inner)
+        payload = _rum_analytics_compute(service, start, end, filter_clauses, filter_params)
+        if memo_key is not None:
+            _rum_memo.put(memo_key, payload)
+        return payload
+
+    if memo_key is not None:
+        return _rum_memo.coalesce(f"hs_rum_analytics:{memo_key}", _compute)
+    return _compute()
+
+
+def _rum_analytics_compute(
+    service: HighScaleService,
+    start: datetime,
+    end: datetime,
+    filter_clauses: list[str],
+    filter_params: dict[str, Any],
+) -> dict[str, Any]:
     params = {"service_id": service.service_id, "start": start, "end": end, **filter_params}
 
     def scope(domain: str) -> str:
@@ -461,6 +512,48 @@ def rum_live_events(
 ) -> list[dict[str, Any]]:
     start_dt, end_dt = parse_time_window(start_time, end_time, now=datetime.now(UTC))
     filter_clauses, filter_params = _filter_clauses(filters)
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
+    memo_key: str | None = None
+    if _HS_RUM_CACHE_TTL > 0 and is_real_ch and start_time is not None and end_time is not None:
+        digest = digest_cache_key(
+            {
+                "ep": "hs_rum_live_events",
+                "cid": client_cache_token(service.client),
+                "s": normalize_cache_bound(start_time),
+                "e": normalize_cache_bound(end_time),
+                "l": int(limit),
+                "f": sorted((str(k), v) for k, v in (filters or {}).items()),
+            },
+            {"name": service.service_id, "service_id": service.service_id},
+        )
+        memo_key = f"{service.service_id}:{digest}"
+        if (cached := _rum_memo.get_with_telemetry(memo_key)) is not None:
+            return list(cached.get("events", []))
+
+    def _compute() -> dict[str, Any]:
+        if memo_key is not None and (cached_inner := _rum_memo.get_with_telemetry(memo_key)) is not None:
+            return cached_inner
+        events = _rum_live_events_compute(service, start_dt, end_dt, limit, filter_clauses, filter_params)
+        payload = {"events": events}
+        if memo_key is not None:
+            _rum_memo.put(memo_key, payload)
+        return payload
+
+    if memo_key is not None:
+        return list(_rum_memo.coalesce(f"hs_rum_live:{memo_key}", _compute).get("events", []))
+    return _compute()["events"]
+
+
+def _rum_live_events_compute(
+    service: HighScaleService,
+    start_dt: datetime,
+    end_dt: datetime,
+    limit: int,
+    filter_clauses: list[str],
+    filter_params: dict[str, Any],
+) -> list[dict[str, Any]]:
     window = ["event_timestamp >= {start_time:DateTime64(3)}", "event_timestamp < {end_time:DateTime64(3)}"]
 
     def scope(domain: str) -> str:

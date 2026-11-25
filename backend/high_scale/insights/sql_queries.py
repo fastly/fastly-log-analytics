@@ -249,7 +249,7 @@ def _per_ip_outlier(column: str, window_floor: int, extra_having: str, order: st
     """Per-IP window maximum against that IP's own baseline p95 (request size, connection reuse)."""
     peak, mean = aliases
     return f""" , agg AS (SELECT ip, maxIf({column}, is_w) AS {peak}, avgIf({column}, is_w) AS {mean}, countIf(is_w) AS w_total,
-            quantileExactInclusiveIf(0.95)({column}, is_b) AS b_p95, countIf(is_b) AS b_total
+            quantileTDigestIf(0.95)({column}, is_b) AS b_p95, countIf(is_b) AS b_total
         FROM base WHERE ip IN (SELECT ip FROM base WHERE is_w GROUP BY ip HAVING count() >= {window_floor})
         GROUP BY ip HAVING w_total >= {window_floor} AND b_total > 0{extra_having})
     SELECT w.ip, w.{peak}, w.{mean}, w.w_total, w.b_p95 FROM agg w

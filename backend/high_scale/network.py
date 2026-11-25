@@ -466,7 +466,7 @@ def network_health(
 
         err_pct_expr = f"countIf({_STATUS} >= 500) * 100.0 / count() AS error_pct"
         map_only = sections is not None and len(sections) > 0 and set(sections) <= {"buckets", "cities", "map_buckets"}
-        if is_real_ch and not map_only:
+        if is_real_ch:
             nh_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
             sample_stride = (
                 (10 if nh_span_s >= 43200 else (4 if nh_span_s > 21600 else 1))
@@ -477,7 +477,7 @@ def network_health(
             rtt_prewhere = f"{_BASE_WHERE}{filter_sql}{stride_sql} AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0'"
             top_asn_ints: list[int] = []
             raw_speed_rows: list[dict[str, Any]] | None = None
-            if not filter_sql and start is not None and end is not None:
+            if not map_only and not filter_sql and start is not None and end is not None:
                 from backend.high_scale.aggregate_query import _hourly_edge_time_clause, can_use_hourly_rollup
 
                 hourly_bounds = can_use_hourly_rollup(service.client, "request", start, end)
@@ -521,7 +521,7 @@ def network_health(
                         source="projection",
                     )
                 top_asn_ints = [int(r["asn"]) for r in top_asn_rows if r.get("asn") is not None][:top_n]
-            if not top_asn_ints:
+            if not map_only and not top_asn_ints:
                 speed_sql = (
                     f"SELECT {_ASN} AS asn, custom_fields['c_speed'] AS c_speed, count() AS cnt "
                     f"FROM request_facts PREWHERE {rtt_prewhere} AND custom_fields['asn'] != '' "
@@ -536,23 +536,8 @@ def network_health(
                 top_asn_ints = sorted(asn_totals, key=lambda a: asn_totals[a], reverse=True)[:top_n]
             asn_str_in = ", ".join(repr(str(a)) for a in top_asn_ints)
             asn_in_filter = f" AND custom_fields['asn'] IN ({asn_str_in})" if top_asn_ints else " AND 1=0"
-            combine_metro_in_map = map_asn == "all"
+            combine_metro_in_map = map_only or map_asn == "all"
             fast_queries_list: list[tuple[str, str]] = [
-                (
-                    "heatmap",
-                    f"WITH {_RTT} AS _rtt, {_RTT_MIN} AS _rtt_min, {_RTT_VAR} AS _rtt_var, {_ELAPSED} AS _elapsed "
-                    f"SELECT {_ASN} AS asn, {bucket_expr} AS bucket_ts, count() AS reqs, "
-                    f"quantileTDigest(0.5)(if(position(custom_fields['cache'], 'HIT') > 0 AND _elapsed > 0, {_RESP_BYTES} * 1000000.0 / _elapsed, NULL)) AS throughput_bps, "
-                    f"avg(_rtt) AS rtt_avg_us, quantileTDigest(0.5)(_rtt) AS rtt_med_us, quantileTDigest(0.1)(_rtt) AS rtt_p10_us, "
-                    f"quantileTDigest(0.95)(_rtt) AS rtt_p95_us, quantileTDigest(0.99)(_rtt) AS rtt_p99_us, "
-                    f"quantileTDigest(0.5)(_rtt_min) AS rtt_baseline_us, "
-                    f"quantileTDigest(0.5)(_rtt - _rtt_min) AS rtt_congestion_us, avg({_PLOSS}) AS avg_ploss, "
-                    f"quantileTDigest(0.5)(_rtt_var) AS rtt_jitter_us, {err_pct_expr}, "
-                    "sumMap(if(custom_fields['c_speed'] != '', [custom_fields['c_speed']], []), "
-                    "if(custom_fields['c_speed'] != '', [toUInt64(1)], [])) AS speed_map "
-                    f"FROM request_facts PREWHERE {rtt_prewhere}{asn_in_filter} "
-                    f"WHERE {_ASN} IS NOT NULL AND _rtt > 0 GROUP BY asn, bucket_ts ORDER BY reqs DESC LIMIT {top_n * 200}",
-                ),
                 (
                     "map",
                     f"WITH {_RTT} AS _rtt "
@@ -560,13 +545,31 @@ def network_health(
                     f"custom_fields['metro'] AS metro, {bucket_expr} AS bucket_ts, "
                     "anyIf(custom_fields['lat'], custom_fields['lat'] != '') AS lat, "
                     "anyIf(custom_fields['lon'], custom_fields['lon'] != '') AS lon, "
-                    f"quantileTDigest(0.5)(_rtt) AS rtt_med_us, quantileTDigest(0.1)(_rtt) AS rtt_p10_us, "
+                    f"quantilesTDigest(0.1, 0.5)(_rtt) AS rtt_quants, "
                     f"avg({_PLOSS}) AS avg_ploss, {err_pct_expr}, count() AS reqs "
                     f"FROM request_facts PREWHERE {rtt_prewhere} AND country != ''{map_asn_sql} "
                     "WHERE _rtt > 0 "
                     "GROUP BY country, city, region, metro, bucket_ts ORDER BY bucket_ts ASC, reqs DESC LIMIT 100 BY bucket_ts LIMIT 20000",
                 ),
             ]
+            if not map_only:
+                fast_queries_list.insert(
+                    0,
+                    (
+                        "heatmap",
+                        f"WITH {_RTT} AS _rtt, {_RTT_MIN} AS _rtt_min, {_RTT_VAR} AS _rtt_var, {_ELAPSED} AS _elapsed "
+                        f"SELECT {_ASN} AS asn, {bucket_expr} AS bucket_ts, count() AS reqs, "
+                        f"quantileTDigest(0.5)(if(position(custom_fields['cache'], 'HIT') > 0 AND _elapsed > 0, {_RESP_BYTES} * 1000000.0 / _elapsed, NULL)) AS throughput_bps, "
+                        f"avg(_rtt) AS rtt_avg_us, quantilesTDigest(0.1, 0.5, 0.95, 0.99)(_rtt) AS rtt_quants, "
+                        f"quantileTDigest(0.5)(_rtt_min) AS rtt_baseline_us, "
+                        f"quantileTDigest(0.5)(_rtt - _rtt_min) AS rtt_congestion_us, avg({_PLOSS}) AS avg_ploss, "
+                        f"quantileTDigest(0.5)(_rtt_var) AS rtt_jitter_us, {err_pct_expr}, "
+                        "sumMap(if(custom_fields['c_speed'] != '', [custom_fields['c_speed']], []), "
+                        "if(custom_fields['c_speed'] != '', [toUInt64(1)], [])) AS speed_map "
+                        f"FROM request_facts PREWHERE {rtt_prewhere}{asn_in_filter} "
+                        f"WHERE {_ASN} IS NOT NULL AND _rtt > 0 GROUP BY asn, bucket_ts ORDER BY reqs DESC LIMIT {top_n * 200}",
+                    ),
+                )
             if not combine_metro_in_map:
                 fast_queries_list.append(
                     (
@@ -574,7 +577,7 @@ def network_health(
                         f"WITH {_RTT} AS _rtt "
                         f"SELECT country AS country, custom_fields['city'] AS city, custom_fields['region'] AS region, "
                         f"custom_fields['metro'] AS metro, "
-                        f"quantileTDigest(0.5)(_rtt) AS rtt_med_us, quantileTDigest(0.1)(_rtt) AS rtt_p10_us, "
+                        f"quantilesTDigest(0.1, 0.5)(_rtt) AS rtt_quants, "
                         f"avg({_PLOSS}) AS avg_ploss, {err_pct_expr}, count() AS total_reqs "
                         f"FROM request_facts PREWHERE {rtt_prewhere} AND country != '' "
                         "WHERE _rtt > 0 "
@@ -584,7 +587,7 @@ def network_health(
             parallel_tasks: list[tuple[str, Callable[[], Any]]] = [
                 (name, partial(service.client.execute, sql, params)) for name, sql in fast_queries_list
             ]
-            if _want_shielding(sections):
+            if not map_only and _want_shielding(sections):
                 parallel_tasks.append(
                     (
                         "shielding_analysis",
@@ -597,8 +600,26 @@ def network_health(
                 max_workers=6,
                 thread_name_prefix="hs-net-health",
             )
-            shielding = q_results.get("shielding_analysis") if _want_shielding(sections) else None
-            heatmap_rows, raw_map_rows = (q_results.get(k, []) for k in ("heatmap", "map"))
+            shielding = q_results.get("shielding_analysis") if (not map_only and _want_shielding(sections)) else None
+
+            def _unpack_rtt_quants(row: dict[str, Any], expect: int) -> dict[str, Any]:
+                quants = row.get("rtt_quants")
+                if isinstance(quants, (list, tuple)) and len(quants) == expect:
+                    if expect == 4:
+                        return {
+                            **row,
+                            "rtt_p10_us": quants[0],
+                            "rtt_med_us": quants[1],
+                            "rtt_p95_us": quants[2],
+                            "rtt_p99_us": quants[3],
+                        }
+                    return {**row, "rtt_p10_us": quants[0], "rtt_med_us": quants[1]}
+                return row
+
+            heatmap_rows = [_unpack_rtt_quants(r, 4) for r in q_results.get("heatmap", [])]
+            raw_map_rows = [_unpack_rtt_quants(r, 2) for r in q_results.get("map", [])]
+            if not combine_metro_in_map:
+                q_results["metro"] = [_unpack_rtt_quants(r, 2) for r in q_results.get("metro", [])]
             pct_acc: dict[int, list[float]] = {}
             speed_acc: dict[tuple[int, str], int] = {}
             for hr in heatmap_rows:
@@ -1129,7 +1150,7 @@ def network_quality(
             region_scale = 10 if q_span_s >= 43200 else (4 if q_span_s > 21600 else 1)
             region_hash = f" AND cityHash64(event_id) % {region_scale} = 0" if region_scale > 1 else ""
             sql = (
-                "SELECT * FROM ("
+                "SELECT dimension, label, rtt_ms, reqs FROM ("
                 "SELECT dimension, value AS label, "
                 "coalesce(sum(tcp_rtt_sum), sum(tcp_rtt_p50_us * tcp_rtt_count)) / nullIf(sum(tcp_rtt_count), 0) / 1000.0 AS rtt_ms, "
                 "toUInt64(sum(tcp_rtt_count)) AS reqs "
@@ -1140,7 +1161,7 @@ def network_quality(
                 "GROUP BY dimension, label HAVING reqs > 0 "
                 "ORDER BY dimension ASC, reqs DESC LIMIT 25 BY dimension) "
                 "UNION ALL "
-                "SELECT * FROM ("
+                "SELECT dimension, label, rtt_ms, reqs FROM ("
                 f"SELECT 'region' AS dimension, custom_fields['region'] AS label, avg({_RTT} / 1000.0) AS rtt_ms, "
                 f"toUInt64(count() * {region_scale}) AS reqs "
                 f"FROM request_facts PREWHERE {_BASE_WHERE} AND country = {{region_country:String}}{region_hash} "
@@ -1174,17 +1195,20 @@ def network_quality(
 
         def _run_scatter() -> list[dict[str, Any]]:
             if is_real_ch:
-                fast_scatter_sql = (
-                    f"SELECT {_RTT} / 1000.0 AS rtt_ms, {_TTFB} * 1000.0 AS ttfb_ms, "
-                    "if(custom_fields['cache'] = '', 'UNKNOWN', custom_fields['cache']) AS cache_state "
-                    f"FROM request_facts PREWHERE {_BASE_WHERE}{filter_sql} "
-                    "AND cityHash64(event_id) % 64 = 0 "
-                    "AND custom_fields['tcp_rtt'] != '' AND custom_fields['ttfb'] != '' "
-                    f"WHERE {_RTT} > 0 AND {_TTFB} > 0 LIMIT {_SCATTER_SAMPLE}"
-                )
-                fast_rows = service.client.execute(fast_scatter_sql, params)
+
+                def _scatter_query(sample_clause: str) -> str:
+                    return (
+                        f"SELECT {_RTT} / 1000.0 AS rtt_ms, {_TTFB} * 1000.0 AS ttfb_ms, "
+                        "if(custom_fields['cache'] = '', 'UNKNOWN', custom_fields['cache']) AS cache_state "
+                        f"FROM request_facts PREWHERE {_BASE_WHERE}{filter_sql}{sample_clause} "
+                        "AND custom_fields['tcp_rtt'] != '' AND custom_fields['ttfb'] != '' "
+                        f"WHERE {_RTT} > 0 AND {_TTFB} > 0 LIMIT {_SCATTER_SAMPLE}"
+                    )
+
+                fast_rows = service.client.execute(_scatter_query(" AND cityHash64(event_id) % 64 = 0"), params)
                 if len(fast_rows) >= 200:
                     return fast_rows
+                return service.client.execute(_scatter_query(""), params)
             return service.client.execute(scatter_sql, params)
 
         trace = HighScaleSections(service.service_id, "network.quality")
@@ -1482,7 +1506,7 @@ def get_transport_metrics(
             hash_clause = f" AND cityHash64(event_id) % {scale_factor} = 0" if scale_factor > 1 else ""
             combined_sql = (
                 f"SELECT count() AS total_reqs, sum(toInt64OrZero(custom_fields['resp_bytes'])) AS total_bytes, "
-                f"quantiles(0.50, 0.90, 0.95, 0.99)({_RTT}) AS rtt_quants, "
+                f"quantilesTDigest(0.50, 0.90, 0.95, 0.99)({_RTT}) AS rtt_quants, "
                 f"{retrans_expr} AS avg_retrans, avg({_PLOSS}) * 100.0 AS avg_ploss_pct, "
                 f"avg(toFloat64OrNull(custom_fields['delivery_rate'])) * 8.0 / 1e6 AS avg_del_rate_mbps, "
                 f"sumMap([{proto_clean_expr}], [toUInt64(1)]) AS proto_map "

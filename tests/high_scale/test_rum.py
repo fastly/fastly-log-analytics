@@ -899,6 +899,31 @@ def test_real_sql_utc_offsets_and_partial_hour_edges(run_analytics) -> None:
     assert result["trends"]["lcp"] == [2.0, 3.0] and result["beacon_count"] == 2
 
 
+def test_rum_analytics_and_live_events_memoize_real_ch_calls() -> None:
+    from types import SimpleNamespace
+
+    from backend.high_scale import rum as hs_rum
+
+    hs_rum._rum_memo.cache.clear()
+    client = _EnvClient(live_rows=LIVE_ROWS)
+    client._http = SimpleNamespace(_transport=SimpleNamespace())  # type: ignore[attr-defined]
+    svc = service_for(client)
+
+    first = rum_analytics(svc, START, END)
+    calls_after_first = len(client.calls)
+    assert calls_after_first > 0
+    second = rum_analytics(svc, START, END)
+    assert len(client.calls) == calls_after_first
+    assert second["beacon_count"] == first["beacon_count"]
+
+    live1 = rum_live_events(svc, START, END, 25)
+    calls_after_live1 = len(client.calls)
+    assert calls_after_live1 == calls_after_first + 1
+    live2 = rum_live_events(svc, START, END, 25)
+    assert len(client.calls) == calls_after_live1
+    assert len(live2) == len(live1)
+
+
 @_skip_unless_real_ch
 def test_real_sql_metric_formats_zero_and_case_normalization(run_analytics) -> None:
     ts = "2026-09-01T00:00:00Z"
