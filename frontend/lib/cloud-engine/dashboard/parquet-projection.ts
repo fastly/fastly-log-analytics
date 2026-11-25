@@ -90,9 +90,13 @@ export type ParquetProjection = {
 
 const MAGIC = 0x31524150; // "PAR1" little-endian
 
-export async function readParquetFooter(size: number, fetchRange: FetchRange): Promise<ParquetFooter> {
+export async function readParquetFooter(
+  size: number,
+  fetchRange: FetchRange,
+  probeBytes = FOOTER_PROBE_BYTES,
+): Promise<ParquetFooter> {
   if (!Number.isSafeInteger(size) || size < 12) throw new Error("Parquet file is too small");
-  const probeStart = Math.max(0, size - FOOTER_PROBE_BYTES);
+  const probeStart = Math.max(0, size - probeBytes);
   let tail = await fetchRange(probeStart, size);
   const view = new DataView(tail);
   if (view.getUint32(tail.byteLength - 4, true) !== MAGIC) throw new Error("Parquet footer magic is missing");

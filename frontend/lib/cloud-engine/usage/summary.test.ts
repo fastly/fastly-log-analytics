@@ -9,10 +9,12 @@ import {
   billedVcpuMsPerRequest,
   fetchCloudStorageInventory,
   fetchUsageInput,
+  fetchUsageKindWithCoverage,
   fetchUsageSettings,
   fetchIngestDeletedBytes,
   fetchIngestDeletedIntervals,
   resetUsageSettingsCache,
+  type UsageLogReader,
   incurredCost,
   parseComputeBilling,
   perTenThousandToPerMillion,
@@ -1793,5 +1795,176 @@ describe("deriveFosUsageFromCronRuns summary bundles", () => {
         run({ listed_files: 0, deleted_files: 4, parquet_files_written: 0 }),
       ]),
     ).toBe(0);
+  });
+});
+
+describe("projected ops reads for /usage", () => {
+  it("fetchIngestDeletedIntervals requests projected columns without dedupe/sort and handles duplicate unsorted rows accurately", async () => {
+    const calls: Array<{
+      kind: string;
+      options: { columns?: readonly string[]; dedupe?: boolean; sort?: boolean };
+    }> = [];
+    const t0 = Date.parse("2026-11-20T00:00:00.000Z");
+    const reader: UsageLogReader = async (kind, _range, options) => {
+      calls.push({ kind, options });
+      return {
+        liveTruncated: false,
+        rows: [
+          // Duplicate & unsorted rows for the same raw_key + empty "[]" output_keys_json.
+          {
+            timestamp: t0 + 60_000,
+            raw_key: "raw/request/a.log.gz",
+            raw_size: 4_096,
+            status: "converted",
+            state_version: 2,
+            output_keys_json: "[]",
+            raw_deleted: true,
+            raw_deleted_at: t0 + 60_000,
+          },
+          {
+            timestamp: t0,
+            raw_key: "raw/request/a.log.gz",
+            raw_size: 4_096,
+            status: "converted",
+            state_version: 1,
+            output_keys_json: JSON.stringify([{ key: "processed/request/p1.parquet", bytes: 1_200 }]),
+            raw_deleted: false,
+            raw_deleted_at: null,
+          },
+          {
+            timestamp: t0,
+            raw_key: "raw/request/a.log.gz",
+            raw_size: 4_096,
+            status: "converted",
+            state_version: 1,
+            output_keys_json: JSON.stringify([{ key: "processed/request/p1.parquet", bytes: 1_200 }]),
+            raw_deleted: false,
+            raw_deleted_at: null,
+          },
+        ],
+      };
+    };
+
+    const res = await fetchIngestDeletedIntervals(
+      { from: t0 - 1_000, to: t0 + 120_000 },
+      { user: "alice", role: "admin" },
+      reader,
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].kind).toBe("ingest_files");
+    expect(calls[0].options.dedupe).toBe(false);
+    expect(calls[0].options.sort).toBe(false);
+    expect(calls[0].options.columns).toEqual(
+      expect.arrayContaining([
+        "timestamp",
+        "raw_key",
+        "raw_size",
+        "status",
+        "state_version",
+        "output_keys_json",
+        "raw_deleted",
+        "raw_deleted_at",
+      ]),
+    );
+    expect(calls[0].options.columns).not.toContain("event_id");
+    expect(calls[0].options.columns).not.toContain("run_id");
+    expect(res.intervals).toHaveLength(1);
+    expect(res.intervals[0]).toMatchObject({
+      id: "raw_request:raw/request/a.log.gz",
+      bytes: 4_096,
+      createdAt: t0,
+      deletedAt: t0 + 60_000,
+    });
+    expect(res.outputs).toEqual([
+      { key: "processed/request/p1.parquet", bytes: 1_200, createdAt: t0 },
+    ]);
+  });
+
+  it("fetchCloudStorageInventory requests projected columns without dedupe/sort and fetchUsageKindWithCoverage keeps event_id for fos_usage", async () => {
+    const calls: Array<{
+      kind: string;
+      options: {
+        columns?: readonly string[];
+        dedupe?: boolean;
+        sort?: boolean;
+        latestCompleteSnapshotOnly?: boolean;
+      };
+    }> = [];
+    const now = Date.parse("2026-11-24T12:00:00.000Z");
+    const reader: UsageLogReader = async (kind, _range, options) => {
+      calls.push({ kind, options });
+      if (kind === "storage_inventory") {
+        return {
+          liveTruncated: false,
+          rows: [
+            {
+              timestamp: now - 10_000,
+              snapshot_id: "snap-1",
+              dataset: "pq_request",
+              key: "processed/request/a.parquet",
+              size: 2_048,
+              last_modified: now - 3_600_000,
+              complete: false,
+            },
+            {
+              timestamp: now - 5_000,
+              snapshot_id: "snap-1",
+              dataset: "",
+              key: "",
+              size: 0,
+              last_modified: null,
+              complete: true,
+            },
+          ],
+        };
+      }
+      return {
+        liveTruncated: false,
+        rows: [
+          {
+            timestamp: now - 1_000,
+            event_id: "fos-1",
+            op: "PUT",
+            op_class: "A",
+            op_count: 5,
+            dataset: "pq_request",
+            caller: "cron:request_ingest",
+            cdn_cache: "DIRECT",
+            bytes_in: 1_000,
+            bytes_out: 0,
+            bytes_deleted: 0,
+            est_cost_usd: 0.0001,
+          },
+        ],
+      };
+    };
+
+    const inv = await fetchCloudStorageInventory({
+      now,
+      identity: { user: "alice", role: "admin" },
+      read: reader,
+    });
+    const fos = await fetchUsageKindWithCoverage(
+      "fos_usage",
+      { from: now - 86_400_000, to: now },
+      { user: "alice", role: "admin" },
+      reader,
+    );
+
+    expect(calls[0].kind).toBe("storage_inventory");
+    expect(calls[0].options.latestCompleteSnapshotOnly).toBe(true);
+    expect(calls[0].options.dedupe).toBe(false);
+    expect(calls[0].options.sort).toBe(false);
+    expect(calls[0].options.columns).not.toContain("event_id");
+    expect(inv.intervals).toHaveLength(1);
+    expect(inv.intervals[0].bytes).toBe(2_048);
+
+    expect(calls[1].kind).toBe("fos_usage");
+    expect(calls[1].options.dedupe).toBeUndefined();
+    expect(calls[1].options.columns).toContain("event_id");
+    expect(calls[1].options.columns).not.toContain("sample_key");
+    expect(fos.rows).toHaveLength(1);
+    expect(fos.rows[0].op_count).toBe(5);
   });
 });

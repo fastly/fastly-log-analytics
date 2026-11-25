@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parquetWriteBuffer } from "hyparquet-writer";
-import { readLogs } from "./engine";
+import { OpsRangeUnsupportedError, readLogs } from "./engine";
 import {
   browserOpsSource,
   clearOpsCaches,
@@ -308,5 +308,75 @@ describe("browserOpsSource fetchFile deduplication", () => {
     const ok = await srcC.fetchFile(key);
     expect(retryMock).toHaveBeenCalledTimes(2);
     expect(new Uint8Array(ok.bytes)).toEqual(new Uint8Array([42]));
+  });
+
+  it("fetchRange sends Range headers, validates 206, deduplicates/caches ranges, slices CacheStorage hits, and rejects 200", async () => {
+    const payload = new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    const file = {
+      key: "processed/ops/ingest_files/range-test.parquet",
+      start: "2026-11-24T00:00:00Z",
+      end: "2026-11-24T01:00:00Z",
+      size: payload.byteLength,
+      rows: 1,
+    };
+    let resolveRange!: (res: Response) => void;
+    const rangeHeaders: string[] = [];
+    const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      rangeHeaders.push(headers.get("range") ?? "");
+      return new Promise<Response>((resolve) => {
+        resolveRange = resolve;
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const srcA = browserOpsSource("http://localhost", { user: "alice", role: "admin" });
+    const srcB = browserOpsSource("http://localhost", { user: "alice", role: "admin" });
+
+    // 1. Concurrent identical range requests deduplicate to 1 HTTP 206 fetch.
+    const p1 = srcA.fetchRange!(file, 2, 6);
+    const p2 = srcB.fetchRange!(file, 2, 6);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(rangeHeaders).toEqual(["bytes=2-5"]);
+
+    resolveRange(
+      new Response(payload.slice(2, 6), {
+        status: 206,
+        headers: {
+          "content-range": `bytes 2-5/${payload.byteLength}`,
+          "x-flp-cdn-cache": "HIT",
+        },
+      }),
+    );
+    const [r1, r2] = await Promise.all([p1, p2]);
+    expect(new Uint8Array(r1.bytes)).toEqual(new Uint8Array([2, 3, 4, 5]));
+    expect(new Uint8Array(r2.bytes)).toEqual(new Uint8Array([2, 3, 4, 5]));
+    expect(r1.cached).toBe(false);
+    expect(r1.cdn).toBe("HIT");
+    expect(r2.cached).toBe(true);
+
+    // 2. Subsequent identical range hits in-memory range cache with 0 network calls.
+    const r3 = await srcA.fetchRange!(file, 2, 6);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(r3.cached).toBe(true);
+    expect(new Uint8Array(r3.bytes)).toEqual(new Uint8Array([2, 3, 4, 5]));
+
+    // 3. HTTP 200 response throws OpsRangeUnsupportedError so readLogs falls back cleanly.
+    const full200Mock = vi.fn(
+      async () => new Response(payload, { status: 200 }),
+    );
+    vi.stubGlobal("fetch", full200Mock);
+    await expect(srcA.fetchRange!(file, 6, 10)).rejects.toBeInstanceOf(
+      OpsRangeUnsupportedError,
+    );
+
+    // 4. When the full file is already in CacheStorage, fetchRange slices it with 0 network calls.
+    await srcA.fetchFile(file.key);
+    expect(full200Mock).toHaveBeenCalledTimes(2);
+    const fromCache = await srcA.fetchRange!(file, 6, 10);
+    expect(full200Mock).toHaveBeenCalledTimes(2);
+    expect(fromCache.cached).toBe(true);
+    expect(new Uint8Array(fromCache.bytes)).toEqual(new Uint8Array([6, 7, 8, 9]));
   });
 });

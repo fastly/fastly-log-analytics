@@ -35,10 +35,25 @@ export function resetEstimatePrefillCache(): void {
   settledPrefills.clear();
 }
 
+const INGEST_PREFILL_COLUMNS = [
+  "timestamp",
+  "status",
+  "raw_size",
+  "raw_bytes",
+  "rows",
+] as const;
+
 type Reader = (
   kind: "ingest_files",
   range: { from: string; to: string },
-  options: { user: string; role: string; signal?: AbortSignal },
+  options: {
+    user: string;
+    role: string;
+    signal?: AbortSignal;
+    columns?: readonly string[];
+    dedupe?: boolean;
+    sort?: boolean;
+  },
 ) => Promise<{ rows: Record<string, unknown>[] }>;
 
 function number(value: unknown): number {
@@ -112,7 +127,15 @@ async function computeEstimatePrefill(
         : null,
     ),
     afterStorageBillingStart.then(() =>
-      optional(read("ingest_files", iso, { ...resolvedIdentity, signal })),
+      optional(
+        read("ingest_files", iso, {
+          ...resolvedIdentity,
+          signal,
+          columns: INGEST_PREFILL_COLUMNS,
+          dedupe: false,
+          sort: false,
+        }),
+      ),
     ),
   ]);
   assertOpsEpoch(startOpsEpoch, signal);

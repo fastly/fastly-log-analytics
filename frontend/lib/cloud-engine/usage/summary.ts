@@ -66,6 +66,47 @@ export interface CloudStorageInventoryResult {
   provenance: "cloud:inventory" | "cloud:inventory_incomplete" | "cloud:inventory_stale";
 }
 
+const STORAGE_INVENTORY_COLUMNS = [
+  "timestamp",
+  "snapshot_id",
+  "dataset",
+  "key",
+  "size",
+  "last_modified",
+  "complete",
+] as const;
+
+// Includes `rows` and `raw_bytes` (adjacent between `state_version` and `output_keys_json`,
+// ~0.2% of file size) so a concurrent 7d `estimatePrefill` read slices from this 31d read.
+const INGEST_DELETED_COLUMNS = [
+  "timestamp",
+  "raw_key",
+  "raw_size",
+  "status",
+  "state_version",
+  "rows",
+  "raw_bytes",
+  "output_keys_json",
+  "raw_deleted",
+  "raw_deleted_at",
+] as const;
+
+const FOS_USAGE_COLUMNS = [
+  "timestamp",
+  "event_id",
+  "op",
+  "op_class",
+  "op_count",
+  "dataset",
+  "caller",
+  "cdn_cache",
+  "bytes_in",
+  "bytes_out",
+  "bytes_deleted",
+  "bytes_deleted_complete",
+  "est_cost_usd",
+] as const;
+
 const INITIAL_INVENTORY_LOOKBACK_DAYS = 2;
 const DEFAULT_INVENTORY_LOOKBACK_DAYS = 30;
 const INVENTORY_TTL_MS = 60_000;
@@ -102,7 +143,14 @@ export async function fetchCloudStorageInventory(
         from: new Date(now - lookbackDays * DAY_MS).toISOString(),
         to: new Date(now).toISOString(),
       },
-      { ...identity, signal, latestCompleteSnapshotOnly: true },
+      {
+        ...identity,
+        signal,
+        latestCompleteSnapshotOnly: true,
+        columns: STORAGE_INVENTORY_COLUMNS,
+        dedupe: false,
+        sort: false,
+      },
     );
     assertOpsEpoch(startOpsEpoch, signal);
     if (dashboardCacheIdentity() !== scope) {
@@ -327,7 +375,13 @@ export async function fetchIngestDeletedIntervals(
       from: new Date(range.from).toISOString(),
       to: new Date(range.to).toISOString(),
     },
-    { ...identity, signal: options.signal },
+    {
+      ...identity,
+      signal: options.signal,
+      columns: INGEST_DELETED_COLUMNS,
+      dedupe: false,
+      sort: false,
+    },
   );
 
   type RawLifecycle = {
@@ -348,7 +402,8 @@ export async function fetchIngestDeletedIntervals(
   for (const row of result.rows) {
     if (
       (row.status === "converted" || row.status === "compacted") &&
-      typeof row.output_keys_json === "string"
+      typeof row.output_keys_json === "string" &&
+      row.output_keys_json.length > 2
     ) {
       const at = parseTimestampMs(row.timestamp);
       let written: unknown = [];
@@ -366,7 +421,8 @@ export async function fetchIngestDeletedIntervals(
     }
     if (
       row.status === "parquet_deleted" &&
-      typeof row.output_keys_json === "string"
+      typeof row.output_keys_json === "string" &&
+      row.output_keys_json.length > 2
     ) {
       let deleted: unknown = [];
       try {
@@ -1753,6 +1809,9 @@ export type UsageLogReader = (
     role: string;
     signal?: AbortSignal;
     latestCompleteSnapshotOnly?: boolean;
+    columns?: readonly string[];
+    dedupe?: boolean;
+    sort?: boolean;
   },
 ) => Promise<{
   rows: Record<string, unknown>[];
@@ -1934,7 +1993,11 @@ export async function fetchUsageInput(
     ...ACTIVE_USAGE_KINDS.map((kind) =>
       kind === "fos_usage"
         ? afterStorageBilling.then(() =>
-            read(kind, range, { ...resolvedIdentity, signal }),
+            read(kind, range, {
+              ...resolvedIdentity,
+              signal,
+              columns: FOS_USAGE_COLUMNS,
+            }),
           )
         : read(kind, kind === "cron_runs" ? cronRunsRange : range, {
             ...resolvedIdentity,
@@ -2005,7 +2068,11 @@ export async function fetchUsageKindWithCoverage<K extends UsageKind>(
       from: new Date(range.from).toISOString(),
       to: new Date(range.to).toISOString(),
     },
-    { ...resolvedIdentity, signal },
+    {
+      ...resolvedIdentity,
+      signal,
+      ...(kind === "fos_usage" ? { columns: FOS_USAGE_COLUMNS } : {}),
+    },
   );
   assertOpsEpoch(startOpsEpoch, signal);
   const raw = Object.fromEntries(

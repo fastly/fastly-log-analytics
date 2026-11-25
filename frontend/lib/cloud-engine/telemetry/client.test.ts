@@ -599,4 +599,63 @@ describe("readLogs request sharing", () => {
     w.emit({ id: w.jobs()[1].id, type: "result", result: emptyResult });
     await Promise.all([p1, p2]);
   });
+
+  it("shares projected reads safely: projected never satisfies full/superset, while full satisfies projected", async () => {
+    const { readLogs } = await load();
+    const workerRes = (kind: string) => ({
+      kind,
+      from: range.from,
+      to: range.to,
+      rows: [{ event_id: "e1", timestamp: Date.parse(range.from) + 1000, raw_key: "k1" }],
+      liveTruncated: false,
+    });
+
+    // 1. Two identical projected reads share one worker job and forward columns/dedupe/sort.
+    const p1 = readLogs("ingest_files", range, {
+      ...identity,
+      columns: ["raw_key", "timestamp"],
+      dedupe: false,
+      sort: false,
+    });
+    const p2 = readLogs("ingest_files", range, {
+      ...identity,
+      columns: ["timestamp", "raw_key"],
+      dedupe: false,
+      sort: false,
+    });
+    const worker = MockWorker.instances[0];
+    expect(worker.jobs()).toHaveLength(1);
+    expect(worker.jobs()[0].options).toMatchObject({
+      kind: "ingest_files",
+      columns: ["raw_key", "timestamp"],
+      dedupe: false,
+      sort: false,
+    });
+
+    // 2. A concurrent full read must NOT attach to the projected/non-deduped read.
+    const fullRead = readLogs("ingest_files", range, identity);
+    expect(worker.jobs()).toHaveLength(2);
+
+    // 3. A concurrent projected read asking for a different column subset DOES attach to the full read.
+    const otherProj = readLogs("ingest_files", range, {
+      ...identity,
+      columns: ["timestamp", "raw_size"],
+      dedupe: false,
+      sort: false,
+    });
+    expect(worker.jobs()).toHaveLength(2);
+
+    worker.emit({ id: worker.jobs()[0].id, type: "result", result: workerRes("ingest_files") });
+    worker.emit({ id: worker.jobs()[1].id, type: "result", result: workerRes("ingest_files") });
+    await Promise.all([p1, p2, fullRead, otherProj]);
+
+    // 4. After settling, another projected read hits the settled full read (0 new jobs).
+    await readLogs("ingest_files", range, {
+      ...identity,
+      columns: ["timestamp", "status"],
+      dedupe: false,
+      sort: false,
+    });
+    expect(worker.jobs()).toHaveLength(2);
+  });
 });

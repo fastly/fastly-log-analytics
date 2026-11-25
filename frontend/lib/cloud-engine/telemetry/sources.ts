@@ -10,7 +10,11 @@ import {
   type BrowserSourceOptions,
 } from "../dashboard/sources";
 import { createSharedRequests } from "../shared-request";
-import { clearOpsDecodedCache, type OpsSource } from "./engine";
+import {
+  clearOpsDecodedCache,
+  OpsRangeUnsupportedError,
+  type OpsSource,
+} from "./engine";
 
 export const OPS_CACHE_PREFIX = "flp-ops-parquet-v1:";
 
@@ -48,6 +52,49 @@ type OpsFileResult = {
 // browserOpsSource instances in the worker; share in-flight file fetches by epoch,
 // cache partition, and URL so cold-cache files are downloaded once.
 const sharedOpsFiles = createSharedRequests<OpsFileResult>();
+const sharedOpsRanges = createSharedRequests<OpsFileResult>();
+
+const OPS_RANGE_CACHE_MAX_BYTES = 16 * 1024 * 1024;
+const opsRangeCache = new Map<string, ArrayBuffer>();
+let opsRangeCacheBytes = 0;
+
+function getCachedOpsRange(key: string): ArrayBuffer | undefined {
+  const hit = opsRangeCache.get(key);
+  if (hit !== undefined) {
+    opsRangeCache.delete(key);
+    opsRangeCache.set(key, hit);
+  }
+  return hit;
+}
+
+function setCachedOpsRange(key: string, bytes: ArrayBuffer): void {
+  if (bytes.byteLength > OPS_RANGE_CACHE_MAX_BYTES) return;
+  const prev = opsRangeCache.get(key);
+  if (prev) {
+    opsRangeCacheBytes -= prev.byteLength;
+    opsRangeCache.delete(key);
+  }
+  while (
+    opsRangeCacheBytes + bytes.byteLength > OPS_RANGE_CACHE_MAX_BYTES &&
+    opsRangeCache.size > 0
+  ) {
+    const oldest = opsRangeCache.entries().next().value as
+      | [string, ArrayBuffer]
+      | undefined;
+    if (!oldest) break;
+    opsRangeCache.delete(oldest[0]);
+    opsRangeCacheBytes -= oldest[1].byteLength;
+  }
+  opsRangeCache.set(key, bytes);
+  opsRangeCacheBytes += bytes.byteLength;
+}
+
+function clearOpsRangeCache(): void {
+  opsRangeCache.clear();
+  opsRangeCacheBytes = 0;
+}
+
+const CONTENT_RANGE_RE = /^bytes (\d+)-(\d+)\/(\d+|\*)$/i;
 
 function opsAbortError(): DOMException {
   return new DOMException("The operation was aborted.", "AbortError");
@@ -150,6 +197,7 @@ export async function clearOpsCaches(
   }
   opsCacheEpoch += 1;
   clearOpsDecodedCache();
+  clearOpsRangeCache();
   volatileOpsScope = `volatile-ops-${++volatileOpsScopeCounter}`;
   for (const controller of activeOpsControllers) {
     controller.abort(opsAbortError());
@@ -466,6 +514,184 @@ export function browserOpsSource(
               path,
               status: response.status,
               duration_ms: Math.max(0, Math.round(end - start)),
+              vcpu_ms: Number.isFinite(vcpuMs) ? vcpuMs : null,
+              bytes: bytes.byteLength,
+              cache: cdnHit ? "cdn" : "miss",
+              endpoint: "GET /api/file",
+              page_load_id: pageLoadId,
+            });
+            emitDebugSubCalls(
+              response,
+              "GET /api/file",
+              pageLoadId,
+              resolvedOptions?.onApiCall,
+            );
+            return {
+              bytes,
+              cached: false,
+              cdn,
+            };
+          });
+        },
+        { signal },
+      );
+      assertOpsEpoch(entryEpoch, signal);
+      if (!started) {
+        return { bytes: result.bytes.slice(0), cached: true, cdn: null };
+      }
+      return result;
+    },
+    async fetchRange(file, start, end, signal) {
+      signal?.throwIfAborted();
+      if (
+        !Number.isSafeInteger(start) ||
+        !Number.isSafeInteger(end) ||
+        start < 0 ||
+        end <= start ||
+        (file.size > 0 && end > file.size)
+      ) {
+        throw new OpsRangeUnsupportedError(
+          `Invalid range ${start}-${end} for ${file.key}`,
+        );
+      }
+      const entryEpoch = opsCacheEpoch;
+      const url = fileUrl(file.key);
+      const dedupKey = JSON.stringify([entryEpoch, name, url, start, end]);
+      const memHit = getCachedOpsRange(dedupKey);
+      if (memHit !== undefined) {
+        return { bytes: memHit.slice(0), cached: true, cdn: null };
+      }
+      let started = false;
+      const result = await sharedOpsRanges(
+        dedupKey,
+        (sharedSignal) => {
+          started = true;
+          return withOpsController(sharedSignal, async (callEpoch, controller) => {
+            const path = fileDisplayPath(file.key);
+            const pageLoadId = resolvedOptions?.getPageLoadId?.();
+            const cacheStart =
+              typeof performance !== "undefined" ? performance.now() : Date.now();
+            const cache = await open(callEpoch, controller.signal.aborted);
+            assertOpsActive(callEpoch, controller);
+            const hit =
+              callEpoch === opsCacheEpoch && !controller.signal.aborted
+                ? await cache?.match(url)
+                : undefined;
+            assertOpsActive(callEpoch, controller);
+            if (hit) {
+              const fullBytes = await hit.arrayBuffer();
+              assertOpsActive(callEpoch, controller);
+              if (end <= fullBytes.byteLength) {
+                const bytes = fullBytes.slice(start, end);
+                const cacheEnd =
+                  typeof performance !== "undefined" ? performance.now() : Date.now();
+                resolvedOptions?.onApiCall?.({
+                  source: "Browser Cache",
+                  method: "GET",
+                  path,
+                  status: 206,
+                  duration_ms: Math.max(0, Math.round(cacheEnd - cacheStart)),
+                  bytes: bytes.byteLength,
+                  cache: "browser",
+                  endpoint: "GET /api/file",
+                  page_load_id: pageLoadId,
+                });
+                return { bytes, cached: true };
+              }
+            }
+            const headers = {
+              ...(buildRequestHeaders() ?? {}),
+              Range: `bytes=${start}-${end - 1}`,
+            };
+            const reqStart =
+              typeof performance !== "undefined" ? performance.now() : Date.now();
+            let onAbortRace!: () => void;
+            const abortRace = new Promise<never>((_, reject) => {
+              onAbortRace = () =>
+                reject(controller.signal.reason ?? opsAbortError());
+              if (controller.signal.aborted) {
+                onAbortRace();
+                return;
+              }
+              controller.signal.addEventListener("abort", onAbortRace, {
+                once: true,
+              });
+            });
+            let response: Response;
+            try {
+              response = await Promise.race([
+                fetch(url, {
+                  credentials: "same-origin",
+                  cache: "no-store",
+                  headers,
+                  signal: controller.signal,
+                }),
+                abortRace,
+              ]);
+            } finally {
+              controller.signal.removeEventListener("abort", onAbortRace);
+            }
+            assertOpsActive(callEpoch, controller);
+            if (!response.ok) {
+              const reqEnd =
+                typeof performance !== "undefined" ? performance.now() : Date.now();
+              resolvedOptions?.onApiCall?.({
+                source: "Compute API",
+                method: "GET",
+                path,
+                status: response.status,
+                duration_ms: Math.max(0, Math.round(reqEnd - reqStart)),
+                endpoint: "GET /api/file",
+                page_load_id: pageLoadId,
+              });
+              await denied(response);
+              throw new Error(`File ${file.key} failed (${response.status})`);
+            }
+            if (response.status !== 206) {
+              throw new OpsRangeUnsupportedError(
+                `File ${file.key} returned status ${response.status} for range request`,
+              );
+            }
+            const contentRange = response.headers.get("content-range") ?? "";
+            const match = CONTENT_RANGE_RE.exec(contentRange.trim());
+            if (
+              !match ||
+              Number(match[1]) !== start ||
+              Number(match[2]) !== end - 1 ||
+              (match[3] !== "*" && file.size > 0 && Number(match[3]) !== file.size)
+            ) {
+              throw new OpsRangeUnsupportedError(
+                `Unexpected Content-Range "${contentRange}" for ${file.key}`,
+              );
+            }
+            const bytes = await response.arrayBuffer();
+            assertOpsActive(callEpoch, controller);
+            if (bytes.byteLength !== end - start) {
+              throw new OpsRangeUnsupportedError(
+                `Short range read for ${file.key}: expected ${end - start}, got ${bytes.byteLength}`,
+              );
+            }
+            if (callEpoch === opsCacheEpoch && !controller.signal.aborted) {
+              setCachedOpsRange(dedupKey, bytes.slice(0));
+            }
+            const reqEnd =
+              typeof performance !== "undefined" ? performance.now() : Date.now();
+            const cdn = response.headers.get("x-flp-cdn-cache");
+            const cdnHit = isCdnHit(cdn);
+            const vcpuHeader = response?.headers?.get?.("x-flp-vcpu-ms");
+            const vcpuMs =
+              vcpuHeader != null && vcpuHeader !== "" ? Number(vcpuHeader) : null;
+            const directCdnMiss = cdn !== null && vcpuMs === null;
+            resolvedOptions?.onApiCall?.({
+              source: cdnHit
+                ? "CDN Cache"
+                : directCdnMiss
+                  ? "FOS S3"
+                  : "Compute API",
+              method: "GET",
+              path,
+              status: response.status,
+              duration_ms: Math.max(0, Math.round(reqEnd - reqStart)),
               vcpu_ms: Number.isFinite(vcpuMs) ? vcpuMs : null,
               bytes: bytes.byteLength,
               cache: cdnHit ? "cdn" : "miss",

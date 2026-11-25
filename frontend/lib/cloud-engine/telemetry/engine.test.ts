@@ -1,7 +1,14 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
 import { parquetWriteBuffer } from "hyparquet-writer";
-import { clearOpsDecodedCache, fnv1a32, readLogs, type OpsSource } from "./engine";
+import {
+  clearOpsDecodedCache,
+  fnv1a32,
+  OPS_PROJECTED_MIN_BYTES,
+  OpsRangeUnsupportedError,
+  readLogs,
+  type OpsSource,
+} from "./engine";
 import type { ManifestFile } from "../dashboard/manifest";
 import type { RunProgress } from "../dashboard/engine";
 
@@ -636,5 +643,206 @@ describe("tagged compact files (Rust parity)", () => {
     expect(result.stats.skippedCovered).toBe(0);
     expect([...log.files].sort()).toEqual([badCompact, late, w1, w2].sort());
     expect(result.rows.map((r) => r.event_id).sort()).toEqual(["late", "w1", "w2"]);
+  });
+
+  it("uses projected Range reads for large uncached ops Parquet files and skips full fetchFile", async () => {
+    clearOpsDecodedCache();
+    const rowCount = 2_500;
+    const baseTs = DAY_MS + 10 * 3_600_000;
+    const bigParquet = parquetWriteBuffer({
+      columnData: [
+        {
+          name: "timestamp",
+          type: "TIMESTAMP",
+          data: Array.from({ length: rowCount }, (_, i) => new Date(baseTs + i * 1000)),
+        },
+        {
+          name: "event_id",
+          type: "STRING",
+          data: Array.from(
+            { length: rowCount },
+            (_, i) => `evt-${String(i).padStart(6, "0")}-${(i * 2654435761).toString(16)}`,
+          ),
+        },
+        {
+          name: "run_id",
+          type: "STRING",
+          data: Array.from(
+            { length: rowCount },
+            (_, i) => `run-${String(i).padStart(6, "0")}-${(i * 1597334677).toString(16)}`,
+          ),
+        },
+        {
+          name: "raw_key",
+          type: "STRING",
+          data: Array.from({ length: rowCount }, (_, i) => `raw/f-${i % 20}.log.gz`),
+        },
+        {
+          name: "raw_size",
+          type: "INT64",
+          data: Array.from({ length: rowCount }, (_, i) => BigInt(1024 + (i % 10))),
+        },
+      ],
+      codec: "SNAPPY",
+    });
+    expect(bigParquet.byteLength).toBeGreaterThan(OPS_PROJECTED_MIN_BYTES);
+
+    const key = "processed/ops/ingest_files/year=2026/month=10/day=29/compact=100-200-c2-n2500.parquet";
+    const rangeCalls: Array<{ start: number; end: number }> = [];
+    const { src, log } = source({
+      live: noLive,
+      manifest: [
+        {
+          files: [
+            {
+              key,
+              start: "2026-10-29T10:00:00Z",
+              end: "2026-10-29T11:00:00Z",
+              size: bigParquet.byteLength,
+              rows: rowCount,
+            },
+          ],
+          next_cursor: null,
+        },
+      ],
+      files: { [key]: bigParquet },
+    });
+    src.fetchRange = async (_file, start, end) => {
+      rangeCalls.push({ start, end });
+      return { bytes: bigParquet.slice(start, end), cached: false, cdn: "HIT" };
+    };
+
+    const result = await readLogs(src, {
+      kind: "ingest_files",
+      ...range,
+      columns: ["timestamp", "raw_key", "raw_size"],
+      dedupe: false,
+      sort: false,
+    });
+
+    expect(log.files).toEqual([]);
+    expect(rangeCalls.length).toBeGreaterThan(0);
+    const rangeBytes = rangeCalls.reduce((sum, r) => sum + (r.end - r.start), 0);
+    expect(rangeBytes).toBeLessThan(bigParquet.byteLength * 0.65);
+    expect(result.rows).toHaveLength(rowCount);
+    expect(result.rows[0]).toMatchObject({
+      timestamp: baseTs,
+      raw_key: "raw/f-0.log.gz",
+      raw_size: 1024,
+    });
+    expect(result.rows[0].event_id).toBeUndefined();
+    expect(result.rows[0].run_id).toBeUndefined();
+    expect(result.stats.read).toBe(1);
+    expect(result.stats.cdnHits).toBe(1);
+  });
+
+  it("falls back to fetchFile when fetchRange throws OpsRangeUnsupportedError", async () => {
+    clearOpsDecodedCache();
+    const rowCount = 3_000;
+    const baseTs = DAY_MS + 10 * 3_600_000;
+    const bigParquet = parquetWriteBuffer({
+      columnData: [
+        {
+          name: "timestamp",
+          type: "TIMESTAMP",
+          data: Array.from({ length: rowCount }, (_, i) => new Date(baseTs + i * 1000)),
+        },
+        {
+          name: "event_id",
+          type: "STRING",
+          data: Array.from({ length: rowCount }, (_, i) => `evt-${i}-${(i * 9973).toString(16)}`),
+        },
+        {
+          name: "raw_key",
+          type: "STRING",
+          data: Array.from({ length: rowCount }, (_, i) => `raw/f-${i}.log.gz`),
+        },
+      ],
+      codec: "SNAPPY",
+    });
+    expect(bigParquet.byteLength).toBeGreaterThan(OPS_PROJECTED_MIN_BYTES);
+
+    const key = "processed/ops/ingest_files/fallback.parquet";
+    const { src, log } = source({
+      live: noLive,
+      manifest: [
+        {
+          files: [
+            {
+              key,
+              start: "2026-10-29T10:00:00Z",
+              end: "2026-10-29T11:00:00Z",
+              size: bigParquet.byteLength,
+              rows: rowCount,
+            },
+          ],
+          next_cursor: null,
+        },
+      ],
+      files: { [key]: bigParquet },
+    });
+    src.fetchRange = async () => {
+      throw new OpsRangeUnsupportedError("server returned 200");
+    };
+
+    const result = await readLogs(src, {
+      kind: "ingest_files",
+      ...range,
+      columns: ["timestamp", "raw_key"],
+      dedupe: false,
+      sort: false,
+    });
+
+    expect(log.files).toEqual([key]);
+    expect(result.rows).toHaveLength(rowCount);
+    expect(result.rows[0].raw_key).toBe("raw/f-0.log.gz");
+  });
+
+  it("isolates projected decoded cache entries from full reads while letting full reads serve projected reads", async () => {
+    clearOpsDecodedCache();
+    const key = "processed/ops/fos_usage/proj-cache.parquet";
+    const bytes = parquet([row(1, "e1"), row(2, "e2")]);
+    const { src, log } = source({
+      live: noLive,
+      manifest: [
+        {
+          files: [{ ...entry(key, 2), size: bytes.byteLength }],
+          next_cursor: null,
+        },
+      ],
+      files: { [key]: bytes },
+    });
+    src.cacheScope = "scope-proj-test";
+
+    // 1. Projected read populates projected cache entry only.
+    const proj1 = await readLogs(src, {
+      kind: "fos_usage",
+      ...range,
+      columns: ["timestamp"],
+      dedupe: false,
+      sort: false,
+    });
+    expect(log.files).toEqual([key]);
+    expect(proj1.rows[0].op).toBeUndefined();
+
+    // 2. Subsequent full read must NOT reuse the projected entry (must fetch & decode all columns).
+    const full = await readLogs(src, {
+      kind: "fos_usage",
+      ...range,
+    });
+    expect(log.files).toEqual([key, key]);
+    expect(full.rows[0].op).toBe("GET");
+    expect(full.rows[0].event_id).toBe("e2");
+
+    // 3. Subsequent projected read with different columns reuses the full "*" decoded entry (0 extra fetches).
+    const proj2 = await readLogs(src, {
+      kind: "fos_usage",
+      ...range,
+      columns: ["timestamp", "op"],
+      dedupe: false,
+      sort: false,
+    });
+    expect(log.files).toEqual([key, key]);
+    expect(proj2.rows[0].op).toBe("GET");
   });
 });

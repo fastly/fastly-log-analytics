@@ -6,6 +6,12 @@ import {
   type ManifestFile,
 } from "../dashboard/manifest";
 import { readParquetRows as readRows } from "../dashboard/parquet";
+import {
+  assembleProjectedParquet,
+  fetchProjectedRanges,
+  planParquetProjection,
+  readParquetFooter,
+} from "../dashboard/parquet-projection";
 import { fnv1a32 } from "../parquet-key";
 import {
   OUTBOX_KINDS,
@@ -21,6 +27,18 @@ export { fnv1a32 };
 export type { LogRow, LogsRange, LogsResult, LogsStats, OpsKind };
 export type LogResult = LogsResult;
 
+/** Uncached ops Parquet files larger than this use HTTP Range projection when `columns` is set. */
+export const OPS_PROJECTED_MIN_BYTES = 48 * 1024;
+/** Initial tail probe size for ops Parquet footers (1 row group, compact metadata). */
+export const OPS_FOOTER_PROBE_BYTES = 16 * 1024;
+
+export class OpsRangeUnsupportedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "OpsRangeUnsupportedError";
+  }
+}
+
 export type OpsSource = {
   /** Optional cache partition key enabling in-memory reuse of decoded immutable ops Parquet files. */
   cacheScope?: string;
@@ -29,9 +47,26 @@ export type OpsSource = {
     key: string,
     signal?: AbortSignal,
   ) => Promise<{ bytes: ArrayBuffer; cached: boolean; cdn?: string | null }>;
+  fetchRange?: (
+    file: ManifestFile,
+    start: number,
+    end: number,
+    signal?: AbortSignal,
+  ) => Promise<{ bytes: ArrayBuffer; cached: boolean; cdn?: string | null }>;
   cachedKeys: () => Promise<string[]>;
   evict: (key: string) => Promise<void>;
 };
+
+export function normalizeOpsColumns(
+  columns: readonly string[] | undefined,
+  dedupe = true,
+): string[] | null {
+  if (!columns || columns.length === 0) return null;
+  const set = new Set<string>(columns);
+  set.add("timestamp");
+  if (dedupe) set.add("event_id");
+  return [...set].sort();
+}
 
 const MAX_DECODED_PARQUET_ENTRIES = 512;
 const decodedParquetCache = new Map<string, Record<string, unknown>[]>();
@@ -40,19 +75,26 @@ export function clearOpsDecodedCache(): void {
   decodedParquetCache.clear();
 }
 
-function decodedCacheKey(scope: string, key: string): string {
-  return `${scope}\0${key}`;
+function decodedCacheKey(scope: string, key: string, columnsKey: string): string {
+  return `${scope}\0${key}\0${columnsKey}`;
 }
 
 function getDecodedParquet(
   scope: string,
   key: string,
+  columnsKey: string,
 ): Record<string, unknown>[] | undefined {
-  const full = decodedCacheKey(scope, key);
-  const hit = decodedParquetCache.get(full);
+  const exact = decodedCacheKey(scope, key, columnsKey);
+  let hit = decodedParquetCache.get(exact);
+  let hitKey = exact;
+  if (hit === undefined && columnsKey !== "*") {
+    const full = decodedCacheKey(scope, key, "*");
+    hit = decodedParquetCache.get(full);
+    hitKey = full;
+  }
   if (hit !== undefined) {
-    decodedParquetCache.delete(full);
-    decodedParquetCache.set(full, hit);
+    decodedParquetCache.delete(hitKey);
+    decodedParquetCache.set(hitKey, hit);
   }
   return hit;
 }
@@ -60,15 +102,32 @@ function getDecodedParquet(
 function setDecodedParquet(
   scope: string,
   key: string,
+  columnsKey: string,
   rows: Record<string, unknown>[],
 ): void {
-  const full = decodedCacheKey(scope, key);
+  const full = decodedCacheKey(scope, key, columnsKey);
   decodedParquetCache.delete(full);
   decodedParquetCache.set(full, rows);
   if (decodedParquetCache.size > MAX_DECODED_PARQUET_ENTRIES) {
     const oldest = decodedParquetCache.keys().next().value;
     if (oldest !== undefined) decodedParquetCache.delete(oldest);
   }
+}
+
+function deleteDecodedParquet(scope: string, key: string): void {
+  const prefix = `${scope}\0${key}\0`;
+  for (const cacheKey of [...decodedParquetCache.keys()]) {
+    if (cacheKey.startsWith(prefix)) decodedParquetCache.delete(cacheKey);
+  }
+}
+
+function isAbortOrAuthError(err: unknown): boolean {
+  if (err instanceof DOMException && err.name === "AbortError") return true;
+  if (err instanceof Error) {
+    if (err.name === "AbortError") return true;
+    if (/\((?:401|403)\)$/.test(err.message)) return true;
+  }
+  return false;
 }
 
 export type ReadLogsOptions = {
@@ -82,6 +141,12 @@ export type ReadLogsOptions = {
    * snapshot (`snap-<epochSec>-...`) and any overlapping files are loaded.
    */
   latestCompleteSnapshotOnly?: boolean;
+  /** Optional column subset to decode (and Range-project on large uncached files). */
+  columns?: readonly string[];
+  /** Deduplicate rows by `event_id` (default `true`). */
+  dedupe?: boolean;
+  /** Sort rows by `timestamp` descending, then `event_id` (default `true`). */
+  sort?: boolean;
 };
 
 const SNAPSHOT_ID_TS_RE = /^snap-(\d+)(?:-|$)/;
@@ -278,13 +343,25 @@ export async function readLogs(
   source: OpsSource,
   kind: OpsKind,
   range: LogsRange,
-  options?: { signal?: AbortSignal; latestCompleteSnapshotOnly?: boolean },
+  options?: {
+    signal?: AbortSignal;
+    latestCompleteSnapshotOnly?: boolean;
+    columns?: readonly string[];
+    dedupe?: boolean;
+    sort?: boolean;
+  },
 ): Promise<LogsResult>;
 export async function readLogs(
   source: OpsSource,
   kindOrOptions: OpsKind | ReadLogsOptions,
   rangeArg?: LogsRange,
-  optionsArg: { signal?: AbortSignal; latestCompleteSnapshotOnly?: boolean } = {},
+  optionsArg: {
+    signal?: AbortSignal;
+    latestCompleteSnapshotOnly?: boolean;
+    columns?: readonly string[];
+    dedupe?: boolean;
+    sort?: boolean;
+  } = {},
 ): Promise<LogsResult> {
   const kind: OpsKind =
     typeof kindOrOptions === "string" ? kindOrOptions : kindOrOptions.kind;
@@ -299,6 +376,18 @@ export async function readLogs(
     typeof kindOrOptions === "string"
       ? optionsArg.latestCompleteSnapshotOnly === true
       : kindOrOptions.latestCompleteSnapshotOnly === true;
+  const dedupe =
+    typeof kindOrOptions === "string"
+      ? optionsArg.dedupe !== false
+      : kindOrOptions.dedupe !== false;
+  const sort =
+    typeof kindOrOptions === "string"
+      ? optionsArg.sort !== false
+      : kindOrOptions.sort !== false;
+  const rawColumns =
+    typeof kindOrOptions === "string" ? optionsArg.columns : kindOrOptions.columns;
+  const requestedColumns = normalizeOpsColumns(rawColumns, dedupe);
+  const columnsKey = requestedColumns ? requestedColumns.join(",") : "*";
   const progress: RunProgress = {
     phase: "cache", cached: 0, toFetch: 0, toDecode: 0, done: 0,
     downloadedBytes: 0, cachedBytes: 0,
@@ -343,7 +432,7 @@ export async function readLogs(
   await Promise.all(
     evictions.map(async (key) => {
       if (source.cacheScope) {
-        decodedParquetCache.delete(decodedCacheKey(source.cacheScope, key));
+        deleteDecodedParquet(source.cacheScope, key);
       }
       await source.evict(key);
     }),
@@ -353,7 +442,7 @@ export async function readLogs(
   const fileRows: Record<string, unknown>[] = [];
   const load = async (file: ManifestFile) => {
     if (source.cacheScope) {
-      const decoded = getDecodedParquet(source.cacheScope, file.key);
+      const decoded = getDecodedParquet(source.cacheScope, file.key, columnsKey);
       if (decoded !== undefined) {
         stats.cached++;
         stats.read++;
@@ -361,6 +450,79 @@ export async function readLogs(
         progress.done++;
         onProgress?.({ ...progress });
         return decoded;
+      }
+    }
+    if (
+      requestedColumns !== null &&
+      source.fetchRange &&
+      file.size > OPS_PROJECTED_MIN_BYTES &&
+      !cachedKeys.has(file.key)
+    ) {
+      try {
+        let anyNetwork = false;
+        let anyCdnHit = false;
+        let downloaded = 0;
+        let cachedBytes = 0;
+        const fetchRangeBytes = async (start: number, end: number) => {
+          const part = await source.fetchRange!(file, start, end, signal);
+          if (part.cached) {
+            cachedBytes += part.bytes.byteLength;
+          } else {
+            anyNetwork = true;
+            downloaded += part.bytes.byteLength;
+          }
+          if (isCdnHit(part.cdn)) anyCdnHit = true;
+          return part.bytes;
+        };
+        const footer = await readParquetFooter(
+          file.size,
+          fetchRangeBytes,
+          OPS_FOOTER_PROBE_BYTES,
+        );
+        const projection = planParquetProjection(footer, new Set(requestedColumns));
+        const tailStart = footer.tail?.start ?? file.size;
+        const extraBytes = projection.ranges.reduce((sum, r) => {
+          if (r.start >= tailStart) return sum;
+          return sum + (Math.min(r.end, tailStart) - r.start);
+        }, 0);
+        const tailBytes = footer.tail ? footer.tail.bytes.byteLength : 0;
+        if (projection.chunks.length === 0) {
+          const rows = Array.from(
+            { length: Number(footer.metadata.num_rows) },
+            () => ({}),
+          );
+          if (!anyNetwork) stats.cached++;
+          if (anyCdnHit) stats.cdnHits++;
+          stats.read++;
+          if (!anyNetwork) progress.cached++;
+          progress.cachedBytes += cachedBytes;
+          progress.downloadedBytes += downloaded;
+          if (source.cacheScope) {
+            setDecodedParquet(source.cacheScope, file.key, columnsKey, rows);
+          }
+          progress.done++;
+          onProgress?.({ ...progress });
+          return rows;
+        }
+        if (extraBytes + tailBytes < file.size * 0.9) {
+          const rangeBytes = await fetchProjectedRanges(projection, fetchRangeBytes);
+          const projected = assembleProjectedParquet(projection, rangeBytes);
+          const rows = await readRows(projected, requestedColumns);
+          if (!anyNetwork) stats.cached++;
+          if (anyCdnHit) stats.cdnHits++;
+          stats.read++;
+          if (!anyNetwork) progress.cached++;
+          progress.cachedBytes += cachedBytes;
+          progress.downloadedBytes += downloaded;
+          if (source.cacheScope) {
+            setDecodedParquet(source.cacheScope, file.key, columnsKey, rows);
+          }
+          progress.done++;
+          onProgress?.({ ...progress });
+          return rows;
+        }
+      } catch (err) {
+        if (signal?.aborted || isAbortOrAuthError(err)) throw err;
       }
     }
     const { bytes, cached, cdn } = await source.fetchFile(file.key, signal);
@@ -373,9 +535,9 @@ export async function readLogs(
     } else {
       progress.downloadedBytes += bytes.byteLength;
     }
-    const rows = await readRows(bytes);
+    const rows = await readRows(bytes, requestedColumns ?? undefined);
     if (source.cacheScope) {
-      setDecodedParquet(source.cacheScope, file.key, rows);
+      setDecodedParquet(source.cacheScope, file.key, columnsKey, rows);
     }
     progress.done++;
     onProgress?.({ ...progress });
@@ -546,17 +708,54 @@ export async function readLogs(
   progress.phase = "aggregate";
   onProgress?.({ ...progress });
   stats.liveRows = live.rows.length;
-  const byId = new Map<string, LogRow>();
-  for (const raw of [...live.rows, ...fileRows]) {
-    const timestamp = Number(raw.timestamp);
-    const eventId = String(raw.event_id ?? "");
-    if (!Number.isFinite(timestamp) || timestamp < fromMs || timestamp >= toMs)
-      continue;
-    byId.set(eventId, { ...raw, timestamp, event_id: eventId });
+  let rows: LogRow[];
+  if (dedupe) {
+    const byId = new Map<string, LogRow>();
+    for (const raw of live.rows) {
+      const timestamp = Number(raw.timestamp);
+      const eventId = String(raw.event_id ?? "");
+      if (!Number.isFinite(timestamp) || timestamp < fromMs || timestamp >= toMs)
+        continue;
+      byId.set(eventId, { ...raw, timestamp, event_id: eventId });
+    }
+    for (const raw of fileRows) {
+      const timestamp = Number(raw.timestamp);
+      const eventId = String(raw.event_id ?? "");
+      if (!Number.isFinite(timestamp) || timestamp < fromMs || timestamp >= toMs)
+        continue;
+      byId.set(eventId, { ...raw, timestamp, event_id: eventId });
+    }
+    rows = [...byId.values()];
+  } else {
+    rows = [];
+    for (const raw of live.rows) {
+      const timestamp = Number(raw.timestamp);
+      if (!Number.isFinite(timestamp) || timestamp < fromMs || timestamp >= toMs)
+        continue;
+      rows.push(
+        raw.timestamp === timestamp
+          ? (raw as LogRow)
+          : ({ ...raw, timestamp } as LogRow),
+      );
+    }
+    for (const raw of fileRows) {
+      const timestamp = Number(raw.timestamp);
+      if (!Number.isFinite(timestamp) || timestamp < fromMs || timestamp >= toMs)
+        continue;
+      rows.push(
+        raw.timestamp === timestamp
+          ? (raw as LogRow)
+          : ({ ...raw, timestamp } as LogRow),
+      );
+    }
   }
-  const rows = [...byId.values()].sort(
-    (a, b) => b.timestamp - a.timestamp || b.event_id.localeCompare(a.event_id),
-  );
+  if (sort) {
+    rows.sort(
+      (a, b) =>
+        b.timestamp - a.timestamp ||
+        String(b.event_id ?? "").localeCompare(String(a.event_id ?? "")),
+    );
+  }
   const liveTimes = live.rows
     .map((row) => Number(row.timestamp))
     .filter(Number.isFinite);

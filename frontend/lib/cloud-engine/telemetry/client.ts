@@ -5,6 +5,7 @@ import { beginCloudLoading } from "../loading-progress";
 import type { RunProgress } from "../dashboard/engine";
 import { dashboardCacheIdentity } from "../dashboard/sources";
 import {
+  normalizeOpsColumns,
   readLogs as readLogsInline,
   type LogResult,
   type LogsRange,
@@ -154,6 +155,9 @@ interface InFlightOpsRead {
   to: string;
   fromMs: number;
   toMs: number;
+  columns: ReadonlySet<string> | null;
+  dedupe: boolean;
+  sort: boolean;
   startEpoch: number;
   controller: AbortController;
   waiters: Set<Waiter>;
@@ -166,8 +170,27 @@ interface SettledOpsRead {
   to: string;
   fromMs: number;
   toMs: number;
+  columns: ReadonlySet<string> | null;
+  dedupe: boolean;
+  sort: boolean;
   at: number;
   result: LogsResult;
+}
+
+function coversReadOptions(
+  entry: { columns: ReadonlySet<string> | null; dedupe: boolean; sort: boolean },
+  reqColumns: readonly string[] | null,
+  reqDedupe: boolean,
+  reqSort: boolean,
+): boolean {
+  if (reqDedupe && !entry.dedupe) return false;
+  if (reqSort && !entry.sort) return false;
+  if (entry.columns === null) return true;
+  if (reqColumns === null) return false;
+  for (const col of reqColumns) {
+    if (!entry.columns.has(col)) return false;
+  }
+  return true;
 }
 
 const inFlightOpsReads = new Set<InFlightOpsRead>();
@@ -222,10 +245,16 @@ function findCoveringSettled(
   to: string,
   fromMs: number,
   toMs: number,
+  columns: readonly string[] | null,
+  columnsKey: string,
+  dedupe: boolean,
+  sort: boolean,
 ): SettledOpsRead | null {
   const now = Date.now();
   pruneSettledReads(now);
-  const exact = settledOpsReads.get(`${scopeKey}|${from}|${to}`);
+  const exact = settledOpsReads.get(
+    `${scopeKey}|${from}|${to}|${columnsKey}|${dedupe ? 1 : 0}|${sort ? 1 : 0}`,
+  );
   if (exact) return exact;
   if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs < fromMs) {
     return null;
@@ -234,6 +263,7 @@ function findCoveringSettled(
   let bestSpan = Number.POSITIVE_INFINITY;
   for (const entry of settledOpsReads.values()) {
     if (entry.scopeKey !== scopeKey) continue;
+    if (!coversReadOptions(entry, columns, dedupe, sort)) continue;
     if (!Number.isFinite(entry.fromMs) || !Number.isFinite(entry.toMs)) continue;
     if (entry.fromMs <= fromMs && entry.toMs >= toMs) {
       const span = entry.toMs - entry.fromMs;
@@ -252,11 +282,15 @@ function findCoveringInFlight(
   to: string,
   fromMs: number,
   toMs: number,
+  columns: readonly string[] | null,
+  dedupe: boolean,
+  sort: boolean,
 ): InFlightOpsRead | null {
   let best: InFlightOpsRead | null = null;
   let bestSpan = Number.POSITIVE_INFINITY;
   for (const entry of inFlightOpsReads) {
     if (entry.scopeKey !== scopeKey) continue;
+    if (!coversReadOptions(entry, columns, dedupe, sort)) continue;
     if (entry.from === from && entry.to === to) return entry;
     if (
       Number.isFinite(fromMs) &&
@@ -324,15 +358,23 @@ function startOpsRead(
   signal: AbortSignal | undefined,
   onProgress: ((progress: RunProgress) => void) | undefined,
   latestCompleteSnapshotOnly: boolean | undefined,
+  columns: string[] | null,
+  columnsKey: string,
+  dedupe: boolean,
+  sort: boolean,
 ): Promise<LogsResult> {
   const controller = new AbortController();
   const waiters = new Set<Waiter>();
+  const columnSet = columns ? new Set(columns) : null;
   const entry: InFlightOpsRead = {
     scopeKey,
     from,
     to,
     fromMs,
     toMs,
+    columns: columnSet,
+    dedupe,
+    sort,
     startEpoch,
     controller,
     waiters,
@@ -348,6 +390,9 @@ function startOpsRead(
         ...(latestCompleteSnapshotOnly
           ? { latestCompleteSnapshotOnly: true }
           : {}),
+        ...(columns ? { columns } : {}),
+        ...(dedupe ? {} : { dedupe: false }),
+        ...(sort ? {} : { sort: false }),
         onProgress: (progress) => {
           for (const waiter of waiters) {
             waiter.onProgress?.(progress);
@@ -363,7 +408,7 @@ function startOpsRead(
         Number.isFinite(fromMs) &&
         Number.isFinite(toMs)
       ) {
-        const settledKey = `${scopeKey}|${from}|${to}`;
+        const settledKey = `${scopeKey}|${from}|${to}|${columnsKey}|${dedupe ? 1 : 0}|${sort ? 1 : 0}`;
         settledOpsReads.delete(settledKey);
         if (settledOpsReads.size >= MAX_SETTLED_OPS_READS) {
           const oldest = settledOpsReads.keys().next().value;
@@ -375,6 +420,9 @@ function startOpsRead(
           to,
           fromMs,
           toMs,
+          columns: columnSet,
+          dedupe,
+          sort,
           at: Date.now(),
           result: res,
         });
@@ -399,12 +447,19 @@ async function sharedRead(
     signal,
     onProgress,
     latestCompleteSnapshotOnly,
+    columns,
+    dedupe: rawDedupe,
+    sort: rawSort,
   }: ReadLogsOptions,
   scope: { user?: string; role?: string } = {},
 ): Promise<LogsResult> {
   if (signal?.aborted) throw abortError();
   const identity = currentOpsIdentity(scope);
   const startEpoch = currentOpsCacheEpoch();
+  const dedupe = rawDedupe !== false;
+  const sort = rawSort !== false;
+  const normalizedColumns = normalizeOpsColumns(columns, dedupe);
+  const columnsKey = normalizedColumns ? normalizedColumns.join(",") : "*";
   const scopeKey = JSON.stringify([
     kind,
     identity.user,
@@ -418,14 +473,33 @@ async function sharedRead(
   const fromMs = Date.parse(from);
   const toMs = Date.parse(to);
 
-  const settled = findCoveringSettled(scopeKey, from, to, fromMs, toMs);
+  const settled = findCoveringSettled(
+    scopeKey,
+    from,
+    to,
+    fromMs,
+    toMs,
+    normalizedColumns,
+    columnsKey,
+    dedupe,
+    sort,
+  );
   if (settled) {
     return settled.from === from && settled.to === to
       ? settled.result
       : sliceLogsResult(settled.result, from, to, fromMs, toMs);
   }
 
-  const inflight = findCoveringInFlight(scopeKey, from, to, fromMs, toMs);
+  const inflight = findCoveringInFlight(
+    scopeKey,
+    from,
+    to,
+    fromMs,
+    toMs,
+    normalizedColumns,
+    dedupe,
+    sort,
+  );
   if (inflight) {
     const res = await attachToInFlight(inflight, signal, onProgress);
     const isStrictSubset = inflight.from !== from || inflight.to !== to;
@@ -442,6 +516,10 @@ async function sharedRead(
         signal,
         onProgress,
         latestCompleteSnapshotOnly,
+        normalizedColumns,
+        columnsKey,
+        dedupe,
+        sort,
       );
     }
     return isStrictSubset
@@ -461,6 +539,10 @@ async function sharedRead(
     signal,
     onProgress,
     latestCompleteSnapshotOnly,
+    normalizedColumns,
+    columnsKey,
+    dedupe,
+    sort,
   );
 }
 
@@ -473,6 +555,9 @@ export function readLogs(
     role?: string;
     signal?: AbortSignal;
     latestCompleteSnapshotOnly?: boolean;
+    columns?: readonly string[];
+    dedupe?: boolean;
+    sort?: boolean;
   },
 ): Promise<LogsResult>;
 export function readLogs(
@@ -483,6 +568,9 @@ export function readLogs(
     role?: string;
     signal?: AbortSignal;
     latestCompleteSnapshotOnly?: boolean;
+    columns?: readonly string[];
+    dedupe?: boolean;
+    sort?: boolean;
   },
 ): Promise<LogsResult> {
   if (typeof kindOrOptions === "string") {
@@ -493,6 +581,9 @@ export function readLogs(
         to: range!.to,
         signal: options?.signal,
         latestCompleteSnapshotOnly: options?.latestCompleteSnapshotOnly,
+        columns: options?.columns,
+        dedupe: options?.dedupe,
+        sort: options?.sort,
       },
       { user: options?.user, role: options?.role },
     );
