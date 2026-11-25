@@ -8,7 +8,7 @@ import {
   parquetQuerySchema, planParquetProjection, readParquetFooter, readsWholeFirst, RANGE_MERGE_GAP,
   RANGE_REQUEST_COST_BYTES, shouldFallbackToWhole, TARGET_RANGES_PER_FILE,
 } from "./parquet-projection";
-import { projectedReader } from "./projected-read";
+import { prefersWholeForWideProjection, projectedReader } from "./projected-read";
 
 const tableRows = (table: unknown) => (table as { toArray(): Record<string, unknown>[] }).toArray();
 
@@ -681,5 +681,85 @@ describe("query schemas from footers", () => {
       .toEqual([{ n: totalRows }]);
     expect(await query({ "t.parquet": threatProj.bytes }, "SELECT count(*)::INT AS n FROM 't.parquet'"))
       .toEqual([{ n: totalRows }]);
+  });
+
+  it("prefersWholeForWideProjection gates on column count, file size, and window overlap", () => {
+    const startMs = Date.parse("2026-11-25T04:04:00Z");
+    const endMs = Date.parse("2026-11-25T04:32:00Z");
+    const compact = { size: 20 * 1024 * 1024, start: new Date(startMs).toISOString(), end: new Date(endMs).toISOString() };
+
+    expect(prefersWholeForWideProjection(compact, 20, { fromMs: startMs + 9_000, toMs: endMs + 3_600_000 })).toBe(true);
+    expect(prefersWholeForWideProjection(compact, 12)).toBe(true);
+    expect(prefersWholeForWideProjection(compact, 20, { fromMs: endMs - 4 * 60_000, toMs: endMs + 3_600_000 })).toBe(false);
+    expect(prefersWholeForWideProjection(compact, 11, { fromMs: startMs + 9_000, toMs: endMs + 3_600_000 })).toBe(false);
+    expect(prefersWholeForWideProjection({ ...compact, size: 40 * 1024 * 1024 }, 20)).toBe(false);
+    expect(prefersWholeForWideProjection({ ...compact, size: 1024 * 1024 }, 20)).toBe(false);
+  });
+
+  it("reads a high-overlap boundary compact whole-first on wide projections without footer probes", async () => {
+    const rgRows = 500;
+    const rowGroups = 6;
+    const totalRows = rgRows * rowGroups;
+    const startMs = 1795579440_000;
+    const stepMs = 500;
+    const endMs = startMs + totalRows * stepMs;
+    const bytes = parquetWriteBuffer({
+      codec: "UNCOMPRESSED",
+      rowGroupSize: rgRows,
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: totalRows }, (_, i) => new Date(startMs + i * stepMs)) },
+        { name: "status", type: "INT32", data: Array.from({ length: totalRows }, () => 200) },
+        { name: "url", type: "STRING", data: Array.from({ length: totalRows }, () => noise(400)) },
+        { name: "ua", type: "STRING", data: Array.from({ length: totalRows }, () => noise(400)) },
+      ],
+    });
+    expect(bytes.byteLength).toBeGreaterThan(2 * 1024 * 1024);
+    const entry = {
+      key: "processed/request/year=2026/month=11/day=25/hour=04/catalog1/compact-edge.parquet",
+      start: new Date(startMs).toISOString(),
+      end: new Date(endMs).toISOString(),
+      size: bytes.byteLength,
+      rows: totalRows,
+      etag: "\"etag-edge\"",
+    };
+    const wideCols = [
+      "timestamp", "status", "cache", "resp_bytes", "edge", "url",
+      "ua", "referer", "ip", "host", "country", "asn",
+    ];
+    let rangeCalls = 0;
+    let fileCalls = 0;
+    const source = {
+      cacheScope: "fixture-session:svc-edge",
+      fetchRange: async (_file: unknown, start: number, end: number) => {
+        rangeCalls++;
+        return bytes.slice(start, end);
+      },
+      fetchFile: async () => {
+        fileCalls++;
+        return { bytes: bytes.slice(0), cached: false };
+      },
+    };
+
+    // High overlap (99%): skips footer probes and downloads once via fetchFile.
+    const highOverlap = projectedReader(source, wideCols, undefined, { fromMs: startMs + 9_000, toMs: endMs + 3_600_000 });
+    const highResult = await (await highOverlap(entry)).read();
+    expect(fileCalls).toBe(1);
+    expect(rangeCalls).toBe(0);
+    expect(await query({ "h.parquet": highResult.bytes }, "SELECT count(*)::INT AS n FROM 'h.parquet'"))
+      .toEqual([{ n: totalRows }]);
+
+    // Low overlap (~15%): stays on footer + range reads and avoids downloading the whole file.
+    rangeCalls = 0;
+    fileCalls = 0;
+    const lowOverlap = projectedReader(source, wideCols, undefined, {
+      fromMs: endMs - Math.floor((endMs - startMs) * 0.15),
+      toMs: endMs + 3_600_000,
+    });
+    const lowResult = await (await lowOverlap(entry)).read();
+    expect(fileCalls).toBe(0);
+    expect(rangeCalls).toBeGreaterThan(0);
+    const [{ n: lowRows }] = await query({ "l.parquet": lowResult.bytes }, "SELECT count(*)::INT AS n FROM 'l.parquet'") as [{ n: number }];
+    expect(lowRows).toBeGreaterThan(0);
+    expect(lowRows).toBeLessThan(totalRows);
   });
 });

@@ -2226,11 +2226,12 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect(await options("/api/performance/aggregates", { filters: [filters] })).toBeUndefined();
     const range = { start_time: "2026-11-05T00:00:00Z", end_time: "2026-11-06T00:00:00Z" };
     const listed = SESSIONS_SCAN_COLUMNS.filter((column) => column !== "ua" && column !== "url");
-    expect(await options("/api/sessions", range)).toEqual({ columns: listed });
+    expect(await options("/api/sessions", range))
+      .toEqual({ columns: listed, preferWholeUpToBytes: 8 * 1024 * 1024 });
     expect(await options("/api/sessions", { ...range, filters: { host: ["example.com"] } }))
-      .toEqual({ columns: [...listed, "host"] });
+      .toEqual({ columns: [...listed, "host"], preferWholeUpToBytes: 8 * 1024 * 1024 });
     expect(await options("/api/sessions", { ...range, sort_by: "unique_urls" }))
-      .toEqual({ columns: SESSIONS_SCAN_COLUMNS.filter((column) => column !== "ua") });
+      .toEqual({ columns: SESSIONS_SCAN_COLUMNS.filter((column) => column !== "ua"), preferWholeUpToBytes: 8 * 1024 * 1024 });
     expect(await options("/api/sessions", { ...range, filters: [filters] })).toBeUndefined();
   });
 

@@ -136,6 +136,8 @@ export async function ensureCloudRange(
       requireAnyColumns?: readonly string[];
       /** Exact-value include/exclude filters used to prune non-matching Parquet row groups via footer statistics. */
       filters?: readonly RowGroupFilterPredicate[];
+      /** Fetch files up to this size whole-first when total candidates fit `byteLimit`, avoiding footer probes and range fan-out across multi-pass scans (e.g. /sessions). */
+      preferWholeUpToBytes?: number;
       maxBytes?: number;
       wider?: { from: string; columns: readonly string[] };
     };
@@ -263,6 +265,10 @@ export async function ensureCloudRange(
       const wholeFirst = new Set<string>();
       const wholes = new Map<string, Awaited<ReturnType<typeof fetchWhole>>>();
       const skippedKeys = new Set<string>();
+      const preferWholeUpToBytes = projection?.preferWholeUpToBytes ?? 0;
+      const shouldReadWholeFirst = (file: typeof files[number], nowMs: number) =>
+        readsWholeFirst(file, nowMs)
+        || (preferWholeUpToBytes > 0 && file.size > 0 && file.size <= preferWholeUpToBytes);
       if (projectedColumns) {
         loading.update({ stage: "files" });
         const unknown = files.filter((file) => !engine.getFileMeta(file.scopedKey));
@@ -270,7 +276,7 @@ export async function ensureCloudRange(
         const now = Date.now();
         // When `requireAnyColumns` is set, read the footer first so files lacking all required
         // columns are skipped without downloading them whole.
-        const candidates = requiredAnyColumns ? [] : unknown.filter((file) => readsWholeFirst(file, now));
+        const candidates = requiredAnyColumns ? [] : unknown.filter((file) => shouldReadWholeFirst(file, now));
         if (candidates.reduce((total, file) => total + file.size, 0) <= byteLimit) {
           for (const file of candidates) wholeFirst.add(file.scopedKey);
         }
@@ -394,7 +400,7 @@ export async function ensureCloudRange(
         wholes.delete(file.scopedKey);
         let plan = plans.get(file.scopedKey);
         // Resident at the budget check but evicted since.
-        if (!plan && readsWholeFirst(file)) {
+        if (!plan && shouldReadWholeFirst(file, Date.now())) {
           held = await fetchWhole(file);
           plan = planForFile(file, await readWholeParquetFooter(held.bytes));
         }

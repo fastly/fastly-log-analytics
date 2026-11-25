@@ -5,6 +5,7 @@ import type { ManifestFile } from "./manifest";
 import {
   assembleProjectedParquet, fetchProjectedRanges, parquetQuerySchema, planParquetProjection, projectedSchema,
   readParquetFooter, readsWholeFirst, readWholeParquetFooter, shouldFallbackToWhole, timestampRowGroupFilter,
+  wholeReadLimits,
   type ParquetFooter, type ParquetProjection, type ParquetQuerySchema,
 } from "./parquet-projection";
 import type { BrowserFileSource } from "./sources";
@@ -14,6 +15,34 @@ import type { CustomField } from "./summaries";
 const QUERY_COLUMNS = ["timestamp", "status", "cache", "resp_bytes", "edge"];
 // Projected ranges are mostly a few KiB, so their round trips, not bandwidth, bound a cold load.
 const RANGE_CONCURRENCY = 16;
+const WIDE_PROJECTION_MIN_COLUMNS = 12;
+const WIDE_PROJECTION_MIN_OVERLAP = 0.5;
+const WIDE_PROJECTION_MAX_BYTES = 32 * 1024 * 1024;
+
+/**
+ * Wide projections (dashboard cards, security residual) covering most of a multi-row-group
+ * compact's span coalesce past `shouldFallbackToWhole` anyway. Fetching whole-first skips
+ * the 1–2 serial footer probes and shares one `fetchFile` across concurrent callers.
+ */
+export function prefersWholeForWideProjection(
+  file: Pick<ManifestFile, "size" | "start" | "end">,
+  columnCount: number,
+  window?: { fromMs: number; toMs: number },
+): boolean {
+  if (wholeReadLimits.closedHourUpToBytes <= 0) return false;
+  if (columnCount < WIDE_PROJECTION_MIN_COLUMNS) return false;
+  if (!(Number.isSafeInteger(file.size) && file.size > wholeReadLimits.closedHourUpToBytes && file.size <= WIDE_PROJECTION_MAX_BYTES)) {
+    return false;
+  }
+  if (!window) return true;
+  const startMs = Date.parse(file.start);
+  const endMs = Date.parse(file.end);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return false;
+  const overlapStart = Math.max(startMs, window.fromMs);
+  const overlapEnd = Math.min(endMs, window.toMs);
+  if (overlapEnd <= overlapStart) return false;
+  return (overlapEnd - overlapStart) / (endMs - startMs) >= WIDE_PROJECTION_MIN_OVERLAP;
+}
 
 /** Canonical whole-file cache identity shared between projectedReader and range-loader. */
 export function wholeFileIdentity(
@@ -105,7 +134,11 @@ export function projectedReader(
       projectionKey(rowGroups.length < footer.metadata.row_groups.length ? rowGroups : undefined);
     const fetchFile = source.fetchFile;
     const wholeId = wholeFileIdentity(source.cacheScope, file);
-    if (fetchFile && (readsWholeFirst(file) || Boolean(await source.hasFile?.(file.key, { identity: wholeId })))) {
+    if (fetchFile && (
+      readsWholeFirst(file)
+      || prefersWholeForWideProjection(file, wanted.size, window)
+      || Boolean(await source.hasFile?.(file.key, { identity: wholeId }))
+    )) {
       return {
         // The whole file is held until its projection is built.
         bytes: file.size,

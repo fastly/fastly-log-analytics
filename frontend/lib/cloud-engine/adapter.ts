@@ -17,6 +17,7 @@ import { cmcdRollupEligible } from "./cmcd-rollup";
 import { formatAsnDisplayLabel, getCachedAsnName, loadAsnNames } from "./asn-names";
 import type { MinuteBucket } from "./dashboard/engine";
 import { currentStoreMetaEpoch } from "./dashboard/file-store";
+import { WHOLE_FALLBACK_HIGH_FANOUT_MAX_BYTES } from "./dashboard/parquet-projection";
 import { dashboardCacheIdentity, parseVcpuMsHeader } from "./dashboard/sources";
 import { customCards, type CardField, type CustomField } from "./dashboard/summaries";
 import {
@@ -1344,6 +1345,7 @@ async function prepareCloudScan(
         serviceId: decodedServiceId, customFields,
         ...columns ? { projection: {
           columns: [...columns],
+          preferWholeUpToBytes: WHOLE_FALLBACK_HIGH_FANOUT_MAX_BYTES,
           ...rowGroupFilters.length ? { filters: rowGroupFilters } : {},
         } } : {},
       });
@@ -1366,6 +1368,7 @@ async function prepareCloudScan(
       } } : {},
     } } : scanColumns ? { projection: {
       columns: scanColumns,
+      ...url.pathname === "/api/sessions" ? { preferWholeUpToBytes: WHOLE_FALLBACK_HIGH_FANOUT_MAX_BYTES } : {},
       ...url.pathname === "/api/cmcd/aggregates" ? { requireAnyColumns: CMCD_REQUIRED_ANY_COLUMNS } : {},
       ...rowGroupFilters.length ? { filters: rowGroupFilters } : {},
     } } : {},
