@@ -91,11 +91,19 @@ _MULTIPLEX_GROUPS: tuple[tuple[str, frozenset[str]], ...] = (
     ),
     (
         "group_window_perf",
-        frozenset({"batch_window_url", "batch_beaconing", "batch_latency_dim", "batch_url_perf", "batch_origin_perf"}),
+        frozenset({"batch_window_url", "batch_beaconing", "batch_origin_perf"}),
     ),
     (
-        "group_ip_network",
-        frozenset({"batch_ip_outlier", "batch_ip_abuse", "batch_network_asn", "batch_fingerprint_spread"}),
+        "group_baseline_perf",
+        frozenset({"batch_latency_dim", "batch_url_perf"}),
+    ),
+    (
+        "group_ip_abuse",
+        frozenset({"batch_ip_outlier", "batch_ip_abuse"}),
+    ),
+    (
+        "group_network_fp",
+        frozenset({"batch_network_asn", "batch_fingerprint_spread"}),
     ),
 )
 _FIELD_SAMPLE_ROWS = 1000

@@ -55,10 +55,15 @@ def _base_cte(
     weighted: bool = False,
 ) -> tuple[str, QuerySource]:
     """Build the ``/* insight:batch_<name> */ WITH base AS (...)`` prefix."""
-    scope = " AND ".join(visible_fact_clauses("request"))
-    if filter_clause:
-        scope = f"{scope} AND ({filter_clause})"
+    fact_scope = " AND ".join(visible_fact_clauses("request"))
+    scope = f"{fact_scope} AND ({filter_clause})" if filter_clause else fact_scope
     rf = f" AND ({row_filter})" if row_filter else ""
+    extra_where_parts: list[str] = []
+    if filter_clause:
+        extra_where_parts.append(f"({filter_clause})")
+    if row_filter:
+        extra_where_parts.append(f"({row_filter})")
+    raw_where = f" WHERE {' AND '.join(extra_where_parts)}" if extra_where_parts else ""
     raw_proj = ", ".join(f"{expr} AS {alias}" for alias, expr in projections)
     if rollup_shape and rollup_span and not filter_clause and not window_only:
         rollup_proj = ", ".join(f"{_to_rollup(expr)} AS {alias}" for alias, expr in projections)
@@ -66,9 +71,10 @@ def _base_cte(
             f"SELECT {raw_proj}, "
             "event_timestamp < {window_start:DateTime64(3)} AS is_b, "
             "event_timestamp >= {window_start:DateTime64(3)} AS is_w, toUInt64(1) AS n "
-            f"FROM request_facts WHERE {scope} AND event_timestamp >= {{baseline_start:DateTime64(3)}} "
-            f"AND event_timestamp < {{window_end:DateTime64(3)}}{rf} "
+            f"FROM request_facts PREWHERE {fact_scope} AND event_timestamp >= {{baseline_start:DateTime64(3)}} "
+            "AND event_timestamp < {window_end:DateTime64(3)} "
             "AND (event_timestamp < {rollup_start:DateTime64(3)} OR event_timestamp >= {rollup_end:DateTime64(3)})"
+            f"{raw_where}"
         )
         rollup = (
             f"SELECT {rollup_proj}, toUInt8(1) AS is_b, toUInt8(0) AS is_w, request_count AS n "
@@ -84,8 +90,8 @@ def _base_cte(
         f"SELECT {raw_proj}, "
         "event_timestamp < {window_start:DateTime64(3)} AS is_b, "
         f"event_timestamp >= {{window_start:DateTime64(3)}} AS is_w{weight_col} "
-        f"FROM request_facts WHERE {scope} AND event_timestamp >= {lower} "
-        f"AND event_timestamp < {{window_end:DateTime64(3)}}{rf}"
+        f"FROM request_facts PREWHERE {fact_scope} AND event_timestamp >= {lower} "
+        f"AND event_timestamp < {{window_end:DateTime64(3)}}{raw_where}"
     )
     return f"/* insight:batch_{name} */ WITH base AS ({raw})", "fact"
 
@@ -603,9 +609,10 @@ def _build_window_url(
     if "tail_latency" in active:
         sel.extend(
             [
-                "round(quantileTDigestIf(0.99)(elapsed, elapsed IS NOT NULL) / 1000.0, 0) AS tl_p99",
-                "round(quantileTDigestIf(0.50)(elapsed, elapsed IS NOT NULL) / 1000.0, 0) AS tl_p50",
-                "round(quantileTDigestIf(0.99)(elapsed, elapsed IS NOT NULL) / nullIf(quantileTDigestIf(0.50)(elapsed, elapsed IS NOT NULL), 0), 1) AS tl_ratio",
+                "quantilesTDigestIf(0.50, 0.99)(elapsed, elapsed IS NOT NULL) AS _tl_q",
+                "round(_tl_q[2] / 1000.0, 0) AS tl_p99",
+                "round(_tl_q[1] / 1000.0, 0) AS tl_p50",
+                "round(_tl_q[2] / nullIf(_tl_q[1], 0), 1) AS tl_ratio",
                 "countIf(elapsed IS NOT NULL) AS tl_total",
             ]
         )
@@ -811,6 +818,8 @@ def _build_url_perf(
         f"countIf(is_w AND {_COMP_ROW}) AS c_w_total, "
         f"countIf(is_b AND {_COMP_ROW}) AS c_b_total "
         "FROM base "
+        f"WHERE url != '' AND url IN (SELECT url FROM base WHERE is_w AND url != '' GROUP BY url "
+        f"HAVING countIf(elapsed IS NOT NULL) >= 5 OR countIf({_COMP_ROW}) >= 10) "
         "GROUP BY url HAVING "
         "(l_w_total >= 5 AND l_b_total >= 20 AND l_w_p95 >= l_b_p95 * 2.0 AND l_w_p95 - l_b_p95 >= 200) "
         "OR (c_w_total >= 10 AND c_b_total >= 50 AND c_b_rate <= 0.20 AND c_w_rate >= 0.50 AND c_w_rate >= c_b_rate + 0.30)"
@@ -939,7 +948,7 @@ def _build_ip_abuse(
             [
                 "countIf(is_w AND url != '' AND status = 404) AS cd_w_404",
                 "countIf(is_w AND url != '') AS cd_w_total",
-                "uniqExactIf(url, is_w AND url != '' AND status = 404) AS cd_w_distinct",
+                "uniqCombinedIf(url, is_w AND url != '' AND status = 404) AS cd_w_distinct",
                 "countIf(is_b AND url != '' AND status = 404) AS cd_b_404",
             ]
         )
@@ -951,7 +960,7 @@ def _build_ip_abuse(
             [
                 f"countIf(is_w AND {auth} AND status IN (401, 403)) AS ce_w_denied",
                 f"countIf(is_w AND {auth}) AS ce_w_attempts",
-                f"uniqExactIf(url, is_w AND {auth}) AS ce_w_paths",
+                f"uniqCombinedIf(url, is_w AND {auth}) AS ce_w_paths",
                 f"countIf(is_b AND {auth} AND status IN (401, 403)) AS ce_b_denied",
             ]
         )
@@ -963,18 +972,18 @@ def _build_ip_abuse(
     if "session_harvesting" in active:
         sel.extend(
             [
-                "uniqExactIf(cookie_session, is_w AND cookie_session != '') AS sh_w_sessions",
+                "uniqCombinedIf(cookie_session, is_w AND cookie_session != '') AS sh_w_sessions",
                 "countIf(is_w AND cookie_session != '') AS sh_w_reqs",
-                "uniqExactIf(cookie_session, is_b AND cookie_session != '') AS sh_b_sessions",
+                "uniqCombinedIf(cookie_session, is_b AND cookie_session != '') AS sh_b_sessions",
             ]
         )
-        pre_having.append("uniqExactIf(cookie_session, cookie_session != '') >= 20")
+        pre_having.append("uniqCombinedIf(cookie_session, cookie_session != '') >= 20")
         having.append("(sh_w_sessions >= 20 AND sh_w_sessions > sh_b_sessions * 2 + 10)")
     if "orphaned_deep_crawl" in active:
         sel.extend(
             [
                 f"countIf(is_w AND {_DEEP_URL}) AS od_w_reqs",
-                f"uniqExactIf(url, is_w AND {_DEEP_URL}) AS od_w_distinct",
+                f"uniqCombinedIf(url, is_w AND {_DEEP_URL}) AS od_w_distinct",
                 f"countIf(is_b AND {_DEEP_URL}) AS od_b_reqs",
             ]
         )
@@ -1133,7 +1142,13 @@ def _build_network_asn(
         proj.append(("delivery_rate", COLUMNS["delivery_rate"]))
         sets.append("(metro)")
 
-    cte, source = _base_cte("network_asn", proj, filter_clause=filter_clause)
+    asn_metro_filters: list[str] = []
+    if has_asn:
+        asn_metro_filters.append("custom_fields['asn'] != ''")
+    if has_metro:
+        asn_metro_filters.append("custom_fields['metro'] != ''")
+    row_filter = " OR ".join(asn_metro_filters)
+    cte, source = _base_cte("network_asn", proj, row_filter=row_filter, filter_clause=filter_clause)
     g_asn = "grouping(asn_str)" if has_asn else "toUInt8(1)"
     g_metro = "grouping(metro)" if has_metro else "toUInt8(1)"
     sel = [
@@ -1297,9 +1312,9 @@ def _build_fingerprint_spread(
         f"{g_cipher} AS g_cipher",
         f"{fp} AS fp_val" if has_fp else "'' AS fp_val",
         "tls_ciphers_sha" if has_cipher else "'' AS tls_ciphers_sha",
-        "uniqExactIf(ip, is_w) AS w_ips",
+        "uniqCombinedIf(ip, is_w) AS w_ips",
         "countIf(is_w) AS w_reqs",
-        "uniqExactIf(ip, is_b) AS b_ips",
+        "uniqCombinedIf(ip, is_b) AS b_ips",
     ]
     having: list[str] = []
     if "botnet_grouping" in active:
@@ -1315,11 +1330,11 @@ def _build_fingerprint_spread(
     if "residential_fingerprint_dispersion" in active:
         sel.extend(
             [
-                "uniqExactIf(ip, is_w AND p_type != 'hosting') AS res_w_ips",
-                "uniqExactIf(asn, is_w AND p_type != 'hosting') AS res_w_asns",
+                "uniqCombinedIf(ip, is_w AND p_type != 'hosting') AS res_w_ips",
+                "uniqCombinedIf(asn, is_w AND p_type != 'hosting') AS res_w_asns",
                 "countIf(is_w AND p_type != 'hosting') AS res_w_reqs",
-                "uniqExactIf(ip, is_b AND p_type != 'hosting') AS res_b_ips",
-                "uniqExactIf(asn, is_b AND p_type != 'hosting') AS res_b_asns",
+                "uniqCombinedIf(ip, is_b AND p_type != 'hosting') AS res_b_ips",
+                "uniqCombinedIf(asn, is_b AND p_type != 'hosting') AS res_b_asns",
             ]
         )
         having.append(f"(g_fp = 0 AND {fp} != '' AND res_w_ips >= 30 AND res_w_asns >= 5)")
@@ -1393,7 +1408,7 @@ def _build_beaconing(
     sql = (
         f"{cte}, meta AS ("
         f"SELECT grouping(ip) AS g_ip, if(grouping(ip) = 0, ip, {fp}) AS entity, "
-        "if(grouping(ip) = 0, uniqExact(ua), uniqExact(ip)) AS diversity, "
+        "if(grouping(ip) = 0, uniqCombined(ua), uniqCombined(ip)) AS diversity, "
         "count() AS n_events, (max(sec) - min(sec)) AS span_s, "
         "arraySlice(arrayDifference(arraySort(groupUniqArray(sec))), 2) AS gaps_arr "
         f"FROM base GROUP BY GROUPING SETS ((ip), ({fp})) "

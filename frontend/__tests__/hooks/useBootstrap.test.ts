@@ -2456,6 +2456,16 @@ describe('runEventStream, useEventStream, useServiceStream & useAdminEventStream
       expect(adminStreamHooks.applySystemMetrics).not.toHaveBeenCalled()
       expect(cronApply).not.toHaveBeenCalled()
     })
+
+    it('omits service header for global-only channels so activeServiceId hydration does not reconnect SSE', () => {
+      renderHook(() => useAdminEventStream(true, ['celery-status']), { wrapper: makeQueryWrapper(makeQc()) })
+      expect(adminStreamHooks.useServiceStream).toHaveBeenCalledWith(
+        true,
+        '/api/admin/events/stream?channels=celery-status',
+        expect.any(Function),
+        { cache: 'no-store', optionalService: true, omitService: true },
+      )
+    })
   })
 
   describe('useAnalystLogout', () => {

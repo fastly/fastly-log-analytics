@@ -38,15 +38,15 @@ export function useServiceStream(
   enabled: boolean,
   path: string,
   onEvent: (raw: string) => void,
-  opts: { cache?: RequestCache; optionalService?: boolean } = {},
+  opts: { cache?: RequestCache; optionalService?: boolean; omitService?: boolean } = {},
 ): { state: SSEConnectionState } {
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
   const storeHydrated = useServiceStoreHydrated()
-  const { cache, optionalService = false } = opts
-  const awaitingHydration = optionalService && !storeHydrated
-  const effectiveEnabled = enabled && (optionalService || !!activeServiceId) && !awaitingHydration
+  const { cache, optionalService = false, omitService = false } = opts
+  const awaitingHydration = optionalService && !omitService && !storeHydrated
+  const effectiveEnabled = enabled && (optionalService || omitService || !!activeServiceId) && !awaitingHydration
   const request: EventStreamRequest | null = effectiveEnabled
-    ? buildStreamRequest({ path, serviceId: activeServiceId, cache })
+    ? buildStreamRequest({ path, serviceId: omitService ? null : activeServiceId, cache })
     : null
   return useEventStream(effectiveEnabled, request, onEvent)
 }
@@ -252,11 +252,21 @@ export function useHeaderBadgeStream(enabled: boolean) {
 
 export type AdminEventChannel = 'sync-status' | 'cron-runs' | 'system-metrics' | 'share' | 'celery-status'
 
+const SERVICE_SCOPED_ADMIN_CHANNELS: ReadonlySet<AdminEventChannel> = new Set([
+  'sync-status',
+  'cron-runs',
+  'system-metrics',
+])
+
 export function useAdminEventStream(enabled: boolean, channels: AdminEventChannel[]) {
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
   const queryClient = useQueryClient()
   const bootstrapSettled = useBootstrapSettled()
   const channelsParam = useMemo(() => [...channels].sort().join(','), [channels])
+  const needsService = useMemo(
+    () => channels.some((ch) => SERVICE_SCOPED_ADMIN_CHANNELS.has(ch)),
+    [channels],
+  )
   const cronApplierRef = useRef<CronRunsApplier | null>(null)
 
   useEffect(() => {
@@ -299,6 +309,8 @@ export function useAdminEventStream(enabled: boolean, channels: AdminEventChanne
           break
       }
     },
-    { cache: 'no-store', optionalService: true },
+    needsService
+      ? { cache: 'no-store', optionalService: true }
+      : { cache: 'no-store', optionalService: true, omitService: true },
   )
 }

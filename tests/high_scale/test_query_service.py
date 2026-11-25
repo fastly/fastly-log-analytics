@@ -2800,8 +2800,8 @@ def test_partial_insights_results_keep_card_errors_and_refresh_in_background(_in
     )
     assert _insight_cards(expired)["latency_regression"]["severity"] == "error"
     _drain_insights_refreshes()
-    # Clean refresh succeeds via the 7 multiplexed/meta calls without per-detector fallback.
-    expected_total = 2 * computed_calls + 7
+    # Clean refresh succeeds via the 9 multiplexed/meta calls without per-detector fallback.
+    expected_total = 2 * computed_calls + 9
     assert len(client.calls) == expected_total
 
     skew[0] += 200.0

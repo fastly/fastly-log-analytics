@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { PageHeader } from '@/components/ui/confirm-dialog'
 import { BackToAdminLink } from '@/components/ReportLayout'
-import { useAdminEventStream } from '@/hooks/useSSE'
+import { useAdminEventStream, type AdminEventChannel } from '@/hooks/useSSE'
 import {
   type LedgerEntry,
   type LedgerStatusFilter,
@@ -19,9 +19,11 @@ import { IngestLedgerSection } from './_sections/QueueLedgerInspector'
 export * from './_sections/QueueOverviewPanels'
 export * from './_sections/QueueLedgerInspector'
 
+const CELERY_STATUS_CHANNELS: AdminEventChannel[] = ['celery-status']
+
 export function QueueClient() {
   const queryClient = useQueryClient()
-  const { state: sseConnected } = useAdminEventStream(true, ['celery-status'])
+  const { state: sseConnected } = useAdminEventStream(true, CELERY_STATUS_CHANNELS)
   const [ledgerFilter, setLedgerFilter] = React.useState<LedgerStatusFilter>('problem')
   const [actionBusyKey, setActionBusyKey] = React.useState<string | null>(null)
   const [actionNotice, setActionNotice] = React.useState<{

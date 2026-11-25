@@ -1199,4 +1199,40 @@ describe('Insights page barrel export', () => {
     const clientMod = await import('@/app/insights/_sections/InsightsClient')
     expect(mod.InsightsClient).toBe(clientMod.InsightsClient)
   })
+
+  it('seeds SSR data even when start_time/end_time/range are in searchParams, and skips when filters are set', async () => {
+    const upstream = await import('@/lib/ssr/upstream')
+    const resolveSpy = vi.spyOn(upstream, 'resolvePageServiceId').mockResolvedValue('svc-1')
+    const bootSpy = vi.spyOn(upstream, 'fetchBootstrapServerSide').mockResolvedValue({
+      log_extents: { earliest_log_at: '2026-11-24T00:00:00Z', _is_cached: false, configured: true },
+    } as Awaited<ReturnType<typeof upstream.fetchBootstrapServerSide>>)
+    const insightsSpy = vi.spyOn(upstream, 'fetchInsightsServerSide').mockResolvedValue({
+      data: { insights: [] },
+      windowHours: '1',
+      baselineHours: '24',
+    })
+    try {
+      const { default: InsightsPage } = await import('@/app/insights/page')
+      await InsightsPage({
+        searchParams: Promise.resolve({
+          start_time: '2026-11-25T12:00:00Z',
+          end_time: '2026-11-25T13:00:00Z',
+          range: '1h',
+        }),
+      })
+      expect(insightsSpy).toHaveBeenCalledTimes(1)
+
+      insightsSpy.mockClear()
+      await InsightsPage({
+        searchParams: Promise.resolve({
+          filters: JSON.stringify({ status: '500' }),
+        }),
+      })
+      expect(insightsSpy).not.toHaveBeenCalled()
+    } finally {
+      resolveSpy.mockRestore()
+      bootSpy.mockRestore()
+      insightsSpy.mockRestore()
+    }
+  })
 })

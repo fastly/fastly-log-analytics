@@ -173,6 +173,18 @@ def _fmt_ts(ts: int) -> str:
     return datetime.fromtimestamp(ts, tz=UTC).replace(tzinfo=None).isoformat()
 
 
+def _network_sample_stride(span_s: float) -> int:
+    if span_s >= 604800:
+        return 100
+    if span_s >= 172800:
+        return 50
+    if span_s >= 43200:
+        return 20
+    if span_s >= 21600:
+        return 5
+    return 1
+
+
 def _ch_bucket_expr(bucket_seconds: int) -> str:
     return f"intDiv(toUnixTimestamp(event_timestamp), {bucket_seconds}) * {bucket_seconds}"
 
@@ -489,11 +501,7 @@ def network_health(
         map_only = sections is not None and len(sections) > 0 and set(sections) <= {"buckets", "cities", "map_buckets"}
         if is_real_ch:
             nh_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
-            sample_stride = (
-                (20 if nh_span_s >= 43200 else (5 if nh_span_s > 21600 else 1))
-                if not os.getenv("PYTEST_CURRENT_TEST")
-                else 1
-            )
+            sample_stride = _network_sample_stride(nh_span_s) if not os.getenv("PYTEST_CURRENT_TEST") else 1
             stride_sql = f" AND line_ordinal % {sample_stride} = 0" if sample_stride > 1 else ""
             rtt_prewhere = f"{_BASE_WHERE}{filter_sql}{stride_sql} AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0'"
             top_asn_ints: list[int] = []
@@ -588,7 +596,7 @@ def network_health(
                         "sumMap(if(custom_fields['c_speed'] != '', [custom_fields['c_speed']], []), "
                         "if(custom_fields['c_speed'] != '', [toUInt64(1)], [])) AS speed_map "
                         f"FROM request_facts PREWHERE {rtt_prewhere}{asn_in_filter} "
-                        f"WHERE {_ASN} IS NOT NULL AND _rtt > 0 GROUP BY asn, bucket_ts ORDER BY reqs DESC LIMIT {top_n * 200}",
+                        f"WHERE {'_rtt > 0' if top_asn_ints else f'{_ASN} IS NOT NULL AND _rtt > 0'} GROUP BY asn, bucket_ts ORDER BY reqs DESC LIMIT {top_n * 200}",
                     ),
                 )
             if not combine_metro_in_map:
@@ -618,7 +626,7 @@ def network_health(
             q_results = trace.run_parallel(
                 parallel_tasks,
                 source="fact",
-                max_workers=6,
+                max_workers=2,
                 thread_name_prefix="hs-net-health",
             )
             shielding = q_results.get("shielding_analysis") if (not map_only and _want_shielding(sections)) else None
@@ -827,7 +835,7 @@ def network_health(
             q_results = trace.run_parallel(
                 parallel_tasks,
                 source="fact",
-                max_workers=6,
+                max_workers=2,
                 thread_name_prefix="hs-net-health",
             )
             shielding = q_results.get("shielding_analysis") if _want_shielding(sections) else None
@@ -1124,7 +1132,7 @@ def network_quality(
 
         def _bar(group_expr: str, extra_where: str = "") -> list[dict]:
             q_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
-            scale_factor = (20 if q_span_s >= 43200 else (5 if q_span_s > 21600 else 1)) if is_real_ch else 1
+            scale_factor = _network_sample_stride(q_span_s) if is_real_ch else 1
             hash_clause = f" AND line_ordinal % {scale_factor} = 0" if scale_factor > 1 else ""
             if is_real_ch and group_expr != _ASN:
                 sql = (
@@ -1168,7 +1176,7 @@ def network_quality(
                 "network_dimensions", client=service.client, service_id=service.service_id
             )
             q_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
-            region_scale = 20 if q_span_s >= 43200 else (5 if q_span_s > 21600 else 1)
+            region_scale = _network_sample_stride(q_span_s)
             region_hash = f" AND line_ordinal % {region_scale} = 0" if region_scale > 1 else ""
             sql = (
                 "SELECT dimension, label, rtt_ms, reqs FROM ("
@@ -1341,7 +1349,7 @@ def get_pop_health(
         base_where = f"{_BASE_WHERE}{filter_sql}"
         if is_real_ch:
             pop_span_s = (end - start).total_seconds()
-            pop_stride = 1 if filter_sql else (20 if pop_span_s >= 43200 else (5 if pop_span_s > 21600 else 1))
+            pop_stride = 1 if filter_sql else _network_sample_stride(pop_span_s)
             hash_clause = f" AND line_ordinal % {pop_stride} = 0" if pop_stride > 1 else ""
             fact_sql = (
                 f"SELECT custom_fields['pop'] AS pop, count() AS requests, countIf({_STATUS} >= 500) AS errors, "
@@ -1352,7 +1360,7 @@ def get_pop_health(
                 "GROUP BY pop ORDER BY requests DESC"
             )
             rollup_by_pop: dict[str, tuple[int, int, Any, Any]] = {}
-            if pop_stride > 1:
+            if not filter_sql:
                 fence = visible_publication_fence_sql(
                     "network_dimensions", client=service.client, service_id=service.service_id
                 )
@@ -1393,7 +1401,7 @@ def get_pop_health(
                             )
                     else:
                         fact_rows.append({**cr, "requests": cr.get("req_count", cr.get("requests"))})
-                if not fact_rows:
+                if not fact_rows or (not rollup_by_pop and pop_stride == 1):
                     pop_stride = 1
                     fact_rows = trace.run(
                         "pop_health_fallback",
@@ -1423,8 +1431,12 @@ def get_pop_health(
                     row_hits = min(exact_reqs, int(round(int(r.get("cache_hits") or 0) * scale)))
                     row_bytes = int(round(int(r.get("bandwidth_bytes") or 0) * scale))
                 else:
-                    row_reqs = int(r.get("requests") or 0)
-                    row_errors = int(r.get("errors") or 0)
+                    row_reqs = (
+                        r_entry[0] if (r_entry[0] > 0 and r.get("errors") is None) else int(r.get("requests") or 0)
+                    )
+                    row_errors = (
+                        r_entry[1] if (r_entry[0] > 0 and r.get("errors") is None) else int(r.get("errors") or 0)
+                    )
                     row_hits = int(r.get("cache_hits") or 0)
                     row_bytes = int(r.get("bandwidth_bytes") or 0)
                 rows.append(
@@ -1529,7 +1541,7 @@ def get_transport_metrics(
         )
         if is_real_ch:
             tr_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
-            scale_factor = 20 if tr_span_s >= 43200 else (5 if tr_span_s > 21600 else 1)
+            scale_factor = _network_sample_stride(tr_span_s)
             hash_clause = f" AND line_ordinal % {scale_factor} = 0" if scale_factor > 1 else ""
             combined_sql = (
                 f"SELECT count() AS total_reqs, sum(toInt64OrZero(custom_fields['resp_bytes'])) AS total_bytes, "
@@ -1684,7 +1696,7 @@ def network_bundle(
                 lambda: get_transport_metrics(service, start_time, end_time, req.filters),
             ),
         )
-        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="hs-net-bundle") as pool:
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-net-bundle") as pool:
             futs = [(k, pool.submit(contextvars.copy_context().run, fn)) for k, want, fn in bundle_specs if want]
             res = {k: fut.result() for k, fut in futs}
         health_resp, quality_resp, pop_response, transport_resp = (
