@@ -15674,6 +15674,8 @@ export interface components {
             is_mock?: boolean | null;
             /** No Data */
             no_data?: boolean | null;
+            /** Estimated */
+            estimated?: boolean | null;
             /** Beacon Count */
             beacon_count?: number | null;
             /** Pageview Count */

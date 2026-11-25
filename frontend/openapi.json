@@ -77313,6 +77313,17 @@
             ],
             "title": "No Data"
           },
+          "estimated": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated"
+          },
           "beacon_count": {
             "anyOf": [
               {

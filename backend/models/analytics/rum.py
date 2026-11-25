@@ -100,6 +100,7 @@ class RumEnvironments(WireSafeModel):
 class RumAnalyticsResponse(WireSafeModel):
     is_mock: bool | None = None
     no_data: bool | None = None
+    estimated: bool | None = None
     beacon_count: int | None = None
     pageview_count: int | None = None
     interaction_count: int | None = None

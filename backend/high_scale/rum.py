@@ -41,6 +41,17 @@ _BEACON_IDENTITY = (
 )
 # A resource timing (`ttlb`) measures one request, not a page view: page-level readers skip it.
 _PAGE_VITALS = "metric_name != 'ttlb'"
+# The tracker reports only a sample of sessions when an admin lowers the sample rate. Each
+# stored row keeps the rate it was collected at, so a row stands for 1 / rate real ones
+# (inverse-probability weighting). Rows written before sampling existed have rate 1.
+_ROW_WEIGHT = "if(sample_rate > 0 AND sample_rate < 1, 1 / sample_rate, 1)"
+
+
+def _weighted_beacons(condition: str = "1", *, identity: str = "beacon_id", weight: str = "w") -> str:
+    """Estimated real beacons: each distinct beacon counted once, at its largest matching weight."""
+    return f"toUInt64(round(arraySum(mapValues(maxMapIf(map({identity}, {weight}), {condition})))))"
+
+
 _RUM_FILTERS_ADAPTER: TypeAdapter[dict[str, Any]] = TypeAdapter(dict[str, Any])
 
 
@@ -190,31 +201,36 @@ def rum_analytics(
     identity = _BEACON_IDENTITY
     events = (
         f"WITH events AS ("
-        f"SELECT event_timestamp, {identity} AS beacon_id, 'vitals' AS src, metric_name, metric_value, pathname "
-        f"FROM rum_vitals_facts WHERE {where_vitals} UNION ALL "
+        f"SELECT event_timestamp, {identity} AS beacon_id, 'vitals' AS src, metric_name, metric_value, pathname, "
+        f"{_ROW_WEIGHT} AS w FROM rum_vitals_facts WHERE {where_vitals} UNION ALL "
         f"SELECT event_timestamp, {identity} AS beacon_id, 'errors' AS src, '' AS metric_name, "
-        f"CAST(NULL AS Nullable(Float64)) AS metric_value, pathname FROM rum_error_facts WHERE {where_errors}) "
+        f"CAST(NULL AS Nullable(Float64)) AS metric_value, pathname, {_ROW_WEIGHT} AS w "
+        f"FROM rum_error_facts WHERE {where_errors}) "
     )
+    pageview = "src = 'vitals' AND metric_name NOT LIKE 'event_%'"
+    interaction = "src = 'vitals' AND metric_name LIKE 'event_%'"
+    is_vital, is_error = "src = 'vitals'", "src = 'errors'"
     counts_sql = (
-        events + "/* rum_analytics_counts */ SELECT uniqExact(beacon_id) AS beacons, "
-        "uniqExactIf(beacon_id, src = 'vitals' AND metric_name NOT LIKE 'event_%') AS pageviews, "
-        "uniqExactIf(beacon_id, src = 'vitals' AND metric_name LIKE 'event_%') AS interactions, "
-        "uniqExactIf(beacon_id, src = 'errors') AS errors FROM events"
+        events + f"/* rum_analytics_counts */ SELECT {_weighted_beacons()} AS beacons, "
+        f"{_weighted_beacons(pageview)} AS pageviews, {_weighted_beacons(interaction)} AS interactions, "
+        f"{_weighted_beacons(is_error)} AS errors, countIf(w > 1) > 0 AS sampled FROM events"
     )
 
     hourly = end - start <= timedelta(hours=48)
     bucket_sql = "toStartOfHour(event_timestamp, 'UTC')" if hourly else "toStartOfDay(event_timestamp, 'UTC')"
     vitals_sql = (
         f"/* rum_analytics_vitals */ SELECT lower(metric_name) AS metric_name, "
-        f"quantileExactInclusiveOrNull(0.75)(metric_value) as p75, count() as total, "
-        f"countIf(metric_rating = 'good') as good, "
-        f"countIf(metric_rating IN ('needs-improvement', 'needs_improvement')) as ni, "
-        f"countIf(metric_rating = 'poor') as poor FROM rum_vitals_facts WHERE {where_vitals} GROUP BY metric_name"
+        f"quantileExactInclusiveOrNull(0.75)(metric_value) as p75, sum({_ROW_WEIGHT}) as total, "
+        f"sumIf({_ROW_WEIGHT}, metric_rating = 'good') as good, "
+        f"sumIf({_ROW_WEIGHT}, metric_rating IN ('needs-improvement', 'needs_improvement')) as ni, "
+        f"sumIf({_ROW_WEIGHT}, metric_rating = 'poor') as poor "
+        f"FROM rum_vitals_facts WHERE {where_vitals} GROUP BY metric_name"
     )
     environments_sql = (
         f"/* rum_analytics_environments */ SELECT if(browser = '', 'Unknown', browser) AS env_browser, "
         f"if(os = '', 'Unknown', os) AS env_os, if(device = '', 'Unknown', device) AS env_device, "
-        f"uniqExact({identity}) AS beacons, grouping(browser) AS g_browser, grouping(os) AS g_os, "
+        f"{_weighted_beacons(identity=identity, weight=_ROW_WEIGHT)} AS beacons, "
+        f"grouping(browser) AS g_browser, grouping(os) AS g_os, "
         f"grouping(device) AS g_device FROM rum_vitals_facts WHERE {where_vitals} "
         f"GROUP BY GROUPING SETS ((browser), (os), (device))"
     )
@@ -222,22 +238,22 @@ def rum_analytics(
         events + f"/* rum_analytics_trends */ SELECT {bucket_sql} AS bucket, "
         "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'lcp') AS lcp, "
         "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'cls') AS cls, "
-        "uniqExactIf(beacon_id, src = 'vitals') AS views, "
-        "uniqExactIf(beacon_id, src = 'vitals' AND metric_name NOT LIKE 'event_%') AS pageviews, "
-        "uniqExactIf(beacon_id, src = 'vitals' AND metric_name LIKE 'event_%') AS interactions, "
-        "uniqExactIf(beacon_id, src = 'errors') AS errors FROM events GROUP BY bucket ORDER BY bucket"
+        f"{_weighted_beacons(is_vital)} AS views, {_weighted_beacons(pageview)} AS pageviews, "
+        f"{_weighted_beacons(interaction)} AS interactions, {_weighted_beacons(is_error)} AS errors "
+        "FROM events GROUP BY bucket ORDER BY bucket"
     )
     pages_sql = (
         events + "/* rum_analytics_pages */ SELECT pathname AS path, "
-        "uniqExactIf(beacon_id, src = 'vitals') AS views, "
+        f"{_weighted_beacons(is_vital)} AS views, {_weighted_beacons(is_error)} AS page_errors, "
         "avgOrNullIf(metric_value, metric_name = 'page_load') AS avg_load, "
         "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'lcp') AS lcp, "
         "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'cls') AS cls, "
-        "uniqExactIf(beacon_id, src = 'errors') * 100.0 / nullIf(views + uniqExactIf(beacon_id, src = 'errors'), 0) AS error_rate "
+        "page_errors * 100.0 / nullIf(views + page_errors, 0) AS error_rate "
         "FROM events GROUP BY pathname HAVING views > 0 ORDER BY error_rate DESC, avg_load DESC, path LIMIT 5"
     )
     exceptions_sql = (
-        f"/* rum_analytics_exceptions */ SELECT error_message, error_file, error_line, error_col, count() AS count "
+        f"/* rum_analytics_exceptions */ SELECT error_message, error_file, error_line, error_col, "
+        f"toUInt64(round(sum({_ROW_WEIGHT}))) AS count "
         f"FROM rum_error_facts WHERE {where_errors} GROUP BY error_message, error_file, error_line, error_col "
         f"ORDER BY count DESC, error_message, error_file, error_line, error_col LIMIT 3"
     )
@@ -346,6 +362,8 @@ def rum_analytics(
     result = {
         "is_mock": False,
         "no_data": no_data,
+        # True when any beacon in the window came from a sampled session: counts are estimates.
+        "estimated": bool(counts.get("sampled")),
         "beacon_count": int(counts["beacons"]),
         "pageview_count": int(counts["pageviews"]),
         "interaction_count": int(counts["interactions"]),

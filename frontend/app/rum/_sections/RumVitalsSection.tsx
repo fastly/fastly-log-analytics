@@ -105,6 +105,11 @@ export function RumVitalsTopSection({
           </div>
         ))}
       </div>
+      {analytics.estimated === true && (
+        <p className="text-xs text-muted-foreground">
+          Counts are estimates: this window includes sampled sessions, so each beacon is scaled up by its sample rate.
+        </p>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {[

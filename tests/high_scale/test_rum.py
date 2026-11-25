@@ -343,7 +343,9 @@ def test_environments_are_counted_per_distinct_beacon_from_the_vitals_facts() ->
         "devices": {"Desktop": 6},
     }
     sql, _ = client.sql("rum_analytics_environments")
-    assert "FROM rum_vitals_facts" in sql and "GROUPING SETS" in sql and "uniqExact(" in sql
+    # Each distinct beacon counts once, scaled by the sample rate it was collected at.
+    assert "FROM rum_vitals_facts" in sql and "GROUPING SETS" in sql and "maxMapIf(map(" in sql
+    assert "1 / sample_rate" in sql
     assert "if(browser = '', 'Unknown', browser)" in sql
 
 
@@ -743,6 +745,39 @@ def test_real_sql_distinct_counts_inclusive_bounds_and_missing_buckets(run_analy
     assert result["worst_pages"][0]["error_rate"] == 25.0
     assert result["errors"] == [{"message": "fixture exception", "file": "fixture.js", "line": 0, "col": 0, "count": 2}]
     assert result["environments"] == {"browsers": {"Unknown": 3}, "os": {"Unknown": 3}, "devices": {"Unknown": 3}}
+
+
+@_skip_unless_real_ch
+def test_real_sql_counts_are_scaled_up_by_each_beacons_sample_rate(run_analytics) -> None:
+    """A beacon collected from a 50% sample stands for two; counts estimate the real totals."""
+    ts = "2026-09-01T00:10:00Z"
+    half = {"client_id": "sampled", "sample_rate": 0.5, "browser": "Firefox"}
+    vitals = [
+        _ch_vital(ts, "LCP", 1000, **half),
+        _ch_vital(ts, "CLS", 0.1, **half),
+        _ch_vital(ts, "event_click", 1, **half),
+        _ch_vital(ts, "LCP", 3000, client_id="unsampled", browser="Chrome"),
+    ]
+    # The sampled session's error was kept at a 25% error rate: it stands for four.
+    errors = [
+        _ch_error(ts, client_id="sampled", sample_rate=0.25),
+        _ch_error(ts, client_id="sampled", sample_rate=0.25),
+    ]
+    result = run_analytics(vitals, errors)
+    assert result["estimated"] is True
+    assert (result["pageview_count"], result["interaction_count"], result["error_count"]) == (3, 2, 4)
+    # One beacon carried both; it counts once, at its largest weight, beside the unsampled one.
+    assert result["beacon_count"] == 5
+    assert result["trends"]["pageviews"][0] == 3 and result["trends"]["errors"][0] == 4
+    assert result["trends"]["error_rate"][0] == 57.14
+    assert result["worst_pages"][0]["views"] == 3 and result["worst_pages"][0]["error_rate"] == 57.14
+    assert result["environments"]["browsers"] == {"Firefox": 2, "Chrome": 1}
+    assert result["errors"][0]["count"] == 8
+    assert result["vitals"]["lcp"]["distribution"]["good"] == 100.0
+
+    unsampled = run_analytics([_ch_vital(ts, "LCP", 1000)], [_ch_error(ts, client_id="other")])
+    assert unsampled["estimated"] is False
+    assert (unsampled["beacon_count"], unsampled["pageview_count"], unsampled["error_count"]) == (2, 1, 1)
 
 
 @_skip_unless_real_ch
