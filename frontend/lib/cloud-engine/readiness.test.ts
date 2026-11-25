@@ -3581,6 +3581,91 @@ it("SEC-T5-ITER40-FE-03: prevents non-contraction apostrophe mismatch and cross-
         ["token", "error"],
         "Error: Runtime Error: [redacted]",
       ],
+      // Wave 60 / Iter 61: Bypass 1 — AUTH_SCHEMES glued to = or : followed by space + value (Stage 2A & 2B)
+      [
+        "Runtime Error: X-Token: Bearer= error",
+        ["Token", "Bearer", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "token": Bearer= error',
+        ["token", "Bearer", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: X-Token=Bearer= error",
+        ["Token", "Bearer", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: token = Bearer= error",
+        ["token", "Bearer", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: X-Token: Basic= 256 KiB",
+        ["Token", "Basic", "256", "KiB", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Bearer: error",
+        ["Authorization", "Bearer", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": Bearer: error',
+        ["Authorization", "Bearer", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 60 / Iter 61: Bypass 2 — Set-Cookie Expires= with non-GMT/UTC timezone (PST, Z, +00:00)
+      [
+        "Runtime Error: Set-Cookie: a=1; Expires=Wed, 21 Oct 2015 07:28:00 PST; sid = error",
+        ["Set-Cookie", "Expires", "PST", "sid", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Set-Cookie: a=1; Expires=Wed, 21 Oct 2015 07:28:00 +00:00; sid = error",
+        ["Set-Cookie", "Expires", "+00:00", "sid", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Set-Cookie: a=1; Expires=Wed, 21 Oct 2015 07:28:00 Z, b = error",
+        ["Set-Cookie", "Expires", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 60 / Iter 61: Bypass 3 — AWS4-HMAC-SHA256 with = or quoted JSON key
+      [
+        "Runtime Error: AWS4-HMAC-SHA256= Credential=abc, host = error",
+        ["AWS4", "HMAC", "Credential", "abc", "host", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "AWS4-HMAC-SHA256": Credential=abc, host = error',
+        ["AWS4", "HMAC", "Credential", "abc", "host", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 60 / Iter 61: Bypass 4 — WWW-Authenticate / Proxy-Authenticate multi-challenge with custom scheme after ,
+      [
+        "Runtime Error: WWW-Authenticate: Basic realm=host, CustomAuth param = error",
+        ["WWW-Authenticate", "Basic", "realm", "host", "CustomAuth", "param", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Proxy-Authenticate: Bearer realm=host, CustomScheme error",
+        ["Proxy-Authenticate", "Bearer", "realm", "host", "CustomScheme", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 60 / Iter 61: Bypass 5 — Comma-folded Set-Cookie with quoted cookie name in Stage 2A
+      [
+        'Runtime Error: "Set-Cookie": a=1, "b" = error',
+        ["Set-Cookie", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: {"Set-Cookie": a=1, "b" = error}',
+        ["Set-Cookie", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
     ];
     for (const [msg, forbidden, expectedExact] of cases) {
       const err = new Error(msg);

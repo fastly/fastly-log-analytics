@@ -210,9 +210,9 @@ const AUTH_SCHEMES = new Set<string>([
 const COOKIE_STEMS = new Set<string>(["cookie", "cookies"]);
 const AUTHENTICATE_KEY_STEMS = new Set<string>(["authenticate"]);
 const AUTH_HEADER_KEY_STEMS = new Set<string>(["authorization", "authenticate"]);
-const MULTI_PARAM_AUTH_KEY_STEMS = new Set<string>(["authorization", "authenticate", "digest", "oauth"]);
+const MULTI_PARAM_AUTH_KEY_STEMS = new Set<string>(["authorization", "authenticate", "digest", "oauth", "hmac", "aws4-hmac-sha256"]);
 const MULTI_PARAM_AUTH_SCHEMES = new Set<string>(["digest", "oauth", "aws4-hmac-sha256"]);
-const HTTP_DATE_VALUE_RE = /^(?:[A-Za-z]{3,9},?\s+)?(?:\d{1,2}[\s-][A-Za-z]{3}[\s-]\d{2,4}|[A-Za-z]{3}\s+\d{1,2})\s+\d{1,2}:\d{2}:\d{2}(?:\s+(?:GMT|UTC|[+-]\d{4}|\d{4}))?(?=$|[\s;,])/;
+const HTTP_DATE_VALUE_RE = /^(?:[A-Za-z]{3,9},?\s+)?(?:\d{1,2}[\s-][A-Za-z]{3}[\s-]\d{2,4}|[A-Za-z]{3}\s+\d{1,2})\s+\d{1,2}:\d{2}:\d{2}(?:\s+(?:[A-Za-z]{1,5}|[+-]\d{2}:?\d{2}|\d{4}))?(?=$|[\s;,])/;
 
 const WORD_CHAR_RE = /[\p{L}\p{N}_]/u;
 
@@ -325,6 +325,19 @@ function scanAuthSchemeTokenEnd(line: string, p: number): number {
   const limit = Math.min(line.length, p + 32);
   while (sEnd < limit && (isAsciiAlpha(line[sEnd]) || isAsciiDigit(line[sEnd]) || line[sEnd] === "-")) {
     sEnd += 1;
+  }
+  return sEnd;
+}
+
+function advancePastAuthSchemeSep(line: string, sEnd: number): number {
+  const ch = line[sEnd];
+  if (ch === "=") {
+    const next = line[sEnd + 1];
+    return next === "=" || next === ">" ? sEnd + 2 : sEnd + 1;
+  }
+  if (ch === ":" && !line.startsWith("://", sEnd)) {
+    const next = line[sEnd + 1];
+    return next === "=" || next === ":" ? sEnd + 2 : sEnd + 1;
   }
   return sEnd;
 }
@@ -1223,19 +1236,21 @@ function consumeJsonSecretValueAfterQuote(
     const sEnd = scanAuthSchemeTokenEnd(line1, p);
     const rawScheme = line1.slice(p, sEnd);
     const maybeScheme = rawScheme.toLowerCase();
+    const afterSchemeSep = advancePastAuthSchemeSep(line1, sEnd);
+    const hasSchemeSep = afterSchemeSep > sEnd;
     const isKnownScheme = AUTH_SCHEMES.has(maybeScheme)
-      && (isInlineWs(line1[sEnd]) || line1[sEnd] === "(" || line1[sEnd] === "[" || line1[sEnd] === "{");
+      && (hasSchemeSep || isInlineWs(line1[sEnd]) || line1[sEnd] === "(" || line1[sEnd] === "[" || line1[sEnd] === "{");
     if (isKnownScheme || isCustomAuthScheme(decodedKey, rawScheme, line1, sEnd, true)) {
       matchedScheme = maybeScheme;
-      valStart = sEnd;
+      valStart = afterSchemeSep;
       while (valStart < len && isInlineWs(line1[valStart])) valStart += 1;
-      if (valStart >= len) return sEnd;
+      if (valStart >= len) return afterSchemeSep;
       if (
         (line1.startsWith("[url]", valStart) || tryScanRawUrlEnd(line1, valStart) !== -1)
         && !isCookieKey(decodedKey, true)
         && !isMultiParamAuthHeader(decodedKey, matchedScheme, true)
       ) {
-        return sEnd;
+        return afterSchemeSep;
       }
     }
   }
@@ -2049,8 +2064,15 @@ function scanContinuationParamsEnd(
       }
       while (next < len && isInlineWs(line[next])) next += 1;
       if (next >= len) break;
-      if (sepCh === "," && (line[next] === '"' || line[next] === "'" || line[next] === "`" || line[next] === "}")) {
+      if (sepCh === "," && line[next] === "}") {
         break;
+      }
+      if (sepCh === "," && (line[next] === '"' || line[next] === "'" || line[next] === "`")) {
+        if (!allowQuoted) break;
+        const qEnd = scanQuotedLiteralEnd(line, next, line[next]!, escapeState);
+        let afterQ = qEnd;
+        while (afterQ < len && isInlineWs(line[afterQ])) afterQ += 1;
+        if (line[afterQ] !== "=") break;
       }
       if (line[next] === ";" || line[next] === ",") {
         end = next;
@@ -2138,6 +2160,33 @@ function scanContinuationParamsEnd(
         if (line[ws] === "," || hasUrl || hasGluedSentinelOrQuote) {
           end = consumeChainedUrlEquals(line, next, itemEnd, false, allowQuoted, escapeState);
           continue;
+        }
+        if (
+          !isJsonMemberKey
+          && keySegments === 1
+          && ws > itemEnd
+          && ws < len
+          && isAsciiAlpha(itemSlice[0])
+          && scanAuthSchemeTokenEnd(line, next) === itemEnd
+          && (AUTH_SCHEMES.has(keyLower) || (!DIAGNOSTIC_VOCAB.has(itemSlice) && !SAFE_CLAUSE_START_WORDS.has(itemSlice)))
+        ) {
+          const nextCh = line[ws]!;
+          if (
+            nextCh !== "=" && nextCh !== "," && nextCh !== ";"
+            && nextCh !== "." && nextCh !== "!" && nextCh !== "?"
+            && nextCh !== ")" && nextCh !== "]" && nextCh !== "}"
+          ) {
+            const challengeKvEnd = tryScanKeyValueParamEnd(line, ws, false, allowQuoted, escapeState);
+            if (challengeKvEnd !== -1) {
+              end = challengeKvEnd;
+              continue;
+            }
+            const challengeValEnd = scanSingleSecretValueEnd(line, ws, true, true, allowQuoted, escapeState);
+            if (challengeValEnd > ws) {
+              end = consumeChainedUrlEquals(line, ws, challengeValEnd, false, allowQuoted, escapeState);
+              continue;
+            }
+          }
         }
       }
       break;
@@ -2509,27 +2558,57 @@ function emitAllowlistedTokens(line: string): string {
       }
       const postSepLower = rawPostSep.toLowerCase();
       const isEmptySep = rawPostSep === "";
-      const isCustomInlineScheme = !isEmptySep && isCustomAuthScheme(keyPart, rawPostSep, line, i, false);
-      if (isEmptySep || AUTH_SCHEMES.has(postSepLower) || isCustomInlineScheme) {
+      let inlineAuthScheme = "";
+      let inlineAuthHasSep = false;
+      if (!isEmptySep) {
+        if (AUTH_SCHEMES.has(postSepLower)) {
+          inlineAuthScheme = postSepLower;
+        } else {
+          const lastCh = rawPostSep[rawPostSep.length - 1];
+          if (lastCh === "=" || lastCh === ":") {
+            let trimEnd = rawPostSep.length - 1;
+            if (trimEnd > 0 && (rawPostSep[trimEnd - 1] === "=" || rawPostSep[trimEnd - 1] === ":")) {
+              trimEnd -= 1;
+            }
+            const candidate = rawPostSep.slice(0, trimEnd).toLowerCase();
+            if (AUTH_SCHEMES.has(candidate)) {
+              inlineAuthScheme = candidate;
+              inlineAuthHasSep = true;
+            }
+          }
+        }
+      }
+      const isCustomInlineScheme = !isEmptySep && !inlineAuthScheme && isCustomAuthScheme(keyPart, rawPostSep, line, i, false);
+      if (isEmptySep || inlineAuthScheme !== "" || isCustomInlineScheme) {
         let p = consumedSecondSepInLine ? i + 1 : i;
+        if (inlineAuthScheme !== "" && !inlineAuthHasSep) {
+          const afterInlineSep = advancePastAuthSchemeSep(line, p);
+          if (afterInlineSep > p) {
+            p = afterInlineSep;
+            inlineAuthHasSep = true;
+          }
+        }
+        const afterInlineSchemeSep = p;
         while (p < len && isInlineWs(line[p])) p += 1;
         const canConsume = isEmptySep
           ? p < len
-          : (p > i || line[p] === "(" || line[p] === "[" || line[p] === "{") && p < len;
+          : (p > i || inlineAuthHasSep || line[p] === "(" || line[p] === "[" || line[p] === "{") && p < len;
         if (canConsume) {
-          let matchedScheme = isEmptySep ? "" : postSepLower;
+          let matchedScheme = isEmptySep ? "" : (inlineAuthScheme || postSepLower);
           if (isEmptySep && !line.startsWith("[redacted]", p) && !line.startsWith("[url]", p)) {
             const sEnd = scanAuthSchemeTokenEnd(line, p);
             const rawScheme = line.slice(p, sEnd);
             const maybeScheme = rawScheme.toLowerCase();
+            const afterSchemeSep = advancePastAuthSchemeSep(line, sEnd);
+            const hasSchemeSep = afterSchemeSep > sEnd;
             const isKnownScheme = AUTH_SCHEMES.has(maybeScheme)
-              && (isInlineWs(line[sEnd]) || line[sEnd] === "(" || line[sEnd] === "[" || line[sEnd] === "{");
+              && (hasSchemeSep || isInlineWs(line[sEnd]) || line[sEnd] === "(" || line[sEnd] === "[" || line[sEnd] === "{");
             if (isKnownScheme || isCustomAuthScheme(keyPart, rawScheme, line, sEnd, false)) {
               matchedScheme = maybeScheme;
-              p = sEnd;
+              p = afterSchemeSep;
               while (p < len && isInlineWs(line[p])) p += 1;
               if (line.startsWith("[url]", p) && !isCookieKey(keyPart) && !isMultiParamAuthHeader(keyPart, matchedScheme)) {
-                i = sEnd;
+                i = afterSchemeSep;
                 parts.push("[redacted]");
                 isClauseStart = false;
                 prevTokLower = "";
@@ -2542,15 +2621,15 @@ function emitAllowlistedTokens(line: string): string {
           if (p < len && (allowLeadingUrl || !line.startsWith("[url]", p))) {
             const valEnd = scanSecretHeaderOrValueEnd(line, p, keyPart, matchedScheme, true);
             if (valEnd > p) i = valEnd;
-            else if (consumedSecondSepInLine) i += 1;
-          } else if (consumedSecondSepInLine) {
-            i += 1;
+            else if (afterInlineSchemeSep > i) i = afterInlineSchemeSep;
+          } else if (afterInlineSchemeSep > i) {
+            i = afterInlineSchemeSep;
           }
         } else {
-          if (consumedSecondSepInLine) i += 1;
+          if (afterInlineSchemeSep > i) i = afterInlineSchemeSep;
           if (!isEmptySep) {
             const cookieMode = isCookieKey(keyPart);
-            const authParamMode = isMultiParamAuthHeader(keyPart, postSepLower);
+            const authParamMode = isMultiParamAuthHeader(keyPart, inlineAuthScheme || postSepLower);
             if (cookieMode || authParamMode) {
               const contEnd = scanContinuationParamsEnd(line, i, cookieMode, authParamMode);
               if (contEnd > i) i = contEnd;
@@ -2603,12 +2682,14 @@ function emitAllowlistedTokens(line: string): string {
         const sEnd = scanAuthSchemeTokenEnd(line, p);
         const rawScheme = line.slice(p, sEnd);
         const maybeScheme = rawScheme.toLowerCase();
+        const afterSchemeSep = advancePastAuthSchemeSep(line, sEnd);
+        const hasSchemeSep = afterSchemeSep > sEnd;
         const isKnownScheme = AUTH_SCHEMES.has(maybeScheme)
-          && (isInlineWs(line[sEnd]) || line[sEnd] === "(" || line[sEnd] === "[" || line[sEnd] === "{");
+          && (hasSchemeSep || isInlineWs(line[sEnd]) || line[sEnd] === "(" || line[sEnd] === "[" || line[sEnd] === "{");
         if (isKnownScheme || (hasExplicitSep && isCustomAuthScheme(rawTok, rawScheme, line, sEnd, false))) {
-          const afterScheme = sEnd;
+          const afterScheme = afterSchemeSep;
           matchedScheme = maybeScheme;
-          p = sEnd;
+          p = afterSchemeSep;
           while (p < len && isInlineWs(line[p])) p += 1;
           if (line.startsWith("[url]", p) && !isCookieKey(rawTok) && !isMultiParamAuthHeader(rawTok, matchedScheme)) {
             parts.push("[redacted]");
