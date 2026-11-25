@@ -1634,7 +1634,7 @@ mod summary_bundles {
         let page = api::files(
             &fake,
             &service(),
-            &format!("{raw}&view=summary&dataset=rum"),
+            &format!("{raw}&view=summary&dataset=ops:cron_runs"),
             Instant::now(),
         );
         assert_eq!(page.unwrap_err().0, 400);

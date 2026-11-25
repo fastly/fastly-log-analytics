@@ -3632,7 +3632,8 @@ pub fn summary_bundle<R: Runtime>(
     cdn_key: &str,
     reserve: u32,
 ) -> Result<BundleReport, String> {
-    request_bundle(store, cdn_key, reserve, None, false)
+    let mut watermark = None;
+    request_bundle(store, cdn_key, reserve, None, false, &mut watermark)
 }
 
 fn request_bundle<R: Runtime>(
@@ -3641,6 +3642,7 @@ fn request_bundle<R: Runtime>(
     reserve: u32,
     record: Option<Option<crate::admin::Record>>,
     lead: bool,
+    watermark: &mut Option<Option<crate::admin::Record>>,
 ) -> Result<BundleReport, String> {
     let scope = scope(store.service);
     run::<R, Acc>(
@@ -3649,6 +3651,7 @@ fn request_bundle<R: Runtime>(
         reserve,
         record,
         lead,
+        watermark,
         Spec {
             windows: summary::summary_prefix(&scope, TABLE),
             bundles: bundle_prefix(&scope, TABLE),
@@ -3669,7 +3672,8 @@ pub fn cmcd_summary_bundle<R: Runtime>(
     cdn_key: &str,
     reserve: u32,
 ) -> Result<BundleReport, String> {
-    cmcd_bundle(store, cdn_key, reserve, None, false)
+    let mut watermark = None;
+    cmcd_bundle(store, cdn_key, reserve, None, false, &mut watermark)
 }
 
 fn cmcd_bundle<R: Runtime>(
@@ -3678,6 +3682,7 @@ fn cmcd_bundle<R: Runtime>(
     reserve: u32,
     record: Option<Option<crate::admin::Record>>,
     lead: bool,
+    watermark: &mut Option<Option<crate::admin::Record>>,
 ) -> Result<BundleReport, String> {
     // Its windows are listed from the bucket rather than a reset catalog head, so a bundle written
     // before Delete Data cleanup finishes could fold pre-reset windows and outlive the reset.
@@ -3691,6 +3696,7 @@ fn cmcd_bundle<R: Runtime>(
         reserve,
         record,
         lead,
+        watermark,
         Spec {
             windows: cmcd_summary::cmcd_summary_prefix(&scope, TABLE),
             bundles: bundle_prefix(&scope, CMCD_TABLE),
@@ -3711,7 +3717,8 @@ pub fn rum_summary_bundle<R: Runtime>(
     cdn_key: &str,
     reserve: u32,
 ) -> Result<BundleReport, String> {
-    rum_bundle(store, cdn_key, reserve, None, false)
+    let mut watermark = None;
+    rum_bundle(store, cdn_key, reserve, None, false, &mut watermark)
 }
 
 fn rum_bundle<R: Runtime>(
@@ -3720,6 +3727,7 @@ fn rum_bundle<R: Runtime>(
     reserve: u32,
     record: Option<Option<crate::admin::Record>>,
     lead: bool,
+    watermark: &mut Option<Option<crate::admin::Record>>,
 ) -> Result<BundleReport, String> {
     if store.service.data_reset.is_some() {
         return Ok(BundleReport::default());
@@ -3731,6 +3739,7 @@ fn rum_bundle<R: Runtime>(
         reserve,
         record,
         lead,
+        watermark,
         Spec {
             windows: rum_summary::prefix(&scope),
             bundles: bundle_prefix(&scope, RUM_TABLE),
@@ -3752,6 +3761,30 @@ pub struct DatasetReports {
     pub cmcd_first: bool,
 }
 
+fn report_active(report: &Result<BundleReport, String>) -> bool {
+    report
+        .as_ref()
+        .is_ok_and(|r| r.more_pending || r.hours + r.days + r.partials > 0 || r.deleted > 0)
+}
+
+fn bump_led<R: Runtime>(
+    runtime: &R,
+    key: &str,
+    record: Option<&crate::admin::Record>,
+    now: i64,
+) -> Result<(), String> {
+    let Some(record) = record else {
+        return Ok(());
+    };
+    let mut value = record.value.clone();
+    if value["led"].as_i64() == Some(now) {
+        return Ok(());
+    }
+    value["led"] = serde_json::json!(now);
+    let _ = runtime.admin_cas(key, Some(record.generation.as_str()), &value)?;
+    Ok(())
+}
+
 /// Bundles all datasets in one execution. The one that led less recently goes first with the
 /// whole vCPU and call allowance; the others follow only while the prior stopped short of the
 /// limits and `min_calls` remain. A backlog in any dataset therefore alternates with the others
@@ -3769,6 +3802,13 @@ pub fn bundle_datasets<R: Runtime>(
         Rum,
     }
     let runtime = store.runtime;
+    // Without an ingest watermark there are no closed or settled windows to bundle (and catalog
+    // publication requires an active watermark), so skip state reads on fresh/idle installs.
+    let initial_watermark = runtime.admin_get(WATERMARK_KEY)?;
+    if initial_watermark.is_none() {
+        return Ok(DatasetReports::default());
+    }
+    let mut watermark: Option<Option<crate::admin::Record>> = Some(initial_watermark);
     let mut request_record = Some(runtime.admin_get(STATE_KEY)?);
     // A reset service skips non-catalog bundling (see `cmcd_bundle` / `rum_bundle`), so their
     // state is not read.
@@ -3814,13 +3854,36 @@ pub fn bundle_datasets<R: Runtime>(
             && runtime.admin_remaining_calls() >= reserve + min_calls
             && runtime.vcpu_ms() < VCPU_STOP_MS / 2
     };
-    for (pos, &(_, _, kind)) in order.iter().enumerate() {
-        let lead = pos == 0;
-        let report = match kind {
-            Kind::Request => request_bundle(store, cdn_key, reserve, request_record.take(), lead),
-            Kind::Cmcd => cmcd_bundle(store, cdn_key, reserve, cmcd_record.take(), lead),
-            Kind::Rum => rum_bundle(store, cdn_key, reserve, rum_record.take(), lead),
+    let mut led_taken = false;
+    let mut idle_before_active: Vec<(&'static str, Option<crate::admin::Record>)> = Vec::new();
+    for &(_, _, kind) in &order {
+        let lead = !led_taken;
+        let (state_key, saved_record, report) = match kind {
+            Kind::Request => {
+                let rec = request_record.take();
+                let copy = rec.as_ref().and_then(|r| r.clone());
+                let rep = request_bundle(store, cdn_key, reserve, rec, lead, &mut watermark);
+                (STATE_KEY, copy, rep)
+            }
+            Kind::Cmcd => {
+                let rec = cmcd_record.take();
+                let copy = rec.as_ref().and_then(|r| r.clone());
+                let rep = cmcd_bundle(store, cdn_key, reserve, rec, lead, &mut watermark);
+                (CMCD_STATE_KEY, copy, rep)
+            }
+            Kind::Rum => {
+                let rec = rum_record.take();
+                let copy = rec.as_ref().and_then(|r| r.clone());
+                let rep = rum_bundle(store, cdn_key, reserve, rec, lead, &mut watermark);
+                (RUM_STATE_KEY, copy, rep)
+            }
         };
+        let active = report_active(&report);
+        if active {
+            led_taken = true;
+        } else if !led_taken && report.is_ok() {
+            idle_before_active.push((state_key, saved_record));
+        }
         let keep_going = follows(&report);
         match kind {
             Kind::Request => out.request = Some(report),
@@ -3829,6 +3892,17 @@ pub fn bundle_datasets<R: Runtime>(
         }
         if !keep_going {
             break;
+        }
+    }
+    // An idle dataset that led before an active one rotates behind it so it does not lead every
+    // subsequent execution and starve the busy datasets of calls.
+    if led_taken {
+        let now = runtime.now() as i64;
+        for (state_key, record) in idle_before_active {
+            if runtime.admin_remaining_calls() <= reserve {
+                break;
+            }
+            let _ = bump_led(runtime, state_key, record.as_ref(), now);
         }
     }
     Ok(out)
@@ -3853,6 +3927,7 @@ fn run<R: Runtime, A: Fold>(
     reserve: u32,
     record: Option<Option<crate::admin::Record>>,
     lead: bool,
+    watermark_cache: &mut Option<Option<crate::admin::Record>>,
     spec: Spec,
 ) -> Result<BundleReport, String> {
     let runtime = store.runtime;
@@ -3953,7 +4028,13 @@ fn run<R: Runtime, A: Fold>(
         ctx.report.backend_calls = started_with.saturating_sub(runtime.admin_remaining_calls());
         return Ok(ctx.report);
     }
-    let watermark = runtime.admin_get(WATERMARK_KEY)?;
+    let watermark = if published_catalog.is_some() || watermark_cache.is_none() {
+        let fresh = runtime.admin_get(WATERMARK_KEY)?;
+        *watermark_cache = Some(fresh.clone());
+        fresh
+    } else {
+        watermark_cache.clone().flatten()
+    };
     let fetched_catalog = if spec.catalog {
         super::catalog::head(
             watermark
@@ -4140,7 +4221,8 @@ fn run<R: Runtime, A: Fold>(
     state.catalog_hours.retain(|h, _| *h >= keep_from);
     let report = &ctx.report;
     if lead
-        && (report.more_pending
+        && (state != original
+            || report.more_pending
             || report.hours + report.days + report.partials > 0
             || report.deleted > 0)
     {
