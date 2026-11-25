@@ -2178,3 +2178,12 @@ def test_truncated_rum_body_falls_back_to_query_or_top_level_vcl_fields() -> Non
     assert decoded_dead.accepted_rows == 0
     assert decoded_dead.quarantined_rows == 1
     assert decoded_dead.dead_letters[0].reason == "invalid Faro RUM body"
+
+
+def test_rum_cwv_distribution_accepts_fractional_percentages() -> None:
+    from backend.models.analytics.rum import RumCwvDistribution
+
+    dist = RumCwvDistribution.model_validate({"good": 36.12, "needs_improvement": 32.14, "poor": 31.74})
+    assert dist.good == pytest.approx(36.12)
+    assert dist.needs_improvement == pytest.approx(32.14)
+    assert dist.poor == pytest.approx(31.74)

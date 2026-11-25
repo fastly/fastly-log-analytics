@@ -37,9 +37,9 @@ RumNumber = int | float
 
 
 class RumCwvDistribution(WireSafeModel):
-    good: int
-    needs_improvement: int
-    poor: int
+    good: RumNumber
+    needs_improvement: RumNumber
+    poor: RumNumber
 
 
 class RumCwvVital(WireSafeModel):
