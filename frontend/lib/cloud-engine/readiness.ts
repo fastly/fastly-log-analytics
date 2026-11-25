@@ -1216,25 +1216,10 @@ function consumeJsonSecretValueAfterQuote(
 
   const cookieMode = isCookieKey(keyCandidate);
   const authParamMode = isMultiParamAuthHeader(keyCandidate, matchedScheme);
-  const vCh = line1[valStart];
-  const valStartsQuoted = vCh === '"' || vCh === "'" || vCh === "`";
-  const valStartsSentinel = line1.startsWith("[redacted]", valStart) || line1.startsWith("[url]", valStart);
-  const valStartsQuotedOrGroup = valStartsQuoted || (!valStartsSentinel && (vCh === "{" || vCh === "[" || vCh === "("));
 
-  let valEnd: number;
-  if (valStartsQuotedOrGroup) {
-    const kvEnd = (cookieMode || authParamMode)
-      ? tryScanKeyValueParamEnd(line1, valStart, cookieMode, true, escapeState)
-      : -1;
-    valEnd = kvEnd !== -1 ? kvEnd : scanJsonValueEnd(line1, valStart, escapeState);
-    if (valEnd > valStart && (cookieMode || authParamMode)) {
-      valEnd = scanContinuationParamsEnd(line1, valEnd, cookieMode, authParamMode, true, escapeState);
-    }
-  } else if (cookieMode || authParamMode) {
-    valEnd = scanSecretHeaderOrValueEnd(line1, valStart, keyCandidate, matchedScheme, true, true, escapeState);
-  } else {
-    valEnd = scanJsonValueEnd(line1, valStart, escapeState);
-  }
+  const valEnd = cookieMode || authParamMode
+    ? scanSecretHeaderOrValueEnd(line1, valStart, keyCandidate, matchedScheme, true, true, escapeState)
+    : scanJsonValueEnd(line1, valStart, escapeState);
 
   if (valEnd > valStart) return valEnd;
   return matchedScheme ? valStart : pos;
@@ -1660,6 +1645,7 @@ function scanBalancedGroupEnd(
   const openCh = line[p];
   const closeCh = openCh === "(" ? ")" : openCh === "[" ? "]" : openCh === "{" ? "}" : "";
   if (!closeCh) return p;
+  if (line.indexOf(closeCh, p + 1) === -1) return len;
   let depth = 1;
   let k = p + 1;
   while (k < len && depth > 0) {
@@ -1750,8 +1736,7 @@ function consumeChainedUrlEquals(
     const hasUrl = slice.includes("[url]") || (allowQuoted && slice.includes("://"));
     if (!hasUrl) break;
     let afterUrl = curEnd;
-    const afterUrlWsLimit = Math.min(len, curEnd + 16);
-    while (afterUrl < afterUrlWsLimit && isInlineWs(line[afterUrl])) afterUrl += 1;
+    while (afterUrl < len && isInlineWs(line[afterUrl])) afterUrl += 1;
     if (line[afterUrl] !== "=") break;
     let val2Start = afterUrl + 1;
     while (val2Start < len && (isInlineWs(line[val2Start]) || line[val2Start] === "=")) val2Start += 1;
@@ -1851,27 +1836,25 @@ function scanParamKeyEnd(
   return { end: k, keyLower: keySegments === 1 ? keyLower : "", keySegments };
 }
 
-function tryScanKeyValueParamEnd(
+function tryFinishKeyValueParamEnd(
   line: string,
-  p: number,
+  k: number,
+  keyLower: string,
   isCookie: boolean,
   allowQuoted = false,
   escapeState?: QuoteEscapeState,
   rejectDoubleEq = false,
 ): number {
   const len = line.length;
-  const { end: k, keyLower } = scanParamKeyEnd(line, p, allowQuoted, escapeState);
-  if (k <= p) return -1;
   let eqPos = k;
-  const wsLimit = Math.min(len, k + 16);
-  while (eqPos < wsLimit && isInlineWs(line[eqPos])) eqPos += 1;
+  while (eqPos < len && isInlineWs(line[eqPos])) eqPos += 1;
   if (line[eqPos] !== "=") return -1;
   if (rejectDoubleEq && line[eqPos + 1] === "=") {
     return -1;
   }
   let vStart = eqPos + 1;
   while (vStart < len && (isInlineWs(line[vStart]) || line[vStart] === "=")) vStart += 1;
-  if (!isCookie && vStart >= len) {
+  if (rejectDoubleEq && vStart >= len) {
     return -1;
   }
   if (isCookie && keyLower === "expires") {
@@ -1886,6 +1869,19 @@ function tryScanKeyValueParamEnd(
   let vEnd = scanSingleSecretValueEnd(line, vStart, true, true, isCookie, allowQuoted, escapeState);
   vEnd = consumeChainedUrlEquals(line, vStart, vEnd, isCookie, allowQuoted, escapeState);
   return vEnd > vStart ? vEnd : vStart;
+}
+
+function tryScanKeyValueParamEnd(
+  line: string,
+  p: number,
+  isCookie: boolean,
+  allowQuoted = false,
+  escapeState?: QuoteEscapeState,
+  rejectDoubleEq = false,
+): number {
+  const { end: k, keyLower } = scanParamKeyEnd(line, p, allowQuoted, escapeState);
+  if (k <= p) return -1;
+  return tryFinishKeyValueParamEnd(line, k, keyLower, isCookie, allowQuoted, escapeState, rejectDoubleEq);
 }
 
 function scanContinuationParamsEnd(
@@ -1910,13 +1906,13 @@ function scanContinuationParamsEnd(
         end = next;
         continue;
       }
-      const kvNext = tryScanKeyValueParamEnd(line, next, true, allowQuoted, escapeState);
-      if (kvNext !== -1) {
-        end = kvNext;
-        continue;
-      }
       const { end: itemEnd, keyLower: attrLower } = scanParamKeyEnd(line, next, allowQuoted, escapeState);
       if (itemEnd > next) {
+        const kvNext = tryFinishKeyValueParamEnd(line, itemEnd, attrLower, true, allowQuoted, escapeState);
+        if (kvNext !== -1) {
+          end = kvNext;
+          continue;
+        }
         let ws = itemEnd;
         while (ws < len && isInlineWs(line[ws])) ws += 1;
         const itemSlice = line.slice(next, itemEnd);
@@ -1948,13 +1944,13 @@ function scanContinuationParamsEnd(
         end = next;
         continue;
       }
-      const kvNext = tryScanKeyValueParamEnd(line, next, false, allowQuoted, escapeState);
-      if (kvNext !== -1) {
-        end = kvNext;
-        continue;
-      }
-      const { end: itemEnd, keySegments } = scanParamKeyEnd(line, next, allowQuoted, escapeState);
+      const { end: itemEnd, keyLower, keySegments } = scanParamKeyEnd(line, next, allowQuoted, escapeState);
       if (itemEnd > next) {
+        const kvNext = tryFinishKeyValueParamEnd(line, itemEnd, keyLower, false, allowQuoted, escapeState);
+        if (kvNext !== -1) {
+          end = kvNext;
+          continue;
+        }
         let ws = itemEnd;
         while (ws < len && isInlineWs(line[ws])) ws += 1;
         const itemSlice = line.slice(next, itemEnd);

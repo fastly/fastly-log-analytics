@@ -3308,6 +3308,51 @@ it("SEC-T5-ITER40-FE-03: prevents non-contraction apostrophe mismatch and cross-
         ["mode"],
         "Error: Runtime Error: [redacted]",
       ],
+      [
+        'Runtime Error: "Cookie": "foo",cache; a = error',
+        ["foo", "cache", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Cookie": (foo),cache; a = error',
+        ["foo", "cache", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Cookie": "foo"[url]cache; a = error',
+        ["foo", "cache", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": Digest "foo"[url]cache, b = error',
+        ["foo", "cache", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        `Runtime Error: Authorization: Digest realm${" ".repeat(17)}=error, b = cache`,
+        ["error", "cache"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        `Runtime Error: Cookie: a=1; sid${" ".repeat(17)}=error; path = cache`,
+        ["error", "cache"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        `Runtime Error: Authorization: Digest uri=https://a.com${" ".repeat(17)}=error, b = cache`,
+        ["error", "cache"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Digest a=b, error =",
+        ["error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": Digest a=b, error =',
+        ["error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
     ];
     for (const [msg, forbidden, expectedExact] of cases) {
       const err = new Error(msg);
@@ -3336,6 +3381,7 @@ it("SEC-T5-ITER40-FE-04: maintains strict O(N) performance (<10ms median, <150ms
       `Error: 'a\\' ${"user's ".repeat(9000)}'1234ms 500 GiB DB::Exception'`,
       `Error: "${"a".repeat(64000)}\\" HTTP 403 100 MB session valid" 'foo"bar'`,
       `Error: "${"\\".repeat(63999)}" and "select"`,
+      (`${'"Authorization":a,('.repeat(30)}${"x".repeat(65536)}`).slice(0, 65536),
     ];
     for (const payload of perfPayloads64k) {
       const err = new Error(payload);
