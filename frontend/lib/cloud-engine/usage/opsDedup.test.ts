@@ -216,4 +216,60 @@ describe("Cloud /usage ops deduplication and memoization", () => {
     expect(billingCountAfter).toBe(billingCountBefore);
     expect(MockWorker.instances[0].jobs()).toHaveLength(6);
   });
+
+  it("covers useLastSync 1h cron_runs from 24h fetchUsageSummary without eager 7d prefill", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ enabled: true, retention_days: 30, min_billed_days: 30 })),
+    );
+
+    const { readLogs } = await import("../telemetry/client");
+    const dayFrom = FLOOR_NOW - 86_400_000;
+    const deletionFrom = dayFrom - 30 * 86_400_000;
+
+    // Initial /usage wave when below-the-fold estimator prefill is deferred:
+    // 1) current-storage (31d fos_usage/ingest_files after settings, 2d storage_inventory, 24h summary)
+    // 2) useLastSync (1h cron_runs up to FIXED_NOW, which is 30s after FLOOR_NOW)
+    const billingSettings = fetch("/api/admin/usage-logging").then((r) => r.json());
+    const storageFos = billingSettings.then(() =>
+      readLogs("fos_usage", {
+        from: new Date(deletionFrom).toISOString(),
+        to: new Date(FLOOR_NOW).toISOString(),
+      }),
+    );
+    const storageIngest = billingSettings.then(() =>
+      readLogs("ingest_files", {
+        from: new Date(deletionFrom).toISOString(),
+        to: new Date(FLOOR_NOW).toISOString(),
+      }),
+    );
+    const inventory = fetchCloudStorageInventory({ now: FLOOR_NOW });
+    const summary = fetchUsageSummary({ from: dayFrom, to: FLOOR_NOW });
+    const lastSync = readLogs("cron_runs", {
+      from: new Date(FIXED_NOW - 3_600_000).toISOString(),
+      to: new Date(FIXED_NOW).toISOString(),
+    });
+
+    await Promise.all([storageFos, storageIngest, inventory, summary, lastSync]);
+
+    const jobs = MockWorker.instances[0].jobs();
+    const byKind = jobs.reduce<Record<string, number>>((acc, job) => {
+      acc[job.kind] = (acc[job.kind] ?? 0) + 1;
+      return acc;
+    }, {});
+
+    expect(byKind).toEqual({
+      cron_runs: 1,
+      api_telemetry: 1,
+      cron_ticks: 1,
+      storage_inventory: 1,
+      fos_usage: 1,
+      ingest_files: 1,
+    });
+    // cron_runs spans only 24h (+ up to 60s ceiling), not 7d.
+    const cronJob = jobs.find((job) => job.kind === "cron_runs")!;
+    const cronSpanHours = (Date.parse(cronJob.to) - Date.parse(cronJob.from)) / 3_600_000;
+    expect(cronSpanHours).toBeGreaterThanOrEqual(24);
+    expect(cronSpanHours).toBeLessThan(25);
+  });
 });

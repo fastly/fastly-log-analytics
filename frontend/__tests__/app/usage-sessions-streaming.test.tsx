@@ -507,6 +507,27 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     expect(screen.queryByText('Compute Requests')).not.toBeInTheDocument()
   })
 
+  test('Cloud usage defers below-the-fold estimator prefill and log-fields queries until estimator enters view', async () => {
+    setCloudModeRuntime(true)
+    vi.stubGlobal('IntersectionObserver', class {
+      observe() {}
+      disconnect() {}
+    })
+    try {
+      mockGet.mockImplementation(async (path: string) => {
+        if (path === '/api/usage/prefill/rates') return { data: LIST_PRICE_RATES }
+        return undefined
+      })
+      renderWithQuery(<UsagePage />, { queryClient })
+      expect(await screen.findByText('Compute (app + worker)')).toBeInTheDocument()
+      expect(mockGet).not.toHaveBeenCalledWith('/api/usage/prefill', expect.anything())
+      expect(mockGet).not.toHaveBeenCalledWith('/api/services/{service_id}/log-fields', expect.anything())
+      expect(mockGet).not.toHaveBeenCalledWith('/api/log-fields/catalog', expect.anything())
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   test('High-Scale does not call traffic unavailable before the below-the-fold estimator loads its measurements', async () => {
     vi.stubGlobal('IntersectionObserver', class {
       observe() {}

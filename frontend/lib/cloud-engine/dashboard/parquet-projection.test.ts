@@ -4,8 +4,8 @@ import { parquetMetadata, type SchemaElement } from "hyparquet";
 import { parquetWriteBuffer } from "hyparquet-writer";
 import { createNodeBackend } from "./duckdb";
 import {
-  assembleProjectedParquet, fetchProjectedRanges, FOOTER_PROBE_BYTES, parquetQuerySchema, planParquetProjection, readParquetFooter,
-  RANGE_MERGE_GAP, RANGE_REQUEST_COST_BYTES,
+  assembleProjectedParquet, fetchProjectedRanges, FOOTER_PROBE_BYTES, MAX_RANGES_PER_FILE, parquetQuerySchema,
+  planParquetProjection, readParquetFooter, RANGE_MERGE_GAP, RANGE_REQUEST_COST_BYTES,
 } from "./parquet-projection";
 import { projectedReader } from "./projected-read";
 
@@ -241,6 +241,40 @@ describe("column-projected Parquet", () => {
     ]);
     expect(await query({ "p.parquet": projected }, "SELECT a, b FROM read_parquet('p.parquet') ORDER BY a"))
       .toEqual(Array.from({ length: 1000 }, (_, i) => ({ a: 1000 + i, b: `b${(1000 + i) % 17}` })));
+  });
+
+  it("avoids collapsing uniform multi-row-group compacts into a single whole-file range", async () => {
+    // 40 uniform row groups (> MAX_RANGES_PER_FILE = 32), each with a large (~80 KiB)
+    // unneeded payload column between narrow wanted columns. Power-of-2 uniform gap doubling
+    // previously jumped past the uniform gap and collapsed all 40 row groups into 1 range
+    // covering ~98% of the file, triggering whole-file fallback in range-loader.
+    const rowGroupSize = 500;
+    const rowGroups = 40;
+    const count = rowGroupSize * rowGroups;
+    const bytes = parquetWriteBuffer({
+      codec: "SNAPPY",
+      rowGroupSize,
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: count }, (_, i) => new Date(1700000000000 + i * 1000)) },
+        { name: "status", type: "INT32", data: Array.from({ length: count }, (_, i) => i % 10 === 0 ? 503 : 200) },
+        { name: "wide_unneeded", type: "STRING", data: Array.from({ length: count }, () => noise(600)) },
+      ],
+    });
+    const source = ranged(bytes);
+    const footer = await readParquetFooter(bytes.byteLength, source.fetchRange);
+    expect(footer.metadata.row_groups).toHaveLength(rowGroups);
+    const plan = planParquetProjection(footer, new Set(["timestamp", "status"]));
+    const plannedBytes = plan.ranges.reduce((sum, range) => sum + (range.end - range.start), 0);
+    expect(plan.ranges.length).toBeLessThanOrEqual(MAX_RANGES_PER_FILE);
+    expect(plan.ranges.length).toBeGreaterThan(1);
+    expect(plannedBytes).toBeLessThan(bytes.byteLength * 0.55);
+    for (const chunk of plan.chunks) {
+      expect(plan.ranges.some((range) => range.start <= chunk.start && chunk.start + chunk.length <= range.end)).toBe(true);
+    }
+    const parts = await fetchProjectedRanges(plan, source.fetchRange);
+    expect(await query({ "p.parquet": assembleProjectedParquet(plan, parts) },
+      "SELECT count(*) AS n, count(*) FILTER (WHERE status = 503) AS errors FROM read_parquet('p.parquet')"))
+      .toEqual([{ n: BigInt(count), errors: BigInt(count / 10) }]);
   });
 
   it("rejects a footer whose chunk offsets fall outside the file", async () => {

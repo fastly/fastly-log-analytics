@@ -97,16 +97,15 @@ export function UsagePageContent({
   const estimatorVisible = useInViewOnce(estimatorRef, { rootMargin: '600px' })
   const cloudMode = isCloudMode()
 
-  // Declare prefill before current-storage so on Cloud its 7d cron_runs read starts first
-  // and current-storage/useLastSync slice their 24h/1h cron_runs windows from it.
+  // The Cost Estimator lives below the fold; defer /api/usage/prefill until it nears
+  // the viewport so initial /usage loads avoid a second compute-billing call and a 7-day
+  // cron_runs scan.
   const { data: prefillFull, isLoading: loadingPrefillFull, isError: prefillFullFailed } = useQuery({
     queryKey: ['usage', 'prefill-full', activeServiceId],
     queryFn: async ({ signal }) => {
       return unwrapClient(client.GET('/api/usage/prefill', { signal }))
     },
-    // On Cloud, start prefill in the initial wave alongside the 24h/30d reads so the
-    // loading popup doesn't finish and then jump into a second file-loading wave.
-    enabled: isReady && (cloudMode || estimatorVisible),
+    enabled: isReady && estimatorVisible,
     staleTime: 5 * 60_000,
   })
 
@@ -246,7 +245,7 @@ export function UsagePageContent({
         signal,
       }))
     },
-    enabled: isReady && cloudMode && Boolean(activeServiceId),
+    enabled: isReady && cloudMode && estimatorVisible && Boolean(activeServiceId),
     staleTime: 5 * 60_000,
   })
 
@@ -255,7 +254,7 @@ export function UsagePageContent({
     queryFn: async ({ signal }) => {
       return unwrapClient(client.GET('/api/log-fields/catalog', { signal }))
     },
-    enabled: isReady && cloudMode && Boolean(activeServiceId),
+    enabled: isReady && cloudMode && estimatorVisible && Boolean(activeServiceId),
     staleTime: 5 * 60_000,
   })
 

@@ -25,6 +25,8 @@ const MAX_RANGE_BYTES = MAX_REGISTERED_BYTES;
 const PREFETCH_CONCURRENCY = 6;
 // Projected ranges are mostly a few KiB, so their round trips, not bandwidth, bound a cold load.
 const RANGE_CONCURRENCY = 16;
+// Fall back to a whole-file fetch only when coalesced column ranges would already transfer 75%+ of the file.
+const WHOLE_FALLBACK_RANGE_RATIO = 0.75;
 const source = browserSource("");
 const requestReads = new WeakMap<Request, DuckDBReadContext>();
 const activeRangeDownloads = new Set<AbortController>();
@@ -278,7 +280,7 @@ export async function ensureCloudRange(
           const plannedRangeBytes = plan.ranges.reduce((sum, r) => sum + (r.end - r.start), 0);
           const willFetchWhole = Boolean(held) || (
             plan.ranges.length > 0 && file.size > 0 && file.size <= MAX_RANGE_BYTES
-            && plannedRangeBytes >= file.size * 0.65
+            && plannedRangeBytes >= file.size * WHOLE_FALLBACK_RANGE_RATIO
           );
           return total + (willFetchWhole ? file.size : plannedRangeBytes);
         }, 0);
@@ -332,7 +334,7 @@ export async function ensureCloudRange(
         // files), fetch the file once via `fileSource.fetchFile` so concurrent page sections share a
         // single in-flight/cached download instead of each pulling the file separately via ranges.
         if (held || (plan.ranges.length > 0 && file.size > 0 && file.size <= MAX_RANGE_BYTES
-          && plannedRangeBytes >= file.size * 0.65)) {
+          && plannedRangeBytes >= file.size * WHOLE_FALLBACK_RANGE_RATIO)) {
           const fetched = held ?? await fetchWhole(file);
           const parts = await fetchProjectedRanges(plan, async (start, end) => fetched.bytes.slice(start, end));
           const bytes = assembleProjectedParquet(plan, parts);

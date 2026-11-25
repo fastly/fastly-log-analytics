@@ -1,5 +1,6 @@
 import { dashboardCacheIdentity } from "../dashboard/sources";
 import { createSharedRequests } from "../shared-request";
+import { readLogs as clientReadLogs } from "../telemetry/client";
 import { reconcileStorage, adminRequest } from "../telemetry/admin";
 import type { LogsRange } from "../telemetry/kinds";
 import {
@@ -15,8 +16,7 @@ import type {
   StorageBillingIntervalKind,
 } from "./storageBilling";
 
-const readLogs: UsageLogReader = async (...args) =>
-  (await import("../telemetry/client")).readLogs(...args);
+const readLogs: UsageLogReader = clientReadLogs;
 
 const sharedSettings = createSharedRequests<unknown>();
 
@@ -1894,12 +1894,24 @@ export async function fetchUsageInput(
   const startOpsEpoch = currentOpsCacheEpoch();
   assertOpsEpoch(startOpsEpoch, signal);
   const resolvedIdentity = currentOpsIdentity(identity);
-  const now = bounds?.to ?? Date.now();
+  const wallNow = Date.now();
+  const now = bounds?.to ?? wallNow;
   const from = bounds?.from ?? now - days * DAY_MS;
   const range = {
     from: new Date(from).toISOString(),
     to: new Date(now).toISOString(),
   };
+  // When reading a live "now" window (quantized down to the minute), extend cron_runs's
+  // upper bound to the current minute ceiling so concurrent useLastSync (1h up to Date.now())
+  // slices from this 24h read instead of issuing a second cron_runs read. Rows are still
+  // filtered to `<= now` below.
+  const cronRunsRange =
+    now >= wallNow - 60_000 && now <= wallNow
+      ? {
+          from: range.from,
+          to: new Date(Math.ceil(wallNow / 60_000) * 60_000).toISOString(),
+        }
+      : range;
   const settingsPromise = readUsageLogging(signal);
   const [settings, ...results] = await Promise.all([
     settingsPromise,
@@ -1910,7 +1922,10 @@ export async function fetchUsageInput(
         ? settingsPromise.then(() =>
             read(kind, range, { ...resolvedIdentity, signal }),
           )
-        : read(kind, range, { ...resolvedIdentity, signal }),
+        : read(kind, kind === "cron_runs" ? cronRunsRange : range, {
+            ...resolvedIdentity,
+            signal,
+          }),
     ),
   ]);
   assertOpsEpoch(startOpsEpoch, signal);

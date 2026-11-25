@@ -19,11 +19,11 @@ export const RANGE_MERGE_GAP = 8 * 1024;
 export const RANGE_REQUEST_COST_BYTES = 32 * 1024;
 /**
  * Upper bound on HTTP ranges issued for a single projected Parquet file.
- * Heavily compacted files can hold 100+ row groups; without a cap, 32 KiB
- * request-cost tuning can still leave 150–200 ranges per file (3,000+ range
- * requests across a 24h multi-section page load) and stall the browser queue.
+ * Heavily compacted files can hold 30–60+ row groups; 32 ranges (2 waves at
+ * RANGE_CONCURRENCY = 16) avoids browser-queue stalls while letting multi-row-group
+ * raw compacts keep projected reads instead of collapsing across large gaps.
  */
-export const MAX_RANGES_PER_FILE = 16;
+export const MAX_RANGES_PER_FILE = 32;
 
 /**
  * Projected reads of files up to these sizes fetch the whole file in one request instead of two
@@ -181,25 +181,41 @@ export function planParquetProjection(
   };
 }
 
-/** The cheapest coalescing of the chunks (sorted by start) by bytes plus request cost. */
+/**
+ * The cheapest coalescing of the chunks (sorted by start) by bytes plus request cost,
+ * subject to at most [`MAX_RANGES_PER_FILE`] ranges.
+ */
 function coalesceRanges(chunks: readonly Chunk[]): { start: number; end: number }[] {
-  let best: { start: number; end: number }[] = [];
-  let bestCost = Infinity;
-  for (let gap = RANGE_MERGE_GAP; ; gap *= 2) {
-    const ranges: { start: number; end: number }[] = [];
-    for (const chunk of chunks) {
-      const last = ranges[ranges.length - 1];
-      if (last && chunk.start - last.end <= gap) last.end = Math.max(last.end, chunk.start + chunk.length);
-      else ranges.push({ start: chunk.start, end: chunk.start + chunk.length });
+  if (chunks.length === 0) return [];
+  // Merging any gap <= max(RANGE_MERGE_GAP, RANGE_REQUEST_COST_BYTES) strictly lowers or
+  // preserves `bytes + ranges * RANGE_REQUEST_COST_BYTES` without pulling in large gaps.
+  const baseGap = Math.max(RANGE_MERGE_GAP, RANGE_REQUEST_COST_BYTES);
+  const ranges: { start: number; end: number }[] = [];
+  for (const chunk of chunks) {
+    const last = ranges[ranges.length - 1];
+    if (last && chunk.start - last.end <= baseGap) {
+      last.end = Math.max(last.end, chunk.start + chunk.length);
+    } else {
+      ranges.push({ start: chunk.start, end: chunk.start + chunk.length });
     }
-    const bytes = ranges.reduce((sum, range) => sum + range.end - range.start, 0);
-    const cost = bytes + ranges.length * RANGE_REQUEST_COST_BYTES;
-    if (ranges.length <= MAX_RANGES_PER_FILE && cost < bestCost) {
-      best = ranges;
-      bestCost = cost;
-    }
-    if (ranges.length <= 1) return best;
   }
+  // If still above MAX_RANGES_PER_FILE, greedily merge only the smallest remaining gap.
+  // This avoids the power-of-2 cliff that collapses uniform row-group compacts into one
+  // whole-file range.
+  while (ranges.length > MAX_RANGES_PER_FILE) {
+    let minIndex = 0;
+    let minGap = Infinity;
+    for (let i = 0; i < ranges.length - 1; i++) {
+      const gap = ranges[i + 1].start - ranges[i].end;
+      if (gap < minGap) {
+        minGap = gap;
+        minIndex = i;
+      }
+    }
+    ranges[minIndex].end = ranges[minIndex + 1].end;
+    ranges.splice(minIndex + 1, 1);
+  }
+  return ranges;
 }
 
 /** The planned ranges' bytes, fetching only what the footer read didn't already cover. */
