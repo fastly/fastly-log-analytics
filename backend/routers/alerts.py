@@ -439,6 +439,7 @@ def _preview_alert_series(
     lookback_mins = int(lookback_hours * 60)
     if eval_type in ("relative_increase", "relative_decrease") and comp_period:
         lookback_mins = max(lookback_mins, int(comp_period + window + 60))
+    lookback_mins = min(lookback_mins, 720 * 60)
 
     if lookback_mins <= 180:
         bucket_expr = "toStartOfMinute(event_timestamp)"
@@ -499,7 +500,7 @@ def _preview_alert_series(
     }
 
     if eval_type == "anomaly_zscore":
-        days = int(getattr(alert, "baseline_period_days", 7) or 7)
+        days = max(1, min(int(getattr(alert, "baseline_period_days", 7) or 7), 90))
         zscore_thresh = float(getattr(alert, "zscore_threshold", 3.0) or 3.0)
         base_rows = client.execute(
             f"SELECT toHour(ts) AS hr, avg(val) AS mean_val, stddevSamp(val) AS stddev_val FROM ("

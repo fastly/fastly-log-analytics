@@ -364,13 +364,13 @@ class Alert(BaseModel):
     evaluation_scope: Literal["all", "edge", "origin"] = "all"
     operator: Literal[">", "<", ">=", "<="]
     threshold: float
-    window_min: float
-    comparison_period_min: float | None = None
+    window_min: float = Field(gt=0, le=10080)
+    comparison_period_min: float | None = Field(default=None, gt=0, le=43200)
     status_codes: list[int] | None = None
     webhook_url: str | None = None
     channels: list[AlertChannel] | None = None
     zscore_threshold: float | None = None
-    baseline_period_days: int | None = None
+    baseline_period_days: int | None = Field(default=None, ge=1, le=90)
     enabled: bool = True
     last_triggered_at: str | None = None
     created_at: str | None = None

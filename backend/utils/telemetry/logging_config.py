@@ -119,8 +119,20 @@ def bridge_uvicorn_loggers() -> None:
 
 audit_log = structlog.get_logger("audit")
 
-ABS_PATH_RE = re.compile(r"(?<![A-Za-z0-9])/(?:srv|var|tmp|data|home|opt|usr|mnt|app)\b(?:/[A-Za-z0-9_./-]*)?")
+ABS_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9])/(?:srv|var|tmp|data|home|opt|usr|mnt|app|etc|root|Users|run|proc|private|Library)\b(?:/[A-Za-z0-9_./-]*)?"
+)
 CID_SALT_LITERAL_RE = re.compile(r"(sha256\(\s*CONCAT\(\s*')[^']*(')", re.IGNORECASE)
+_URL_CREDS_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]*:)([^/\s@]+)(@)")
+_HEADER_SECRET_RE = re.compile(
+    r"(\b(?:Fastly-Key|X-API-Key)\s*:\s*|(?:\bAuthorization\s*:\s*(?:Bearer|Basic)\s+))([^\s'\"`,;)}\]]+)",
+    re.IGNORECASE,
+)
+_KV_SECRET_RE = re.compile(
+    r"((?:[?&]|\b)(?:password|passwd|token|api_key|apikey|secret|access_key|x-api-key|fastly_key|aws_secret_access_key|aws_access_key_id)\s*=\s*)(['\"]?)([^\s&'\"`,;)}\]]+)\2",
+    re.IGNORECASE,
+)
+_AWS_KEY_ID_RE = re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")
 REDACTED = "[redacted]"
 _MIN_SALT_LEN = 8
 _known_salts: set[str] = set()
@@ -142,4 +154,9 @@ def scrub_secrets(text: str) -> str:
 
 
 def redact_error_text(msg: object) -> str:
-    return ABS_PATH_RE.sub("<path>", scrub_secrets(str(msg)))
+    text = scrub_secrets(str(msg))
+    text = _URL_CREDS_RE.sub(r"\1[redacted]\3", text)
+    text = _HEADER_SECRET_RE.sub(r"\1[redacted]", text)
+    text = _KV_SECRET_RE.sub(r"\1\2[redacted]\2", text)
+    text = _AWS_KEY_ID_RE.sub(REDACTED, text)
+    return ABS_PATH_RE.sub("<path>", text)

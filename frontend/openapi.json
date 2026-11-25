@@ -47237,12 +47237,16 @@
           },
           "window_min": {
             "type": "number",
+            "maximum": 10080.0,
+            "exclusiveMinimum": 0.0,
             "title": "Window Min"
           },
           "comparison_period_min": {
             "anyOf": [
               {
-                "type": "number"
+                "type": "number",
+                "maximum": 43200.0,
+                "exclusiveMinimum": 0.0
               },
               {
                 "type": "null"
@@ -47303,7 +47307,9 @@
           "baseline_period_days": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "maximum": 90.0,
+                "minimum": 1.0
               },
               {
                 "type": "null"

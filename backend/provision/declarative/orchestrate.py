@@ -74,6 +74,7 @@ from backend.provision.session_scoring_orchestrator import (
     ensure_scoring_service,
     scorer_vcl_fingerprint,
 )
+from backend.utils.telemetry.logging_config import redact_error_text
 
 fastly_integration: Any = sys.modules[__name__]
 logger = logging.getLogger(__name__)
@@ -248,12 +249,13 @@ def reconcile_vcl_state(
                 result.changes_applied = diff.summary()
             except Exception as rollback_err:
                 if draft_version is not None:
+                    safe_err = redact_error_text(rollback_err)
                     if status_cb:
                         status_cb(
-                            f"🧹 Reconcile failed: {rollback_err}. Broken draft version {draft_version} left as inactive draft (Fastly does not support deleting individual draft versions)."
+                            f"🧹 Reconcile failed: {safe_err}. Broken draft version {draft_version} left as inactive draft (Fastly does not support deleting individual draft versions)."
                         )
                     logging.getLogger("backend.scheduler").warning(
-                        f"Reconcile failed: {rollback_err}. Broken draft version {draft_version} left in Fastly configuration."
+                        f"Reconcile failed: {safe_err}. Broken draft version {draft_version} left in Fastly configuration."
                     )
                 raise rollback_err
     finally:

@@ -24,7 +24,7 @@ from backend.core.request_context import require_admin
 from backend.models.common import Alert, ServiceCronSettingsBody
 from backend.provision import fastly_api
 from backend.provision.declarative.models import FeatureState
-from backend.provision.declarative.vcl_builder import desired_snippets, generate_consolidated_snippet
+from backend.provision.declarative.vcl_builder import desired_snippets
 from backend.routers import alerts as alerts_mod
 from backend.routers import insights as insights_mod
 from backend.routers import provision as provision_mod
@@ -372,10 +372,12 @@ def test_c1_5_alerts_preview_bounds_lookback_and_cache() -> None:
 
 
 def test_c2_1_declarative_vcl_scrubs_fastly_client_ip_before_capture() -> None:
-    """High-Scale declarative VCL must scrub client-supplied Fastly-Client-IP at ingress before capture."""
-    assert "Fastly-Client-IP" in fastly_api._SCRUB_HEADERS
+    """High-Scale declarative VCL must emit a priority -100 reset snippet for Fastly-Client-IP
+    while keeping _SCRUB_HEADERS free of Fastly-Client-IP so operator VCL between -100 and 10
+    is preserved."""
+    assert "Fastly-Client-IP" not in fastly_api._SCRUB_HEADERS
     scrub_stmts = fastly_api.get_scrub_vcl_statements({"groups": ["A"]})
-    assert "unset req.http.Fastly-Client-IP;" in scrub_stmts
+    assert "unset req.http.Fastly-Client-IP;" not in scrub_stmts
 
     state = FeatureState(
         service_id="svc-vcl",
@@ -387,13 +389,357 @@ def test_c2_1_declarative_vcl_scrubs_fastly_client_ip_before_capture() -> None:
         fos_endpoint="us-east.object.fastlystorage.app",
         logging_enabled=True,
     )
-    recv_vcl = generate_consolidated_snippet(state, "vcl_recv")
-    assert "if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {" in recv_vcl
-    unset_idx = recv_vcl.index("unset req.http.Fastly-Client-IP;")
-    capture_idx = recv_vcl.index("set req.http.x-fos-edge-data:ip = req.http.Fastly-Client-IP;")
-    guard_idx = recv_vcl.index("if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {")
-    assert guard_idx < unset_idx < capture_idx
-
     snippets = desired_snippets(state)
-    recv_snippet = next(s for s in snippets if s.subroutine == "vcl_recv")
-    assert "unset req.http.Fastly-Client-IP;" in recv_snippet.body
+    reset_snippet = next(s for s in snippets if s.name == "Fastly Log Analysis Reset Client IP")
+    recv_snippet = next(s for s in snippets if s.name == "Fastly Log Analytics - vcl_recv")
+    assert reset_snippet.subroutine == "vcl_recv"
+    assert reset_snippet.priority == -100
+    assert reset_snippet.priority < recv_snippet.priority
+    assert "if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {" in reset_snippet.body
+    assert "unset req.http.Fastly-Client-IP;" in reset_snippet.body
+    assert "set req.http.x-fos-edge-data:ip = req.http.Fastly-Client-IP;" in recv_snippet.body
+
+
+# ── Iteration 2 Wave 1 Verifier Hardening Regressions ─────────────────────────
+
+
+def test_w1_1_redact_error_text_scrubs_credentials_headers_aws_and_paths() -> None:
+    """redact_error_text must scrub DSN creds, query/kv secrets, auth headers, AWS keys, and OS paths."""
+    from backend.utils.telemetry.logging_config import redact_error_text
+
+    # Use low-entropy synthetic placeholders so secret scanners remain clean.
+    raw = (
+        "connect failed postgresql://dbuser:demopass00@db.internal:5432/fla "
+        "https://svc.local/api?token=demotok00&api_key=demokey00&password=demopw00 "
+        "Fastly-Key: demofastly00 Authorization: Bearer demobearer00 "
+        "aws_secret_access_key=demoawssec00 AKIA0000000000000001 ASIA0000000000000002 "
+        "paths /etc/shadow /root/.ssh/id /Users/dev/secret /run/secrets/db /proc/self/environ /private/tmp/a"
+    )
+    redacted = redact_error_text(raw)
+    for secret in (
+        "demopass00",
+        "demotok00",
+        "demokey00",
+        "demopw00",
+        "demofastly00",
+        "demobearer00",
+        "demoawssec00",
+        "AKIA0000000000000001",
+        "ASIA0000000000000002",
+        "/etc/shadow",
+        "/root/.ssh/id",
+        "/Users/dev/secret",
+        "/run/secrets/db",
+        "/proc/self/environ",
+        "/private/tmp/a",
+    ):
+        assert secret not in redacted, f"Sensitive fragment leaked: {secret!r} in {redacted!r}"
+    assert "postgresql://dbuser:[redacted]@db.internal:5432/fla" in redacted
+    assert "<path>" in redacted
+
+
+def test_w1_2_remaining_sse_and_http_error_paths_are_redacted() -> None:
+    """stream_iac_reconcile, provision teardown/fos/check-config, and orchestrate rollback_err must redact."""
+    from backend.models.common import CheckFosRequest, ProvisionTeardownRequest
+    from backend.provision.declarative import orchestrate as orch_mod
+    from backend.utils.sse import stream_iac_reconcile
+
+    # 1) stream_iac_reconcile default fallback error event
+    with patch(
+        "backend.provision.orchestrator.run_with_events",
+        side_effect=RuntimeError("boom postgresql://u:demopass11@h/db /etc/fla.conf"),
+    ):
+        resp = stream_iac_reconcile("svc-sse-1", "tok", start_message="start", done_event={"type": "done"})
+        out = asyncio.run(_collect_sse(resp))
+    assert "demopass11" not in out
+    assert "/etc/fla.conf" not in out
+    assert "[redacted]" in out and "<path>" in out
+
+    # 2) provision_teardown SSE error & warning events
+    with (
+        patch(
+            "backend.config.load_config",
+            return_value={"fos_bucket": "b", "fos_region": "us-east-1", "provisioning": {}},
+        ),
+        patch("backend.core.vcl_generator.validate_destructive_token"),
+        patch("backend.config.config_path", return_value="/nonexistent-cfg-path"),
+        patch("backend.provision._sync_crontab", side_effect=RuntimeError("cron /etc/crontab failed")),
+        patch.object(provision_mod, "_invalidate_service_credentials"),
+        patch(
+            "backend.provision.perform_teardown",
+            side_effect=RuntimeError("teardown failed Fastly-Key: demofastly22 /root/key"),
+        ),
+    ):
+        resp_td = provision_mod.provision_teardown(
+            _fake_request(None),
+            ProvisionTeardownRequest(service_id="svc-td", token="tok", remove_cron=True),
+        )
+        out_td = asyncio.run(_collect_sse(resp_td))
+    assert "/etc/crontab" not in out_td
+    assert "demofastly22" not in out_td
+    assert "/root/key" not in out_td
+
+    # 3) FOS credential probe fallback error message
+    fake_s3 = MagicMock()
+    fake_s3.list_objects_v2.side_effect = RuntimeError("probe failed https://u:demopass33@s3.local /etc/certs.pem")
+    with patch.object(provision_mod, "_get_fos_s3_client", return_value=fake_s3):
+        fos_out = provision_mod.provision_check_fos(
+            CheckFosRequest(
+                bucket="demo-bucket",
+                region="us-east-1",
+                access_key="demo-ak",
+                secret_key="demo-sk",
+            )
+        )
+    fos_text = json.dumps(fos_out)
+    assert "demopass33" not in fos_text
+    assert "/etc/certs.pem" not in fos_text
+
+    # 4) provision_check_config logging & cdn error branches
+    with patch(
+        "backend.core.fastly.client.fastly",
+        side_effect=RuntimeError("fastly fail Fastly-Key: demofastly44 /etc/fastly.ini"),
+    ):
+        chk_out = provision_mod.provision_check_config(
+            authorization="Bearer tok",
+            service_id="svc-chk",
+            cdn_service_id="cdn-1",
+            bucket="demo-bucket",
+        )
+    chk_text = json.dumps(chk_out)
+    assert "demofastly44" not in chk_text
+    assert "/etc/fastly.ini" not in chk_text
+    assert "[redacted]" in chk_text and "<path>" in chk_text
+
+    # 5) orchestrate.py rollback_err status_cb message
+    cb_messages: list[str] = []
+    fake_state = FeatureState(
+        service_id="svc-orch",
+        log_period=60,
+        sample_rate=100,
+        edge_only=False,
+        custom_condition="",
+        fos_prefix="",
+        fos_endpoint="us-east.object.fastlystorage.app",
+        logging_enabled=True,
+    )
+    fake_diff = MagicMock()
+    fake_diff.is_empty.return_value = False
+    fake_diff.snippets_to_remove = []
+    fake_lock = MagicMock()
+    fake_lock.__enter__ = MagicMock(return_value=None)
+    fake_lock.__exit__ = MagicMock(return_value=False)
+    with (
+        patch.object(orch_mod, "acquire_vcl_lock", return_value=fake_lock),
+        patch.object(orch_mod, "_load_or_bootstrap_feature_state", return_value=fake_state),
+        patch.object(orch_mod, "_fetch_active_version", return_value=1),
+        patch.object(orch_mod, "_fetch_snippets", return_value=[]),
+        patch.object(orch_mod, "_fetch_logging_endpoints", return_value=[]),
+        patch.object(orch_mod, "_fetch_backends", return_value=[]),
+        patch.object(orch_mod, "_fetch_dictionaries", return_value=[]),
+        patch.object(orch_mod, "compute_diff", return_value=fake_diff),
+        patch.object(orch_mod, "_clone_active_version", return_value=2),
+        patch.object(
+            orch_mod,
+            "_apply_diff",
+            side_effect=RuntimeError("apply failed postgresql://u:demopass55@h/db /etc/vcl.conf"),
+        ),
+    ):
+        with pytest.raises(RuntimeError):
+            orch_mod.reconcile_vcl_state("svc-orch", "tok", dry_run=False, status_cb=cb_messages.append)
+    joined_cb = "\n".join(cb_messages)
+    assert "demopass55" not in joined_cb
+    assert "/etc/vcl.conf" not in joined_cb
+    assert "[redacted]" in joined_cb and "<path>" in joined_cb
+
+
+def test_w1_4_alert_model_bounds_and_preview_lookback_clamping() -> None:
+    """Alert model must enforce bounds on window_min, comparison_period_min, baseline_period_days,
+    and _preview_alert_series must clamp lookback_mins and baseline days."""
+    from datetime import UTC, datetime
+
+    from pydantic import ValidationError
+
+    base = dict(name="Bound Check", service_id="svc-b", metric="5xx", operator=">", threshold=1.0, window_min=5)
+    with pytest.raises(ValidationError):
+        Alert(**{**base, "window_min": 0})
+    with pytest.raises(ValidationError):
+        Alert(**{**base, "window_min": 10081})
+    with pytest.raises(ValidationError):
+        Alert(**{**base, "comparison_period_min": 0})
+    with pytest.raises(ValidationError):
+        Alert(**{**base, "comparison_period_min": 43201})
+    with pytest.raises(ValidationError):
+        Alert(**{**base, "baseline_period_days": 0})
+    with pytest.raises(ValidationError):
+        Alert(**{**base, "baseline_period_days": 91})
+
+    # Even with max valid window_min + comparison_period_min (10080 + 43200 + 60 = 53340 > 43200),
+    # _preview_alert_series must clamp lookback_mins to <= 720 * 60 (43200).
+    captured_params: list[dict] = []
+
+    class _FakeCH:
+        def execute(self, sql, params=None):
+            captured_params.append(dict(params or {}))
+            return []
+
+    anchor = datetime(2026, 11, 25, 12, 0, 0, tzinfo=UTC)
+    rel_alert = Alert(
+        **{
+            **base,
+            "evaluation_type": "relative_increase",
+            "window_min": 10080,
+            "comparison_period_min": 43200,
+        }
+    )
+    with (
+        patch.object(alerts_mod, "_resolve_ch_client", return_value=_FakeCH()),
+        patch.object(alerts_mod, "visible_publication_fence_sql", return_value="1=1"),
+        patch.object(alerts_mod.svcconfig, "get_status", return_value={"latest_log_at": anchor.isoformat()}),
+    ):
+        alerts_mod._preview_alert_series("svc-b", {"name": "svc-b"}, "tbl", rel_alert, lookback_hours=720)
+    assert captured_params, "expected ClickHouse execute call"
+    first_delta_mins = (captured_params[0]["end"] - captured_params[0]["start"]).total_seconds() / 60.0
+    assert first_delta_mins <= 720 * 60
+
+    # Also verify anomaly_zscore clamps baseline days to [1, 90] even if a non-validated object is passed.
+    captured_params.clear()
+    fake_z_alert = SimpleNamespace(
+        metric="5xx",
+        window_min=5,
+        evaluation_type="anomaly_zscore",
+        evaluation_scope="all",
+        comparison_period_min=None,
+        status_codes=None,
+        baseline_period_days=9999,
+        zscore_threshold=3.0,
+    )
+    with (
+        patch.object(alerts_mod, "_resolve_ch_client", return_value=_FakeCH()),
+        patch.object(alerts_mod, "visible_publication_fence_sql", return_value="1=1"),
+        patch.object(alerts_mod.svcconfig, "get_status", return_value={"latest_log_at": anchor.isoformat()}),
+    ):
+        alerts_mod._preview_alert_series("svc-b", {"name": "svc-b"}, "tbl", fake_z_alert, lookback_hours=24)  # type: ignore[arg-type]
+    assert len(captured_params) >= 2
+    z_days = (captured_params[1]["end"] - captured_params[1]["start"]).total_seconds() / 86400.0
+    assert z_days <= 90.0
+
+
+def test_w1_5_sessions_endpoint_scrubs_ua_and_scrub_ip_text_handles_pct_encoded_ipv6(monkeypatch) -> None:
+    """POST /api/sessions must scrub embedded IPs in ua for analyst_no_pii, and scrub_ip_text must
+    scrub percent-encoded IPv6 (%3A / %3a) without corrupting non-IP text."""
+    from backend.core.share_db import scrub_ip_text
+    from backend.models.analytics import SessionsRequest
+
+    # 1) Percent-encoded IPv6 in scrub_ip_text
+    url_upper = "/api/v1?peer=2001%3Adb8%3Aabcd%3A%3A9&ts=12%3A34%3A56&tag=foo%3Abar%3Abaz"
+    scrubbed_upper = scrub_ip_text(url_upper)
+    assert "2001%3Adb8%3Aabcd%3A%3A9" not in scrubbed_upper
+    assert "abcd%3A%3A9" not in scrubbed_upper
+    assert "ts=12%3A34%3A56" in scrubbed_upper
+    assert "tag=foo%3Abar%3Abaz" in scrubbed_upper
+
+    url_lower = "/trace?src=2001%3adb8%3a%3a1"
+    scrubbed_lower = scrub_ip_text(url_lower)
+    assert "2001%3adb8%3a%3a1" not in scrubbed_lower
+    assert "2001:db8::" in scrubbed_lower
+
+    # 2) POST /api/sessions ua scrubbing for analyst_no_pii
+    fake_hs_result = {
+        "sessions": [
+            {
+                "ip": "203.0.113.xxx",
+                "ja4": "t13d1516h2_8daaf6152771_e5627efa2ab1",
+                "country": "US",
+                "ua": "CustomBot/1.0 (client 198.51.100.77; v6 2001:db8:abcd::9; enc 2001%3Adb8%3Aef01%3A%3A5)",
+                "session_start": "2026-11-25T10:00:00Z",
+                "session_end": "2026-11-25T10:05:00Z",
+                "req_count": 10,
+                "flagged": False,
+            }
+        ],
+        "total": 1,
+        "page": 1,
+        "limit": 50,
+        "has_rtt": False,
+        "has_ja4": True,
+        "has_edge": True,
+    }
+    fake_ctx = SimpleNamespace(
+        service_id="svc-sess",
+        analyst_session=_analyst_no_pii(["svc-sess"]),
+        resolve_window=lambda r: ("2026-11-25T00:00:00Z", "2026-11-25T23:59:59Z"),
+    )
+    with (
+        patch("backend.high_scale.sessions.sessions_endpoint", return_value=fake_hs_result),
+        patch.object(scoring_mod, "require_high_scale", return_value=MagicMock()),
+        patch.object(scoring_mod, "seal_session_token", return_value="sealed-tok-demo"),
+    ):
+        resp = scoring_mod.sessions_endpoint(SessionsRequest(service_id="svc-sess"), fake_ctx)  # type: ignore[arg-type]
+    dumped = resp.model_dump_json()
+    for leaked in ("198.51.100.77", "2001:db8:abcd::9", "2001%3Adb8%3Aef01%3A%3A5"):
+        assert leaked not in dumped, f"Embedded IP {leaked} leaked in POST /api/sessions"
+
+
+def test_w1_6_insights_cache_collapse_guarded_and_locked_semaphores_never_evicted() -> None:
+    """cache_collapse_detail_endpoint must be async and acquire per-service semaphore,
+    and _get_insights_sem must never evict an actively locked semaphore."""
+    import inspect
+
+    assert inspect.iscoroutinefunction(insights_mod.cache_collapse_detail_endpoint)
+
+    # 1) Never evict actively locked semaphores at capacity
+    async def _check_no_locked_eviction() -> None:
+        with insights_mod._insights_sems_lock:
+            insights_mod._insights_sems.clear()
+        orig_max = insights_mod._INSIGHTS_SEMS_MAXSIZE
+        try:
+            insights_mod._INSIGHTS_SEMS_MAXSIZE = 2
+            sem_a = insights_mod._get_insights_sem("svc-lock-a")
+            sem_b = insights_mod._get_insights_sem("svc-lock-b")
+            await sem_a.acquire()
+            await sem_b.acquire()
+            try:
+                _ = insights_mod._get_insights_sem("svc-lock-c")
+                assert insights_mod._insights_sems.get("svc-lock-a") is sem_a
+                assert insights_mod._insights_sems.get("svc-lock-b") is sem_b
+            finally:
+                sem_a.release()
+                sem_b.release()
+        finally:
+            insights_mod._INSIGHTS_SEMS_MAXSIZE = orig_max
+            with insights_mod._insights_sems_lock:
+                insights_mod._insights_sems.clear()
+
+    asyncio.run(_check_no_locked_eviction())
+
+    # 2) cache_collapse_detail_endpoint serializes under _get_insights_sem(service_id)
+    from backend.models.analytics import CacheCollapseDetailRequest
+
+    async def _check_detail_uses_sem() -> None:
+        with insights_mod._insights_sems_lock:
+            insights_mod._insights_sems.clear()
+        sem = insights_mod._get_insights_sem("svc-cc-sem")
+        await sem.acquire()
+        called = False
+
+        def _fake_hs_detail(*_args, **_kwargs):
+            nonlocal called
+            called = True
+            return {"data": {}}
+
+        fake_ctx = SimpleNamespace(service_id="svc-cc-sem", analyst_session=None)
+        req = CacheCollapseDetailRequest(service_id="svc-cc-sem", url="/x", baseline_hours=24, window_size_hrs=1)
+        with (
+            patch.object(insights_mod, "record_insights_request"),
+            patch.object(insights_mod, "require_high_scale", return_value=MagicMock()),
+            patch.object(insights_mod, "hs_detail", side_effect=_fake_hs_detail),
+        ):
+            task = asyncio.create_task(insights_mod.cache_collapse_detail_endpoint(req, fake_ctx))  # type: ignore[arg-type]
+            await asyncio.sleep(0.05)
+            assert not called, "cache_collapse_detail_endpoint bypassed the per-service semaphore!"
+            sem.release()
+            await task
+            assert called
+
+    asyncio.run(_check_detail_uses_sem())

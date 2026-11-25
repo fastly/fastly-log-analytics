@@ -1215,6 +1215,8 @@ def sessions_endpoint(req: SessionsRequest, ctx: RequestContext = Depends(build_
 
         result = hs_sessions(require_high_scale(ctx), req, start_time, end_time)
         _seal_session_rows(result.get("sessions", []), ctx.service_id)
+        if mask_ips_for(ctx.analyst_session):
+            result["sessions"] = _scrub_string_leaves(result.get("sessions", []))
         return SessionsResponse.with_telemetry(**result)
 
 

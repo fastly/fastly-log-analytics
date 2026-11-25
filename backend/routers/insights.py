@@ -52,9 +52,7 @@ def _get_insights_sem(
         if len(_insights_sems) >= _INSIGHTS_SEMS_MAXSIZE:
             evict_key = next((k for k, sem in _insights_sems.items() if not sem.locked()), None)
             if evict_key is not None:
-                del _insights_sems[evict_key]
-            else:
-                _insights_sems.popitem(last=False)
+                _insights_sems.pop(evict_key, None)
         sem = asyncio.Semaphore(1)
         _insights_sems[service_id] = sem
         return sem
@@ -120,11 +118,12 @@ async def insights_endpoint(
 
 @router.post("/insights/cache-collapse-detail", response_model=CacheCollapseDetailResponse)
 @query_errors()
-def cache_collapse_detail_endpoint(
+async def cache_collapse_detail_endpoint(
     req: CacheCollapseDetailRequest,
     ctx: RequestContext = Depends(build_request_context),
 ):
     record_insights_request(ctx.service_id)
     clamp_start, clamp_end, mask_ips, _ = _analyst_lookback_clamp(ctx, req.baseline_hours, req.window_size_hrs)
     high_scale_service = require_high_scale(ctx)
-    return hs_detail(high_scale_service, req, clamp_start, clamp_end, mask_ips)
+    async with _get_insights_sem(ctx.service_id):
+        return await asyncio.to_thread(hs_detail, high_scale_service, req, clamp_start, clamp_end, mask_ips)

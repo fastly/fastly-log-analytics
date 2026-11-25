@@ -93,8 +93,20 @@ def logging_service_snippets(state: FeatureState) -> list[VCLSnippet]:
     ]
 
 
+_RESET_CLIENT_IP_SNIPPET_NAME = "Fastly Log Analysis Reset Client IP"
+_RESET_CLIENT_IP_SNIPPET_BODY = (
+    "# [security] Drop a client-supplied Fastly-Client-IP at the true edge so a\n"
+    "# spoofed value cannot poison the captured client IP. Operator VCL running\n"
+    "# after this (priority above -100, before the priority-10 capture) may set\n"
+    "# the real source IP; the ip capture falls back to client.ip otherwise.\n"
+    "if (req.restarts == 0 && fastly.ff.visits_this_service == 0) {\n"
+    "  unset req.http.Fastly-Client-IP;\n"
+    "}"
+)
+
+
 def desired_snippets(state: FeatureState) -> list[VCLSnippet]:
-    """Return the 5 consolidated snippets (vcl_recv, vcl_miss, vcl_fetch, vcl_deliver, vcl_error)."""
+    """Return the consolidated snippets plus the priority -100 Fastly-Client-IP reset snippet."""
     snippets: list[VCLSnippet] = []
     for subroutine in ("vcl_recv", "vcl_miss", "vcl_pass", "vcl_fetch", "vcl_deliver", "vcl_error"):
         body = generate_consolidated_snippet(state, subroutine)
@@ -105,6 +117,15 @@ def desired_snippets(state: FeatureState) -> list[VCLSnippet]:
         duplicates = [v for v in set(declared_vars) if declared_vars.count(v) > 1]
         if duplicates:
             raise RuntimeError(f"{subroutine}: duplicate var declarations {duplicates}")
+    if state.logging_enabled:
+        snippets.append(
+            VCLSnippet(
+                name=_RESET_CLIENT_IP_SNIPPET_NAME,
+                priority=-100,
+                body=_RESET_CLIENT_IP_SNIPPET_BODY,
+                subroutine="vcl_recv",
+            )
+        )
     return snippets
 
 
@@ -469,6 +490,7 @@ def _is_managed_snippet(name: str) -> bool:
 
     return (
         name.startswith("Fastly Log Analytics - ")
+        or name == _RESET_CLIENT_IP_SNIPPET_NAME
         or name in RUM_SNIPPET_NAMES
         or name in scoring_snippet_names()
         or name in cmcd_snippet_names()

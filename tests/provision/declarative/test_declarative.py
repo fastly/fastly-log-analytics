@@ -1525,7 +1525,7 @@ class TestGeneratorVCLStructure:
 
     def test_generator_builds_5_consolidated_snippets(self):
         snippets = desired_snippets(_state())
-        assert len(snippets) == 6
+        assert len(snippets) == 7
         assert {s.name for s in snippets} == {
             "Fastly Log Analytics - vcl_recv",
             "Fastly Log Analytics - vcl_miss",
@@ -1533,11 +1533,15 @@ class TestGeneratorVCLStructure:
             "Fastly Log Analytics - vcl_fetch",
             "Fastly Log Analytics - vcl_deliver",
             "Fastly Log Analytics - vcl_error",
+            "Fastly Log Analysis Reset Client IP",
         }
 
     def test_generator_snippet_priority_is_10(self):
         for snippet in desired_snippets(_state()):
-            assert snippet.priority == 10
+            if snippet.name == "Fastly Log Analysis Reset Client IP":
+                assert snippet.priority == -100
+            else:
+                assert snippet.priority == 10
 
     def test_generator_includes_all_custom_fields_in_format(self):
         state = _state(

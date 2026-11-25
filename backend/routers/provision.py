@@ -413,7 +413,8 @@ def provision_check_fos(req: CheckFosRequest):
         )
         return debug_envelope({"ok": True}, gated=True, is_cached=None, inject_calls=True)
     except Exception as e:
-        err_msg = str(e)
+        raw_err = str(e)
+        err_msg = redact_error_text(e)
         logger.warning(
             "[provision] FOS credential probe failed bucket=%s region=%s endpoint=%s: %s",
             bucket,
@@ -429,7 +430,7 @@ def provision_check_fos(req: CheckFosRequest):
                 err_msg = "Bucket not found. Please check the Bucket Name."
             elif code == "IllegalLocationConstraintException":
                 err_msg = "Region mismatch. Please check the FOS Region."
-        if "EndpointConnectionError" in err_msg:
+        if "EndpointConnectionError" in raw_err:
             err_msg = "Connection failed. Please verify the FOS Region is correct."
         return debug_envelope({"ok": False, "error": err_msg}, gated=True, is_cached=None, inject_calls=True)
 
@@ -499,7 +500,7 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
                         yield _sse("status", "Cron jobs updated")
                 except Exception as e:
                     if body.remove_cron:
-                        yield _sse("status", f"Warning: Failed to update cron jobs: {e}")
+                        yield _sse("status", f"Warning: Failed to update cron jobs: {redact_error_text(e)}")
 
                 _invalidate_service_credentials(sid)
 
@@ -526,7 +527,9 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
                                     except FileNotFoundError:
                                         pass
                         except OSError as rmtree_err:
-                            yield _sse("status", f"Warning: could not remove cache dir: {rmtree_err}")
+                            yield _sse(
+                                "status", f"Warning: could not remove cache dir: {redact_error_text(rmtree_err)}"
+                            )
 
                 if sid:
                     try:
@@ -534,7 +537,7 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
 
                         metadata_db.teardown(sid)
                     except Exception as e:
-                        yield _sse("status", f"Warning: could not clear metadata: {e}")
+                        yield _sse("status", f"Warning: could not clear metadata: {redact_error_text(e)}")
 
                 yield _sse("status", "Removed local metadata and cache")
 
@@ -561,12 +564,12 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
                         shutil.rmtree(logs_dir)
                         yield _sse("status", "Removed logs directory")
                     except Exception as e:
-                        yield _sse("status", f"Warning: could not remove logs directory: {e}")
+                        yield _sse("status", f"Warning: could not remove logs directory: {redact_error_text(e)}")
 
             _db.reload_default_source()
             yield _sse("done", "Teardown complete.")
         except Exception as e:
-            yield _sse("error", str(e))
+            yield _sse("error", redact_error_text(e))
 
     return sse_response(stream())
 
@@ -1578,7 +1581,7 @@ def provision_check_config(
                     else:
                         results["logging_service"] = {"ok": True, "details": f"{msg} and active sampling condition"}
         except Exception as e:
-            results["logging_service"]["details"] = f"Error checking logging service: {e}"
+            results["logging_service"]["details"] = f"Error checking logging service: {redact_error_text(e)}"
 
         try:
             dicts = fastly("GET", f"/service/{cdn_service_id}/version/active/dictionary", token=token)
@@ -1615,7 +1618,7 @@ def provision_check_config(
                             "details": "Service fully configured with dictionaries, backends, and performance snippets",
                         }
         except Exception as e:
-            results["cdn_service"]["details"] = f"Error checking CDN service: {e}"
+            results["cdn_service"]["details"] = f"Error checking CDN service: {redact_error_text(e)}"
     except Exception as e:
         logger.error("[provision-check-config] Global error: %s", e)
 

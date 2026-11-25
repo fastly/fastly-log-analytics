@@ -183,6 +183,7 @@ def stream_iac_reconcile(
     """Stream ``reconcile_infrastructure`` events via ``run_with_events`` as SSE JSON frames."""
     from backend.provision.declarative.reconciler import reconcile_infrastructure
     from backend.provision.orchestrator import run_with_events
+    from backend.utils.telemetry.logging_config import redact_error_text
 
     def _stream() -> Iterator[str]:
         yield json.dumps({"type": "status", "message": start_message})
@@ -196,7 +197,9 @@ def stream_iac_reconcile(
         except Exception as e:
             if logger_obj is not None:
                 logger_obj.exception("%s failed for %s", log_label, service_id)
-            err_payload = error_event(e) if error_event is not None else {"type": "error", "message": str(e)}
+            err_payload = (
+                error_event(e) if error_event is not None else {"type": "error", "message": redact_error_text(e)}
+            )
             yield json.dumps(err_payload)
 
     return sse_response(_stream())

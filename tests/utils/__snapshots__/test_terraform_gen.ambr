@@ -42,7 +42,6 @@
         unset req.http.X-Edge-Prev-Anchor;
         unset req.http.x-sigsci-skip-inspection-once;
         unset req.http.X-FOS-Request;
-        unset req.http.Fastly-Client-IP;
         if (req.http.Fastly-Client-IP) {
           set req.http.x-fos-edge-data:ip = req.http.Fastly-Client-IP;
         } else {

@@ -145,7 +145,6 @@ _SCRUB_HEADERS = (
     "X-Edge-Prev-Anchor",
     "x-sigsci-skip-inspection-once",
     "X-FOS-Request",
-    "Fastly-Client-IP",
 )
 
 

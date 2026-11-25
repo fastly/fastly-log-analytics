@@ -443,6 +443,13 @@ _UA_PROD_VER_RE = re.compile(
     re.IGNORECASE,
 )
 _EMBEDDED_IPV4_RE = re.compile(r"(?<!\d)(?<!\d\.)(?:\d{1,3}\.){3}\d{1,3}(?![\d]|\.\d)")
+_PCT_COLON_RE = re.compile(r"%3[Aa]")
+_PCT_IPV6_TOKEN_RE = re.compile(
+    r"(?:(?<![A-Za-z0-9])|(?<=%5[Bb]))"
+    r"(?:[0-9A-Fa-f]{1,4})?"
+    r"(?:%3[Aa](?:[0-9A-Fa-f]{0,4}|(?:\d{1,3}\.){3}\d{1,3})){2,7}"
+    r"(?![A-Za-z0-9]|\.\d)"
+)
 _EMBEDDED_IPV6_RE = re.compile(
     r"(?<![A-Za-z0-9])(?:"
     r"(?:"
@@ -901,7 +908,10 @@ def mask_ip_or_chain(val: str) -> str:
 
 def scrub_ip_text(val: str) -> str:
     """Mask IPv4/IPv6 literals embedded in URLs or free text while preserving UA version tokens."""
-    if not isinstance(val, str) or not val or ("." not in val and ":" not in val):
+    if not isinstance(val, str) or not val:
+        return val
+    has_pct_colon = "%3a" in val.lower()
+    if "." not in val and ":" not in val and not has_pct_colon:
         return val
     ua_spans: list[tuple[int, int]] = []
     ua_idx = 0
@@ -921,6 +931,15 @@ def scrub_ip_text(val: str) -> str:
         except ValueError:
             return cand
         return mask_ip(cand)
+
+    def _sub_pct_v6(match: re.Match[str]) -> str:
+        raw = match.group(0)
+        decoded = _PCT_COLON_RE.sub(":", raw)
+        try:
+            ipaddress.IPv6Address(decoded)
+        except ValueError:
+            return raw
+        return mask_ip(decoded)
 
     def _sub_v6(match: re.Match[str]) -> str:
         cand = match.group(0)
@@ -957,6 +976,8 @@ def scrub_ip_text(val: str) -> str:
         return mask_ip(cand)
 
     out = val
+    if has_pct_colon:
+        out = _PCT_IPV6_TOKEN_RE.sub(_sub_pct_v6, out)
     if ":" in out:
         out = _EMBEDDED_IPV6_RE.sub(_sub_v6, out)
     if "." in out:
