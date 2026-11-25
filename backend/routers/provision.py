@@ -506,6 +506,8 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
 
             yield _sse("status", "Starting teardown of Fastly resources...")
             for event in perform_teardown(state, token, opts=opts):
+                if isinstance(event, dict) and isinstance(event.get("message"), str):
+                    event = {**event, "message": redact_error_text(event["message"])}
                 yield json.dumps(event)
 
             if body.remove_cache:
@@ -1052,6 +1054,8 @@ def provision_execute(req: ProvisionExecuteRequest):
             from backend.provision import provision
 
             for event in provision(cfg):
+                if isinstance(event, dict) and isinstance(event.get("message"), str):
+                    event = {**event, "message": redact_error_text(event["message"])}
                 if event.get("type") == "error":
                     error_already_emitted = True
                 yield json.dumps(event)
@@ -1131,7 +1135,7 @@ def provision_reconcile(body: ProvisionReconcileRequest):
                     "activated_version": result.activated_version,
                     "changes_applied": result.changes_applied,
                     "duration_ms": result.duration_ms,
-                    "error": result.error,
+                    "error": redact_error_text(result.error) if result.error else None,
                 }
             )
             events.put({"type": "done", "success": result.error is None})

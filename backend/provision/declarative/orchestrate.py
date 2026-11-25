@@ -561,7 +561,7 @@ def reconcile_cdn_service_state(
             except Exception as rollback_err:
                 if draft_version is not None and status_cb:
                     status_cb(
-                        f"🧹 Reconcile failed: {rollback_err}. Broken draft version {draft_version} left as inactive draft."
+                        f"🧹 Reconcile failed: {redact_error_text(rollback_err)}. Broken draft version {draft_version} left as inactive draft."
                     )
                 raise rollback_err
     finally:
@@ -881,7 +881,9 @@ def reconcile_infrastructure(
     except Exception as err:
         logger.error("IaC reconciliation failure, executing transactional configuration rollback", exc_info=True)
         if status_cb:
-            status_cb(f"❌ Error during reconciliation: {err}. Rolling back to previous configuration...")
+            status_cb(
+                f"❌ Error during reconciliation: {redact_error_text(err)}. Rolling back to previous configuration..."
+            )
         rollback_error: RuntimeError | None = None
         if persisted:
             if mutate_config(logging_service_id, _rollback_owned_keys) is None:

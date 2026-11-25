@@ -135,6 +135,7 @@ from backend.provision.rum_assets import (
 from backend.provision.rum_assets import (
     upload_rum_tracker_js as upload_rum_tracker_js,
 )
+from backend.utils.telemetry.logging_config import redact_error_text
 
 logger = logging.getLogger(__name__)
 _ORIG_DELETE_FOS_TOKENS = delete_fos_tokens_for_service
@@ -696,10 +697,13 @@ def provision(cfg: dict, _resume_from_state: bool = False):
         except FileNotFoundError:
             pass
     except _PreflightError as e:
-        yield {"type": "error", "message": str(e)}
+        yield {"type": "error", "message": redact_error_text(e)}
         return
     except Exception as e:
-        yield {"type": "status", "message": f"Provisioning failed: {str(e)}. Starting full cleanup rollback..."}
+        yield {
+            "type": "status",
+            "message": f"Provisioning failed: {redact_error_text(e)}. Starting full cleanup rollback...",
+        }
         service_id = state.get("logging_service_id")
         rollback_failed = False
         previous_version = state.get("previous_logging_version")
@@ -725,7 +729,7 @@ def provision(cfg: dict, _resume_from_state: bool = False):
                     rollback_failed = True
                     yield {
                         "type": "status",
-                        "message": f"Rollback aborted: could not restore logging version {previous_version}: {rollback_exc}",
+                        "message": f"Rollback aborted: could not restore logging version {previous_version}: {redact_error_text(rollback_exc)}",
                     }
         if not rollback_failed:
             try:
@@ -741,7 +745,7 @@ def provision(cfg: dict, _resume_from_state: bool = False):
                 rollback_failed = True
                 yield {
                     "type": "status",
-                    "message": f"Rollback aborted: could not restore service config: {rollback_exc}",
+                    "message": f"Rollback aborted: could not restore service config: {redact_error_text(rollback_exc)}",
                 }
         created = state.get("_created_resources") or {}
         opts = {
@@ -755,7 +759,7 @@ def provision(cfg: dict, _resume_from_state: bool = False):
         }
         if not rollback_failed:
             yield from perform_teardown(state, token, opts)
-        yield {"type": "error", "message": str(e)}
+        yield {"type": "error", "message": redact_error_text(e)}
         if rollback_failed:
             raise RuntimeError(f"{e}; provisioning rollback failed, created resources retained") from e
         raise
@@ -794,7 +798,7 @@ def perform_teardown(state: dict, token: str, opts: dict | None = None):
             yield {
                 "type": "status",
                 "message": (
-                    f"❌ Scoring teardown ABORTED (Compute service left in place on purpose): {exc} "
+                    f"❌ Scoring teardown ABORTED (Compute service left in place on purpose): {redact_error_text(exc)} "
                     "Re-run teardown after resolving; continuing with the remaining steps."
                 ),
             }
@@ -816,7 +820,7 @@ def perform_teardown(state: dict, token: str, opts: dict | None = None):
                 remove_rum=opts.get("remove_rum", True),
             )
         except Exception as exc:
-            yield {"type": "status", "message": f"Warning: {exc}"}
+            yield {"type": "status", "message": f"Warning: {redact_error_text(exc)}"}
     yield {"type": "progress", "current": 3, "total": total_steps}
     step(
         3,
@@ -828,7 +832,10 @@ def perform_teardown(state: dict, token: str, opts: dict | None = None):
             try:
                 yield from run_with_events(delete_fos_access_key, key_id, token)
             except Exception as exc:
-                yield {"type": "status", "message": f"Warning: failed to delete created FOS key {key_id}: {exc}"}
+                yield {
+                    "type": "status",
+                    "message": f"Warning: failed to delete created FOS key {key_id}: {redact_error_text(exc)}",
+                }
     elif opts.get("remove_fos_tokens"):
         try:
             from backend.provision import fos_setup as _fos_setup_mod
@@ -876,7 +883,7 @@ def perform_teardown(state: dict, token: str, opts: dict | None = None):
                 yield from run_with_events(delete_fos_access_key, temp_key["id"], token)
         except Exception as exc:
             if remove_cloud_files:
-                yield {"type": "status", "message": f"Warning: failed to delete cloud files: {exc}"}
+                yield {"type": "status", "message": f"Warning: failed to delete cloud files: {redact_error_text(exc)}"}
     yield {"type": "progress", "current": 5, "total": total_steps}
     step(5, total_steps, "Deleting CDN service" if opts.get("remove_cdn") else "Skipping CDN service deletion")
     if (

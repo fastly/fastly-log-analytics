@@ -844,6 +844,7 @@ def remove_logging_endpoint(
         info("Removing VCL snippets…")
         owned_exact: set[str] = set()
         if remove_logging:
+            owned_exact.add("Fastly Log Analysis Reset Client IP")
             owned_exact.update(scoring_snippet_names())
             owned_exact.update(cmcd_snippet_names())
         if remove_rum:

@@ -123,7 +123,7 @@ ABS_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9])/(?:srv|var|tmp|data|home|opt|usr|mnt|app|etc|root|Users|run|proc|private|Library)\b(?:/[A-Za-z0-9_./-]*)?"
 )
 CID_SALT_LITERAL_RE = re.compile(r"(sha256\(\s*CONCAT\(\s*')[^']*(')", re.IGNORECASE)
-_URL_CREDS_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]*:)([^/\s@]+)(@)")
+_URL_CREDS_RE = re.compile(r"(?<![A-Za-z0-9+.-])([A-Za-z][A-Za-z0-9+.-]{0,31}://[^/\s:@]*:)([^/\s@]+)(@)")
 _HEADER_SECRET_RE = re.compile(
     r"(\b(?:Fastly-Key|X-API-Key)\s*:\s*|(?:\bAuthorization\s*:\s*(?:Bearer|Basic)\s+))([^\s'\"`,;)}\]]+)",
     re.IGNORECASE,

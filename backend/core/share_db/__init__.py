@@ -442,10 +442,12 @@ _UA_PROD_VER_RE = re.compile(
     r"/\d+(?:\.\d+){1,3}\b",
     re.IGNORECASE,
 )
-_EMBEDDED_IPV4_RE = re.compile(r"(?<!\d)(?<!\d\.)(?:\d{1,3}\.){3}\d{1,3}(?![\d]|\.\d)")
+_EMBEDDED_IPV4_RE = re.compile(
+    r"(?:(?<!\d)|(?<=%(?:2[0-9A-Fa-f]|3[AaBbCcDdEeFf]|5[BbCcDd]|7[BbCcDd])))(?<!\d\.)(?:\d{1,3}\.){3}\d{1,3}(?![\d]|\.\d)"
+)
 _PCT_COLON_RE = re.compile(r"%3[Aa]")
 _PCT_IPV6_TOKEN_RE = re.compile(
-    r"(?:(?<![A-Za-z0-9])|(?<=%5[Bb]))"
+    r"(?:(?<![A-Za-z0-9])|(?<=%(?:2[0-9A-Fa-f]|3[AaBbCcDdEeFf]|5[BbCcDd]|7[BbCcDd])))"
     r"(?:[0-9A-Fa-f]{1,4})?"
     r"(?:%3[Aa](?:[0-9A-Fa-f]{0,4}|(?:\d{1,3}\.){3}\d{1,3})){2,7}"
     r"(?![A-Za-z0-9]|\.\d)"

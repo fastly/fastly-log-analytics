@@ -743,3 +743,286 @@ def test_w1_6_insights_cache_collapse_guarded_and_locked_semaphores_never_evicte
             assert called
 
     asyncio.run(_check_detail_uses_sem())
+
+
+# ── Iteration 3 Wave 2 Verifier Hardening Regressions ─────────────────────────
+
+
+def test_w2_1_url_creds_regex_linear_time_no_redos() -> None:
+    """_URL_CREDS_RE must run in linear time (<50ms on 40K adversarial inputs) without ReDoS."""
+    import time
+
+    from backend.utils.telemetry.logging_config import redact_error_text
+
+    # Sanity check: valid URL credentials are still redacted
+    assert (
+        redact_error_text("connect postgresql://dbuser:demopass00@db.internal:5432/fla")
+        == "connect postgresql://dbuser:[redacted]@db.internal:5432/fla"
+    )
+
+    # Adversarial inputs that triggered O(N^2) backtracking in the unanchored scheme regex
+    payload_alpha = "a" * 40_000
+    t0 = time.perf_counter()
+    out_alpha = redact_error_text(payload_alpha)
+    dt_alpha = time.perf_counter() - t0
+    assert out_alpha == payload_alpha
+    assert dt_alpha < 0.05, f"ReDoS regression on alpha payload: {dt_alpha:.4f}s"
+
+    payload_url = "https://" + "a" * 40_000 + ":" + "b" * 40_000
+    t1 = time.perf_counter()
+    out_url = redact_error_text(payload_url)
+    dt_url = time.perf_counter() - t1
+    assert out_url == payload_url
+    assert dt_url < 0.05, f"ReDoS regression on unclosed URL payload: {dt_url:.4f}s"
+
+
+def test_w2_2_scrub_ip_text_handles_pct_encoded_delimiters() -> None:
+    """scrub_ip_text must scrub percent-encoded IPv6 and embedded IPv4 preceded by percent-encoded delimiters."""
+    from backend.core.share_db import scrub_ip_text
+
+    for delim in ("%3D", "%2C", "%20", "%2F", "%3A"):
+        raw_v6 = f"/trace?q=ip{delim}2001%3Adb8%3Aabcd%3A%3A9&ok=1"
+        scrubbed = scrub_ip_text(raw_v6)
+        assert "2001%3Adb8%3Aabcd%3A%3A9" not in scrubbed, f"Failed to scrub IPv6 after {delim}: {scrubbed!r}"
+        assert "abcd%3A%3A9" not in scrubbed, f"Partial IPv6 leaked after {delim}: {scrubbed!r}"
+        assert "2001:db8:abcd::" in scrubbed
+
+    raw_v4 = "/proxy?hdr=for%20198.51.100.7%2C203.0.113.42&ts=12%3A34%3A56"
+    scrubbed_v4 = scrub_ip_text(raw_v4)
+    assert "198.51.100.7" not in scrubbed_v4, f"IPv4 after %20 leaked: {scrubbed_v4!r}"
+    assert "203.0.113.42" not in scrubbed_v4, f"IPv4 after %2C leaked: {scrubbed_v4!r}"
+    assert "ts=12%3A34%3A56" in scrubbed_v4
+
+
+def test_w2_3_teardown_removes_reset_client_ip_snippet() -> None:
+    """remove_logging_endpoint(remove_logging=True) must remove the priority -100 Reset Client IP snippet."""
+    from contextlib import contextmanager
+
+    deleted_paths: list[str] = []
+
+    @contextmanager
+    def _fake_draft_version(service_id, token, **kwargs):
+        yield 7
+
+    def _fake_fastly(method, path, token=None, **kwargs):
+        if method == "GET" and path.endswith("/snippet"):
+            return [
+                {"name": "Fastly Log Analysis Reset Client IP"},
+                {"name": "Fastly Log Analytics - vcl_recv"},
+                {"name": "user-custom-snippet"},
+            ]
+        if method == "GET":
+            return []
+        if method == "DELETE":
+            deleted_paths.append(path)
+            return None
+        return {}
+
+    with (
+        patch.object(fastly_api, "get_active_version", return_value=6),
+        patch.object(fastly_api, "list_log_endpoints", return_value=[]),
+        patch.object(fastly_api, "draft_version", _fake_draft_version),
+        patch.object(fastly_api, "fastly", _fake_fastly),
+    ):
+        fastly_api.remove_logging_endpoint(
+            "svc-td-reset",
+            "ep-main",
+            "tok-demo",
+            remove_logging=True,
+            remove_rum=False,
+        )
+
+    assert any("Fastly%20Log%20Analysis%20Reset%20Client%20IP" in p for p in deleted_paths), (
+        f"Reset Client IP snippet was orphaned on teardown; deleted={deleted_paths!r}"
+    )
+    assert not any("user-custom-snippet" in p for p in deleted_paths)
+
+
+def test_w2_4a_orchestrate_cdn_and_infra_reconcile_redact_status_cb(tmp_path) -> None:
+    """reconcile_cdn_service_state and reconcile_infrastructure must redact errors in status_cb."""
+    from backend.provision.declarative import orchestrate as orch_mod
+
+    # 1) reconcile_cdn_service_state rollback_err
+    cdn_cb: list[str] = []
+    cfg_file = tmp_path / "svc-log.json"
+    cfg_file.write_text(json.dumps({"fos_proxy": {"service_id": "cdn-1", "domain": "https://cdn.example.com"}}))
+    fake_lock = MagicMock()
+    fake_lock.__enter__ = MagicMock(return_value=None)
+    fake_lock.__exit__ = MagicMock(return_value=False)
+    fake_diff = MagicMock()
+    fake_diff.is_empty.return_value = False
+    with (
+        patch("backend.config.config_path", return_value=cfg_file),
+        patch.object(orch_mod, "acquire_vcl_lock", return_value=fake_lock),
+        patch.object(orch_mod.fastly_integration, "fetch_active_version", return_value=1),
+        patch.object(orch_mod, "fastly", return_value={"content": ""}),
+        patch.object(orch_mod, "_fetch_snippets", return_value=[]),
+        patch.object(orch_mod, "_fetch_backends", return_value=[]),
+        patch.object(orch_mod, "_fetch_dictionaries", return_value=[]),
+        patch.object(orch_mod, "compute_diff", return_value=fake_diff),
+        patch.object(orch_mod, "_clone_active_version", return_value=2),
+        patch.object(
+            orch_mod,
+            "_apply_diff",
+            side_effect=RuntimeError("cdn apply failed postgresql://u:demopass66@h/db /etc/cdn.conf"),
+        ),
+    ):
+        with pytest.raises(RuntimeError):
+            orch_mod.reconcile_cdn_service_state("svc-log", "tok", dry_run=False, status_cb=cdn_cb.append)
+    cdn_joined = "\n".join(cdn_cb)
+    assert "demopass66" not in cdn_joined
+    assert "/etc/cdn.conf" not in cdn_joined
+    assert "[redacted]" in cdn_joined and "<path>" in cdn_joined
+
+    # 2) reconcile_infrastructure err
+    infra_cb: list[str] = []
+    fake_desired = SimpleNamespace(compute_scorer=SimpleNamespace(domains=["demo.global.ssl.fastly.net"]))
+    with (
+        patch.object(orch_mod, "build_desired_state", return_value=fake_desired),
+        patch.object(orch_mod, "discover_current_state", return_value={"compute_scorer": None, "kv_stores": {}}),
+        patch("backend.config.snapshot_config", return_value=json.dumps({"service_id": "svc-log"})),
+        patch(
+            "backend.provision.opaque_names.generate_opaque_scorer_domain",
+            side_effect=RuntimeError("infra failed Fastly-Key: demofastly77 /etc/infra.conf"),
+        ),
+    ):
+        fake_desired.compute_scorer.domains = []
+        with pytest.raises(RuntimeError):
+            orch_mod.reconcile_infrastructure("svc-log", "tok", dry_run=False, status_cb=infra_cb.append)
+    infra_joined = "\n".join(infra_cb)
+    assert "demofastly77" not in infra_joined
+    assert "/etc/infra.conf" not in infra_joined
+    assert "[redacted]" in infra_joined and "<path>" in infra_joined
+
+
+def test_w2_4b_orchestrator_provision_and_teardown_redact_events() -> None:
+    """provision() and perform_teardown() in orchestrator.py must redact raw exceptions in yielded events."""
+    from backend.provision import orchestrator as orch_core
+
+    # 1) perform_teardown warning events
+    state = {
+        "logging_service_id": "svc-td-orch",
+        "provisioning": {"endpoint_name": "ep-1"},
+        "fos_bucket_name": "demo-bucket",
+        "fos_region": "us-east-1",
+    }
+    opts = {
+        "remove_logging": True,
+        "remove_rum": False,
+        "remove_cdn": False,
+        "remove_bucket": False,
+        "remove_cloud_files": True,
+        "remove_scoring": False,
+        "remove_fos_tokens": False,
+        "fos_key_ids": ["key-1"],
+    }
+    with (
+        patch.object(
+            orch_core,
+            "remove_logging_endpoint",
+            side_effect=RuntimeError("rm ep failed Fastly-Key: demofastly81 /etc/ep.conf"),
+        ),
+        patch.object(
+            orch_core,
+            "delete_fos_access_key",
+            side_effect=RuntimeError("rm key failed postgresql://u:demopass82@h/db /etc/key.conf"),
+        ),
+        patch.object(
+            orch_core,
+            "ensure_fos_access_key",
+            side_effect=RuntimeError("cloud del failed Authorization: Bearer demobearer83 /var/lib/cloud.json"),
+        ),
+    ):
+        events = list(orch_core.perform_teardown(state, "tok", opts))
+    serialized = json.dumps(events)
+    for secret in (
+        "demofastly81",
+        "/etc/ep.conf",
+        "demopass82",
+        "/etc/key.conf",
+        "demobearer83",
+        "/var/lib/cloud.json",
+    ):
+        assert secret not in serialized, f"Leaked {secret!r} in perform_teardown events"
+    assert "[redacted]" in serialized and "<path>" in serialized
+
+    # 2) provision() _PreflightError event
+    with (
+        patch.object(orch_core, "validate_log_format", return_value=[]),
+        patch.object(
+            orch_core,
+            "logging_endpoint_role_error",
+            return_value="preflight Fastly-Key: demofastly84 /etc/preflight.conf",
+        ),
+    ):
+        prov_events = list(orch_core.provision({"logging_service_id": "svc-pre", "admin_token": "tok"}))
+    prov_serialized = json.dumps(prov_events)
+    assert "demofastly84" not in prov_serialized
+    assert "/etc/preflight.conf" not in prov_serialized
+    assert "[redacted]" in prov_serialized and "<path>" in prov_serialized
+
+
+def test_w2_4c_run_with_events_redacts_error_event() -> None:
+    """run_with_events(raise_on_error=False) in cli.py must redact error messages."""
+    from backend.provision.cli import run_with_events
+
+    def _boom(status_cb=None):
+        raise RuntimeError("cli failed Fastly-Key: demofastly99 /etc/cli.conf")
+
+    events = list(run_with_events(_boom, raise_on_error=False))
+    err_events = [e for e in events if e.get("type") == "error"]
+    assert len(err_events) == 1
+    msg = err_events[0]["message"]
+    assert "demofastly99" not in msg
+    assert "/etc/cli.conf" not in msg
+    assert "[redacted]" in msg and "<path>" in msg
+
+
+def test_w2_4d_provision_router_defensively_redacts_stream_and_reconcile_result() -> None:
+    """provision.py must defensively redact streamed event messages and reconcile result.error."""
+    from backend.models.common import ProvisionReconcileRequest, ProvisionTeardownRequest
+
+    # 1) provision_teardown defensive redaction of yielded perform_teardown event messages
+    with (
+        patch(
+            "backend.config.load_config",
+            return_value={"fos_bucket": "b", "fos_region": "us-east-1", "provisioning": {}},
+        ),
+        patch("backend.core.vcl_generator.validate_destructive_token"),
+        patch("backend.config.config_path", return_value="/nonexistent-cfg-path"),
+        patch("backend.provision._sync_crontab"),
+        patch.object(provision_mod, "_invalidate_service_credentials"),
+        patch(
+            "backend.provision.perform_teardown",
+            return_value=iter(
+                [{"type": "status", "message": "raw teardown Fastly-Key: demofastly01 /etc/td_raw.conf"}]
+            ),
+        ),
+    ):
+        resp_td = provision_mod.provision_teardown(
+            _fake_request(None),
+            ProvisionTeardownRequest(service_id="svc-td-raw", token="tok", remove_cron=False),
+        )
+        out_td = asyncio.run(_collect_sse(resp_td))
+    assert "demofastly01" not in out_td
+    assert "/etc/td_raw.conf" not in out_td
+    assert "[redacted]" in out_td and "<path>" in out_td
+
+    # 2) provision_reconcile redaction of result.error
+    fake_result = SimpleNamespace(
+        service_id="svc-rec",
+        activated_version=None,
+        changes_applied={},
+        duration_ms=12,
+        error="reconcile err postgresql://u:demopass02@h/db /etc/rec_res.conf",
+    )
+    with (
+        patch.object(provision_mod, "_validate_provision_vcl_inputs"),
+        patch("backend.config.load_config", return_value=None),
+        patch("backend.provision.declarative.reconciler.reconcile_vcl_state", return_value=fake_result),
+    ):
+        resp_rec = provision_mod.provision_reconcile(ProvisionReconcileRequest(service_id="svc-rec", token="tok-demo"))
+        out_rec = asyncio.run(_collect_sse(resp_rec))
+    assert "demopass02" not in out_rec
+    assert "/etc/rec_res.conf" not in out_rec
+    assert "[redacted]" in out_rec and "<path>" in out_rec

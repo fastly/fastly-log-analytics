@@ -28,6 +28,7 @@ from backend.core.service_defaults import (
     DEFAULT_SNAPSHOT_INTERVAL_MINUTES,
     VALID_SNAPSHOT_INTERVAL_MINUTES,
 )
+from backend.utils.telemetry.logging_config import redact_error_text
 
 # ── Rich Consoles & ANSI colour helpers (folded from utils.py) ───────────────
 _stdout = Console(highlight=False, markup=False, soft_wrap=True)
@@ -150,7 +151,7 @@ def run_with_events(func, *args, raise_on_error: bool = True, **kwargs):
     if err:
         if raise_on_error:
             raise err[0]
-        yield {"type": "error", "message": str(err[0])}
+        yield {"type": "error", "message": redact_error_text(err[0])}
         return None
     return res[0]
 
