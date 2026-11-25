@@ -8,6 +8,11 @@ import {
   readLogs,
   type OpsSource,
 } from "./engine";
+import {
+  deserializeIngestLifecycleFold,
+  serializeIngestLifecycleFold,
+  type IngestLifecycleFold,
+} from "./ingest-lifecycle";
 import type { ManifestFile } from "../dashboard/manifest";
 import { fetchIngestDeletedIntervals } from "../usage/summary";
 
@@ -361,6 +366,79 @@ describe("readIngestLifecycle", () => {
     expect(second.intervals.map((i) => i.id)).toEqual([
       "raw_request:raw/interior.gz",
     ]);
+  });
+
+  it("persists interior file folds via writeIngestFold and serves post-clear loads from readIngestFold without fetching Parquet", async () => {
+    const day10 = BASE_DAY;
+    const day11 = BASE_DAY + DAY_MS;
+    const day12 = BASE_DAY + 2 * DAY_MS;
+    const interiorKey =
+      "processed/ops/ingest_files/year=2026/month=11/day=11/compact=29901440-29901500-c1-n2.parquet";
+    const files = {
+      [interiorKey]: makeIngestParquet([
+        {
+          timestamp: day11 + 1000,
+          event_id: "p1",
+          raw_key: "raw/persisted.gz",
+          raw_size: 1234,
+          status: "converted",
+          state_version: 1,
+          output_keys_json: JSON.stringify([{ key: "processed/request/out.parquet", bytes: 456 }]),
+          raw_deleted: false,
+        },
+        {
+          timestamp: day11 + 2000,
+          event_id: "p2",
+          raw_key: "raw/persisted.gz",
+          raw_size: 1234,
+          status: "raw_deleted",
+          state_version: 2,
+          raw_deleted: true,
+          raw_deleted_at: day11 + 2000,
+        },
+      ]),
+    };
+    const manifestFiles: ManifestFile[] = [
+      { key: interiorKey, start: "", end: "", size: 100, rows: 2 },
+    ];
+    const persistedStore = new Map<string, ArrayBuffer>();
+    const { src, fetchCalls } = makeSource({
+      files,
+      manifestFiles,
+      cacheScope: "persisted-fold-scope",
+    });
+    const persistentSrc: OpsSource = {
+      ...src,
+      async readIngestFold(key) {
+        const raw = persistedStore.get(key);
+        return raw ? deserializeIngestLifecycleFold(raw) : null;
+      },
+      async writeIngestFold(key, fold: IngestLifecycleFold) {
+        persistedStore.set(key, serializeIngestLifecycleFold(fold));
+      },
+    };
+
+    const first = await readIngestLifecycle(persistentSrc, {
+      from: new Date(day10).toISOString(),
+      to: new Date(day12).toISOString(),
+    });
+    expect(fetchCalls).toEqual([interiorKey]);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(persistedStore.has(interiorKey)).toBe(true);
+
+    // Clear in-memory decoded cache (simulating fresh worker on warm navigation).
+    clearOpsDecodedCache();
+    fetchCalls.length = 0;
+
+    const second = await readIngestLifecycle(persistentSrc, {
+      from: new Date(day10).toISOString(),
+      to: new Date(day12).toISOString(),
+    });
+    expect(fetchCalls).toEqual([]);
+    expect(second.intervals).toEqual(first.intervals);
+    expect(second.outputs).toEqual(first.outputs);
+    expect(second.deletedParquetKeys).toEqual(first.deletedParquetKeys);
+    expect(second.bytes).toBe(first.bytes);
   });
 
   it("fetches ops files up to OPS_FETCH_CONCURRENCY (32) in parallel", async () => {

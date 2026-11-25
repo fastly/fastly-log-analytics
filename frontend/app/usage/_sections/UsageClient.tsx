@@ -119,10 +119,15 @@ export function UsagePageContent({
   } = useQuery({
     queryKey: ['usage', 'storage', activeServiceId, queryStartTime, queryEndTime],
     queryFn: async ({ signal }) => {
+      const query = {
+        start: queryStartTime ?? undefined,
+        end: queryEndTime ?? undefined,
+        ...(cloudMode ? { include_intervals: '0' } : {}),
+      } as { start?: string; end?: string }
       return unwrapClient(
         client.GET('/api/usage/current-storage', {
           signal,
-          params: { query: { start: queryStartTime ?? undefined, end: queryEndTime ?? undefined } },
+          params: { query },
         }),
       )
     },

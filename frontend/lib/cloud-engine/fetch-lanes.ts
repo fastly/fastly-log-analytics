@@ -13,7 +13,7 @@ export type FetchLanes = {
  * `rawWhileSummary` raw reads run, which leaves the rest of the browser's
  * connections to the summaries.
  */
-export function createFetchLanes({ summaryLimit = 16, rawWhileSummary = 10 } = {}): FetchLanes {
+export function createFetchLanes({ summaryLimit = 24, rawWhileSummary = 10 } = {}): FetchLanes {
   const waiting: Record<FetchLane, (() => void)[]> = { summary: [], raw: [] };
   const active: Record<FetchLane, number> = { summary: 0, raw: 0 };
   let draining = false;

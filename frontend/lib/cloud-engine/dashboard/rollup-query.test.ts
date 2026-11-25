@@ -708,6 +708,74 @@ describe("queryRollup", () => {
     expect([result!.dataFromMs, result!.dataThroughMs]).toEqual([T0, T0 + 2 * HOUR]);
   });
 
+  it("persists decoded rollups via writeDerivedFile and serves post-clear loads from readDerivedFile without refetching Parquet", async () => {
+    const {
+      clearRollupQueryCache,
+      deserializeDecodedRollup,
+      serializeDecodedRollup,
+    } = await import("./rollup-query");
+    const { defineSummarySpec } = await import("./summary-projection");
+    const spec = defineSummarySpec({
+      groups: ["dims", "all_fields", "field_totals", "dim_totals", "urls", "ins_url", "ins_lat"],
+      columns: ["count", "requests", "errors", "elapsed_count", "elapsed_hist"],
+    });
+
+    const derived = new Map<string, { bytes: ArrayBuffer; meta: string }>();
+    let fetchFileCalls = 0;
+    let writeCalls = 0;
+    const base = source(HOURS);
+    const persistentSource = {
+      ...base,
+      cacheScope: "decoded-rollup-persist-test",
+      fetchFile: async (key: string, sig?: AbortSignal) => {
+        fetchFileCalls++;
+        return base.fetchFile(key, sig);
+      },
+      readDerivedFile: async (key: string, identity: string) => {
+        const hit = derived.get(`${key}\0${identity}`);
+        if (!hit) return null;
+        return {
+          bytes: async () => hit.bytes.slice(0),
+          meta: hit.meta,
+          byteLength: hit.bytes.byteLength,
+        };
+      },
+      writeDerivedFile: async (key: string, identity: string, bytes: ArrayBuffer, meta: string) => {
+        writeCalls++;
+        derived.set(`${key}\0${identity}`, { bytes: bytes.slice(0), meta });
+      },
+    };
+
+    const first = await queryRollup(persistentSource, {
+      fromMs: T0,
+      toMs: T0 + 2 * HOUR,
+      spec,
+    });
+    expect(first).not.toBeNull();
+    expect(fetchFileCalls).toBe(HOURS.length);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(writeCalls).toBe(HOURS.length);
+
+    // Direct serialize/deserialize round-trip check including NaN for skipped columns
+    const roundTripped = deserializeDecodedRollup(serializeDecodedRollup(first!.rollup), spec);
+    expect(roundTripped).not.toBeNull();
+    expect(roundTripped!.seriesStepMs).toBe(first!.rollup.seriesStepMs);
+
+    // Simulate fresh worker navigation: wipe in-memory decoded/merged caches, keep derived CacheStorage.
+    clearRollupQueryCache();
+    fetchFileCalls = 0;
+
+    const second = await queryRollup(persistentSource, {
+      fromMs: T0,
+      toMs: T0 + 2 * HOUR,
+      spec,
+    });
+    expect(second).not.toBeNull();
+    expect(fetchFileCalls).toBe(0);
+    expect(second!.rollup.dims.get("city")).toEqual(first!.rollup.dims.get("city"));
+    expect(second!.rollup.fields).toEqual(first!.rollup.fields);
+  });
+
   it("returns null instead of fabricating zero traffic if a summary-first bundle is missing (404)", async () => {
     const s = {
       cacheScope: "summary-first-missing-bundle",

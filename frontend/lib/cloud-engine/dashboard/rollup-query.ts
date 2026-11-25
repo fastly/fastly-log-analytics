@@ -1188,6 +1188,328 @@ export function clearRollupQueryCache(): void {
   mergedResults.clear();
 }
 
+const DECODED_ROLLUP_CACHE_VERSION = "decoded-rollup-v1";
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+
+function base64ToBytes(encoded: string): Uint8Array {
+  const binary = atob(encoded);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+  return out;
+}
+
+type EncodedAgg = {
+  s?: Record<string, number | null>;
+  l?: string;
+  h?: Partial<Record<keyof RollupHists, string>>;
+};
+
+type EncodedRollup = {
+  v: 1;
+  step: number;
+  dims?: [string, [string, EncodedAgg][]][];
+  series?: [string, [string, [number, EncodedAgg][]][]][];
+  series1?: [string, [string, [number, EncodedAgg][]][]][];
+  fields?: [string, [string, number | null][]][];
+  truncated: string[];
+  present?: string[];
+  groups?: [string, [string, [string, EncodedAgg][]][]][];
+  waterfall?: Record<string, number | null>;
+  overview?: Record<string, number | null>;
+  assets?: [string, Record<string, number | null>][];
+  samples?: [string, number, string | null, number | null, number | null, number | null][];
+  value?: [string, [string, [number, Record<string, number | null>][]][]][];
+  valueTotals?: [string, number | null][];
+  binsTotals?: [string, number | null][];
+};
+
+const encodeNum = (n: number): number | null => (Number.isNaN(n) ? null : n);
+const decodeNum = (n: number | null | undefined): number => (n === null ? NaN : (n ?? 0));
+
+function encodeAgg(agg: RollupAgg): EncodedAgg {
+  const out: EncodedAgg = {};
+  let sums: Record<string, number | null> | undefined;
+  for (let i = 0; i < SUM_KEYS.length; i++) {
+    const key = SUM_KEYS[i];
+    const v = agg[key];
+    if (v !== 0) {
+      sums ??= {};
+      sums[key] = encodeNum(v);
+    }
+  }
+  if (sums) out.s = sums;
+  if (agg.label !== null) out.l = agg.label;
+  let hists: Partial<Record<keyof RollupHists, string>> | undefined;
+  for (let i = 0; i < HIST_KEYS.length; i++) {
+    const key = HIST_KEYS[i];
+    const hist = agg.hists[key];
+    if (hist) {
+      const bytes = hist.toBytes();
+      if (bytes) {
+        hists ??= {};
+        hists[key] = bytesToBase64(bytes);
+      }
+    }
+  }
+  if (hists) out.h = hists;
+  return out;
+}
+
+function decodeAgg(raw: EncodedAgg): RollupAgg {
+  const agg = emptyAgg();
+  if (raw.s) {
+    for (const key of SUM_KEYS) {
+      if (key in raw.s) agg[key] = decodeNum(raw.s[key]);
+    }
+  }
+  if (typeof raw.l === "string") agg.label = raw.l;
+  if (raw.h) {
+    for (const key of HIST_KEYS) {
+      const encoded = raw.h[key];
+      if (typeof encoded === "string") {
+        agg.hists[key] = Histogram.fromBytes(base64ToBytes(encoded));
+      }
+    }
+  }
+  return agg;
+}
+
+function encodeNumsRecord<K extends string>(
+  record: Record<K, number>,
+  keys: readonly K[],
+): Record<string, number | null> {
+  const out: Record<string, number | null> = {};
+  for (const key of keys) out[key] = encodeNum(record[key]);
+  return out;
+}
+
+function decodeNumsRecord<T extends Record<string, number>>(
+  raw: Record<string, number | null>,
+  keys: readonly (keyof T)[],
+): T {
+  const out = {} as T;
+  for (const key of keys) out[key] = decodeNum(raw[key as string]) as T[keyof T];
+  return out;
+}
+
+function encodeSeriesMap(
+  series: Map<string, Map<string, Map<number, RollupAgg>>>,
+): [string, [string, [number, EncodedAgg][]][]][] {
+  const out: [string, [string, [number, EncodedAgg][]][]][] = [];
+  for (const [field, values] of series) {
+    const valList: [string, [number, EncodedAgg][]][] = [];
+    for (const [value, buckets] of values) {
+      const bucketList: [number, EncodedAgg][] = [];
+      for (const [t, agg] of buckets) bucketList.push([t, encodeAgg(agg)]);
+      valList.push([value, bucketList]);
+    }
+    out.push([field, valList]);
+  }
+  return out;
+}
+
+function decodeSeriesMap(
+  raw: [string, [string, [number, EncodedAgg][]][]][],
+): Map<string, Map<string, Map<number, RollupAgg>>> {
+  const out = new Map<string, Map<string, Map<number, RollupAgg>>>();
+  for (const [field, values] of raw) {
+    const valMap = new Map<string, Map<number, RollupAgg>>();
+    for (const [value, buckets] of values) {
+      const bucketMap = new Map<number, RollupAgg>();
+      for (const [t, agg] of buckets) bucketMap.set(t, decodeAgg(agg));
+      valMap.set(value, bucketMap);
+    }
+    out.set(field, valMap);
+  }
+  return out;
+}
+
+export function serializeDecodedRollup(rollup: Rollup): ArrayBuffer {
+  const has = (group: string) => !rollup.loaded || rollup.loaded.has(group);
+  const payload: EncodedRollup = {
+    v: 1,
+    step: rollup.seriesStepMs,
+    truncated: [...Set.prototype.values.call(rollup.truncated)],
+  };
+  if (rollup.present) {
+    payload.present = [...Set.prototype.values.call(rollup.present)];
+  }
+  if (has("dims") && rollup.dims.size > 0) {
+    payload.dims = [...rollup.dims].map(([dim, values]) => [
+      dim,
+      [...values].map(([v, agg]) => [v, encodeAgg(agg)]),
+    ]);
+  }
+  if (has("series5") && rollup.series.size > 0) {
+    payload.series = encodeSeriesMap(rollup.series);
+  }
+  const series1 = own(rollup, "series1");
+  if (series1 && series1.size > 0) {
+    payload.series1 = encodeSeriesMap(series1);
+  }
+  if (has("all_fields") && rollup.fields.size > 0) {
+    payload.fields = [...rollup.fields].map(([field, values]) => [
+      field,
+      [...values].map(([v, count]) => [v, encodeNum(count)]),
+    ]);
+  }
+  if (rollup.groups && rollup.groups.size > 0) {
+    payload.groups = [...rollup.groups].map(([group, fields]) => [
+      group,
+      [...fields].map(([field, values]) => [
+        field,
+        [...values].map(([v, agg]) => [v, encodeAgg(agg)]),
+      ]),
+    ]);
+  }
+  const waterfall = own(rollup, "waterfall");
+  if (waterfall) payload.waterfall = encodeNumsRecord(waterfall, WATERFALL_KEYS);
+  const overview = own(rollup, "overview");
+  if (overview) payload.overview = encodeNumsRecord(overview, OVERVIEW_KEYS);
+  const assets = own(rollup, "assets");
+  if (assets && assets.size > 0) {
+    payload.assets = [...assets].map(([k, asset]) => [k, encodeNumsRecord(asset, ASSET_KEYS)]);
+  }
+  const samples = own(rollup, "samples");
+  if (samples && samples.length > 0) {
+    payload.samples = samples.map((s) => [
+      s.key.toString(),
+      s.tsMs,
+      s.cache,
+      encodeNum(s.ttfbS),
+      s.elapsedUs === null ? null : encodeNum(s.elapsedUs),
+      s.rttUs === null ? null : encodeNum(s.rttUs),
+    ]);
+  }
+  const value = own(rollup, "value");
+  if (value && value.size > 0) {
+    payload.value = [...value].map(([field, values]) => [
+      field,
+      [...values].map(([v, days]) => [
+        v,
+        [...days].map(([day, sums]) => [day, encodeNumsRecord(sums, VALUE_KEYS)]),
+      ]),
+    ]);
+  }
+  const valueTotals = own(rollup, "valueTotals");
+  if (valueTotals && valueTotals.size > 0) {
+    payload.valueTotals = [...valueTotals].map(([k, n]) => [k, encodeNum(n)]);
+  }
+  const binsTotals = own(rollup, "binsTotals");
+  if (binsTotals && binsTotals.size > 0) {
+    payload.binsTotals = [...binsTotals].map(([k, n]) => [k, encodeNum(n)]);
+  }
+  const bytes = new TextEncoder().encode(JSON.stringify(payload));
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+}
+
+export function deserializeDecodedRollup(
+  bytes: ArrayBuffer,
+  spec?: SummarySpec,
+): Rollup | null {
+  let raw: EncodedRollup;
+  try {
+    raw = JSON.parse(new TextDecoder().decode(bytes)) as EncodedRollup;
+  } catch {
+    return null;
+  }
+  if (!raw || raw.v !== 1 || typeof raw.step !== "number" || !Array.isArray(raw.truncated)) {
+    return null;
+  }
+  const rollup: Rollup = {
+    dims: new Map(),
+    series: new Map(),
+    seriesStepMs: raw.step,
+    fields: new Map(),
+    truncated: new Set(raw.truncated),
+    groups: new Map(),
+    present: new Set(raw.present ?? []),
+  };
+  if (raw.dims) {
+    for (const [dim, values] of raw.dims) {
+      const m = new Map<string, RollupAgg>();
+      for (const [v, agg] of values) m.set(v, decodeAgg(agg));
+      rollup.dims.set(dim, m);
+    }
+  }
+  if (raw.series) rollup.series = decodeSeriesMap(raw.series);
+  if (raw.series1) rollup.series1 = decodeSeriesMap(raw.series1);
+  if (raw.fields) {
+    for (const [field, values] of raw.fields) {
+      const m = new Map<string, number>();
+      for (const [v, count] of values) m.set(v, decodeNum(count));
+      rollup.fields.set(field, m);
+    }
+  }
+  if (raw.groups) {
+    for (const [group, fields] of raw.groups) {
+      const fMap = new Map<string, Map<string, RollupAgg>>();
+      for (const [field, values] of fields) {
+        const vMap = new Map<string, RollupAgg>();
+        for (const [v, agg] of values) vMap.set(v, decodeAgg(agg));
+        fMap.set(field, vMap);
+      }
+      rollup.groups!.set(group, fMap);
+    }
+  }
+  if (raw.waterfall) rollup.waterfall = decodeNumsRecord<RollupWaterfall>(raw.waterfall, WATERFALL_KEYS);
+  if (raw.overview) rollup.overview = decodeNumsRecord<RollupOverview>(raw.overview, OVERVIEW_KEYS);
+  if (raw.assets) {
+    const assets = new Map<string, RollupAsset>();
+    for (const [k, asset] of raw.assets) assets.set(k, decodeNumsRecord<RollupAsset>(asset, ASSET_KEYS));
+    rollup.assets = assets;
+  }
+  if (raw.samples) {
+    rollup.samples = raw.samples.map(([k, tsMs, cache, ttfbS, elapsedUs, rttUs]) => ({
+      key: BigInt(k),
+      tsMs,
+      cache,
+      ttfbS: decodeNum(ttfbS),
+      elapsedUs: elapsedUs === null ? null : elapsedUs,
+      rttUs: rttUs === null ? null : rttUs,
+    }));
+  }
+  if (raw.value) {
+    const valueMap = new Map<string, Map<string, Map<number, RollupValue>>>();
+    for (const [field, values] of raw.value) {
+      const vMap = new Map<string, Map<number, RollupValue>>();
+      for (const [v, days] of values) {
+        const dMap = new Map<number, RollupValue>();
+        for (const [day, sums] of days) dMap.set(day, decodeNumsRecord<RollupValue>(sums, VALUE_KEYS));
+        vMap.set(v, dMap);
+      }
+      valueMap.set(field, vMap);
+    }
+    rollup.value = valueMap;
+  }
+  if (raw.valueTotals) {
+    rollup.valueTotals = new Map(raw.valueTotals.map(([k, n]) => [k, decodeNum(n)]));
+  }
+  if (raw.binsTotals) {
+    rollup.binsTotals = new Map(raw.binsTotals.map(([k, n]) => [k, decodeNum(n)]));
+  }
+  return guard(rollup, spec?.groups);
+}
+
+function decodedRollupIdentity(
+  source: RollupSource,
+  file: ManifestFile,
+  spec: SummarySpec | undefined,
+): string {
+  return JSON.stringify([
+    source.cacheScope ?? "default",
+    file.key,
+    file.size,
+    DECODED_ROLLUP_CACHE_VERSION,
+    spec?.id ?? "whole",
+  ]);
+}
+
 function decodeCached(
   source: RollupSource,
   file: ManifestFile,
@@ -1209,34 +1531,68 @@ function decodeCached(
     return hit;
   }
   const step = file.key.includes("/day_bundle=") ? HOUR_MS : FIVE_MINUTES_MS;
-  const pending = (
-    spec
-      ? readSummaryProjection(source, file, spec, signal).then(({ parts }) => {
-          signal.throwIfAborted();
-          if (callRollupEpoch !== rollupEpoch) {
-            throw new DOMException("The operation was aborted.", "AbortError");
-          }
-          return decodeRollup(parts, step, spec);
-        })
-      : source.fetchFile(file.key, signal).then(({ bytes }) => {
-          signal.throwIfAborted();
-          if (callRollupEpoch !== rollupEpoch) {
-            throw new DOMException("The operation was aborted.", "AbortError");
-          }
-          return decodeRollup(bytes, step);
-        })
-  ).then((rollup) => {
+  const derivedId =
+    source.readDerivedFile || source.writeDerivedFile
+      ? decodedRollupIdentity(source, file, spec)
+      : null;
+
+  const load = async (): Promise<Rollup | null> => {
+    if (derivedId && source.readDerivedFile) {
+      const stored = await source.readDerivedFile(file.key, derivedId).catch(() => null);
+      signal.throwIfAborted();
+      if (callRollupEpoch !== rollupEpoch) {
+        throw new DOMException("The operation was aborted.", "AbortError");
+      }
+      if (stored && stored.meta === DECODED_ROLLUP_CACHE_VERSION) {
+        const rawBytes = await stored.bytes().catch(() => null);
+        signal.throwIfAborted();
+        if (callRollupEpoch !== rollupEpoch) {
+          throw new DOMException("The operation was aborted.", "AbortError");
+        }
+        if (rawBytes) {
+          const cached = deserializeDecodedRollup(rawBytes, spec);
+          if (cached) return cached;
+        }
+      }
+    }
+    let rollup: Rollup | null;
+    if (spec) {
+      const { parts } = await readSummaryProjection(source, file, spec, signal);
+      signal.throwIfAborted();
+      if (callRollupEpoch !== rollupEpoch) {
+        throw new DOMException("The operation was aborted.", "AbortError");
+      }
+      rollup = await decodeRollup(parts, step, spec);
+    } else {
+      const { bytes } = await source.fetchFile(file.key, signal);
+      signal.throwIfAborted();
+      if (callRollupEpoch !== rollupEpoch) {
+        throw new DOMException("The operation was aborted.", "AbortError");
+      }
+      rollup = await decodeRollup(bytes, step);
+    }
     if (callRollupEpoch !== rollupEpoch || signal.aborted) {
-      if (decoded.get(key) === pending) decoded.delete(key);
       throw (
         signal.reason ??
         new DOMException("The operation was aborted.", "AbortError")
       );
     }
+    if (rollup && derivedId && source.writeDerivedFile) {
+      void source
+        .writeDerivedFile(
+          file.key,
+          derivedId,
+          serializeDecodedRollup(rollup),
+          DECODED_ROLLUP_CACHE_VERSION,
+        )
+        .catch(() => {});
+    }
     return rollup;
-  });
-  pending.catch(() => {
+  };
+
+  const pending = load().catch((err) => {
     if (decoded.get(key) === pending) decoded.delete(key);
+    throw err;
   });
   if (callRollupEpoch === rollupEpoch && !signal.aborted) {
     decoded.set(key, pending);

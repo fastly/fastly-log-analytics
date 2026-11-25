@@ -80,6 +80,15 @@ export type OpsSource = {
     end: number,
     signal?: AbortSignal,
   ) => Promise<{ bytes: ArrayBuffer; cached: boolean; cdn?: string | null }>;
+  readIngestFold?: (
+    key: string,
+    signal?: AbortSignal,
+  ) => Promise<IngestLifecycleFold | null>;
+  writeIngestFold?: (
+    key: string,
+    fold: IngestLifecycleFold,
+    signal?: AbortSignal,
+  ) => Promise<void>;
   cachedKeys: () => Promise<string[]>;
   evict: (key: string) => Promise<void>;
 };
@@ -878,7 +887,29 @@ export async function readIngestLifecycle(
       const { fold, coalesced } = await loadIngestFileFold(
         source.cacheScope,
         file.key,
-        (sharedSignal) => fetchAndFold(file, sharedSignal),
+        async (sharedSignal) => {
+          if (source.readIngestFold) {
+            const persisted = await source
+              .readIngestFold(file.key, sharedSignal)
+              .catch(() => null);
+            sharedSignal.throwIfAborted();
+            if (persisted) {
+              stats.cached++;
+              stats.read++;
+              progress.cached++;
+              progress.done++;
+              onProgress?.({ ...progress });
+              return persisted;
+            }
+          }
+          const computed = await fetchAndFold(file, sharedSignal);
+          if (source.writeIngestFold && !sharedSignal.aborted) {
+            void source
+              .writeIngestFold(file.key, computed, sharedSignal)
+              .catch(() => {});
+          }
+          return computed;
+        },
         signal,
       );
       if (coalesced) {

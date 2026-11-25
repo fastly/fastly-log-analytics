@@ -398,3 +398,82 @@ export function finalizeIngestLifecycle(
     ...(options.stats ? { stats: options.stats } : {}),
   };
 }
+
+type SerializedIngestFold = {
+  v: 1;
+  r: number;
+  min: number | null;
+  max: number | null;
+  l: [string, number | null, 0 | 1, number | null, 0 | 1, number | null, number, number][];
+  o: [string, number, number][];
+  d: string[];
+};
+
+export function serializeIngestLifecycleFold(fold: IngestLifecycleFold): ArrayBuffer {
+  const payload: SerializedIngestFold = {
+    v: 1,
+    r: fold.rowCount,
+    min: Number.isFinite(fold.minTs) ? fold.minTs : null,
+    max: Number.isFinite(fold.maxTs) ? fold.maxTs : null,
+    l: [...fold.lifecycles].map(([key, state]) => [
+      key,
+      state.earliestTs,
+      state.sawNonDeleted ? 1 : 0,
+      state.knownSize ?? null,
+      state.latest.deleted ? 1 : 0,
+      state.latest.deletedAt,
+      state.latest.rowAt,
+      state.latest.version,
+    ]),
+    o: [...fold.outputs.values()].map((o) => [o.key, o.bytes, o.createdAt]),
+    d: [...fold.deletedParquetKeys],
+  };
+  const bytes = new TextEncoder().encode(JSON.stringify(payload));
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+}
+
+export function deserializeIngestLifecycleFold(bytes: ArrayBuffer): IngestLifecycleFold | null {
+  let raw: SerializedIngestFold;
+  try {
+    raw = JSON.parse(new TextDecoder().decode(bytes)) as SerializedIngestFold;
+  } catch {
+    return null;
+  }
+  if (
+    !raw ||
+    raw.v !== 1 ||
+    typeof raw.r !== "number" ||
+    !Array.isArray(raw.l) ||
+    !Array.isArray(raw.o) ||
+    !Array.isArray(raw.d)
+  ) {
+    return null;
+  }
+  const fold = createIngestLifecycleFold();
+  fold.rowCount = raw.r;
+  fold.minTs = typeof raw.min === "number" ? raw.min : Infinity;
+  fold.maxTs = typeof raw.max === "number" ? raw.max : -Infinity;
+  for (let i = 0; i < raw.l.length; i++) {
+    const [key, earliestTs, sawNonDeleted, knownSize, deleted, deletedAt, rowAt, version] =
+      raw.l[i];
+    fold.lifecycles.set(key, {
+      earliestTs,
+      sawNonDeleted: sawNonDeleted === 1,
+      knownSize: knownSize === null ? undefined : knownSize,
+      latest: {
+        deleted: deleted === 1,
+        deletedAt,
+        rowAt,
+        version,
+      },
+    });
+  }
+  for (let i = 0; i < raw.o.length; i++) {
+    const [key, size, createdAt] = raw.o[i];
+    fold.outputs.set(key, { key, bytes: size, createdAt });
+  }
+  for (let i = 0; i < raw.d.length; i++) {
+    fold.deletedParquetKeys.add(raw.d[i]);
+  }
+  return fold;
+}

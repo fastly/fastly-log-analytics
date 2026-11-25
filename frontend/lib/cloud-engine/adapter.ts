@@ -2582,6 +2582,9 @@ async function dispatchCloudRequest(
       const liveBytes = storageBilling.intervals.some((interval) => interval.kind === "live")
         ? liveIntervalBytes
         : summary.storage.totalBytes;
+      const omitIntervals =
+        searchParams.get("include_intervals") === "0" ||
+        searchParams.get("include_intervals") === "false";
       return jsonResponse(
         {
           total_billed_gb_hours: storageBilling.summary.totalGbHours,
@@ -2592,7 +2595,7 @@ async function dispatchCloudRequest(
           minimum_billed_gb_hours: storageBilling.summary.minimumBilledGbHours,
           storage_billing_complete: storageBilling.summary.complete,
           storage_billing_provenance: storageBilling.summary.provenance,
-          storage_intervals: storageBilling.intervals,
+          ...(omitIntervals ? {} : { storage_intervals: storageBilling.intervals }),
           observed_at:
             observedAtMs !== null ? new Date(observedAtMs).toISOString() : null,
           live_bytes: liveBytes,

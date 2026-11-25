@@ -725,6 +725,22 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       storage_billing_complete: true,
     });
     expect(body.storage_intervals).toHaveLength(1);
+
+    const compactParams = new URLSearchParams(params);
+    compactParams.set("include_intervals", "0");
+    const compactResponse = await handleCloudAnalyticalRequest(
+      new Request(`http://localhost/api/usage/current-storage?${compactParams}`),
+    );
+    const compactBody = await compactResponse!.json();
+    expect(compactBody).toMatchObject({
+      deleted_bytes: 700,
+      deleted_bytes_complete: true,
+      deleted_bytes_provenance: "ingest_files_exact",
+      storage_billing_complete: true,
+      total_billed_gb_hours: body.total_billed_gb_hours,
+      live_bytes: body.live_bytes,
+    });
+    expect("storage_intervals" in compactBody).toBe(false);
   });
 
   it("subtracts deleted Parquet keys from snapshotLive and includes compaction outputs in liveSinceSnapshot", async () => {

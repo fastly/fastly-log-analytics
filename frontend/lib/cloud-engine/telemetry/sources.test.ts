@@ -5,8 +5,10 @@ import { OpsRangeUnsupportedError, readLogs } from "./engine";
 import {
   browserOpsSource,
   clearOpsCaches,
+  OPS_FOLD_CACHE_PREFIX,
   syncOpsCacheForSession,
 } from "./sources";
+import { createIngestLifecycleFold } from "./ingest-lifecycle";
 
 function installMemoryCaches() {
   const buckets = new Map<string, Map<string, Response>>();
@@ -452,5 +454,35 @@ describe("browserOpsSource fetchFile deduplication", () => {
     const res = await pending;
     expect(events).toEqual(["put:start", "arrayBuffer", "put:end"]);
     expect(new Uint8Array(res.bytes)).toEqual(payload);
+  });
+
+  it("persists, evicts, and clears ingest folds in OPS_FOLD_CACHE_PREFIX without polluting cachedKeys", async () => {
+    const buckets = installMemoryCaches();
+    const src = browserOpsSource("http://localhost", {
+      user: "alice",
+      role: "admin",
+    });
+    const key = "processed/ops/ingest_files/year=2026/month=11/day=11/compact=1-2-c1-n1.parquet";
+    const fold = createIngestLifecycleFold();
+    fold.rowCount = 1;
+    fold.minTs = 1000;
+    fold.maxTs = 1000;
+    fold.deletedParquetKeys.add("processed/request/old.parquet");
+
+    await src.writeIngestFold!(key, fold);
+    expect(buckets.has(`${OPS_FOLD_CACHE_PREFIX}alice:admin`)).toBe(true);
+    expect(await src.cachedKeys()).toEqual([]);
+
+    const loaded = await src.readIngestFold!(key);
+    expect(loaded).not.toBeNull();
+    expect(loaded!.rowCount).toBe(1);
+    expect([...loaded!.deletedParquetKeys]).toEqual(["processed/request/old.parquet"]);
+
+    await src.evict(key);
+    expect(await src.readIngestFold!(key)).toBeNull();
+
+    await src.writeIngestFold!(key, fold);
+    await clearOpsCaches({ user: "alice" });
+    expect(buckets.has(`${OPS_FOLD_CACHE_PREFIX}alice:admin`)).toBe(false);
   });
 });

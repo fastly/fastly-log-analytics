@@ -15,11 +15,19 @@ import {
   OpsRangeUnsupportedError,
 } from "./decoded-cache";
 import type { OpsSource } from "./engine";
+import {
+  deserializeIngestLifecycleFold,
+  serializeIngestLifecycleFold,
+} from "./ingest-lifecycle";
 
 export const OPS_CACHE_PREFIX = "flp-ops-parquet-v1:";
+export const OPS_FOLD_CACHE_PREFIX = "flp-ops-fold-v1:";
 
 export const opsCacheName = (user: string, role: string) =>
   `${OPS_CACHE_PREFIX}${user}:${role}`;
+
+export const opsFoldCacheName = (user: string, role: string) =>
+  `${OPS_FOLD_CACHE_PREFIX}${user}:${role}`;
 
 export type OpsIdentity = { user: string; role: string };
 
@@ -211,13 +219,25 @@ export async function clearOpsCaches(
   const prefix = options.user
     ? `${OPS_CACHE_PREFIX}${options.user}:`
     : OPS_CACHE_PREFIX;
+  const foldPrefix = options.user
+    ? `${OPS_FOLD_CACHE_PREFIX}${options.user}:`
+    : OPS_FOLD_CACHE_PREFIX;
+  const keepFold =
+    options.keep && options.keep.startsWith(OPS_CACHE_PREFIX)
+      ? `${OPS_FOLD_CACHE_PREFIX}${options.keep.slice(OPS_CACHE_PREFIX.length)}`
+      : undefined;
   if (!options.keep) {
-    await deleteCaches((name) => name.startsWith(prefix));
+    await deleteCaches(
+      (name) => name.startsWith(prefix) || name.startsWith(foldPrefix),
+    );
     return;
   }
   try {
     for (const name of await caches.keys()) {
-      if (name.startsWith(prefix) && name !== options.keep) {
+      if (
+        (name.startsWith(prefix) && name !== options.keep) ||
+        (name.startsWith(foldPrefix) && name !== keepFold)
+      ) {
         await caches.delete(name);
       }
     }
@@ -302,11 +322,18 @@ export function browserOpsSource(
         }
       : options;
   const name = opsCacheName(identity.user, identity.role);
+  const foldName = opsFoldCacheName(identity.user, identity.role);
   const open = (callEpoch: number, aborted = false): Promise<Cache | null> =>
     callEpoch === opsCacheEpoch && !aborted
       ? openCache(name)
       : Promise.resolve(null);
+  const openFold = (callEpoch: number, aborted = false): Promise<Cache | null> =>
+    callEpoch === opsCacheEpoch && !aborted
+      ? openCache(foldName)
+      : Promise.resolve(null);
   const fileUrl = (key: string) => `${baseUrl}${fileRequestPath(key)}`;
+  const foldUrl = (key: string) =>
+    `${baseUrl}/__flp_ingest_fold?${new URLSearchParams({ v: "1", key })}`;
   const denied = async (response: Response) => {
     if (response.status === 401 || response.status === 403) {
       await clearOpsCaches({ user: identity.user });
@@ -720,6 +747,35 @@ export function browserOpsSource(
       }
       return result;
     },
+    async readIngestFold(key, signal) {
+      signal?.throwIfAborted();
+      const callEpoch = opsCacheEpoch;
+      const cache = await openFold(callEpoch, signal?.aborted === true);
+      if (!cache || callEpoch !== opsCacheEpoch || signal?.aborted) return null;
+      const hit = await cache.match(foldUrl(key)).catch(() => undefined);
+      if (!hit || callEpoch !== opsCacheEpoch || signal?.aborted) return null;
+      const bytes = await hit.arrayBuffer().catch(() => null);
+      if (!bytes || callEpoch !== opsCacheEpoch || signal?.aborted) return null;
+      return deserializeIngestLifecycleFold(bytes);
+    },
+    async writeIngestFold(key, fold, signal) {
+      if (signal?.aborted) return;
+      const callEpoch = opsCacheEpoch;
+      const cache = await openFold(callEpoch, signal?.aborted === true);
+      if (!cache || callEpoch !== opsCacheEpoch || signal?.aborted) return;
+      const bytes = serializeIngestLifecycleFold(fold);
+      const writePromise = cache
+        .put(
+          foldUrl(key),
+          new Response(bytes, {
+            headers: { "content-type": "application/json" },
+          }),
+        )
+        .catch(() => {});
+      activeOpsWrites.add(writePromise);
+      writePromise.finally(() => activeOpsWrites.delete(writePromise));
+      await writePromise;
+    },
     async cachedKeys() {
       const callEpoch = opsCacheEpoch;
       const cache = await open(callEpoch);
@@ -730,7 +786,10 @@ export function browserOpsSource(
     },
     async evict(key) {
       const callEpoch = opsCacheEpoch;
-      await (await open(callEpoch))?.delete(fileUrl(key));
+      await Promise.all([
+        (await open(callEpoch))?.delete(fileUrl(key)),
+        (await openFold(callEpoch))?.delete(foldUrl(key)),
+      ]);
     },
   };
 }
