@@ -59,7 +59,7 @@ export function SSEProgressView({
     if (typeof errorLine?.link !== 'string') return null
     try {
       const parsed = new URL(errorLine.link)
-      return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? errorLine.link : null
+      return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.href : null
     } catch {
       return null
     }

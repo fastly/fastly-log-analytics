@@ -433,7 +433,7 @@ fn segment_is_pii(seg: &str) -> bool {
 fn is_pii_split_outer(ch: char) -> bool {
     matches!(
         ch,
-        '[' | ']' | '/' | ':' | ';' | '|' | ',' | '&' | '=' | '?' | '{' | '}'
+        '[' | ']' | '/' | ':' | ';' | '|' | ',' | '&' | '=' | '?' | '#' | '{' | '}'
     ) || is_pii_ws_or_ctrl(ch)
 }
 

@@ -481,6 +481,10 @@ fn list_for_role_hides_views_with_pii_in_page_query_string() {
                 "pii-encoded-delim-extra",
                 Some("/logs?status%3D200%26_extra=198.51.100.7"),
             ),
+            make_view(
+                "pii-encoded-hash-extra",
+                Some("/logs?status%3D200%23_extra=198.51.100.7"),
+            ),
         ],
     };
 
@@ -492,7 +496,7 @@ fn list_for_role_hides_views_with_pii_in_page_query_string() {
     );
 
     let admin = views::list_for_role(&store, "svc1", Role::Admin, 50).expect("list");
-    assert_eq!(admin.len(), 24);
+    assert_eq!(admin.len(), 25);
 }
 
 const DEBUG_TEST_SESSION_KEY: &[u8] = b"debug-gate-session-signing-key-32b";

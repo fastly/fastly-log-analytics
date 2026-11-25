@@ -1097,3 +1097,16 @@ def test_w3_2_reconcile_status_cb_cli_and_fastly_ops_redact_secrets() -> None:
     joined = "\n".join(seen)
     for leaked in ("demopass31", "demofastly31", "/srv/fla/s.json", "AKIA0000000000000031"):
         assert leaked not in joined, f"Leaked {leaked} in fastly_ops._upload_rum_tracker_best_effort"
+
+
+def test_w4_redact_error_text_json_reprs_and_quoted_libpq_passwords() -> None:
+    """redact_error_text must redact JSON/dict secret reprs, quoted libpq passwords with spaces, and app secret keys."""
+    from backend.utils.telemetry.logging_config import redact_error_text
+
+    sample = (
+        '{"Fastly-Key": "demofastly44", "password": "demo pass 44"} '
+        "password='my secret pass 44' fos_secret_access_key=demofos44 client_secret=democlient44"
+    )
+    redacted = redact_error_text(sample)
+    for leaked in ("demofastly44", "demo pass 44", "my secret pass 44", "demofos44", "democlient44"):
+        assert leaked not in redacted, f"Leaked {leaked!r} in {redacted!r}"

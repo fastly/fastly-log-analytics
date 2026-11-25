@@ -394,7 +394,9 @@ export function proxy(request: NextRequest) {
     return NextResponse.next()
   }
 
-  const nonce = btoa(crypto.randomUUID())
+  const nonceBytes = new Uint8Array(16)
+  crypto.getRandomValues(nonceBytes)
+  const nonce = btoa(String.fromCharCode(...nonceBytes))
   const requestHeaders = new Headers(request.headers)
   requestHeaders.delete(RAW_SOCKET_UNTRUSTED_HEADER)
   requestHeaders.delete(FRONTEND_PROXY_HEADER)
@@ -449,7 +451,7 @@ export function proxy(request: NextRequest) {
 export const config = {
   matcher: [
     {
-      source: '/((?!_next/static|_next/image|favicon.ico|geo/|public/|maplibre-gl-worker\\.mjs|maplibre-gl-shared\\.mjs).*)',
+      source: '/((?!_next/static|_next/image|favicon\\.ico|geo/|public/|maplibre-gl-worker\\.mjs|maplibre-gl-shared\\.mjs).*)',
     },
     {
       source: '/:path*',
