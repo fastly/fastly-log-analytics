@@ -11,7 +11,10 @@ vi.mock("./engine", () => ({
   searchFieldValues: vi.fn(),
 }));
 vi.mock("./manifest", () => ({ clearManifestCache: vi.fn() }));
-vi.mock("./duckdb", () => ({ getDuckDBEngine: vi.fn() }));
+vi.mock("./duckdb", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./duckdb")>()),
+  getDuckDBEngine: vi.fn(),
+}));
 
 type Host = { onmessage?: (event: { data: unknown }) => void; postMessage: ReturnType<typeof vi.fn> };
 

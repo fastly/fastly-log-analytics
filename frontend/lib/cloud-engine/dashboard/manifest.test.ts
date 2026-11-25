@@ -1531,7 +1531,7 @@ describe("closed-hour manifest cache", () => {
   it("allows realistic multi-thousand-file manifests past 4 MiB while enforcing MAX_MANIFEST_BYTES", () => {
     const budget: ManifestBudget = { bytes: 0, identities: new Set() };
     const realisticKey =
-      "cVnu9mYB3Cvmob3lsqjQU3/processed/request/catalog1/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/year=2026/month=11/day=25/hour=16/window=1795536000_1795536060_abcdef012345_1.parquet";
+      "svcExampleTestId012345/processed/request/catalog1/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/year=2026/month=11/day=25/hour=16/window=1795536000_1795536060_abcdef012345_1.parquet";
     const files: ManifestFile[] = Array.from({ length: MAX_IDENTITIES }, (_, i) => ({
       key: `${realisticKey}#${i}`,
       start: iso(T0),

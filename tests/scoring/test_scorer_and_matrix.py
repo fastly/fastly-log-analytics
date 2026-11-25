@@ -1320,6 +1320,10 @@ def test_ensure_reuses_existing_service_and_heals_missing_anchor(anchor_missing)
     def side_effect(method, path, body=None, token=None, **kwargs):
         if (method, path) == ("GET", "/service"):
             return [existing]
+        if (method, path) == ("GET", "/service/EXISTING_SVC_ID/version"):
+            return [{"number": 1, "active": True}]
+        if (method, path) == ("GET", "/service/EXISTING_SVC_ID/version/1/domain"):
+            return [{"name": "fla-0123456789abcdef01234567.edgecompute.app"}]
         if (method, path) == ("GET", "/resources/stores/config"):
             return [
                 {"id": "EXISTING_KEYS", "name": "scoring_keys_EXISTING_SVC_ID"},
