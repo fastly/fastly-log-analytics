@@ -46,10 +46,6 @@ ALLOWED: dict[tuple[str, str], str] = {
         "scoring_labels_update",
     ): "validation: labels.ALLOWED_LABELS ValueError, authored",
     (
-        "backend/routers/session_scoring/scoring_analytics.py",
-        "query_logs",
-    ): "validation: scoring query helper error envelope",
-    (
         "backend/routers/root_system.py",
         "_invalid_service_id_handler",
     ): "validation: 422 body echoing the authored invalid-service-id ValueError",

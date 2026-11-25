@@ -21,7 +21,7 @@ from backend.core.metadata.base import InvalidServiceIdError
 from backend.models.analytics import HealthResponse
 from backend.models.common import DEFAULT_ERROR_RESPONSES
 from backend.utils.remote_access import RemoteAccessMiddleware
-from backend.utils.telemetry import TelemetryResponseBodyMiddleware
+from backend.utils.telemetry import TelemetryResponseBodyMiddleware, redact_error_text
 
 logger = logging.getLogger("backend.main")
 
@@ -607,7 +607,7 @@ def health_check(
                         svc_state["reason"] = f"no ingest since {last_ingest} (cutoff {effective_cutoff})"
         except Exception as e:
             svc_state["status"] = "degraded"
-            svc_state["reason"] = f"metadata_db query failed: {e}"
+            svc_state["reason"] = f"metadata_db query failed: {redact_error_text(e)}"
 
         if svc_state["status"] not in ("ok", "stale"):
             overall_ok = False

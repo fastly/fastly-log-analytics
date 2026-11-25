@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from backend.core import metadata as metadata_db
 from backend.core.fos_client import ensure_cid_salt
-from backend.core.request_context import get_service_id, get_source
+from backend.core.request_context import get_service_id, get_source, require_admin
 from backend.models.common import (
     CredentialsUpdateResponse,
     CronScheduleResponse,
@@ -29,6 +29,7 @@ from backend.utils.router_utils import (
     make_error,
     mutate_service_config,
     raise_internal,
+    redact_error_text,
     stored_fastly_token,
 )
 from backend.utils.sse import sse_payload as _sse
@@ -78,7 +79,7 @@ def api_services_list(request: Request, service_id: str | None = Depends(get_ser
     return ServicesListResponse.with_telemetry(services=result, debug_queries=[])
 
 
-@router.post("/services/{service_id}/cron-settings")
+@router.post("/services/{service_id}/cron-settings", dependencies=[Depends(require_admin)])
 def api_service_cron_settings(request: Request, service_id: str, body: ServiceCronSettingsBody):
     from backend import config as svcconfig
 
@@ -130,12 +131,12 @@ def api_service_cron_settings(request: Request, service_id: str, body: ServiceCr
 
                 _sync_crontab()
             except Exception as e:
-                yield _sse("status", f"Warning: Cron sync failed: {e}")
+                yield _sse("status", f"Warning: Cron sync failed: {redact_error_text(e)}")
             _record_audit_best_effort(service_id, "cron_settings_update", body_payload, "stream")
             yield _sse("progress", current=4, total=4)
             yield _sse("done", "Successfully applied changes.")
         except Exception as e:
-            yield _sse("error", str(e))
+            yield _sse("error", redact_error_text(e))
 
     return sse_response(stream())
 
@@ -144,9 +145,11 @@ def api_service_cron_settings(request: Request, service_id: str, body: ServiceCr
     "/services/{service_id}/time-range",
     response_model=OkMessageResponse,
     response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
 )
-def api_service_clear_time_range(service_id: str):
+def api_service_clear_time_range(request: Request, service_id: str):
     """Remove the persisted time_range filter from a service config."""
+    require_service_in_scope(request, service_id)
     cfg = load_service_config(service_id)
     if "time_range" not in cfg.get("provisioning", {}):
         return {"ok": True, "message": "No time_range was set."}
@@ -155,7 +158,7 @@ def api_service_clear_time_range(service_id: str):
     return {"ok": True, "message": "time_range cleared. Cron will now ingest all available data."}
 
 
-@router.get("/cron-runs/{run_id}/stream")
+@router.get("/cron-runs/{run_id}/stream", dependencies=[Depends(require_admin)])
 async def cron_logs_stream(run_id: int, service_id: str | None = Depends(get_service_id)):
     from backend.cron.scheduler import get_progress
 
@@ -232,7 +235,12 @@ async def cron_logs_stream(run_id: int, service_id: str | None = Depends(get_ser
     return sse_response(stream())
 
 
-@router.get("/cron-schedule", response_model=CronScheduleResponse, response_model_exclude_unset=True)
+@router.get(
+    "/cron-schedule",
+    response_model=CronScheduleResponse,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+)
 def api_cron_schedule(source: dict = Depends(get_source)):
     from backend.cron.scheduler import build_cron_schedule_payload
 
@@ -254,6 +262,7 @@ def api_cron_schedule(source: dict = Depends(get_source)):
     "/services/{service_id}/credentials",
     response_model=CredentialsUpdateResponse,
     response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
 )
 def api_service_update_credentials(request: Request, service_id: str, body: ServiceCredentialsBody):
     """Rotate or validate and update FOS credentials for a service."""
@@ -321,9 +330,10 @@ def api_service_update_credentials(request: Request, service_id: str, body: Serv
     return {"ok": True, "message": "Credentials updated successfully"}
 
 
-@router.post("/services/{service_id}/ngwaf-sync")
-def api_ngwaf_sync(service_id: str):
+@router.post("/services/{service_id}/ngwaf-sync", dependencies=[Depends(require_admin)])
+def api_ngwaf_sync(request: Request, service_id: str):
     """Manually trigger an NGWAF bot-sync run for a service, streamed as SSE."""
+    require_service_in_scope(request, service_id)
     from backend import config as svcconfig
     from backend.core.fos_client import get_source_for_service, log_cron_run, start_cron_run
     from backend.cron.jobs.metadata import (
@@ -355,7 +365,7 @@ def api_ngwaf_sync(service_id: str):
         try:
             run_id = start_cron_run(src, "ngwaf_sync")
         except RuntimeError as e:
-            yield _sse("error", str(e))
+            yield _sse("error", redact_error_text(e))
             return
         retention_days = int(cfg.get("provisioning", {}).get("cron_ngwaf", {}).get("log_retention_days", 30))
         server_name_filter = cfg.get("server_name") or None
@@ -409,6 +419,6 @@ def api_ngwaf_sync(service_id: str):
             yield _sse("done", summary)
         except Exception as e:
             log_cron_run(src, "ngwaf_sync", time.time() - start_time, "error", error_message=str(e), run_id=run_id)
-            yield _sse("error", str(e))
+            yield _sse("error", redact_error_text(e))
 
     return sse_response(stream())

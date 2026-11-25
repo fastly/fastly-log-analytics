@@ -43,6 +43,7 @@ from backend.utils.auth import (
     require_owned_row,
     require_service_in_scope,
 )
+from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
 from backend.utils.router_utils import (
     not_found,
     redact_error_text,
@@ -167,7 +168,10 @@ def create_alert(alert: Alert, request: Request) -> AlertResponse:
     return resp
 
 
-_ALERT_PREVIEW_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
+_ALERT_PREVIEW_CACHE: BoundedTTLCache[tuple[Any, ...], dict[str, Any]] = BoundedTTLCache(
+    maxsize=256, ttl_seconds=300.0, name="alerts._ALERT_PREVIEW_CACHE"
+)
+CacheRegistry.register("alerts._ALERT_PREVIEW_CACHE", _ALERT_PREVIEW_CACHE)
 
 
 def _resolve_ch_client(service_id: str) -> Any:
@@ -629,7 +633,7 @@ def evaluate_alerts_endpoint(
 def preview_alert(
     alert: Alert,
     request: Request,
-    lookback_hours: int = Query(default=24, ge=1),
+    lookback_hours: int = Query(default=24, ge=1, le=720),
 ) -> AlertPreviewResponse:
     require_service_in_scope(request, alert.service_id)
 

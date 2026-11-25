@@ -53,7 +53,7 @@ from backend.utils.auth import mask_ips_for, require_service_in_scope
 from backend.utils.bounded_cache import BoundedTTLCache as _BoundedTTLCache
 from backend.utils.date_utils import parse_iso_utc
 from backend.utils.remote_access import clamp_or_400, get_analyst_time_bounds
-from backend.utils.router_utils import make_error, not_found, query_errors, require_high_scale
+from backend.utils.router_utils import make_error, not_found, query_errors, redact_error_text, require_high_scale
 from backend.utils.telemetry import process_context_scope
 
 from .scoring_vcl import scoring_status
@@ -122,7 +122,7 @@ def query_logs(service_id: str, sql: str, params: dict | tuple = ()) -> list[dic
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail={"error": str(e)})
+        raise HTTPException(status_code=400, detail={"error": redact_error_text(e)})
 
 
 def _scoring_source(table: str, cols: set[str] | None = None) -> str:
@@ -790,6 +790,9 @@ def scoring_top_flagged(
         from backend.core.share_db import apply_pii_policy
 
         out = apply_pii_policy(out, {"mask_ips": True})
+        scrubbed = _scrub_string_leaves(out)
+        if isinstance(scrubbed, dict):
+            out = scrubbed
     return out
 
 

@@ -43,6 +43,7 @@ from backend.utils.date_utils import parse_relative_time_window
 from backend.utils.router_utils import (
     bad_request,
     make_error,
+    redact_error_text,
 )
 from backend.utils.sse import (  # noqa: F401
     ClientDisconnected,
@@ -365,7 +366,7 @@ def health_snapshot(probe_fos: bool = False) -> dict[str, Any]:
                     src = _svcconfig.config_to_source(cfg)
                     fos_out[sid] = _db.fos_reachable(src)
                 except Exception as e:
-                    fos_out[sid] = {"reachable": False, "error": str(e)[:200]}
+                    fos_out[sid] = {"reachable": False, "error": redact_error_text(e)[:200]}
             out["fos"] = fos_out
         except Exception:
             out["fos"] = None
@@ -396,7 +397,7 @@ def health_snapshot(probe_fos: bool = False) -> dict[str, Any]:
             else:
                 ch_health = {"reachable": False}
         except Exception as ch_exc:
-            ch_health = {"reachable": False, "error": str(ch_exc)[:200]}
+            ch_health = {"reachable": False, "error": redact_error_text(ch_exc)[:200]}
 
         out["clickhouse"] = ch_health
         out["high_scale"] = {"disk": disk_snapshot_payload(), "topology": topology, "clickhouse": ch_health}

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends
@@ -32,7 +33,8 @@ router = APIRouter(prefix="/api", tags=["insights"], responses=DEFAULT_ERROR_RES
 insights_router = router
 
 # Per-service semaphore (capacity=1) serialises concurrent insights scans.
-_insights_sems: dict[str, asyncio.Semaphore] = {}
+_INSIGHTS_SEMS_MAXSIZE = 256
+_insights_sems: OrderedDict[str, asyncio.Semaphore] = OrderedDict()
 _insights_sems_lock = threading.Lock()
 
 
@@ -41,15 +43,21 @@ def _get_insights_sem(
     window_hours: float | None = None,
     baseline_hours: float | None = None,
 ) -> asyncio.Semaphore:
-    sem_key = (
-        service_id
-        if window_hours is None and baseline_hours is None
-        else f"{service_id}:{float(window_hours or 0):.2f}:{float(baseline_hours or 0):.2f}"
-    )
+    del window_hours, baseline_hours
     with _insights_sems_lock:
-        if sem_key not in _insights_sems:
-            _insights_sems[sem_key] = asyncio.Semaphore(1)
-        return _insights_sems[sem_key]
+        existing = _insights_sems.get(service_id)
+        if existing is not None:
+            _insights_sems.move_to_end(service_id)
+            return existing
+        if len(_insights_sems) >= _INSIGHTS_SEMS_MAXSIZE:
+            evict_key = next((k for k, sem in _insights_sems.items() if not sem.locked()), None)
+            if evict_key is not None:
+                del _insights_sems[evict_key]
+            else:
+                _insights_sems.popitem(last=False)
+        sem = asyncio.Semaphore(1)
+        _insights_sems[service_id] = sem
+        return sem
 
 
 def _analyst_lookback_clamp(
@@ -96,7 +104,7 @@ async def insights_endpoint(
     )
     high_scale_service = require_high_scale(ctx)
     force_refresh = req.force_refresh if ctx.analyst_session is None else False
-    sem = _get_insights_sem(ctx.service_id, req.window_size_hrs, req.baseline_hours)
+    sem = _get_insights_sem(ctx.service_id)
     async with sem:
         return await asyncio.to_thread(
             hs_insights,

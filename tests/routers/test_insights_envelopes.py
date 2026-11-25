@@ -72,13 +72,13 @@ def test_analyst_lookback_clamp_admin_vs_analyst_session() -> None:
     assert isinstance(cache_key, str) and len(cache_key) > 0
 
 
-def test_get_insights_sem_keys_by_service_and_windows() -> None:
+def test_get_insights_sem_keys_strictly_by_service() -> None:
     sem_a = insights_router_mod._get_insights_sem("svc-a", 1.0, 24.0)
     sem_a_same = insights_router_mod._get_insights_sem("svc-a", 1.0, 24.0)
     sem_a_diff = insights_router_mod._get_insights_sem("svc-a", 4.0, 24.0)
     sem_b = insights_router_mod._get_insights_sem("svc-b", 1.0, 24.0)
     assert sem_a is sem_a_same
-    assert sem_a is not sem_a_diff
+    assert sem_a is sem_a_diff
     assert sem_a is not sem_b
 
 

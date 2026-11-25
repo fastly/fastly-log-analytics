@@ -27,6 +27,7 @@ from backend.utils.bounded_cache import SWRTTLCache as _SWRTTLCache
 from backend.utils.router_utils import (
     load_service_config,
     raise_internal,
+    redact_error_text,
     resolve_fastly_token,
     stored_fastly_token,
 )
@@ -230,7 +231,7 @@ def scoring_enable(
     def _error_event(e: Exception) -> dict:
         from backend.provision.session_scoring_orchestrator import EntitlementError
 
-        err_event: dict = {"type": "error", "message": str(e)}
+        err_event: dict = {"type": "error", "message": redact_error_text(e)}
         if isinstance(e, EntitlementError):
             err_event["code"] = e.code
             if e.link:

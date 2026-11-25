@@ -43,6 +43,7 @@ from backend.utils.router_utils import (
     load_service_config,
     make_error,
     raise_internal,
+    redact_error_text,
     require_fastly_token,
     stored_fastly_token,
 )
@@ -141,7 +142,7 @@ async def enable_rum_handler(
                 }
             )
         except Exception as e:
-            yield json.dumps({"type": "error", "message": str(e)})
+            yield json.dumps({"type": "error", "message": redact_error_text(e)})
 
     return sse_response(stream())
 
@@ -184,7 +185,7 @@ async def disable_rum_handler(
                 }
             )
         except Exception as e:
-            yield json.dumps({"type": "error", "message": str(e)})
+            yield json.dumps({"type": "error", "message": redact_error_text(e)})
 
     return sse_response(stream())
 
@@ -343,7 +344,7 @@ async def upgrade_rum_handler(
                 }
             )
         except Exception as e:
-            yield json.dumps({"type": "error", "message": str(e)})
+            yield json.dumps({"type": "error", "message": redact_error_text(e)})
 
     return sse_response(stream())
 

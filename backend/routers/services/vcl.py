@@ -29,6 +29,7 @@ from backend.utils.router_utils import (
     make_error,
     mutate_service_config,
     query_errors,
+    redact_error_text,
     stored_fastly_token,
 )
 from backend.utils.sse import sse_response
@@ -401,6 +402,6 @@ def api_service_update_logging_settings(
                         logger.warning("stream: _sync_crontab failed (ignored)", exc_info=True)
                 yield json.dumps(event)
         except Exception as e:
-            yield _sse("error", str(e))
+            yield _sse("error", redact_error_text(e))
 
     return sse_response(stream())

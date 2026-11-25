@@ -50,6 +50,7 @@ from backend.provision.fos_setup import _get_fos_s3_client
 from backend.utils.router_utils import (
     make_error,
     raise_internal,
+    redact_error_text,
     require_json_content_type,
     require_service_id,
 )
@@ -1092,7 +1093,7 @@ def provision_execute(req: ProvisionExecuteRequest):
                         logger.debug("stream: step failed (ignored)", exc_info=True)
         except Exception as e:
             if not error_already_emitted:
-                yield _sse("error", str(e))
+                yield _sse("error", redact_error_text(e))
 
     return sse_response(stream())
 
@@ -1132,7 +1133,7 @@ def provision_reconcile(body: ProvisionReconcileRequest):
             )
             events.put({"type": "done", "success": result.error is None})
         except Exception as e:
-            events.put({"type": "error", "message": str(e)})
+            events.put({"type": "error", "message": redact_error_text(e)})
 
     return stream_sse_from_worker(worker)
 

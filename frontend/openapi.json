@@ -13036,6 +13036,7 @@
             "required": false,
             "schema": {
               "type": "integer",
+              "maximum": 720,
               "minimum": 1,
               "default": 24,
               "title": "Lookback Hours"
