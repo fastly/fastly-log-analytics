@@ -765,7 +765,10 @@ describe("IP detectors from the window's ins_ip", () => {
 });
 
 describe("INSIGHTS_SUMMARY_SPEC column scoping and multi-hour window alignment", () => {
-  it("scopes expensive columns in INSIGHTS_SUMMARY_SPEC to their owning groups", () => {
+  it("omits series5 and scopes expensive columns in INSIGHTS_SUMMARY_SPEC to their owning groups", () => {
+    expect(INSIGHTS_SUMMARY_SPEC.groups.has("series5")).toBe(false);
+    expect([...(INSIGHTS_SUMMARY_SPEC.only.get("requests") ?? [])].sort()).toEqual(["dims", "ins_asn", "ins_url"]);
+    expect([...(INSIGHTS_SUMMARY_SPEC.only.get("errors") ?? [])].sort()).toEqual(["dims", "ins_ip"]);
     expect([...(INSIGHTS_SUMMARY_SPEC.only.get("elapsed_hist") ?? [])].sort()).toEqual(["ins_lat", "urls"]);
     expect([...(INSIGHTS_SUMMARY_SPEC.only.get("elapsed_count") ?? [])].sort()).toEqual(["ins_lat", "urls"]);
     expect([...(INSIGHTS_SUMMARY_SPEC.only.get("status_5xx") ?? [])]).toEqual(["ins_url"]);
@@ -775,16 +778,10 @@ describe("INSIGHTS_SUMMARY_SPEC column scoping and multi-hour window alignment",
     expect([...(INSIGHTS_SUMMARY_SPEC.only.get("count") ?? [])].sort()).toEqual(["all_fields", "ins_asn", "ins_ip"]);
   });
 
-  it("aligns multi-hour (>=6h) windows to completed UTC hours to avoid open-hour and mid-hour raw scans", async () => {
-    // 12 hours of 1-hour summaries ending at 2030-01-02T17:00:00Z; now is 17:32:00Z (32m into open hour).
-    const ALIGNED_END = Date.UTC(2030, 0, 2, 17, 0, 0);
-    const MID_HOUR_NOW = ALIGNED_END + 32 * 60_000;
+  const makeHourlyFixture = (alignedEnd: number, extraFiles: { fromMs: number; toMs: number; key: string }[] = []) => {
     const summaryFiles: { key: string; start: string; end: string; size: number; rows: number }[] = [];
     const bufs: Record<string, ArrayBuffer> = {};
-    for (let h = 12; h >= 1; h--) {
-      const fromMs = ALIGNED_END - h * HOUR;
-      const toMs = fromMs + HOUR;
-      const key = `raw-h${h}`;
+    const addFile = (key: string, fromMs: number, toMs: number) => {
       const raw = parquetWriteBuffer({
         columnData: [
           { name: "timestamp", type: "TIMESTAMP", data: [new Date(fromMs + 60_000), new Date(fromMs + 120_000)] },
@@ -801,17 +798,30 @@ describe("INSIGHTS_SUMMARY_SPEC column scoping and multi-hour window alignment",
         size: raw.byteLength,
         rows: 2,
       });
+    };
+    for (let h = 12; h >= 1; h--) {
+      const fromMs = alignedEnd - h * HOUR;
+      addFile(`raw-h${h}`, fromMs, fromMs + HOUR);
     }
+    for (const f of extraFiles) addFile(f.key, f.fromMs, f.toMs);
     const calls = { json: [] as string[], files: [] as string[] };
     const src = fixtureSource([fixturePage(summaryFiles)], bufs, calls, []);
+    return { src, calls };
+  };
+
+  it("aligns multi-hour (>=6h) windows to completed UTC hours even when clamp_end is mid-hour", async () => {
+    // 12 hours of 1-hour files ending at 2030-01-02T17:00:00Z; adapter passes mid-hour clamp_end (17:32:00Z).
+    const ALIGNED_END = Date.UTC(2030, 0, 2, 17, 0, 0);
+    const MID_HOUR_NOW = ALIGNED_END + 32 * 60_000;
+    const { src, calls } = makeHourlyFixture(ALIGNED_END);
     vi.useFakeTimers({ toFake: ["Date"], now: MID_HOUR_NOW });
     try {
       const result = await insightsFromRollup(
         withSettings({
           ...body,
-          clamp_end: undefined,
+          clamp_end: new Date(MID_HOUR_NOW).toISOString(),
           window_size_hrs: 6,
-          baseline_hrs: 6,
+          baseline_hours: 6,
           earliest_log_at: new Date(ALIGNED_END - 24 * HOUR).toISOString(),
         }),
         [],
@@ -825,6 +835,36 @@ describe("INSIGHTS_SUMMARY_SPEC column scoping and multi-hour window alignment",
       expect(result!.window_total_requests).toBe(12);
       // No manifest query should have asked for the open hour (17:32:00Z).
       expect(calls.json.some((u) => u.includes("17%3A32") || u.includes("17:32"))).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves exact mid-hour window when end_time is explicitly requested", async () => {
+    const ALIGNED_END = Date.UTC(2030, 0, 2, 17, 0, 0);
+    const MID_HOUR_END = ALIGNED_END + 32 * 60_000;
+    const { src, calls } = makeHourlyFixture(ALIGNED_END, [
+      { key: "raw-open", fromMs: ALIGNED_END, toMs: MID_HOUR_END },
+    ]);
+    vi.useFakeTimers({ toFake: ["Date"], now: MID_HOUR_END });
+    try {
+      const result = await insightsFromRollup(
+        withSettings({
+          ...body,
+          clamp_end: undefined,
+          end_time: new Date(MID_HOUR_END).toISOString(),
+          window_size_hrs: 6,
+          baseline_hours: 6,
+          earliest_log_at: new Date(ALIGNED_END - 24 * HOUR).toISOString(),
+        }),
+        [],
+        src,
+        signal,
+      );
+      expect(result).not.toBeNull();
+      expect(result!.window_end).toBe(new Date(MID_HOUR_END).toISOString());
+      expect(result!.window_start).toBe(new Date(MID_HOUR_END - 6 * HOUR).toISOString());
+      expect(calls.json.some((u) => u.includes("17%3A32") || u.includes("17:32"))).toBe(true);
     } finally {
       vi.useRealTimers();
     }

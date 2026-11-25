@@ -134,7 +134,7 @@ const DIMENSIONS = ["country", "p_type", "method", "referer", "ua"] as const;
 
 /** The summary groups and columns the /insights baseline reads. */
 export const INSIGHTS_SUMMARY_SPEC = defineSummarySpec({
-  groups: ["dims", "series5", "all_fields", "field_totals", "dim_totals", "urls", "ins_url", "ins_ip", "ins_lat", "ins_asn"],
+  groups: ["dims", "all_fields", "field_totals", "dim_totals", "urls", "ins_url", "ins_ip", "ins_lat", "ins_asn"],
   columns: [
     "count", "requests", "errors",
     "status_5xx", "hit_requests", "miss_requests", "pass_requests",
@@ -142,8 +142,8 @@ export const INSIGHTS_SUMMARY_SPEC = defineSummarySpec({
   ],
   only: {
     count: ["all_fields", "ins_ip", "ins_asn"],
-    requests: ["dims", "series5", "ins_url", "ins_ip", "ins_asn"],
-    errors: ["dims", "series5", "ins_ip"],
+    requests: ["dims", "ins_url", "ins_asn"],
+    errors: ["dims", "ins_ip"],
     status_5xx: ["ins_url"],
     hit_requests: ["ins_url"],
     miss_requests: ["ins_url"],
@@ -152,6 +152,21 @@ export const INSIGHTS_SUMMARY_SPEC = defineSummarySpec({
     elapsed_hist: ["urls", "ins_lat"],
   },
 });
+
+function sumTotalRequests(rollup: Rollup): number {
+  const protos = rollup.dims.get("proto");
+  if (protos?.size) {
+    let total = 0;
+    for (const agg of protos.values()) total += agg.requests;
+    return total;
+  }
+  if (!rollup.loaded || rollup.loaded.has("series5")) {
+    let total = 0;
+    for (const agg of rollup.series.get("overall")?.get("")?.values() ?? []) total += agg.requests;
+    return total;
+  }
+  return 0;
+}
 
 /**
  * Merges the v3 summaries for an unfiltered /insights baseline, the range
@@ -197,7 +212,10 @@ export function insightsBaselineRollup(result: RollupResult): RollupResult {
   const bare = <K>(values: Map<K, RollupAgg>) =>
     new Map([...values].map(([key, agg]) => [key, { ...emptyAgg(), requests: agg.requests, errors: agg.errors }]));
   const cities = rollup.dims.get("city");
-  const overall = rollup.series.get("overall")?.get("");
+  const protos = rollup.dims.get("proto");
+  const overall = !protos?.size && (!rollup.loaded || rollup.loaded.has("series5"))
+    ? rollup.series.get("overall")?.get("")
+    : undefined;
   const insUrl = rollup.groups?.get("ins_url")?.get("url");
   const urls = rollup.groups?.get("urls")?.get("url");
   const insIp = rollup.groups?.get("ins_ip")?.get("ip");
@@ -229,7 +247,6 @@ export function insightsBaselineRollup(result: RollupResult): RollupResult {
   if (insIp) {
     groups.set("ins_ip", new Map([["ip", new Map([...insIp].map(([k, a]) => [k, {
       ...emptyAgg(),
-      requests: a.requests,
       errors: a.errors,
       count: a.count,
     }]))]]));
@@ -251,10 +268,13 @@ export function insightsBaselineRollup(result: RollupResult): RollupResult {
     ["ins_url/url", "urls/url", "ins_ip/ip", "ins_lat/city", "ins_lat/pop", "ins_asn/asn"]
       .filter((key) => rollup.present?.has(key)),
   );
+  const dims = new Map<string, Map<string, RollupAgg>>();
+  if (cities) dims.set("city", bare(cities));
+  if (protos) dims.set("proto", bare(protos));
   return {
     ...result,
     rollup: {
-      dims: new Map(cities ? [["city", bare(cities)]] : []),
+      dims,
       series: new Map(overall ? [["overall", new Map([["", bare(overall)]])]] : []),
       seriesStepMs: rollup.seriesStepMs,
       fields: new Map(
@@ -286,8 +306,7 @@ export function rollupInsightsBaseline(result: RollupResult, rows: InsightScanRo
 } {
   const { rollup } = result;
   const fields = (name: string) => rollup.fields.get(name) ?? new Map<string, number>();
-  let baselineRequests = 0;
-  for (const agg of rollup.series.get("overall")?.get("")?.values() ?? []) baselineRequests += agg.requests;
+  const baselineRequests = sumTotalRequests(rollup);
 
   const cities = rollup.dims.get("city");
   const insLatCity = rollupGroup(rollup, "ins_lat", "city");
@@ -442,11 +461,6 @@ export async function insightsFromRollup(
 ) {
   if (filters.length || Array.isArray(body.detectors)) return null;
   const { end, windowStart, start, windowHours, baselineHours } = resolveInsightWindow(body);
-  const sumOverall = (rollup: Rollup) => {
-    let total = 0;
-    for (const agg of rollup.series.get("overall")?.get("")?.values() ?? []) total += agg.requests;
-    return total;
-  };
   const fetchPair = (fromStart: number, fromWindow: number, toEnd: number) =>
     Promise.all([
       queryRollup(source, {
@@ -462,7 +476,7 @@ export async function insightsFromRollup(
   const alignedEnd = Math.floor(end / HOUR_MS) * HOUR_MS;
   const canAlignToCompletedHour =
     windowHours >= ALIGN_MIN_WINDOW_HOURS
-    && !body.clamp_end
+    && !body.end_time
     && end !== alignedEnd
     && (!Number.isFinite(earliestLogMs) || earliestLogMs <= alignedEnd - HOUR_MS);
 
@@ -473,7 +487,7 @@ export async function insightsFromRollup(
     const alignedWindowStart = alignedEnd - windowHours * HOUR_MS;
     const alignedStart = alignedWindowStart - baselineHours * HOUR_MS;
     const [wRes, bRes] = await fetchPair(alignedStart, alignedWindowStart, alignedEnd);
-    if (wRes && bRes && sumOverall(wRes.rollup) > 0) {
+    if (wRes && bRes && sumTotalRequests(wRes.rollup) > 0) {
       windowResult = wRes;
       baselineResult = bRes;
       effectiveEnd = alignedEnd;
@@ -489,8 +503,8 @@ export async function insightsFromRollup(
 
   const wRollup = windowResult.rollup;
   const bRollup = baselineResult.rollup;
-  const windowRequests = sumOverall(wRollup);
-  const baselineRequests = sumOverall(bRollup);
+  const windowRequests = sumTotalRequests(wRollup);
+  const baselineRequests = sumTotalRequests(bRollup);
 
   const histOf = (agg: RollupAgg | undefined) =>
     agg && agg.elapsedCount > 0
@@ -682,7 +696,8 @@ export async function insightsFromRollup(
     ? Math.min(baselineResult.dataFromMs, earliestLogMs)
     : baselineRequests > 0 ? baselineResult.dataFromMs : null;
   const historyHours = effectiveFirstMs == null ? 0 : Math.max(0, (effectiveEnd - effectiveFirstMs) / HOUR_MS);
-  const envelope = await handleInsights(body, {
+  const effectiveBody = effectiveEnd === end ? body : { ...body, clamp_end: new Date(effectiveEnd).toISOString() };
+  const envelope = await handleInsights(effectiveBody, {
     now: new Date(effectiveEnd),
     maskIps: Boolean(body.mask_ips),
     availableColumns,

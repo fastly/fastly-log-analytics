@@ -10,7 +10,7 @@ export const INSIGHTS_RESIDUAL_FIELDS = ["country", "p_type", "method", "referer
 
 const KEYS = new Set([
   "dims/city",
-  "series5/overall",
+  "dims/proto",
   ...INSIGHTS_RESIDUAL_FIELDS.map((field) => `all_fields/${field}`),
   "ins_url/url",
   "ins_ip/ip",
@@ -21,11 +21,11 @@ const KEYS = new Set([
 ]);
 
 /** Keys `present` in every v3 summary that has the /insights groups. */
-const PRESENT = ["dims/city", "series5/overall", "ins_url/url", "ins_ip/ip", "ins_lat/city", "ins_lat/pop", "ins_asn/asn", "urls/url"];
+const PRESENT = ["dims/city", "dims/proto", "ins_url/url", "ins_ip/ip", "ins_lat/city", "ins_lat/pop", "ins_asn/asn", "urls/url"];
 
 const COLUMNS = [
   "timestamp", "status", "cache", "url", "elapsed", "ip", "country", "geo_country", "city", "geo_city",
-  "region", "pop", "asn", "p_type", "method", "referer", "ua", "transport",
+  "region", "pop", "asn", "p_type", "method", "referer", "ua", "transport", "protocol", "proto",
 ];
 
 /** summary.rs `AUTH_TOKENS`, matched ASCII case-insensitively. */
@@ -119,13 +119,13 @@ function addElapsed(agg: RollupAgg, elapsed: number | null) {
  * histograms. Rows are never cut to a top K, so the residual is never truncated.
  */
 export const INSIGHTS_RESIDUAL: RollupResidual = {
-  id: "insights-residual-v2",
+  id: "insights-residual-v3",
   columns: COLUMNS,
   maxBytes: 256 * 1024 * 1024,
   keys: KEYS,
   accumulate(fromMs, toMs) {
     const cities = new Map<string, RollupAgg>();
-    const overall = new Map<number, RollupAgg>();
+    const protos = new Map<string, RollupAgg>();
     const fields = new Map<string, Map<string, number>>(INSIGHTS_RESIDUAL_FIELDS.map((field) => [field, new Map()]));
     const insUrl = new Map<string, RollupAgg>();
     const insIp = new Map<string, RollupAgg>();
@@ -148,8 +148,8 @@ export const INSIGHTS_RESIDUAL: RollupResidual = {
         const ts = column("timestamp", "ts");
         const status = int("status");
         const elapsedCol = int("elapsed");
-        const [cache, ip, plainCountry, plainCity, region, pop, pType] =
-          ["cache", "ip", "country", "city", "region", "pop", "p_type"].map(str);
+        const [cache, ip, plainCountry, plainCity, region, pop, pType, protocol, protoCol] =
+          ["cache", "ip", "country", "city", "region", "pop", "p_type", "protocol", "proto"].map(str);
         const geoCountry = str("geo_country");
         const geoCity = str("geo_city");
         const urlKind = kinds.get("url") ?? null;
@@ -177,11 +177,10 @@ export const INSIGHTS_RESIDUAL: RollupResidual = {
           if (s !== null && (s >= 400 || s === 0)) city.errors += 1;
           if (s !== null && s >= 500 && s <= 599) city.status5xx += 1;
 
-          const step = Math.floor(t / SERIES_STEP_MS) * SERIES_STEP_MS;
-          const bucket = overall.get(step) ?? emptyAgg();
-          overall.set(step, bucket);
-          bucket.requests += 1;
-          if (s !== null && s >= 500 && s <= 599) bucket.status5xx += 1;
+          const proto = aggOf(protos, nonEmpty(protocol[i]) ?? nonEmpty(protoCol[i]) ?? "Other");
+          proto.requests += 1;
+          if (s !== null && (s >= 400 || s === 0)) proto.errors += 1;
+          if (s !== null && s >= 500 && s <= 599) proto.status5xx += 1;
 
           for (const { counts, kind, values } of fieldCols) {
             const key = fieldKey(kind, values[i]);
@@ -240,8 +239,8 @@ export const INSIGHTS_RESIDUAL: RollupResidual = {
       },
       finish(): Rollup {
         return {
-          dims: new Map([["city", cities]]),
-          series: new Map([["overall", new Map([["", overall]])]]),
+          dims: new Map([["city", cities], ["proto", protos]]),
+          series: new Map(),
           seriesStepMs: SERIES_STEP_MS,
           fields,
           truncated: new Set(),

@@ -23,9 +23,7 @@ function insightsView(rollup: Rollup) {
     Object.fromEntries([...(values ?? [])].map(([v, a]) => [v, keys.map((k) => a[k])]));
   return {
     city: pick(rollup.dims.get("city"), ["requests", "errors"]),
-    overall: Object.fromEntries(
-      [...(rollup.series.get("overall")?.get("") ?? [])].map(([t, a]) => [t, a.requests]),
-    ),
+    proto: pick(rollup.dims.get("proto"), ["requests"]),
     fields: Object.fromEntries(
       INSIGHTS_RESIDUAL_FIELDS.map((field) => [field, Object.fromEntries(rollup.fields.get(field) ?? [])]),
     ),
@@ -91,7 +89,7 @@ describe("INSIGHTS_RESIDUAL", () => {
     const cut = Date.parse(files("raw")[2].start) + 7 * 60_000;
     const whole = await residualOf(raw);
     const [head, tail] = await Promise.all([residualOf(raw, -Infinity, cut), residualOf(raw, cut, Infinity)]);
-    const total = (r: Rollup) => [...r.series.get("overall")!.get("")!.values()].reduce((n, a) => n + a.requests, 0);
+    const total = (r: Rollup) => [...r.dims.get("proto")!.values()].reduce((n, a) => n + a.requests, 0);
     expect(total(head)).toBeGreaterThan(0);
     expect(total(tail)).toBeGreaterThan(0);
     expect(total(head) + total(tail)).toBe(total(whole));
