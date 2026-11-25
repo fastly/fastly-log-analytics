@@ -1600,9 +1600,9 @@ def test_network_health_real_ch_uses_rollups_subminute_sampling_and_fast_shieldi
     req = NetworkHealthRequest(start_time=start_s, end_time=end_s, bucket_seconds=300, top_n=30)
     resp = network_health(svc, req, start_s, end_s)
 
-    # Uniform 10x deterministic hash sampling across 24h without periodic minute/sub-minute strides.
-    assert resp.summary is not None and resp.summary.total_reqs == 1000
-    assert resp.heatmap[0].buckets[0].reqs == 1000
+    # Uniform 20x deterministic line_ordinal sampling across 24h without periodic minute/sub-minute strides.
+    assert resp.summary is not None and resp.summary.total_reqs == 2000
+    assert resp.heatmap[0].buckets[0].reqs == 2000
     assert resp.cities[0].lat == 37.33 and resp.cities[0].lon == -121.89
     assert resp.leaderboard[0].c_speed_mix == {"fast": 0.833, "medium": 0.167}
     assert resp.leaderboard[0].p95_rtt_us == pytest.approx((40000.0 * 2500 + 44000.0 * 500) / 3000)
@@ -1612,9 +1612,9 @@ def test_network_health_real_ch_uses_rollups_subminute_sampling_and_fast_shieldi
     assert not client.matching("FROM network_minute_dimensions")
     assert client.matching("sumMap(")
 
-    # Heatmap uses single-pass WITH + quantileTDigest + position(..., 'HIT'), and deterministic hash sampling.
+    # Heatmap uses single-pass WITH + quantileTDigest + position(..., 'HIT'), and deterministic line_ordinal sampling.
     ((heatmap_sql, _),) = client.matching("AS throughput_bps")
-    assert "cityHash64(event_id) % 10 = 0" in heatmap_sql
+    assert "line_ordinal % 20 = 0" in heatmap_sql
     assert "toMinute" not in heatmap_sql and "toSecond" not in heatmap_sql
     assert "quantileTDigest(0.5)" in heatmap_sql
     assert "position(custom_fields['cache'], 'HIT') > 0" in heatmap_sql

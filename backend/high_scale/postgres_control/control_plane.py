@@ -243,12 +243,20 @@ _SOURCE_OBJECTS_ACTIVITY_INDEX_DDL = (
     "INCLUDE (accepted_rows, size_bytes) "
     "WHERE status NOT IN ('discovered', 'claimed')"
 )
+SOURCE_OBJECTS_REQUEST_FLUSH_INDEX = "high_scale_source_objects_request_flush_idx"
+_SOURCE_OBJECTS_REQUEST_FLUSH_INDEX_DDL = (
+    f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {SOURCE_OBJECTS_REQUEST_FLUSH_INDEX} "
+    "ON high_scale_source_objects (service_id, object_key) "
+    "INCLUDE (accepted_rows) "
+    "WHERE domain = 'request' AND status NOT IN ('discovered', 'claimed')"
+)
 _CONCURRENT_BILLING_INDEXES: tuple[tuple[str, str], ...] = (
     (SOURCE_OBJECTS_BILLING_INDEX, _SOURCE_OBJECTS_BILLING_INDEX_DDL),
     (SOURCE_OBJECTS_UPDATED_BILLING_INDEX, _SOURCE_OBJECTS_UPDATED_BILLING_INDEX_DDL),
     (ARCHIVE_MANIFESTS_BILLING_INDEX, _ARCHIVE_MANIFESTS_BILLING_INDEX_DDL),
     (ARCHIVE_MANIFESTS_EXPIRED_BILLING_INDEX, _ARCHIVE_MANIFESTS_EXPIRED_BILLING_INDEX_DDL),
     (SOURCE_OBJECTS_ACTIVITY_INDEX, _SOURCE_OBJECTS_ACTIVITY_INDEX_DDL),
+    (SOURCE_OBJECTS_REQUEST_FLUSH_INDEX, _SOURCE_OBJECTS_REQUEST_FLUSH_INDEX_DDL),
 )
 # A concurrent build waits for every older transaction in the database; an idle-in-transaction session would
 # otherwise stall the booting worker forever. Timing out leaves an INVALID index the next boot rebuilds.

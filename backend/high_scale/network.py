@@ -46,6 +46,7 @@ from backend.repositories.utils.response_cache import (
     client_cache_token,
     coalesce,
     digest_cache_key,
+    register_service_cache_invalidator,
     serialize_filters_for_key,
 )
 from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
@@ -53,12 +54,32 @@ from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
 if TYPE_CHECKING:
     from backend.high_scale.ingest_controller import HighScaleService
 
-_network_memo = ResponseMemo(ttl=60.0, maxsize=128, prewarmer=False)
+_network_memo = ResponseMemo(ttl=60.0, maxsize=128, prewarmer=False, invalidate_on_ingest=False)
 CacheRegistry.register("high_scale.network", _network_memo.cache)
 _network_model_cache: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=60.0)
 CacheRegistry.register("high_scale.network.models", _network_model_cache)
 _network_json_cache: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=60.0)
 CacheRegistry.register("high_scale.network.json", _network_json_cache)
+
+
+def _invalidate_network_caches(_service_id: str) -> int:
+    n = len(_network_model_cache) + len(_network_json_cache)
+    _network_model_cache.clear()
+    _network_json_cache.clear()
+    return n
+
+
+register_service_cache_invalidator(_invalidate_network_caches, on_ingest=False)
+
+
+def _cache_minute_bound(value: str | datetime | None) -> int | str | None:
+    if value is None:
+        return None
+    parsed = value if isinstance(value, datetime) else _range_value(value)
+    if parsed is not None:
+        dt = parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+        return int(dt.timestamp()) // 60
+    return normalize_cache_bound(value)
 
 
 def _fast_model_hit(memo_key: str) -> Any | None:
@@ -349,8 +370,8 @@ def origin_shielding_analysis(
             {
                 "ep": "hs_origin_shielding",
                 "cid": client_cache_token(service.client),
-                "s": normalize_cache_bound(start_time),
-                "e": normalize_cache_bound(end_time),
+                "s": _cache_minute_bound(start_time),
+                "e": _cache_minute_bound(end_time),
                 "f": serialize_filters_for_key(getattr(req, "filters", None) or {}),
                 "l": limit,
             },
@@ -410,8 +431,8 @@ def network_health(
         {
             "ep": "hs_network_health",
             "cid": client_cache_token(service.client),
-            "s": normalize_cache_bound(start_time),
-            "e": normalize_cache_bound(end_time),
+            "s": _cache_minute_bound(start_time),
+            "e": _cache_minute_bound(end_time),
             "f": serialize_filters_for_key(getattr(req, "filters", None) or {}),
             "bs": int(bs),
             "tn": int(top_n),
@@ -469,11 +490,11 @@ def network_health(
         if is_real_ch:
             nh_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
             sample_stride = (
-                (10 if nh_span_s >= 43200 else (4 if nh_span_s > 21600 else 1))
+                (20 if nh_span_s >= 43200 else (5 if nh_span_s > 21600 else 1))
                 if not os.getenv("PYTEST_CURRENT_TEST")
                 else 1
             )
-            stride_sql = f" AND cityHash64(event_id) % {sample_stride} = 0" if sample_stride > 1 else ""
+            stride_sql = f" AND line_ordinal % {sample_stride} = 0" if sample_stride > 1 else ""
             rtt_prewhere = f"{_BASE_WHERE}{filter_sql}{stride_sql} AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0'"
             top_asn_ints: list[int] = []
             raw_speed_rows: list[dict[str, Any]] | None = None
@@ -1078,8 +1099,8 @@ def network_quality(
             {
                 "ep": "hs_network_quality",
                 "cid": client_cache_token(service.client),
-                "s": normalize_cache_bound(start_time),
-                "e": normalize_cache_bound(end_time),
+                "s": _cache_minute_bound(start_time),
+                "e": _cache_minute_bound(end_time),
                 "f": serialize_filters_for_key(getattr(req, "filters", None) or {}),
                 "rc": str(region_country),
             },
@@ -1103,8 +1124,8 @@ def network_quality(
 
         def _bar(group_expr: str, extra_where: str = "") -> list[dict]:
             q_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
-            scale_factor = (10 if q_span_s >= 43200 else (4 if q_span_s > 21600 else 1)) if is_real_ch else 1
-            hash_clause = f" AND cityHash64(event_id) % {scale_factor} = 0" if scale_factor > 1 else ""
+            scale_factor = (20 if q_span_s >= 43200 else (5 if q_span_s > 21600 else 1)) if is_real_ch else 1
+            hash_clause = f" AND line_ordinal % {scale_factor} = 0" if scale_factor > 1 else ""
             if is_real_ch and group_expr != _ASN:
                 sql = (
                     f"SELECT {group_expr} AS label, avg({_RTT} / 1000.0) AS rtt_ms, count() AS reqs "
@@ -1147,8 +1168,8 @@ def network_quality(
                 "network_dimensions", client=service.client, service_id=service.service_id
             )
             q_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
-            region_scale = 10 if q_span_s >= 43200 else (4 if q_span_s > 21600 else 1)
-            region_hash = f" AND cityHash64(event_id) % {region_scale} = 0" if region_scale > 1 else ""
+            region_scale = 20 if q_span_s >= 43200 else (5 if q_span_s > 21600 else 1)
+            region_hash = f" AND line_ordinal % {region_scale} = 0" if region_scale > 1 else ""
             sql = (
                 "SELECT dimension, label, rtt_ms, reqs FROM ("
                 "SELECT dimension, value AS label, "
@@ -1205,7 +1226,7 @@ def network_quality(
                         f"WHERE {_RTT} > 0 AND {_TTFB} > 0 LIMIT {_SCATTER_SAMPLE}"
                     )
 
-                fast_rows = service.client.execute(_scatter_query(" AND cityHash64(event_id) % 64 = 0"), params)
+                fast_rows = service.client.execute(_scatter_query(" AND line_ordinal % 64 = 0"), params)
                 if len(fast_rows) >= 200:
                     return fast_rows
                 return service.client.execute(_scatter_query(""), params)
@@ -1320,8 +1341,8 @@ def get_pop_health(
         base_where = f"{_BASE_WHERE}{filter_sql}"
         if is_real_ch:
             pop_span_s = (end - start).total_seconds()
-            pop_stride = 1 if filter_sql else (10 if pop_span_s >= 43200 else (4 if pop_span_s > 21600 else 1))
-            hash_clause = f" AND cityHash64(event_id) % {pop_stride} = 0" if pop_stride > 1 else ""
+            pop_stride = 1 if filter_sql else (20 if pop_span_s >= 43200 else (5 if pop_span_s > 21600 else 1))
+            hash_clause = f" AND line_ordinal % {pop_stride} = 0" if pop_stride > 1 else ""
             fact_sql = (
                 f"SELECT custom_fields['pop'] AS pop, count() AS requests, countIf({_STATUS} >= 500) AS errors, "
                 f"quantileTDigest(0.5)({_RTT}) AS p50_rtt_us, quantileTDigest(0.95)({_TTFB}) * 1000.0 AS p95_ttfb_ms, "
@@ -1330,14 +1351,14 @@ def get_pop_health(
                 f"FROM request_facts PREWHERE {base_where}{hash_clause} AND custom_fields['pop'] != '' "
                 "GROUP BY pop ORDER BY requests DESC"
             )
-            rollup_by_pop: dict[str, tuple[int, Any, Any]] = {}
+            rollup_by_pop: dict[str, tuple[int, int, Any, Any]] = {}
             if pop_stride > 1:
                 fence = visible_publication_fence_sql(
                     "network_dimensions", client=service.client, service_id=service.service_id
                 )
                 combined_sql = (
                     "SELECT 'rollup' AS kind, value AS pop, toUInt64(sum(requests)) AS req_count, "
-                    "toUInt64(0) AS errors, "
+                    "CAST(toUInt64(sum(errors)), 'Nullable(UInt64)') AS errors, "
                     "sum(tcp_rtt_p50_us * tcp_rtt_count) / nullIf(sum(tcp_rtt_count), 0) AS p50_rtt_us, "
                     "sum(ttfb_p95_us * requests) / nullIf(sumIf(requests, ttfb_p95_us IS NOT NULL), 0) * 1000.0 AS p95_ttfb_ms, "
                     "toUInt64(0) AS cache_hits, toInt64(0) AS bandwidth_bytes "
@@ -1346,9 +1367,10 @@ def get_pop_health(
                     f"AND bucket_start >= {{start:DateTime64(3)}} AND bucket_start < {{end:DateTime64(3)}} AND {fence} "
                     "GROUP BY pop "
                     "UNION ALL "
-                    f"SELECT 'fact' AS kind, custom_fields['pop'] AS pop, toUInt64(count()) AS req_count, "
-                    f"toUInt64(countIf({_STATUS} >= 500)) AS errors, "
-                    f"quantileTDigest(0.5)({_RTT}) AS p50_rtt_us, quantileTDigest(0.95)({_TTFB}) * 1000.0 AS p95_ttfb_ms, "
+                    "SELECT 'fact' AS kind, custom_fields['pop'] AS pop, toUInt64(count()) AS req_count, "
+                    "CAST(NULL, 'Nullable(UInt64)') AS errors, "
+                    "CAST(NULL, 'Nullable(Float64)') AS p50_rtt_us, "
+                    "CAST(NULL, 'Nullable(Float64)') AS p95_ttfb_ms, "
                     "toUInt64(countIf(startsWith(upper(custom_fields['cache']), 'HIT'))) AS cache_hits, "
                     "toInt64(sum(toInt64OrZero(custom_fields['resp_bytes']))) AS bandwidth_bytes "
                     f"FROM request_facts PREWHERE {base_where}{hash_clause} AND custom_fields['pop'] != '' "
@@ -1365,6 +1387,7 @@ def get_pop_health(
                         if cr.get("pop"):
                             rollup_by_pop[str(cr["pop"])] = (
                                 int(cr.get("req_count") or 0),
+                                int(cr.get("errors") or 0),
                                 cr.get("p50_rtt_us"),
                                 cr.get("p95_ttfb_ms"),
                             )
@@ -1386,13 +1409,17 @@ def get_pop_health(
             rows = []
             for r in fact_rows:
                 pop_key = str(r["pop"])
-                r_entry = rollup_by_pop.get(pop_key, (0, None, None))
+                r_entry = rollup_by_pop.get(pop_key, (0, 0, None, None))
                 sampled_reqs = max(1, int(r.get("requests") or 0))
                 if pop_stride > 1:
                     exact_reqs = r_entry[0] if r_entry[0] > 0 else sampled_reqs * pop_stride
                     scale = exact_reqs / sampled_reqs
                     row_reqs = exact_reqs
-                    row_errors = min(exact_reqs, int(round(int(r.get("errors") or 0) * scale)))
+                    row_errors = (
+                        r_entry[1]
+                        if (r_entry[0] > 0 and r.get("errors") is None)
+                        else min(exact_reqs, int(round(int(r.get("errors") or 0) * scale)))
+                    )
                     row_hits = min(exact_reqs, int(round(int(r.get("cache_hits") or 0) * scale)))
                     row_bytes = int(round(int(r.get("bandwidth_bytes") or 0) * scale))
                 else:
@@ -1407,8 +1434,8 @@ def get_pop_health(
                         "errors": row_errors,
                         "cache_hits": row_hits,
                         "bandwidth_bytes": row_bytes,
-                        "p50_rtt_us": r.get("p50_rtt_us") if r.get("p50_rtt_us") is not None else r_entry[1],
-                        "p95_ttfb_ms": r.get("p95_ttfb_ms") if r.get("p95_ttfb_ms") is not None else r_entry[2],
+                        "p50_rtt_us": r.get("p50_rtt_us") if r.get("p50_rtt_us") is not None else r_entry[2],
+                        "p95_ttfb_ms": r.get("p95_ttfb_ms") if r.get("p95_ttfb_ms") is not None else r_entry[3],
                     }
                 )
             rows.sort(key=lambda x: int(x.get("requests") or 0), reverse=True)
@@ -1476,8 +1503,8 @@ def get_transport_metrics(
             {
                 "ep": "hs_transport_metrics",
                 "cid": client_cache_token(service.client),
-                "s": normalize_cache_bound(start_time),
-                "e": normalize_cache_bound(end_time),
+                "s": _cache_minute_bound(start_time),
+                "e": _cache_minute_bound(end_time),
                 "f": serialize_filters_for_key(filters or {}),
             },
             {"name": service.service_id, "service_id": service.service_id},
@@ -1502,8 +1529,8 @@ def get_transport_metrics(
         )
         if is_real_ch:
             tr_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
-            scale_factor = 10 if tr_span_s >= 43200 else (4 if tr_span_s > 21600 else 1)
-            hash_clause = f" AND cityHash64(event_id) % {scale_factor} = 0" if scale_factor > 1 else ""
+            scale_factor = 20 if tr_span_s >= 43200 else (5 if tr_span_s > 21600 else 1)
+            hash_clause = f" AND line_ordinal % {scale_factor} = 0" if scale_factor > 1 else ""
             combined_sql = (
                 f"SELECT count() AS total_reqs, sum(toInt64OrZero(custom_fields['resp_bytes'])) AS total_bytes, "
                 f"quantilesTDigest(0.50, 0.90, 0.95, 0.99)({_RTT}) AS rtt_quants, "
@@ -1614,8 +1641,8 @@ def network_bundle(
             {
                 "ep": "hs_network_bundle",
                 "cid": client_cache_token(service.client),
-                "s": normalize_cache_bound(start_time),
-                "e": normalize_cache_bound(end_time),
+                "s": _cache_minute_bound(start_time),
+                "e": _cache_minute_bound(end_time),
                 "f": serialize_filters_for_key(getattr(req, "filters", None) or {}),
                 "bs": int(getattr(req, "bucket_seconds", 300) or 300),
                 "tn": int(getattr(req, "top_n", 30) or 30),

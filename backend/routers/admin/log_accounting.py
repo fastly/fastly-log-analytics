@@ -527,7 +527,20 @@ def prewarm_log_accounting(service_id: str) -> None:
             logger.debug("[log-accounting] thread connection release failed", exc_info=True)
 
 
+from backend.repositories.utils.response_cache import register_service_cache_invalidator as _register_cache_invalidator
+
+
+def _invalidate_log_accounting_caches(_service_id: str) -> int:
+    n = len(_FASTLY_COUNTS_CACHE) + len(_CLICKHOUSE_COUNTS_CACHE) + len(_LOCAL_COUNTS_CACHE) + len(_LATEST_INGEST_CACHE)
+    _FASTLY_COUNTS_CACHE.clear()
+    _CLICKHOUSE_COUNTS_CACHE.clear()
+    _LOCAL_COUNTS_CACHE.clear()
+    _LATEST_INGEST_CACHE.clear()
+    return n
+
+
 _CacheRegistry.register("routers.admin.log_accounting._FASTLY_COUNTS_CACHE", _FASTLY_COUNTS_CACHE)
 _CacheRegistry.register("routers.admin.log_accounting._CLICKHOUSE_COUNTS_CACHE", _CLICKHOUSE_COUNTS_CACHE)
 _CacheRegistry.register("routers.admin.log_accounting._LOCAL_COUNTS_CACHE", _LOCAL_COUNTS_CACHE)
 _CacheRegistry.register("routers.admin.log_accounting._LATEST_INGEST_CACHE", _LATEST_INGEST_CACHE)
+_register_cache_invalidator(_invalidate_log_accounting_caches, on_ingest=False)

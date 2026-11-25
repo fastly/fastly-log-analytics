@@ -133,12 +133,12 @@ def test_network_health_map_and_metro_scores_use_rtt_and_baseline(monkeypatch: p
     ((map_sql, _),) = client.matching("AS lat")
     assert "quantilesTDigest(0.1, 0.5)(_rtt) AS rtt_quants" in map_sql
 
-    # sample_stride = 10 (cityHash64) on 24h window scales heatmap, map_buckets, metro_leaderboard, and summary
-    assert resp.heatmap[0].buckets[0].reqs == 1000
-    assert resp.summary is not None and resp.summary.total_reqs == 1010
+    # sample_stride = 20 (line_ordinal) on 24h window scales heatmap, map_buckets, metro_leaderboard, and summary
+    assert resp.heatmap[0].buckets[0].reqs == 2000
+    assert resp.summary is not None and resp.summary.total_reqs == 2020
     city_cell = resp.map_buckets[0].cities[0]
-    assert city_cell.reqs == 500
-    assert resp.metro_leaderboard[0].total_reqs == 500
+    assert city_cell.reqs == 1000
+    assert resp.metro_leaderboard[0].total_reqs == 1000
 
     # Map & metro health score reflect RTT ratio 60k/20k = 3.0 -> 60.0 (not 100.0!)
     assert city_cell.health_score == 60.0
@@ -203,7 +203,7 @@ def test_network_health_separate_metro_query_scales_and_uses_rtt(monkeypatch: py
     ((metro_sql, _),) = client.matching("AS total_reqs")
     assert "quantilesTDigest(0.1, 0.5)(_rtt) AS rtt_quants" in metro_sql
 
-    assert resp.metro_leaderboard[0].total_reqs == 400
+    assert resp.metro_leaderboard[0].total_reqs == 800
     assert resp.metro_leaderboard[0].health_score == 68.0
 
 
@@ -402,7 +402,7 @@ def test_network_quality_mean_rtt_country_labels_and_hash_scatter(monkeypatch: p
     assert "avg(" in reg_sql and "median(" not in reg_sql
     assert rollup_sql == reg_sql
     sc_sql = client.matching("cache_state")[0][0]
-    assert "cityHash64(event_id)" in sc_sql and "toUnixTimestamp64Milli" not in sc_sql
+    assert "line_ordinal % 64 = 0" in sc_sql and "toUnixTimestamp64Milli" not in sc_sql
     assert resp.by_country[0].label == "United States" and resp.by_country[0].value == "US"
     assert len(client.calls) == 2
 

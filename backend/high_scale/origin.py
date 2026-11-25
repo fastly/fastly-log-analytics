@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from backend.high_scale._common import (
@@ -64,8 +64,20 @@ from backend.repositories.utils.response_shaping import (
 from backend.utils.bounded_cache import CacheRegistry
 from backend.utils.date_utils import safe_iso
 
-_origin_memo = ResponseMemo(ttl=60.0, maxsize=256, prewarmer=False)
+_origin_memo = ResponseMemo(ttl=60.0, maxsize=256, prewarmer=False, invalidate_on_ingest=False)
 CacheRegistry.register("high_scale.origin", _origin_memo.cache)
+
+
+def _cache_minute_bound(value: str | None) -> int | str | None:
+    if value is None:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        dt = dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+        return int(dt.timestamp()) // 60
+    except ValueError:
+        return normalize_cache_bound(value)
+
 
 _EMPTY = empty_origin_aggregates(include_has_data=False)
 
@@ -362,6 +374,58 @@ def _dimension_rows(
     )
 
 
+def _dimensions_batch_rows(
+    service: HighScaleService,
+    *,
+    dimensions: list[str],
+    start_time: str | None,
+    end_time: str | None,
+    min_requests: int,
+    per_dim_limit: int,
+) -> dict[str, list[dict[str, Any]]]:
+    where, params = _where(service.service_id, "origin_dimensions", start_time, end_time)
+    params["dims"] = dimensions
+    params["min_requests"] = int(min_requests)
+    params["per_dim_limit"] = int(per_dim_limit)
+    rows = service.client.execute(
+        "/* origin:dimensions_batch */ "
+        "SELECT dimension, value, "
+        "sum(origin_minute_dimensions.requests) AS requests, "
+        "sum(origin_5xx) AS origin_5xx, "
+        f"{_sketch_select('latency', 'latency', (0.5, 0.95, 0.99))} "
+        f"FROM origin_minute_dimensions WHERE {where} AND dimension IN {{dims:Array(String)}} "
+        "GROUP BY dimension, value "
+        "HAVING (dimension != 'url' OR sum(origin_minute_dimensions.requests) >= {min_requests:UInt64}) "
+        "AND (dimension != 'oip' OR sum(origin_minute_dimensions.requests) >= 10) "
+        "ORDER BY dimension ASC, "
+        "if(dimension = 'status', toFloat64(requests), ifNotFinite(latency_q[2], -1.0)) DESC "
+        "LIMIT {per_dim_limit:UInt32} BY dimension",
+        params,
+    )
+    grouped: dict[str, list[dict[str, Any]]] = {dim: [] for dim in dimensions}
+    for row in rows:
+        dim = str(row.get("dimension") or "")
+        if dim in grouped:
+            grouped[dim].append(row)
+    return grouped
+
+
+def _shape_slow_urls(rows: list[dict[str, Any]], *, approx: dict[str, Any]) -> dict[str, Any]:
+    return shape_origin_slow_urls_response(
+        [
+            shape_origin_slow_url_row(
+                row["value"],
+                row["requests"],
+                _milliseconds(_quantile(row, "latency", 0)),
+                _milliseconds(_quantile(row, "latency", 1)),
+                _milliseconds(_quantile(row, "latency", 2)),
+            )
+            for row in rows
+        ],
+        **approx,
+    )
+
+
 def _slow_urls(service: HighScaleService, req: Any, start_time: str | None, end_time: str | None) -> dict[str, Any]:
     min_requests = int(getattr(req, "slow_urls_min_requests", None) or getattr(req, "min_requests", 10) or 10)
     limit = int(getattr(req, "slow_urls_limit", None) or getattr(req, "limit", 20) or 20)
@@ -380,19 +444,7 @@ def _slow_urls(service: HighScaleService, req: Any, start_time: str | None, end_
         limit=limit,
         extra_params={"min_requests": min_requests},
     )
-    return shape_origin_slow_urls_response(
-        [
-            shape_origin_slow_url_row(
-                row["value"],
-                row["requests"],
-                _milliseconds(_quantile(row, "latency", 0)),
-                _milliseconds(_quantile(row, "latency", 1)),
-                _milliseconds(_quantile(row, "latency", 2)),
-            )
-            for row in rows
-        ],
-        **_APPROX,
-    )
+    return _shape_slow_urls(rows, approx=_APPROX)
 
 
 def _status_codes(service: HighScaleService, start_time: str | None, end_time: str | None) -> dict[str, Any]:
@@ -459,8 +511,8 @@ def origin_aggregates(
             {
                 "ep": "hs_origin_aggregates",
                 "cid": client_cache_token(service.client),
-                "s": normalize_cache_bound(start_time),
-                "e": normalize_cache_bound(end_time),
+                "s": _cache_minute_bound(start_time),
+                "e": _cache_minute_bound(end_time),
                 "f": serialize_filters_for_key(getattr(req, "filters", None) or {}),
                 "sec": sorted(sections),
                 "bm": getattr(req, "bucket_minutes", None),
@@ -568,37 +620,127 @@ def origin_aggregates(
                     ),
                 )
             )
-        if "slow_urls" in sections:
+        _DIM_SECTION_MAP = (
+            ("slow_urls", "url"),
+            ("status_codes", "status"),
+            ("path_breakdown", "edge"),
+            ("pop_latency", "pop"),
+            ("ip_health", "oip"),
+        )
+        batched_dims = (
+            [dim for sec, dim in _DIM_SECTION_MAP if sec in sections] if (is_real_ch and facts is None) else []
+        )
+        use_dim_batch = len(batched_dims) >= 2
+
+        if use_dim_batch:
+            min_requests = int(getattr(req, "slow_urls_min_requests", None) or getattr(req, "min_requests", 10) or 10)
+            slow_limit = int(getattr(req, "slow_urls_limit", None) or getattr(req, "limit", 20) or 20)
+            pop_limit = int(getattr(req, "pop_latency_limit", None) or getattr(req, "limit", 30) or 30)
+            ip_limit = int(getattr(req, "ip_health_limit", None) or getattr(req, "limit", 30) or 30)
+            per_dim_limit = max(slow_limit, pop_limit, ip_limit, 100)
             tasks.append(
                 (
-                    "slow_urls",
-                    lambda: (
-                        _slow_urls(service, req, start_time, end_time)
-                        if facts is None
-                        else _facts_slow_urls(service, facts, req)
+                    "dimensions_batch",
+                    lambda: _dimensions_batch_rows(
+                        service,
+                        dimensions=batched_dims,
+                        start_time=start_time,
+                        end_time=end_time,
+                        min_requests=min_requests,
+                        per_dim_limit=per_dim_limit,
                     ),
                 )
             )
-        if "status_codes" in sections:
-            tasks.append(
-                (
-                    "status_codes",
-                    lambda: (
-                        _status_codes(service, start_time, end_time)
-                        if facts is None
-                        else _facts_status_codes(service, facts)
-                    ),
+        else:
+            if "slow_urls" in sections:
+                tasks.append(
+                    (
+                        "slow_urls",
+                        lambda: (
+                            _slow_urls(service, req, start_time, end_time)
+                            if facts is None
+                            else _facts_slow_urls(service, facts, req)
+                        ),
+                    )
                 )
-            )
-        if "path_breakdown" in sections:
-            tasks.append(("path_breakdown", _build_path_breakdown))
-        if "pop_latency" in sections:
-            tasks.append(("pop_latency", _build_pop_latency))
-        if "ip_health" in sections:
-            tasks.append(("ip_health", _build_ip_health))
+            if "status_codes" in sections:
+                tasks.append(
+                    (
+                        "status_codes",
+                        lambda: (
+                            _status_codes(service, start_time, end_time)
+                            if facts is None
+                            else _facts_status_codes(service, facts)
+                        ),
+                    )
+                )
+            if "path_breakdown" in sections:
+                tasks.append(("path_breakdown", _build_path_breakdown))
+            if "pop_latency" in sections:
+                tasks.append(("pop_latency", _build_pop_latency))
+            if "ip_health" in sections:
+                tasks.append(("ip_health", _build_ip_health))
 
         trace = HighScaleSections(service.service_id, "origin")
         result = trace.run_parallel(tasks, source="projection" if facts is None else "fact")
+
+        if use_dim_batch:
+            grouped = result.pop("dimensions_batch", {})
+            if "slow_urls" in sections:
+                result["slow_urls"] = _shape_slow_urls(grouped.get("url", [])[:slow_limit], approx=approx)
+            if "status_codes" in sections:
+                st_rows = grouped.get("status", [])
+                st_total = sum(int(r["requests"]) for r in st_rows)
+                result["status_codes"] = shape_status_code_rows(
+                    [{**r, "total_requests": st_total} for r in st_rows], round_pct=False
+                )
+            if "path_breakdown" in sections:
+                edge_rows = grouped.get("edge", [])
+                result["path_breakdown"] = shape_origin_path_breakdown(
+                    [
+                        shape_origin_path_row(
+                            row["value"] == "true",
+                            row["requests"],
+                            _milliseconds(_quantile(row, "latency", 0)),
+                            _milliseconds(_quantile(row, "latency", 1)),
+                        )
+                        for row in edge_rows
+                    ],
+                    shielding_detected=any(row["value"] == "false" for row in edge_rows),
+                    **approx,
+                )
+            if "pop_latency" in sections:
+                pop_rows = grouped.get("pop", [])[:pop_limit]
+                result["pop_latency"] = shape_pop_latency_rows(
+                    [
+                        {
+                            "pop": row["value"],
+                            "requests": int(row["requests"]),
+                            "p50_ms": _milliseconds(_quantile(row, "latency", 0)),
+                            "p95_ms": _milliseconds(_quantile(row, "latency", 1)),
+                        }
+                        for row in pop_rows
+                    ],
+                    include_median_when_empty=True,
+                    **approx,
+                )
+            if "ip_health" in sections:
+                ip_rows = grouped.get("oip", [])[:ip_limit]
+                result["ip_health"] = shape_origin_ip_health_response(
+                    [
+                        shape_origin_ip_health_row(
+                            row["value"],
+                            row["requests"],
+                            _milliseconds(_quantile(row, "latency", 0)),
+                            _milliseconds(_quantile(row, "latency", 1)),
+                            int(row.get("origin_5xx") or 0) * 100.0 / int(row["requests"]),
+                        )
+                        for row in ip_rows
+                        if int(row["requests"]) > 0
+                    ],
+                    has_data=bool(ip_rows),
+                    **approx,
+                )
 
         summary = result.get("summary", _EMPTY["summary"])
         out = {"has_data": bool(summary.get("has_data")), **result, "section_timings": trace.timings()}
@@ -638,8 +780,8 @@ def origin_drilldown(
             {
                 "ep": "hs_origin_drilldown",
                 "cid": client_cache_token(service.client),
-                "s": normalize_cache_bound(start_time),
-                "e": normalize_cache_bound(end_time),
+                "s": _cache_minute_bound(start_time),
+                "e": _cache_minute_bound(end_time),
                 "f": serialize_filters_for_key(getattr(req, "filters", None) or {}),
                 "dim": dimension,
                 "l": limit,
