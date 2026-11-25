@@ -1181,7 +1181,12 @@ function consumeJsonSecretValueAfterQuote(
     p += 1;
   }
   while (p < len && isInlineWs(line1[p])) p += 1;
-  if (p >= len || line1.startsWith("[url]", p)) return pos;
+  if (
+    p >= len
+    || (line1.startsWith("[url]", p) && !isCookieKey(keyCandidate) && !isMultiParamAuthHeader(keyCandidate, ""))
+  ) {
+    return pos;
+  }
 
   const firstCh = line1[p]!;
   const startsQuotedOrGroup = firstCh === '"' || firstCh === "'" || firstCh === "`"
@@ -1213,7 +1218,8 @@ function consumeJsonSecretValueAfterQuote(
   const authParamMode = isMultiParamAuthHeader(keyCandidate, matchedScheme);
   const vCh = line1[valStart];
   const valStartsQuoted = vCh === '"' || vCh === "'" || vCh === "`";
-  const valStartsQuotedOrGroup = valStartsQuoted || vCh === "{" || vCh === "[" || vCh === "(";
+  const valStartsSentinel = line1.startsWith("[redacted]", valStart) || line1.startsWith("[url]", valStart);
+  const valStartsQuotedOrGroup = valStartsQuoted || (!valStartsSentinel && (vCh === "{" || vCh === "[" || vCh === "("));
 
   let valEnd: number;
   if (valStartsQuotedOrGroup) {
@@ -1748,13 +1754,13 @@ function consumeChainedUrlEquals(
     while (afterUrl < afterUrlWsLimit && isInlineWs(line[afterUrl])) afterUrl += 1;
     if (line[afterUrl] !== "=") break;
     let val2Start = afterUrl + 1;
-    while (val2Start < len && isInlineWs(line[val2Start])) val2Start += 1;
+    while (val2Start < len && (isInlineWs(line[val2Start]) || line[val2Start] === "=")) val2Start += 1;
     const val2End = scanSingleSecretValueEnd(line, val2Start, true, true, isCookie, allowQuoted, escapeState);
     if (val2End > val2Start) {
       curStart = val2Start;
       curEnd = val2End;
     } else {
-      curEnd = afterUrl + 1;
+      curEnd = val2Start;
       break;
     }
   }
