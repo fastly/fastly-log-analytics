@@ -982,6 +982,7 @@ const insightBaselines = new WeakMap<Request, RollupResult>();
 const QUERY_TABLES = ["logs", "requests", "client_vitals", "client_errors"];
 const QUERY_CUSTOM_TYPES = { string: "VARCHAR", number: "DOUBLE", boolean: "BOOLEAN" } as const;
 const QUERY_FIRST_WINDOW_MS = 3_600_000;
+const SUB_HOUR_FILE_WINDOWS_MS = [15 * 60_000, 5 * 60_000, 60_000] as const;
 
 /**
  * A `/api/query` scan by the prepared request: its plan, the newest-window
@@ -1326,10 +1327,13 @@ async function prepareCloudScan(
   generation.assertCurrent();
   assertAdapterEpoch(request, entryMetaEpoch);
   // Newest-first windows end at the range end: 1h, then 4x wider until the whole range.
-  const queryWindow = (step: number): string | null => {
-    const from = Math.floor((Date.parse(end) - QUERY_FIRST_WINDOW_MS * 4 ** step) / 1000) * 1000;
-    return from > Date.parse(scanStart) ? new Date(from).toISOString() : null;
+  const endMs = Date.parse(end);
+  const windowFromIso = (windowMs: number, minFromMs: number): string | null => {
+    const from = Math.floor((endMs - windowMs) / 1000) * 1000;
+    return from > minFromMs ? new Date(from).toISOString() : null;
   };
+  const queryWindow = (step: number): string | null =>
+    windowFromIso(QUERY_FIRST_WINDOW_MS * 4 ** step, Date.parse(scanStart));
   const loadQuery = async (from: string) => {
     assertAdapterEpoch(request, entryMetaEpoch);
     return ensureCloudRange(from, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
@@ -1382,23 +1386,38 @@ async function prepareCloudScan(
   let rawWindowFrom: string | null = null;
   const loadNewestWindow = async (error: unknown): Promise<DuckDBReadContext> => {
     if (!narrowable || !(error instanceof CloudBudgetError)) throw error;
+    const firstFromMs = Date.parse(firstFrom);
     const froms: string[] = [];
     for (let step = 0; ; step++) {
       const from = queryWindow(step);
-      if (from === null || Date.parse(from) <= Date.parse(firstFrom)) break;
+      if (from === null || Date.parse(from) <= firstFromMs) break;
       froms.unshift(from);
     }
-    for (const from of froms) {
-      assertAdapterEpoch(request, entryMetaEpoch);
-      try {
-        const narrowed = await loadRange(false, from);
-        rawWindowFrom = from;
-        return narrowed;
-      } catch (narrowError) {
-        if (!(narrowError instanceof CloudBudgetError)) throw narrowError;
+    let lastBudgetError: CloudBudgetError = error;
+    const tryWindows = async (candidates: readonly string[]): Promise<DuckDBReadContext | null> => {
+      for (const from of candidates) {
+        assertAdapterEpoch(request, entryMetaEpoch);
+        try {
+          const narrowed = await loadRange(false, from);
+          rawWindowFrom = from;
+          return narrowed;
+        } catch (narrowError) {
+          if (!(narrowError instanceof CloudBudgetError)) throw narrowError;
+          lastBudgetError = narrowError;
+        }
       }
+      return null;
+    };
+    const hourOrWider = await tryWindows(froms);
+    if (hourOrWider) return hourOrWider;
+    if (lastBudgetError.detail?.unit === "files" && sessionsFrom <= Date.parse(scanStart)) {
+      const subHourFroms = SUB_HOUR_FILE_WINDOWS_MS
+        .map((windowMs) => windowFromIso(windowMs, firstFromMs))
+        .filter((from): from is string => from !== null);
+      const subHour = await tryWindows(subHourFroms);
+      if (subHour) return subHour;
     }
-    throw error;
+    throw lastBudgetError;
   };
   const read = queryPlan ? await loadQuery(firstQueryWindow ?? scanStart) : await loadRange(widenFollowUp).catch((error: unknown) => {
     // When no earlier pass loaded the window wide, its every-column read can outgrow the budget alone.

@@ -1679,6 +1679,92 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       expect(windows.at(-1)?.[0]).toBe("2026-11-05T23:00:00.000Z");
     });
 
+    const overFilesAboveMinutes = (minutes: number) => vi.mocked(ensureCloudRange).mockImplementation(async (from, to) => {
+      windows.push([String(from), String(to)]);
+      if ((Date.parse(String(to)) - Date.parse(String(from))) / 60_000 > minutes) {
+        throw new CloudBudgetError("over", { unit: "files", needed: 300, limit: 256 });
+      }
+      return getDuckDBEngine().readContext();
+    });
+
+    it("falls back to sub-hour windows for filtered /api/value/summary when 1h hits the file budget", async () => {
+      overFilesAboveMinutes(15);
+      const res = await handleCloudAnalyticalRequest(new Request("http://localhost/api/value/summary", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sections: ["overview", "caching"],
+          filters: { country: { mode: "include", values: ["US"] } },
+          start_time: "2026-11-05T00:00:00Z",
+          end_time: "2026-11-06T00:00:00Z",
+        }),
+      }));
+      expect(res?.status).toBe(200);
+      expect(windows.map(([from]) => from)).toEqual([
+        "2026-11-05T00:00:00Z",
+        "2026-11-05T08:00:00.000Z",
+        "2026-11-05T20:00:00.000Z",
+        "2026-11-05T23:00:00.000Z",
+        "2026-11-05T23:45:00.000Z",
+      ]);
+      expect((await res!.json()).raw_window).toEqual({
+        data_from: "2026-11-05T23:45:00.000Z",
+        data_through: "2026-11-06T00:00:00.000Z",
+      });
+    });
+
+    it("falls back through 5m and 1m on file budget for /api/sessions and refuses with 413 if even 1m is over", async () => {
+      const sessions = () => handleCloudAnalyticalRequest(new Request("http://localhost/api/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          sort_by: "unique_urls",
+          start_time: "2026-11-05T00:00:00Z",
+          end_time: "2026-11-06T00:00:00Z",
+        }),
+      }));
+
+      overFilesAboveMinutes(5);
+      const res5m = await sessions();
+      expect(res5m?.status).toBe(200);
+      expect(windows.map(([from]) => from)).toEqual([
+        "2026-11-05T00:00:00Z",
+        "2026-11-05T08:00:00.000Z",
+        "2026-11-05T20:00:00.000Z",
+        "2026-11-05T23:00:00.000Z",
+        "2026-11-05T23:45:00.000Z",
+        "2026-11-05T23:55:00.000Z",
+      ]);
+      expect((await res5m!.json()).raw_window).toEqual({
+        data_from: "2026-11-05T23:55:00.000Z",
+        data_through: "2026-11-06T00:00:00.000Z",
+      });
+
+      windows.length = 0;
+      overFilesAboveMinutes(1);
+      const res1m = await sessions();
+      expect(res1m?.status).toBe(200);
+      expect(windows.map(([from]) => from)).toEqual([
+        "2026-11-05T00:00:00Z",
+        "2026-11-05T08:00:00.000Z",
+        "2026-11-05T20:00:00.000Z",
+        "2026-11-05T23:00:00.000Z",
+        "2026-11-05T23:45:00.000Z",
+        "2026-11-05T23:55:00.000Z",
+        "2026-11-05T23:59:00.000Z",
+      ]);
+      expect((await res1m!.json()).raw_window).toEqual({
+        data_from: "2026-11-05T23:59:00.000Z",
+        data_through: "2026-11-06T00:00:00.000Z",
+      });
+
+      windows.length = 0;
+      overFilesAboveMinutes(0.5);
+      const res413 = await sessions();
+      expect(res413?.status).toBe(413);
+      expect(windows.at(-1)?.[0]).toBe("2026-11-05T23:59:00.000Z");
+    });
+
     it("budgets /origin projections like other projected scans", async () => {
       vi.mocked(ensureCloudRange).mockClear();
       await origin();
