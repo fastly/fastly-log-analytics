@@ -22,6 +22,7 @@ import {
   SECURITY_SUMMARY_SPEC,
   SECURITY_THREAT_INTEL_SUMMARY_SPEC,
   SECURITY_TLS_SUMMARY_SPEC,
+  securitySummarySpec,
   type SecurityRollup,
   securityAggregatesFromRollup,
   securityFromRollup,
@@ -545,6 +546,18 @@ describe("security row sections vs raw DuckDB over the same rows", () => {
     }
     expect(await securityAggregatesFromRollup(files((s) => s.totals.delete("_ref_stem")), body({ sections: ["bot_efficiency"] })))
       .toBeNull();
+  });
+
+  it("omits unrelated groups and scopes per-group columns in securitySummarySpec for row sections", () => {
+    const rawSpec = securitySummarySpec(["wellknown_bots", "bot_efficiency", "top_ips_header", "proxies"]);
+    expect(rawSpec.groups.has("all_fields")).toBe(false);
+    expect(rawSpec.groups.has("bins")).toBe(false);
+    expect(rawSpec.groups.has("time_series")).toBe(false);
+    expect([...(rawSpec.only.get("ip_sketch") ?? [])]).toEqual(["all_fields_ip"]);
+    expect([...(rawSpec.only.get("value_max") ?? [])]).toEqual(["header_ip"]);
+    expect([...(rawSpec.only.get("resp_bytes_sum") ?? [])]).toEqual(["bot_ua"]);
+    expect([...(rawSpec.only.get("total_bandwidth_bytes") ?? [])]).toEqual(["overview"]);
+    expect([...(rawSpec.only.get("ip") ?? [])]).toEqual(["proxy"]);
   });
 });
 

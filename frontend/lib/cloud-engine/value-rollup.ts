@@ -486,13 +486,37 @@ export const VALUE_SUMMARY_SPEC = defineSummarySpec({
     "hit_elapsed_sum", "hit_elapsed_count", "miss_elapsed_sum", "miss_elapsed_count",
     "elapsed_hist", "elapsed_sum", "elapsed_count", "io_in_sum", "io_out_sum", "ratio_sum", "ratio_count",
   ],
-  only: { threats_blocked: ["overview"] },
+  only: {
+    count: ["all_fields", "value"],
+    requests: ["overview", "series5", "dim_totals", "value", "bins"],
+    resp_bytes_sum: ["series5", "value"],
+    total_bandwidth_bytes: ["overview"],
+    threats_blocked: ["overview"],
+    hit_elapsed_sum: ["overview"],
+    hit_elapsed_count: ["overview"],
+    miss_elapsed_sum: ["overview"],
+    miss_elapsed_count: ["overview"],
+    elapsed_hist: ["series5"],
+    elapsed_sum: ["value"],
+    elapsed_count: ["value"],
+    io_in_sum: ["value"],
+    io_out_sum: ["value"],
+    ratio_sum: ["value"],
+    ratio_count: ["value"],
+  },
 });
 
 /** The summary groups and columns /fastly-value reads for a filtered overview. */
 export const VALUE_FILTERED_SUMMARY_SPEC = defineSummarySpec({
   groups: ["filtered_rollups", "dim_totals"],
   columns: ["requests", "hit_requests", "miss_requests", "pass_requests", "resp_bytes_sum"],
+  only: {
+    requests: ["filtered_rollups"],
+    hit_requests: ["filtered_rollups"],
+    miss_requests: ["filtered_rollups"],
+    pass_requests: ["filtered_rollups"],
+    resp_bytes_sum: ["filtered_rollups"],
+  },
 });
 
 /**

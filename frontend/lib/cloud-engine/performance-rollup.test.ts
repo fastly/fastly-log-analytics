@@ -9,6 +9,7 @@ import {
   executePerformanceAggregates, type PerfScatterItem, type PerfTopAsnItem, type PerfTopUrlItem,
 } from "./performance";
 import {
+  PERFORMANCE_SUMMARY_SPEC,
   performanceAggregatesFromRollup,
   performanceFromRollup,
   performanceRollupEligible,
@@ -308,5 +309,13 @@ describe("performanceFromRollup", () => {
       sections: ["waterfall"],
       filters: { status: { mode: "include", values: ["200"] } },
     }))).toBe(false);
+  });
+
+  it("scopes heavy summary columns to only their owning row groups", () => {
+    expect([...(PERFORMANCE_SUMMARY_SPEC.only.get("elapsed_hist") ?? [])]).toEqual(["urls"]);
+    expect([...(PERFORMANCE_SUMMARY_SPEC.only.get("waterfall_count") ?? [])]).toEqual(["overview"]);
+    expect([...(PERFORMANCE_SUMMARY_SPEC.only.get("ttfb_sum") ?? [])]).toEqual(["sample"]);
+    expect([...(PERFORMANCE_SUMMARY_SPEC.only.get("sample_key") ?? [])]).toEqual(["sample"]);
+    expect([...(PERFORMANCE_SUMMARY_SPEC.only.get("count") ?? [])]).toEqual(["all_fields"]);
   });
 });

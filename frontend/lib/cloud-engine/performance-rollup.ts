@@ -188,6 +188,21 @@ export const PERFORMANCE_SUMMARY_SPEC = defineSummarySpec({
     "count", "requests", "elapsed_sum", "elapsed_count", "elapsed_hist", "waterfall_count", "edge_processing_sum",
     "origin_wait_sum", "origin_download_sum", "client_download_sum", "ttfb_sum", "sample_key", "elapsed_us",
   ],
+  only: {
+    count: ["all_fields"],
+    requests: ["overview", "urls"],
+    elapsed_sum: ["urls"],
+    elapsed_count: ["urls"],
+    elapsed_hist: ["urls"],
+    waterfall_count: ["overview"],
+    edge_processing_sum: ["overview"],
+    origin_wait_sum: ["overview"],
+    origin_download_sum: ["overview"],
+    client_download_sum: ["overview"],
+    ttfb_sum: ["sample"],
+    sample_key: ["sample"],
+    elapsed_us: ["sample"],
+  },
 });
 
 /**

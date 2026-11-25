@@ -9,7 +9,13 @@ import { editSummaryRows } from "./dashboard/summary-layout-fixture";
 import { fixtureSource } from "./dashboard/test-fixtures";
 import { queryValueSummary } from "./value";
 import { VALUE_ROLLUP_SECTIONS } from "./rollup-sections";
-import { valueFromRollup, valueRollupEligible, valueSummaryFromRollup } from "./value-rollup";
+import {
+  VALUE_FILTERED_SUMMARY_SPEC,
+  VALUE_SUMMARY_SPEC,
+  valueFromRollup,
+  valueRollupEligible,
+  valueSummaryFromRollup,
+} from "./value-rollup";
 
 const HOUR = 3_600_000;
 const T0 = FIXTURE_START * 1000;
@@ -408,5 +414,14 @@ describe("valueFromRollup", () => {
 
     const sec = await valueFromRollup("/api/value/summary", body({ sections: ["security"] }), src);
     expect(sec).toBeNull();
+  });
+
+  it("scopes value summary spec columns to only their owning row groups", () => {
+    expect([...(VALUE_SUMMARY_SPEC.only.get("elapsed_hist") ?? [])]).toEqual(["series5"]);
+    expect([...(VALUE_SUMMARY_SPEC.only.get("io_in_sum") ?? [])]).toEqual(["value"]);
+    expect([...(VALUE_SUMMARY_SPEC.only.get("total_bandwidth_bytes") ?? [])]).toEqual(["overview"]);
+    expect([...(VALUE_SUMMARY_SPEC.only.get("count") ?? [])].sort()).toEqual(["all_fields", "value"]);
+    expect([...(VALUE_FILTERED_SUMMARY_SPEC.only.get("requests") ?? [])]).toEqual(["filtered_rollups"]);
+    expect([...(VALUE_FILTERED_SUMMARY_SPEC.only.get("resp_bytes_sum") ?? [])]).toEqual(["filtered_rollups"]);
   });
 });

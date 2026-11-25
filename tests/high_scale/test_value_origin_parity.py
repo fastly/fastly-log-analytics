@@ -256,3 +256,107 @@ def test_value_summary_waf_case_insensitive_and_ua_bot_fallback() -> None:
     assert res.bots.verified_bots == 1
     assert [b.name for b in res.bots.top_bots] == ["Google Crawler"]
     assert res.bots.top_bots[0].count == 4
+
+
+def test_value_summary_prunes_unused_bucket_columns_and_reuses_matching_reported_window(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class _Client:
+        def execute(self, sql: str, params: dict | None = None) -> list[dict[str, Any]]:
+            calls.append(sql)
+            if "value:combined_buckets" in sql:
+                return [
+                    {
+                        "bucket": "2026-11-24T16:00:00Z",
+                        "total": 40,
+                        "hit_cnt": 30,
+                        "miss_cnt": 10,
+                        "pass_cnt": 0,
+                        "synth_cnt": 0,
+                        "bandwidth_saved": 3000,
+                        "total_bytes": 4000,
+                        "origin_cnt": 10,
+                        "shield_hit": 5,
+                        "shield_total": 10,
+                        "threats_cnt": 0,
+                        "sum_hit_elapsed": 1000.0,
+                        "cnt_hit_elapsed": 30,
+                        "sum_miss_elapsed": 5000.0,
+                        "cnt_miss_elapsed": 10,
+                        "waf_sample_cnt": 0,
+                        "waf_inspected": 0,
+                        "http3_cnt": 10,
+                        "h2_cnt": 30,
+                        "h11_cnt": 0,
+                        "other_proto_cnt": 0,
+                        "tls_cnt": 40,
+                        "ipv6_cnt": 20,
+                    }
+                ]
+            if "value:fastly_reported_window" in sql:
+                return [{"requests": 25, "bandwidth_bytes": 2500}]
+            return []
+
+    from backend.repositories import value as value_repo
+
+    monkeypatch.setattr(
+        value_repo,
+        "fetch_fastly_reported",
+        lambda *_a, **_kw: {
+            "window_start": "2026-11-24T16:00:00Z",
+            "window_end": "2026-11-24T17:00:00Z",
+            "requests": 42,
+            "bandwidth_bytes": 4200,
+            "hit_requests": 30,
+        },
+    )
+    svc = _empty_service(_Client(), service_id="svc-prune-match")
+    req = ValueSummaryRequest(
+        filters={},
+        sections=["overview", "caching", "network"],
+        start_time="2026-11-24T16:00:00Z",
+        end_time="2026-11-24T17:00:00Z",
+    )
+    res = value_summary(
+        svc,
+        req,
+        "2026-11-24T16:00:00Z",
+        "2026-11-24T17:00:00Z",
+        sections={"overview", "caching", "network"},
+    )
+    bucket_sql = next(sql for sql in calls if "value:combined_buckets" in sql)
+    assert "waf_logged" not in bucket_sql
+    assert "waf_passed" not in bucket_sql
+    assert "waf_sig" not in bucket_sql
+    assert "custom_fields['ua']" not in bucket_sql
+    assert "custom_fields['_bot_name']" not in bucket_sql
+    assert not any("value:fastly_reported_window" in sql for sql in calls)
+    assert res.fastly_reported is not None
+    assert res.fastly_reported.logged_requests == 40
+    assert res.fastly_reported.logged_bandwidth_bytes == 4000
+
+    # When the Fastly-reported window is narrower than the request range, the window query still runs.
+    calls.clear()
+    monkeypatch.setattr(
+        value_repo,
+        "fetch_fastly_reported",
+        lambda *_a, **_kw: {
+            "window_start": "2026-11-24T16:00:00Z",
+            "window_end": "2026-11-24T16:45:00Z",
+            "requests": 26,
+            "bandwidth_bytes": 2600,
+            "hit_requests": 18,
+        },
+    )
+    svc2 = _empty_service(_Client(), service_id="svc-prune-narrow")
+    res2 = value_summary(
+        svc2,
+        req,
+        "2026-11-24T16:00:00Z",
+        "2026-11-24T17:00:00Z",
+        sections={"overview", "caching", "network"},
+    )
+    assert any("value:fastly_reported_window" in sql for sql in calls)
+    assert res2.fastly_reported is not None
+    assert res2.fastly_reported.logged_requests == 25
+    assert res2.fastly_reported.logged_bandwidth_bytes == 2500

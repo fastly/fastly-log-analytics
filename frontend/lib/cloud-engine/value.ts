@@ -122,204 +122,272 @@ export async function queryValueSummary(params: ValueQueryParams = {}): Promise<
       }
     }
   }
+  const want = (section: ValueSection) => !params.sections?.length || params.sections.includes(section);
+  const needCache = want("overview") || want("caching") || want("performance");
+  const needBytes = want("overview") || want("caching") || want("io");
+  const needLatency = want("overview") || want("performance");
+  const needP99 = want("performance");
+  const needShield = want("caching") || want("io");
+  const needWaf = want("overview") || want("security");
+  const needBots = want("bots");
+  const needNet = want("network");
+  const needIo = want("io");
+  const needBuckets = want("caching") || want("performance") || want("network") || want("security") || want("io");
+
+  const normCols: string[] = [`EPOCH_MS(CAST(ts_ms AS BIGINT)) AS "timestamp"`];
+  if (needIo) normCols.push("url");
+  if (needCache) normCols.push(`UPPER(COALESCE(NULLIF(cache_status, ''), cache, '')) AS cache_state`);
+  if (needBytes) normCols.push(`COALESCE(resp_body_size, resp_body_bytes, resp_bytes) AS body_bytes`);
+  if (needLatency) normCols.push(`COALESCE(time_elapsed_usec, elapsed) / 1000.0 AS latency_ms`);
+  if (needNet) {
+    normCols.push(
+      `UPPER(COALESCE(NULLIF(protocol, ''), proto, '')) AS protocol_name`,
+      `COALESCE(is_ssl, CASE WHEN COALESCE(tls_version, tls) IS NOT NULL THEN NULLIF(COALESCE(tls_version, tls), '') IS NOT NULL END) AS encrypted`,
+      `COALESCE(is_ipv6, ipv6) AS ipv6_flag`,
+    );
+  }
+  if (needShield) normCols.push(`COALESCE(fastly_is_shield, is_shield, NOT edge) AS shield_flag`);
+  if (needIo) normCols.push(`LOWER(COALESCE(NULLIF(content_type, ''), resp_header_content_type, '')) AS content_type`);
+  if (needWaf) {
+    normCols.push(
+      `COALESCE(NULLIF(waf_action, ''), NULLIF(ngwaf_decision, '')) AS waf_decision`,
+      `waf AS waf_flag`,
+      `waf_resp AS waf_resp_code`,
+      `NULLIF(waf_sig, '') AS waf_signals`,
+    );
+  }
+  if (needBots) {
+    normCols.push(
+      `COALESCE(bot_verified, verified_bot, CASE WHEN waf_sig IS NOT NULL THEN regexp_matches(waf_sig, '(?i)verified-bot\\.') END) AS bot_verified`,
+      `COALESCE(bot_verified, verified_bot) AS bot_verified_col`,
+      `COALESCE(NULLIF(_bot_name, ''), NULLIF(ngwaf_bot_name, ''), NULLIF(bot_category, '')) AS bot_name`,
+      `is_bot`,
+      `NULLIF(TRIM(CAST(ua AS VARCHAR)), '') AS ua_norm`,
+    );
+  }
+  if (needIo) {
+    normCols.push(
+      `NULLIF(COALESCE(NULLIF(io_output_format, ''), ofmt), '') AS output_format`,
+      `NULLIF(COALESCE(NULLIF(io_input_format, ''), ifmt), '') AS input_format`,
+      `io_input_bytes`,
+      `io_output_bytes`,
+    );
+  }
   const normalized = `WITH normalized AS (
-    SELECT EPOCH_MS(CAST(ts_ms AS BIGINT)) AS "timestamp", url,
-      UPPER(COALESCE(NULLIF(cache_status, ''), cache, '')) AS cache_state,
-      COALESCE(resp_body_size, resp_body_bytes, resp_bytes) AS body_bytes,
-      COALESCE(time_elapsed_usec, elapsed) / 1000.0 AS latency_ms,
-      UPPER(COALESCE(NULLIF(protocol, ''), proto, '')) AS protocol_name,
-      COALESCE(is_ssl, CASE WHEN COALESCE(tls_version, tls) IS NOT NULL
-        THEN NULLIF(COALESCE(tls_version, tls), '') IS NOT NULL END) AS encrypted,
-      COALESCE(is_ipv6, ipv6) AS ipv6_flag,
-      COALESCE(fastly_is_shield, is_shield, NOT edge) AS shield_flag,
-      LOWER(COALESCE(NULLIF(content_type, ''), resp_header_content_type, '')) AS content_type,
-      COALESCE(NULLIF(waf_action, ''), NULLIF(ngwaf_decision, '')) AS waf_decision,
-      waf AS waf_flag,
-      waf_resp AS waf_resp_code,
-      NULLIF(waf_sig, '') AS waf_signals,
-      COALESCE(bot_verified, verified_bot, CASE WHEN waf_sig IS NOT NULL THEN regexp_matches(waf_sig, '(?i)verified-bot\\.') END) AS bot_verified,
-      COALESCE(bot_verified, verified_bot) AS bot_verified_col,
-      COALESCE(NULLIF(_bot_name, ''), NULLIF(ngwaf_bot_name, ''), NULLIF(bot_category, '')) AS bot_name,
-      is_bot,
-      NULLIF(TRIM(CAST(ua AS VARCHAR)), '') AS ua_norm,
-      NULLIF(COALESCE(NULLIF(io_output_format, ''), ofmt), '') AS output_format,
-      NULLIF(COALESCE(NULLIF(io_input_format, ''), ifmt), '') AS input_format,
-      io_input_bytes, io_output_bytes
+    SELECT ${normCols.join(", ")}
     FROM requests WHERE ${buildWhereClause(params, types)}
   )`;
   const query = (sql: string) =>
     engine.executeSql<Record<string, unknown>>(`${normalized} ${sql}`, [], params.signal);
   const count = (row: Record<string, unknown>, key: string) => Number(row[key] ?? 0);
-  const rows = await query(`SELECT
-    COUNT(*) AS total,
-    COUNT(NULLIF(cache_state, '')) AS cache_samples,
-    COUNT(body_bytes) AS byte_samples,
-    SUM(body_bytes) AS total_bytes,
-    COUNT(*) FILTER (WHERE starts_with(cache_state, 'HIT')) AS hits,
-    COUNT(*) FILTER (WHERE starts_with(cache_state, 'MISS')) AS misses,
-    COUNT(*) FILTER (WHERE starts_with(cache_state, 'PASS')) AS passes,
-    COUNT(*) FILTER (WHERE starts_with(cache_state, 'SYNTH')) AS synths,
-    SUM(body_bytes) FILTER (WHERE starts_with(cache_state, 'HIT')) AS saved_bytes,
-    AVG(latency_ms) FILTER (WHERE starts_with(cache_state, 'HIT')) AS avg_hit,
-    AVG(latency_ms) FILTER (WHERE starts_with(cache_state, 'MISS')) AS avg_miss,
-    QUANTILE_CONT(latency_ms, 0.99) AS p99,
-    COUNT(*) FILTER (WHERE shield_flag) AS shield_requests,
-    COUNT(*) FILTER (WHERE shield_flag AND starts_with(cache_state, 'HIT')) AS shield_hits,
-    COUNT(*) FILTER (WHERE waf_decision IS NOT NULL OR waf_flag IS NOT NULL) AS waf_samples,
-    COUNT(*) FILTER (WHERE CASE
-      WHEN waf_decision IS NOT NULL THEN UPPER(waf_decision) IN ('BLOCK', 'BLOCKED', 'DENY')
-      ELSE waf_flag IS TRUE AND waf_resp_code = 406
-    END) AS blocked,
-    COUNT(*) FILTER (WHERE CASE
-      WHEN waf_decision IS NOT NULL THEN UPPER(waf_decision) IN ('LOG', 'LOGGED')
-      ELSE waf_flag IS TRUE AND COALESCE(waf_resp_code, 0) != 406 AND waf_signals IS NOT NULL
-    END) AS logged,
-    COUNT(*) FILTER (WHERE CASE
-      WHEN waf_decision IS NOT NULL THEN UPPER(waf_decision) IN ('ALLOW', 'ALLOWED', 'PASS', 'PASSED')
-      ELSE waf_flag IS TRUE AND waf_resp_code = 200
-    END) AS passed,
-    COUNT(*) FILTER (WHERE bot_name IS NOT NULL OR is_bot OR bot_verified_col) AS bots,
-    COUNT(*) FILTER (WHERE bot_verified) AS verified,
-    COUNT(bot_verified) AS verified_samples,
-    COUNT(bot_name) + COUNT(is_bot) + COUNT(bot_verified_col) AS bot_samples,
-    COUNT(ua_norm) AS ua_samples,
-    COUNT(NULLIF(protocol_name, '')) AS protocol_samples,
-    COUNT(*) FILTER (WHERE protocol_name LIKE 'HTTP/3%' OR protocol_name IN ('H3', '3')) AS h3,
-    COUNT(*) FILTER (WHERE protocol_name LIKE 'HTTP/2%' OR protocol_name IN ('H2', '2')) AS h2,
-    COUNT(*) FILTER (WHERE encrypted) AS tls_count,
-    COUNT(encrypted) AS tls_samples,
-    COUNT(ipv6_flag) AS ipv6_samples,
-    COUNT(*) FILTER (WHERE ipv6_flag) AS ipv6_count,
-    COUNT(*) FILTER (WHERE starts_with(content_type, 'image/')) AS images,
-    SUM(body_bytes) FILTER (WHERE starts_with(content_type, 'image/')) AS image_bytes,
-    COUNT(*) FILTER (WHERE output_format IS NOT NULL) AS io_count,
-    SUM(body_bytes) FILTER (WHERE output_format IS NOT NULL) AS io_bytes,
-    SUM(body_bytes) FILTER (WHERE output_format IS NOT NULL AND shield_flag) AS io_shield_bytes,
-    SUM(io_input_bytes) FILTER (WHERE io_output_bytes IS NOT NULL) AS input_bytes,
-    SUM(io_output_bytes) FILTER (WHERE io_input_bytes IS NOT NULL) AS output_bytes,
-    SUM(io_input_bytes - io_output_bytes) AS actual_saved
-    FROM normalized`);
-  const r = rows[0] ?? {};
-  const total = count(r, "total");
+
+  const aggCols: string[] = ["COUNT(*) AS total"];
+  if (needCache) {
+    aggCols.push(
+      `COUNT(NULLIF(cache_state, '')) AS cache_samples`,
+      `COUNT(*) FILTER (WHERE starts_with(cache_state, 'HIT')) AS hits`,
+      `COUNT(*) FILTER (WHERE starts_with(cache_state, 'MISS')) AS misses`,
+      `COUNT(*) FILTER (WHERE starts_with(cache_state, 'PASS')) AS passes`,
+      `COUNT(*) FILTER (WHERE starts_with(cache_state, 'SYNTH')) AS synths`,
+    );
+  }
+  if (needBytes) {
+    aggCols.push(`COUNT(body_bytes) AS byte_samples`, `SUM(body_bytes) AS total_bytes`);
+    if (needCache) aggCols.push(`SUM(body_bytes) FILTER (WHERE starts_with(cache_state, 'HIT')) AS saved_bytes`);
+  }
+  if (needLatency) {
+    aggCols.push(
+      `SUM(latency_ms) FILTER (WHERE starts_with(cache_state, 'HIT')) AS sum_hit_latency`,
+      `COUNT(latency_ms) FILTER (WHERE starts_with(cache_state, 'HIT')) AS cnt_hit_latency`,
+      `SUM(latency_ms) FILTER (WHERE starts_with(cache_state, 'MISS')) AS sum_miss_latency`,
+      `COUNT(latency_ms) FILTER (WHERE starts_with(cache_state, 'MISS')) AS cnt_miss_latency`,
+    );
+  }
+  if (needShield && needCache) {
+    aggCols.push(
+      `COUNT(*) FILTER (WHERE shield_flag) AS shield_requests`,
+      `COUNT(*) FILTER (WHERE shield_flag AND starts_with(cache_state, 'HIT')) AS shield_hits`,
+    );
+  }
+  if (needWaf) {
+    aggCols.push(
+      `COUNT(*) FILTER (WHERE waf_decision IS NOT NULL OR waf_flag IS NOT NULL) AS waf_samples`,
+      `COUNT(*) FILTER (WHERE CASE
+        WHEN waf_decision IS NOT NULL THEN UPPER(waf_decision) IN ('BLOCK', 'BLOCKED', 'DENY')
+        ELSE waf_flag IS TRUE AND waf_resp_code = 406
+      END) AS blocked`,
+      `COUNT(*) FILTER (WHERE CASE
+        WHEN waf_decision IS NOT NULL THEN UPPER(waf_decision) IN ('LOG', 'LOGGED')
+        ELSE waf_flag IS TRUE AND COALESCE(waf_resp_code, 0) != 406 AND waf_signals IS NOT NULL
+      END) AS logged`,
+      `COUNT(*) FILTER (WHERE CASE
+        WHEN waf_decision IS NOT NULL THEN UPPER(waf_decision) IN ('ALLOW', 'ALLOWED', 'PASS', 'PASSED')
+        ELSE waf_flag IS TRUE AND waf_resp_code = 200
+      END) AS passed`,
+    );
+  }
+  if (needBots) {
+    aggCols.push(
+      `COUNT(*) FILTER (WHERE bot_name IS NOT NULL OR is_bot OR bot_verified_col) AS bots`,
+      `COUNT(*) FILTER (WHERE bot_verified) AS verified`,
+      `COUNT(bot_verified) AS verified_samples`,
+      `COUNT(bot_name) + COUNT(is_bot) + COUNT(bot_verified_col) AS bot_samples`,
+      `COUNT(ua_norm) AS ua_samples`,
+    );
+  }
+  if (needNet) {
+    aggCols.push(
+      `COUNT(NULLIF(protocol_name, '')) AS protocol_samples`,
+      `COUNT(*) FILTER (WHERE protocol_name LIKE 'HTTP/3%' OR protocol_name IN ('H3', '3')) AS h3`,
+      `COUNT(*) FILTER (WHERE protocol_name LIKE 'HTTP/2%' OR protocol_name IN ('H2', '2')) AS h2`,
+      `COUNT(*) FILTER (WHERE protocol_name LIKE 'HTTP/1.1%' OR protocol_name = '1.1') AS h11`,
+      `COUNT(*) FILTER (WHERE encrypted) AS tls_count`,
+      `COUNT(encrypted) AS tls_samples`,
+      `COUNT(ipv6_flag) AS ipv6_samples`,
+      `COUNT(*) FILTER (WHERE ipv6_flag) AS ipv6_count`,
+    );
+  }
+  if (needIo) {
+    aggCols.push(
+      `COUNT(*) FILTER (WHERE starts_with(content_type, 'image/')) AS images`,
+      `COUNT(body_bytes) FILTER (WHERE starts_with(content_type, 'image/')) AS image_byte_samples`,
+      `SUM(body_bytes) FILTER (WHERE starts_with(content_type, 'image/')) AS image_bytes`,
+      `COUNT(*) FILTER (WHERE output_format IS NOT NULL) AS io_count`,
+      `COUNT(body_bytes) FILTER (WHERE output_format IS NOT NULL) AS io_byte_samples`,
+      `SUM(body_bytes) FILTER (WHERE output_format IS NOT NULL) AS io_bytes`,
+      `COUNT(body_bytes) FILTER (WHERE output_format IS NOT NULL AND shield_flag) AS io_shield_byte_samples`,
+      `SUM(body_bytes) FILTER (WHERE output_format IS NOT NULL AND shield_flag) AS io_shield_bytes`,
+      `COUNT(io_input_bytes) FILTER (WHERE io_output_bytes IS NOT NULL) AS input_byte_samples`,
+      `SUM(io_input_bytes) FILTER (WHERE io_output_bytes IS NOT NULL) AS input_bytes`,
+      `COUNT(io_output_bytes) FILTER (WHERE io_input_bytes IS NOT NULL) AS output_byte_samples`,
+      `SUM(io_output_bytes) FILTER (WHERE io_input_bytes IS NOT NULL) AS output_bytes`,
+      `COUNT(io_input_bytes - io_output_bytes) AS actual_saved_samples`,
+      `SUM(io_input_bytes - io_output_bytes) AS actual_saved`,
+    );
+  }
+
+  const interval = CHART_INTERVAL_SECONDS[params.chart_interval ?? "1 day"] ?? 86400;
+  const mainSql = needBuckets
+    ? `SELECT time_bucket(INTERVAL '${interval} seconds', "timestamp") AS bucket, ${aggCols.join(", ")} FROM normalized GROUP BY bucket ORDER BY bucket`
+    : `SELECT ${aggCols.join(", ")} FROM normalized`;
+  const [buckets, p99Rows] = await Promise.all([
+    query(mainSql),
+    needP99 ? query(`SELECT QUANTILE_CONT(latency_ms, 0.99) AS p99 FROM normalized`) : Promise.resolve([]),
+  ]);
+
+  const sumKey = (key: string) => buckets.reduce((acc, row) => acc + count(row, key), 0);
+  const total = sumKey("total");
   const result = emptyValueSummary();
   if (!total) return selectSections(result, params.sections);
-  const hits = count(r, "hits");
-  const hasCache = count(r, "cache_samples") > 0;
+  const hits = sumKey("hits");
+  const cacheSamples = sumKey("cache_samples");
+  const hasCache = cacheSamples > 0;
   const offload = hasCache ? roundTo(hits * 100 / total) : null;
-  const avgHit = nullableNumber(r.avg_hit);
-  const avgMiss = nullableNumber(r.avg_miss);
+  const cntHitLat = sumKey("cnt_hit_latency");
+  const cntMissLat = sumKey("cnt_miss_latency");
+  const avgHit = cntHitLat > 0 ? roundTo(sumKey("sum_hit_latency") / cntHitLat) : null;
+  const avgMiss = cntMissLat > 0 ? roundTo(sumKey("sum_miss_latency") / cntMissLat) : null;
   const acceleration = avgHit !== null && avgHit > 0 && avgMiss !== null
     ? roundTo(avgMiss / avgHit) : null;
-  const hasWaf = count(r, "waf_samples") > 0;
+  const hasWaf = sumKey("waf_samples") > 0;
+  const byteSamples = sumKey("byte_samples");
   result.overview = {
-    total_requests: total, total_bandwidth_bytes: nullableNumber(r.total_bytes),
+    total_requests: total, total_bandwidth_bytes: byteSamples > 0 ? sumKey("total_bytes") : null,
     origin_offload_pct: offload, cache_acceleration_factor: acceleration,
-    threats_blocked: hasWaf ? count(r, "blocked") : null,
+    threats_blocked: hasWaf ? sumKey("blocked") : null,
     edge_hit_requests: hasCache ? hits : null,
-    origin_requests: hasCache ? count(r, "misses") + count(r, "passes") : null,
+    origin_requests: hasCache ? sumKey("misses") + sumKey("passes") : null,
   };
+  const shieldRequests = sumKey("shield_requests");
   result.caching = {
     total_requests: total, hit_requests: hasCache ? hits : null,
-    miss_requests: hasCache ? count(r, "misses") : null,
-    pass_requests: hasCache ? count(r, "passes") : null,
-    synth_requests: hasCache ? count(r, "synths") : null,
+    miss_requests: hasCache ? sumKey("misses") : null,
+    pass_requests: hasCache ? sumKey("passes") : null,
+    synth_requests: hasCache ? sumKey("synths") : null,
     origin_offload_pct: offload,
-    bandwidth_saved_bytes: count(r, "byte_samples") ? count(r, "saved_bytes") : null,
-    shield_effectiveness_pct: count(r, "shield_requests")
-      ? roundTo(count(r, "shield_hits") * 100 / count(r, "shield_requests")) : null,
+    bandwidth_saved_bytes: byteSamples ? sumKey("saved_bytes") : null,
+    shield_effectiveness_pct: shieldRequests
+      ? roundTo(sumKey("shield_hits") * 100 / shieldRequests) : null,
     offload_time_series: [], cache_state_time_series: [],
   };
   result.performance = {
     total_requests: total, avg_hit_latency_ms: avgHit, avg_miss_latency_ms: avgMiss,
-    p99_latency_ms: nullableNumber(r.p99), cache_accel_factor: acceleration, latency_time_series: [],
+    p99_latency_ms: nullableNumber(p99Rows[0]?.p99), cache_accel_factor: acceleration, latency_time_series: [],
   };
   result.security = {
-    total_requests: total, waf_blocked: hasWaf ? count(r, "blocked") : null,
-    waf_logged: hasWaf ? count(r, "logged") : null, waf_passed: hasWaf ? count(r, "passed") : null,
+    total_requests: total, waf_blocked: hasWaf ? sumKey("blocked") : null,
+    waf_logged: hasWaf ? sumKey("logged") : null, waf_passed: hasWaf ? sumKey("passed") : null,
     threat_time_series: [], top_waf_signals: [],
   };
-  const hasBotCol = count(r, "bot_samples") > 0;
-  const uaSamples = count(r, "ua_samples");
+  const hasBotCol = sumKey("bot_samples") > 0;
+  const uaSamples = sumKey("ua_samples");
   result.bots = {
     total_requests: total,
-    bot_requests: hasBotCol ? count(r, "bots") : (uaSamples > 0 ? 0 : null),
-    verified_bots: count(r, "verified_samples") ? count(r, "verified") : null,
+    bot_requests: hasBotCol ? sumKey("bots") : (uaSamples > 0 ? 0 : null),
+    verified_bots: sumKey("verified_samples") ? sumKey("verified") : null,
     top_bots: [],
   };
+  const protocolSamples = sumKey("protocol_samples");
   result.network = {
     total_requests: total,
-    http3_pct: count(r, "protocol_samples") ? roundTo(count(r, "h3") * 100 / total) : null,
-    h2_pct: count(r, "protocol_samples") ? roundTo(count(r, "h2") * 100 / total) : null,
-    tls_pct: count(r, "tls_samples") ? roundTo(count(r, "tls_count") * 100 / total) : null,
-    ipv6_pct: count(r, "ipv6_samples") ? roundTo(count(r, "ipv6_count") * 100 / total) : null,
+    http3_pct: protocolSamples ? roundTo(sumKey("h3") * 100 / total) : null,
+    h2_pct: protocolSamples ? roundTo(sumKey("h2") * 100 / total) : null,
+    tls_pct: sumKey("tls_samples") ? roundTo(sumKey("tls_count") * 100 / total) : null,
+    ipv6_pct: sumKey("ipv6_samples") ? roundTo(sumKey("ipv6_count") * 100 / total) : null,
     protocol_time_series: [],
   };
+  const ioCount = sumKey("io_count");
+  const outputBytes = sumKey("output_byte_samples") > 0 ? sumKey("output_bytes") : null;
+  const inputBytes = sumKey("input_byte_samples") > 0 ? sumKey("input_bytes") : null;
   result.io = {
-    ...result.io, total_requests: total, image_request_count: count(r, "images"),
-    image_bandwidth_bytes: nullableNumber(r.image_bytes),
-    io_transforms: count(r, "io_count") || null, io_bandwidth_bytes: nullableNumber(r.io_bytes),
-    io_shield_bandwidth_bytes: nullableNumber(r.io_shield_bytes),
-    io_pct_of_traffic: count(r, "io_count") ? roundTo(count(r, "io_count") * 100 / total) : null,
-    io_actual_bandwidth_saved_bytes: nullableNumber(r.actual_saved),
-    io_actual_compression_ratio: Number(r.output_bytes) > 0 && r.input_bytes != null
-      ? roundTo(Number(r.input_bytes) / Number(r.output_bytes)) : null,
+    ...result.io, total_requests: total, image_request_count: sumKey("images"),
+    image_bandwidth_bytes: sumKey("image_byte_samples") > 0 ? sumKey("image_bytes") : null,
+    io_transforms: ioCount || null,
+    io_bandwidth_bytes: sumKey("io_byte_samples") > 0 ? sumKey("io_bytes") : null,
+    io_shield_bandwidth_bytes: sumKey("io_shield_byte_samples") > 0 ? sumKey("io_shield_bytes") : null,
+    io_pct_of_traffic: ioCount ? roundTo(ioCount * 100 / total) : null,
+    io_actual_bandwidth_saved_bytes: sumKey("actual_saved_samples") > 0 ? sumKey("actual_saved") : null,
+    io_actual_compression_ratio: outputBytes != null && outputBytes > 0 && inputBytes != null
+      ? roundTo(inputBytes / outputBytes) : null,
   };
 
-  const interval = CHART_INTERVAL_SECONDS[params.chart_interval ?? "1 day"] ?? 86400;
-  const buckets = await query(`SELECT
-    time_bucket(INTERVAL '${interval} seconds', "timestamp") AS bucket,
-    COUNT(*) AS total,
-    COUNT(*) FILTER (WHERE starts_with(cache_state, 'HIT')) AS hits,
-    COUNT(*) FILTER (WHERE starts_with(cache_state, 'MISS')) AS misses,
-    COUNT(*) FILTER (WHERE starts_with(cache_state, 'PASS')) AS passes,
-    AVG(latency_ms) FILTER (WHERE starts_with(cache_state, 'HIT')) AS avg_hit,
-    AVG(latency_ms) FILTER (WHERE starts_with(cache_state, 'MISS')) AS avg_miss,
-    COUNT(*) FILTER (WHERE protocol_name LIKE 'HTTP/3%' OR protocol_name IN ('H3', '3')) AS h3,
-    COUNT(*) FILTER (WHERE protocol_name LIKE 'HTTP/2%' OR protocol_name IN ('H2', '2')) AS h2,
-    COUNT(*) FILTER (WHERE protocol_name LIKE 'HTTP/1.1%' OR protocol_name = '1.1') AS h11,
-    COUNT(*) FILTER (WHERE CASE
-      WHEN waf_decision IS NOT NULL THEN UPPER(waf_decision) IN ('BLOCK', 'BLOCKED', 'DENY')
-      ELSE waf_flag IS TRUE AND waf_resp_code = 406
-    END) AS blocked,
-    COUNT(*) FILTER (WHERE CASE
-      WHEN waf_decision IS NOT NULL THEN UPPER(waf_decision) IN ('LOG', 'LOGGED')
-      ELSE waf_flag IS TRUE AND COALESCE(waf_resp_code, 0) != 406 AND waf_signals IS NOT NULL
-    END) AS logged,
-    COUNT(*) FILTER (WHERE output_format IS NOT NULL) AS io_count,
-    SUM(body_bytes) FILTER (WHERE output_format IS NOT NULL) AS io_bytes,
-    SUM(io_input_bytes - io_output_bytes) AS actual_saved
-    FROM normalized GROUP BY bucket ORDER BY bucket`);
-  for (const b of buckets) {
-    const raw = b.bucket;
-    const time = new Date(raw instanceof Date ? raw : typeof raw === "number" ? raw : String(raw)).toISOString();
-    const point = (value: number, category?: string): ValuePoint => ({ time, value, ...(category ? { category } : {}) });
-    const bucketTotal = count(b, "total");
-    if (count(r, "cache_samples")) {
-      result.caching.offload_time_series!.push(point(roundTo(count(b, "hits") * 100 / bucketTotal)));
-      for (const [key, category] of [["hits", "HIT"], ["misses", "MISS"], ["passes", "PASS"]] as const) {
-        result.caching.cache_state_time_series!.push(point(count(b, key), category));
+  if (needBuckets) {
+    for (const b of buckets) {
+      const raw = b.bucket;
+      const time = new Date(raw instanceof Date ? raw : typeof raw === "number" ? raw : String(raw)).toISOString();
+      const point = (value: number, category?: string): ValuePoint => ({ time, value, ...(category ? { category } : {}) });
+      const bucketTotal = count(b, "total");
+      if (needCache && hasCache) {
+        result.caching.offload_time_series!.push(point(roundTo(count(b, "hits") * 100 / bucketTotal)));
+        for (const [key, category] of [["hits", "HIT"], ["misses", "MISS"], ["passes", "PASS"]] as const) {
+          result.caching.cache_state_time_series!.push(point(count(b, key), category));
+        }
+        const other = bucketTotal - count(b, "hits") - count(b, "misses") - count(b, "passes");
+        if (other) result.caching.cache_state_time_series!.push(point(other, "OTHER"));
       }
-      const other = bucketTotal - count(b, "hits") - count(b, "misses") - count(b, "passes");
-      if (other) result.caching.cache_state_time_series!.push(point(other, "OTHER"));
-    }
-    if (b.avg_hit != null) result.performance.latency_time_series!.push(point(Number(b.avg_hit), "hit"));
-    if (b.avg_miss != null) result.performance.latency_time_series!.push(point(Number(b.avg_miss), "miss"));
-    if (count(r, "protocol_samples")) {
-      for (const [key, category] of [["h3", "HTTP/3"], ["h2", "HTTP/2"], ["h11", "HTTP/1.1"]] as const) {
-        if (count(b, key)) result.network.protocol_time_series!.push(point(count(b, key), category));
+      if (needLatency) {
+        const bHitCnt = count(b, "cnt_hit_latency");
+        const bMissCnt = count(b, "cnt_miss_latency");
+        if (bHitCnt > 0) result.performance.latency_time_series!.push(point(count(b, "sum_hit_latency") / bHitCnt, "hit"));
+        if (bMissCnt > 0) result.performance.latency_time_series!.push(point(count(b, "sum_miss_latency") / bMissCnt, "miss"));
       }
-      const other = bucketTotal - count(b, "h3") - count(b, "h2") - count(b, "h11");
-      if (other) result.network.protocol_time_series!.push(point(other, "Other"));
+      if (needNet && protocolSamples) {
+        for (const [key, category] of [["h3", "HTTP/3"], ["h2", "HTTP/2"], ["h11", "HTTP/1.1"]] as const) {
+          if (count(b, key)) result.network.protocol_time_series!.push(point(count(b, key), category));
+        }
+        const other = bucketTotal - count(b, "h3") - count(b, "h2") - count(b, "h11");
+        if (other) result.network.protocol_time_series!.push(point(other, "Other"));
+      }
+      if (needWaf && hasWaf) {
+        result.security.threat_time_series!.push(point(count(b, "blocked"), "blocked"), point(count(b, "logged"), "logged"));
+      }
+      if (needIo) {
+        if (ioCount) result.io.io_time_series!.push(point(count(b, "io_count")));
+        if (b.io_bytes != null) result.io.io_bandwidth_time_series!.push(point(Number(b.io_bytes)));
+        if (b.actual_saved != null) result.io.io_compression_time_series!.push(point(Number(b.actual_saved)));
+      }
     }
-    if (hasWaf) {
-      result.security.threat_time_series!.push(point(count(b, "blocked"), "blocked"), point(count(b, "logged"), "logged"));
-    }
-    if (count(r, "io_count")) result.io.io_time_series!.push(point(count(b, "io_count")));
-    if (b.io_bytes != null) result.io.io_bandwidth_time_series!.push(point(Number(b.io_bytes)));
-    if (b.actual_saved != null) result.io.io_compression_time_series!.push(point(Number(b.actual_saved)));
   }
-
-  const want = (section: ValueSection) => !params.sections?.length || params.sections.includes(section);
   if (want("bots")) {
     const namedBots = (await query(`SELECT bot_name, COUNT(*) AS count FROM normalized
       WHERE bot_name IS NOT NULL GROUP BY bot_name ORDER BY count DESC LIMIT 20`))

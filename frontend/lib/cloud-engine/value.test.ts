@@ -191,4 +191,49 @@ describe("Feature F22 — Fastly Value cloud-engine", () => {
       await engine.reset();
     }
   });
+
+  it("runs a single pruned bucket scan without QUANTILE_CONT or bot regex when only caching and network are requested", async () => {
+    const engine = new DuckDBAnalyticalEngine();
+    const sqls: string[] = [];
+    const spyEngine = {
+      executeSql: <T extends Record<string, unknown>>(sql: string, params?: unknown[], signal?: AbortSignal) => {
+        sqls.push(sql);
+        return engine.executeSql<T>(sql, params, signal);
+      },
+    } as unknown as DuckDBAnalyticalEngine;
+    try {
+      await engine.executeSql(`
+        INSERT INTO requests (
+          scoped_key, ts_ms, "timestamp", cache, resp_bytes, proto, is_ssl, is_ipv6
+        ) VALUES
+          ('cn', 1700000000000, epoch_ms(1700000000000), 'HIT', 200, 'HTTP/3', TRUE, TRUE),
+          ('cn', 1700000001000, epoch_ms(1700000001000), 'MISS', 100, 'HTTP/2', TRUE, FALSE)
+      `);
+      const res = await queryValueSummary({
+        engine: spyEngine,
+        start_time: "2023-11-14T22:00:00Z",
+        end_time: "2023-11-14T23:00:00Z",
+        sections: ["caching", "network"],
+      });
+      expect(sqls).toHaveLength(1);
+      expect(sqls[0]).not.toContain("QUANTILE_CONT");
+      expect(sqls[0]).not.toContain("regexp_matches");
+      expect(sqls[0]).not.toContain("io_output_format");
+      expect(res.caching).toMatchObject({
+        total_requests: 2,
+        hit_requests: 1,
+        miss_requests: 1,
+        bandwidth_saved_bytes: 200,
+      });
+      expect(res.network).toMatchObject({
+        total_requests: 2,
+        http3_pct: 50,
+        h2_pct: 50,
+        tls_pct: 100,
+        ipv6_pct: 50,
+      });
+    } finally {
+      await engine.reset();
+    }
+  });
 });

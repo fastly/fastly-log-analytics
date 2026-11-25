@@ -66,35 +66,78 @@ const THREAT_INTEL_LIMIT = 50;
 const IPV6_TRUE = new Set(["1", "true", "t", "yes"]);
 
 const GROUPS = ["overview", "time_series", "bins", "dim_totals", "field_totals", "all_fields"];
+const PROXY_COLUMNS = ["ip", "asn", "rtt_min", "tcp_rtt", "lat_sum", "lon_sum", "pop"];
+const ONLY: Record<string, readonly string[]> = {
+  count: ["all_fields", "field_totals", "bot_ua"],
+  requests: ["overview", "time_series", "bins", "bot_ua"],
+  ip_sketch: ["all_fields_ip"],
+  value_max: ["header_ip"],
+  resp_bytes_sum: ["bot_ua"],
+  total_bandwidth_bytes: ["overview"],
+  ip: ["proxy"],
+  asn: ["proxy"],
+  rtt_min: ["proxy"],
+  tcp_rtt: ["proxy"],
+  lat_sum: ["proxy"],
+  lon_sum: ["proxy"],
+  pop: ["proxy"],
+};
+
+function onlyFor(groups: ReadonlySet<string>, columns: ReadonlySet<string>): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const [column, allowed] of Object.entries(ONLY)) {
+    if (!columns.has(column)) continue;
+    const filtered = allowed.filter((group) => groups.has(group));
+    if (filtered.length > 0) out[column] = filtered;
+  }
+  return out;
+}
+
 /** The summary groups and columns /security reads without the TLS fingerprints or the row sections. */
-export const SECURITY_SUMMARY_SPEC = defineSummarySpec({ groups: GROUPS, columns: ["count", "requests"] });
+export const SECURITY_SUMMARY_SPEC = defineSummarySpec({
+  groups: GROUPS,
+  columns: ["count", "requests"],
+  only: {
+    count: ["all_fields", "field_totals"],
+    requests: ["overview", "time_series", "bins"],
+  },
+});
 /** And with the TLS fingerprints, whose IP counts merge the `all_fields_ip` sketches. */
 export const SECURITY_TLS_SUMMARY_SPEC = defineSummarySpec({
   groups: [...GROUPS, "all_fields_ip"],
   columns: ["count", "requests", "ip_sketch"],
-  only: { ip_sketch: ["all_fields_ip"] },
+  only: {
+    count: ["all_fields", "field_totals"],
+    requests: ["overview", "time_series", "bins"],
+    ip_sketch: ["all_fields_ip"],
+  },
 });
 
-const PROXY_COLUMNS = ["ip", "asn", "rtt_min", "tcp_rtt", "lat_sum", "lon_sum", "pop"];
-/** What each section reads beyond `SECURITY_SUMMARY_SPEC`. */
-const SECTION_READS: Partial<Record<SecuritySectionName, { groups: string[]; columns: string[] }>> = {
-  tls_fingerprints: { groups: ["all_fields_ip"], columns: ["ip_sketch"] },
-  top_ips_header: { groups: ["header_ip"], columns: ["value_max"] },
-  wellknown_bots: { groups: ["bot_ua"], columns: [] },
-  bot_efficiency: { groups: ["bot_ua", "all_fields_ip"], columns: ["resp_bytes_sum", "total_bandwidth_bytes", "ip_sketch"] },
-  proxies: { groups: ["proxy"], columns: PROXY_COLUMNS },
+/** Exact summary groups and columns each /security section reads. */
+const SECTION_READS: Record<SecuritySectionName, { groups: string[]; columns: string[] }> = {
+  tls_fingerprints: { groups: ["all_fields", "all_fields_ip", "field_totals"], columns: ["count", "ip_sketch"] },
+  fingerprint_coverage: { groups: ["overview", "all_fields", "field_totals"], columns: ["requests", "count"] },
+  req_size_dist: { groups: ["bins", "dim_totals"], columns: ["requests"] },
+  conn_reuse_dist: { groups: ["all_fields", "field_totals"], columns: ["count"] },
+  ipv6_adoption: { groups: ["overview", "time_series", "all_fields", "field_totals"], columns: ["requests", "count"] },
+  proxy_dist: { groups: ["all_fields", "field_totals"], columns: ["count"] },
+  verified_bots_ts: { groups: ["bins", "dim_totals"], columns: ["requests"] },
+  ngwaf_verified_bots: { groups: ["dim_totals"], columns: [] },
+  ngwaf_verified_bots_ts: { groups: ["dim_totals"], columns: [] },
+  top_ips_header: { groups: ["header_ip", "dim_totals", "field_totals"], columns: ["value_max", "count"] },
+  wellknown_bots: { groups: ["bot_ua", "dim_totals", "field_totals"], columns: ["requests", "count"] },
+  bot_efficiency: {
+    groups: ["overview", "bot_ua", "all_fields_ip", "dim_totals", "field_totals"],
+    columns: ["requests", "count", "resp_bytes_sum", "total_bandwidth_bytes", "ip_sketch"],
+  },
+  top_bots: { groups: ["all_fields", "field_totals"], columns: ["count"] },
+  proxies: { groups: ["proxy", "dim_totals", "field_totals"], columns: [...PROXY_COLUMNS, "count"] },
 };
-/**
- * Columns read only in the row groups of the groups that use them. Only the
- * sketches: each extra column set is one more projected part with its own
- * footer, more than the few null chunks of a numeric column cost.
- */
-const ONLY: Record<string, string[]> = { ip_sketch: ["all_fields_ip"] };
 
 /** The summary groups and columns an aggregates read of `sections` uses. */
 export function securitySummarySpec(sections: readonly string[] | null | undefined): SummarySpec {
-  const groups = new Set(GROUPS);
-  const columns = new Set(["count", "requests"]);
+  const groups = new Set<string>();
+  const columns = new Set<string>();
   for (const section of expandSecuritySections(sections)) {
     const reads = SECTION_READS[section];
     reads?.groups.forEach((group) => groups.add(group));
@@ -103,7 +146,7 @@ export function securitySummarySpec(sections: readonly string[] | null | undefin
   return defineSummarySpec({
     groups: [...groups],
     columns: [...columns],
-    only: Object.fromEntries(Object.entries(ONLY).filter(([column]) => columns.has(column))),
+    only: onlyFor(groups, columns),
   });
 }
 
@@ -111,6 +154,10 @@ export function securitySummarySpec(sections: readonly string[] | null | undefin
 export const SECURITY_THREAT_INTEL_SUMMARY_SPEC = defineSummarySpec({
   groups: ["tls_fp", "dim_totals", "field_totals"],
   columns: ["count", "requests"],
+  only: {
+    count: ["tls_fp", "field_totals"],
+    requests: ["tls_fp"],
+  },
 });
 
 /** The security rows of one v3 window summary or bundle. */
@@ -167,13 +214,14 @@ export async function decodeSecuritySummary(
   const version = parquetMetadata(parts[0]).key_value_metadata?.find((kv) => kv.key === "flp_summary")?.value;
   if (version !== SUMMARY_VERSION) return null;
   const reads = (column: string) => !spec || spec.columns.has(column);
-  const { rows, columns } = await readSummaryColumns(parts, [
-    "bundle", "bucket", "field", "value", "truncated", "count", "requests", "value_max", "resp_bytes_sum",
-    "total_bandwidth_bytes", "ip", "asn", "rtt_min", "tcp_rtt", "lat_sum", "lon_sum", "pop",
-  ].filter(reads));
-  const sketches = reads("ip_sketch")
-    ? (await readSummaryColumns(parts, ["ip_sketch"], false)).columns.get("ip_sketch") ?? []
-    : [];
+  const [{ rows, columns }, sketchResult] = await Promise.all([
+    readSummaryColumns(parts, [
+      "bundle", "bucket", "field", "value", "truncated", "count", "requests", "value_max", "resp_bytes_sum",
+      "total_bandwidth_bytes", "ip", "asn", "rtt_min", "tcp_rtt", "lat_sum", "lon_sum", "pop",
+    ].filter(reads)),
+    reads("ip_sketch") ? readSummaryColumns(parts, ["ip_sketch"], false) : Promise.resolve(null),
+  ]);
+  const sketches = sketchResult?.columns.get("ip_sketch") ?? [];
   const col = (name: string) => columns.get(name) ?? [];
   const [group, bucket, field, value, truncated, count, requests] =
     ["bundle", "bucket", "field", "value", "truncated", "count", "requests"].map(col);
@@ -284,7 +332,7 @@ export async function decodeSecuritySummary(
   return out;
 }
 
-const DECODED_LIMIT = 64;
+const DECODED_LIMIT = 256;
 let securityRollupEpoch = 0;
 const activeSecurityRollupControllers = new Set<AbortController>();
 const decoded = new Map<string, Promise<SecuritySummary | null>>();

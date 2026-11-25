@@ -534,7 +534,7 @@ def value_summary(
         _shape_caching_and_overview_buckets,
         _shape_raw_network_buckets,
     )
-    from backend.utils.date_utils import safe_iso
+    from backend.utils.date_utils import parse_iso_utc, safe_iso
 
     wanted = sections or {"overview", "caching", "security", "bots", "performance", "network", "io"}
     filters = _active_filters(req)
@@ -566,7 +566,7 @@ def value_summary(
     )
 
     def _compute() -> dict[str, Any]:
-        if cache_key is not None and (cached_inner := _perf_memo.get(cache_key)) is not None:
+        if cache_key is not None and (cached_inner := _perf_memo.get_with_telemetry(cache_key)) is not None:
             return cached_inner
         trace = HighScaleSections(service.service_id, "value_summary")
         where, params = _facts_where(service.service_id, start_time, end_time, filters, end_inclusive=False)
@@ -587,17 +587,54 @@ def value_summary(
         proto_expr = "coalesce(nullIf(custom_fields['proto'], ''), custom_fields['protocol'])"
         ipv6_expr = "coalesce(nullIf(custom_fields['is_ipv6'], ''), custom_fields['ipv6'])"
 
-        def _fetch_fastly_reported() -> dict[str, Any] | None:
+        need_cache = bool({"overview", "caching", "performance"} & wanted)
+        need_bytes = bool({"overview", "caching"} & wanted)
+        need_shield = "caching" in wanted
+        need_elapsed = bool({"overview", "performance"} & wanted)
+        need_waf_basic = bool({"overview", "security", "bots"} & wanted)
+        need_waf_detail = bool({"security", "bots"} & wanted)
+        need_network = "network" in wanted
+        need_bots_inline = is_real_ch and "bots" in wanted
+
+        req_start_dt = parse_iso_utc(start_time) if start_time else None
+        req_end_dt = parse_iso_utc(end_time) if end_time else None
+
+        def _fetch_fastly_reported() -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
             try:
                 coverage_end = getattr(service.watermark_for("request"), "coverage_end", None)
-                return value_repo.fetch_fastly_reported(
+                reported = value_repo.fetch_fastly_reported(
                     service.service_id, start_time, end_time, coverage_end=coverage_end
                 )
             except Exception:
                 logger.warning("Fastly-reported stats unavailable for %s", service.service_id, exc_info=True)
-                return None
+                return None, None
+            if reported is None:
+                return None, None
+            rep_start_dt = parse_iso_utc(reported.get("window_start")) if reported.get("window_start") else None
+            rep_end_dt = parse_iso_utc(reported.get("window_end")) if reported.get("window_end") else None
+            if (
+                need_bytes
+                and req_start_dt is not None
+                and req_end_dt is not None
+                and rep_start_dt == req_start_dt
+                and rep_end_dt == req_end_dt
+            ):
+                return reported, None
+            w_where, w_params = _facts_where(
+                service.service_id, reported["window_start"], reported["window_end"], {}, end_inclusive=False
+            )
+            w_rows = trace.run(
+                "fastly_reported_window",
+                lambda: service.client.execute(
+                    f"/* value:fastly_reported_window */ SELECT count() AS requests, "
+                    f"sum({bytes_expr}) AS bandwidth_bytes FROM request_facts WHERE {w_where}",
+                    w_params,
+                ),
+                source="fact",
+            )
+            return reported, (w_rows[0] if w_rows else {})
 
-        reported_future: Future[dict[str, Any] | None] | None = None
+        reported_future: Future[tuple[dict[str, Any] | None, dict[str, Any] | None]] | None = None
         if "overview" in wanted and not filters:
             stats_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="hs-val-stats")
             reported_future = trace.submit(
@@ -606,44 +643,81 @@ def value_summary(
             stats_pool.shutdown(wait=False)
 
         def _run_bucket_scan() -> list[dict[str, Any]]:
-            bot_select = (
-                ", countIf(custom_fields['_bot_name'] != '') AS bot_requests, "
-                "countIf(positionCaseInsensitive(custom_fields['waf_sig'], 'VERIFIED-BOT.') > 0) AS verified_bots, "
-                "countIf(custom_fields['ua'] != '') AS ua_cnt "
-                if is_real_ch
-                else " "
-            )
+            select_cols = [
+                f"toDateTime(intDiv(toUInt32(event_timestamp), {bucket_sec}) * {bucket_sec}, 'UTC') AS bucket",
+                "count() AS total",
+            ]
+            if need_cache:
+                select_cols.extend(
+                    [
+                        f"countIf({hit_cond}) AS hit_cnt",
+                        f"countIf({miss_cond}) AS miss_cnt",
+                        f"countIf({pass_cond}) AS pass_cnt",
+                        f"countIf({synth_cond}) AS synth_cnt",
+                    ]
+                )
+            if need_bytes:
+                select_cols.extend(
+                    [
+                        f"sumIf({bytes_expr}, {hit_cond}) AS bandwidth_saved",
+                        f"sum({bytes_expr}) AS total_bytes",
+                        f"countIf({origin_cond}) AS origin_cnt",
+                    ]
+                )
+            if need_shield:
+                select_cols.extend(
+                    [
+                        f"countIf({shield_cond} AND {hit_cond}) AS shield_hit",
+                        f"countIf({shield_cond}) AS shield_total",
+                    ]
+                )
+            if need_waf_basic:
+                select_cols.extend(
+                    [
+                        f"countIf({waf_block_cond}) AS threats_cnt",
+                        "countIf(custom_fields['waf'] != '' AND custom_fields['waf'] != '-') AS waf_sample_cnt",
+                        f"countIf({waf_cond}) AS waf_inspected",
+                    ]
+                )
+            if need_elapsed:
+                select_cols.extend(
+                    [
+                        f"sumIf({elapsed_us_expr}, {hit_cond}) AS sum_hit_elapsed",
+                        f"countIf({elapsed_us_expr} IS NOT NULL AND {hit_cond}) AS cnt_hit_elapsed",
+                        f"sumIf({elapsed_us_expr}, {miss_cond}) AS sum_miss_elapsed",
+                        f"countIf({elapsed_us_expr} IS NOT NULL AND {miss_cond}) AS cnt_miss_elapsed",
+                    ]
+                )
+            if need_waf_detail:
+                select_cols.extend(
+                    [
+                        f"countIf({waf_block_cond}) AS waf_blocked",
+                        f"countIf({waf_log_cond}) AS waf_logged",
+                        f"countIf({waf_pass_cond}) AS waf_passed",
+                        "countIf(custom_fields['waf_sig'] != '') AS waf_sig_cnt",
+                    ]
+                )
+            if need_network:
+                select_cols.extend(
+                    [
+                        f"countIf({proto_expr} IN ('3.0', '3', 'HTTP/3', 'h3')) AS http3_cnt",
+                        f"countIf({proto_expr} IN ('2.0', '2', 'HTTP/2', 'h2')) AS h2_cnt",
+                        f"countIf({proto_expr} IN ('1.1', 'HTTP/1.1', 'http/1.1')) AS h11_cnt",
+                        f"countIf({proto_expr} NOT IN ('3.0', '3', 'HTTP/3', 'h3', '2.0', '2', 'HTTP/2', 'h2', '1.1', 'HTTP/1.1', 'http/1.1')) AS other_proto_cnt",
+                        "countIf(lower(custom_fields['is_ssl']) IN ('true', '1') OR (custom_fields['tls'] != '' AND custom_fields['tls'] != '-')) AS tls_cnt",
+                        f"countIf(lower({ipv6_expr}) IN ('true', '1')) AS ipv6_cnt",
+                    ]
+                )
+            if need_bots_inline:
+                select_cols.extend(
+                    [
+                        "countIf(custom_fields['_bot_name'] != '') AS bot_requests",
+                        "countIf(positionCaseInsensitive(custom_fields['waf_sig'], 'VERIFIED-BOT.') > 0) AS verified_bots",
+                        "countIf(custom_fields['ua'] != '') AS ua_cnt",
+                    ]
+                )
             sql = (
-                f"/* value:combined_buckets */ SELECT "
-                f"toDateTime(intDiv(toUInt32(event_timestamp), {bucket_sec}) * {bucket_sec}, 'UTC') AS bucket, "
-                f"count() AS total, "
-                f"countIf({hit_cond}) AS hit_cnt, "
-                f"countIf({miss_cond}) AS miss_cnt, "
-                f"countIf({pass_cond}) AS pass_cnt, "
-                f"countIf({synth_cond}) AS synth_cnt, "
-                f"sumIf({bytes_expr}, {hit_cond}) AS bandwidth_saved, "
-                f"sum({bytes_expr}) AS total_bytes, "
-                f"countIf({origin_cond}) AS origin_cnt, "
-                f"countIf({shield_cond} AND {hit_cond}) AS shield_hit, "
-                f"countIf({shield_cond}) AS shield_total, "
-                f"countIf({waf_block_cond}) AS threats_cnt, "
-                f"sumIf({elapsed_us_expr}, {hit_cond}) AS sum_hit_elapsed, "
-                f"countIf({elapsed_us_expr} IS NOT NULL AND {hit_cond}) AS cnt_hit_elapsed, "
-                f"sumIf({elapsed_us_expr}, {miss_cond}) AS sum_miss_elapsed, "
-                f"countIf({elapsed_us_expr} IS NOT NULL AND {miss_cond}) AS cnt_miss_elapsed, "
-                f"countIf(custom_fields['waf'] != '' AND custom_fields['waf'] != '-') AS waf_sample_cnt, "
-                f"countIf({waf_cond}) AS waf_inspected, "
-                f"countIf({waf_block_cond}) AS waf_blocked, "
-                f"countIf({waf_log_cond}) AS waf_logged, "
-                f"countIf({waf_pass_cond}) AS waf_passed, "
-                f"countIf(custom_fields['waf_sig'] != '') AS waf_sig_cnt, "
-                f"countIf({proto_expr} IN ('3.0', '3', 'HTTP/3', 'h3')) AS http3_cnt, "
-                f"countIf({proto_expr} IN ('2.0', '2', 'HTTP/2', 'h2')) AS h2_cnt, "
-                f"countIf({proto_expr} IN ('1.1', 'HTTP/1.1', 'http/1.1')) AS h11_cnt, "
-                f"countIf({proto_expr} NOT IN ('3.0', '3', 'HTTP/3', 'h3', '2.0', '2', 'HTTP/2', 'h2', '1.1', 'HTTP/1.1', 'http/1.1')) AS other_proto_cnt, "
-                f"countIf(lower(custom_fields['is_ssl']) IN ('true', '1') OR (custom_fields['tls'] != '' AND custom_fields['tls'] != '-')) AS tls_cnt, "
-                f"countIf(lower({ipv6_expr}) IN ('true', '1')) AS ipv6_cnt"
-                f"{bot_select}"
+                f"/* value:combined_buckets */ SELECT {', '.join(select_cols)} "
                 f"FROM request_facts WHERE {where} GROUP BY bucket ORDER BY bucket"
             )
             return service.client.execute(sql, params)
@@ -691,25 +765,20 @@ def value_summary(
                 result["caching"] = shaped["caching"]
             if "overview" in wanted and "overview" in shaped:
                 result["overview"] = shaped["overview"]
-        if reported_future is not None and (reported := reported_future.result()) is not None:
-            w_where, w_params = _facts_where(
-                service.service_id, reported["window_start"], reported["window_end"], {}, end_inclusive=False
-            )
-            w_rows = trace.run(
-                "fastly_reported_window",
-                lambda: service.client.execute(
-                    f"/* value:fastly_reported_window */ SELECT count() AS requests, "
-                    f"sum({bytes_expr}) AS bandwidth_bytes FROM request_facts WHERE {w_where}",
-                    w_params,
-                ),
-                source="fact",
-            )
-            w_row = w_rows[0] if w_rows else {}
-            result["fastly_reported"] = {
-                **reported,
-                "logged_requests": int(w_row.get("requests") or 0),
-                "logged_bandwidth_bytes": int(w_row.get("bandwidth_bytes") or 0),
-            }
+        if reported_future is not None:
+            reported, w_row = reported_future.result()
+            if reported is not None:
+                if w_row is None:
+                    logged_requests = total_requests
+                    logged_bandwidth_bytes = sum(int(b.get("total_bytes") or 0) for b in buckets)
+                else:
+                    logged_requests = int(w_row.get("requests") or 0)
+                    logged_bandwidth_bytes = int(w_row.get("bandwidth_bytes") or 0)
+                result["fastly_reported"] = {
+                    **reported,
+                    "logged_requests": logged_requests,
+                    "logged_bandwidth_bytes": logged_bandwidth_bytes,
+                }
         if "performance" in wanted and "performance_from_buckets" in shaped:
             pf = shaped["performance_from_buckets"]
             p99_rows = (
@@ -845,24 +914,75 @@ def value_summary(
             ifmt_expr = "nullIf(coalesce(nullIf(custom_fields['io_input_format'], ''), custom_fields['ifmt']), '')"
             io_in_expr = "toInt64OrNull(nullIf(custom_fields['io_input_bytes'], ''))"
             io_out_expr = "toInt64OrNull(nullIf(custom_fields['io_output_bytes'], ''))"
-            io_sum_rows = trace.run(
-                "io_summary",
-                lambda: service.client.execute(
-                    f"/* value:io_summary */ SELECT "
-                    f"countIf(startsWith({ctype_expr}, 'image/')) AS image_requests, "
-                    f"sumIf({bytes_expr}, startsWith({ctype_expr}, 'image/')) AS image_bytes, "
-                    f"countIf({ofmt_expr} IS NOT NULL) AS io_count, "
-                    f"sumIf({bytes_expr}, {ofmt_expr} IS NOT NULL) AS io_bytes, "
-                    f"sumIf({bytes_expr}, {ofmt_expr} IS NOT NULL AND {shield_cond}) AS io_shield_bytes, "
-                    f"sumIf({io_in_expr}, {io_out_expr} IS NOT NULL) AS input_bytes, "
-                    f"sumIf({io_out_expr}, {io_in_expr} IS NOT NULL) AS output_bytes, "
-                    f"sumIf({io_in_expr} - {io_out_expr}, {io_in_expr} IS NOT NULL AND {io_out_expr} IS NOT NULL) AS actual_saved, "
-                    f"countIf({io_in_expr} IS NOT NULL AND {io_out_expr} IS NOT NULL) AS io_pair_count "
-                    f"FROM request_facts WHERE {where}",
-                    params,
-                ),
+            io_res = trace.run_parallel(
+                [
+                    (
+                        "io_summary",
+                        lambda: service.client.execute(
+                            f"/* value:io_summary */ SELECT "
+                            f"countIf(startsWith({ctype_expr}, 'image/')) AS image_requests, "
+                            f"sumIf({bytes_expr}, startsWith({ctype_expr}, 'image/')) AS image_bytes, "
+                            f"countIf({ofmt_expr} IS NOT NULL) AS io_count, "
+                            f"sumIf({bytes_expr}, {ofmt_expr} IS NOT NULL) AS io_bytes, "
+                            f"sumIf({bytes_expr}, {ofmt_expr} IS NOT NULL AND {shield_cond}) AS io_shield_bytes, "
+                            f"sumIf({io_in_expr}, {io_out_expr} IS NOT NULL) AS input_bytes, "
+                            f"sumIf({io_out_expr}, {io_in_expr} IS NOT NULL) AS output_bytes, "
+                            f"sumIf({io_in_expr} - {io_out_expr}, {io_in_expr} IS NOT NULL AND {io_out_expr} IS NOT NULL) AS actual_saved, "
+                            f"countIf({io_in_expr} IS NOT NULL AND {io_out_expr} IS NOT NULL) AS io_pair_count "
+                            f"FROM request_facts WHERE {where}",
+                            params,
+                        ),
+                    ),
+                    (
+                        "io_formats",
+                        lambda: service.client.execute(
+                            f"/* value:io_formats */ SELECT coalesce({ofmt_expr}, nullIf(splitByChar('/', {ctype_expr})[2], '')) AS format, "
+                            f"count() AS cnt FROM request_facts "
+                            f"WHERE {where} AND ({ofmt_expr} IS NOT NULL OR startsWith({ctype_expr}, 'image/')) "
+                            f"GROUP BY format HAVING format IS NOT NULL AND format != '' ORDER BY cnt DESC",
+                            params,
+                        ),
+                    ),
+                    (
+                        "io_opportunities",
+                        lambda: service.client.execute(
+                            f"/* value:io_opportunities */ SELECT url, count() AS request_count, "
+                            f"sum({bytes_expr}) AS total_bytes, avg({bytes_expr}) / 1024.0 AS avg_kb "
+                            f"FROM request_facts WHERE {where} "
+                            f"AND {ctype_expr} IN ('image/jpeg', 'image/jpg', 'image/png', 'image/gif') "
+                            f"AND {ofmt_expr} IS NULL AND {bytes_expr} > 51200 "
+                            f"GROUP BY url ORDER BY total_bytes DESC LIMIT 20",
+                            params,
+                        ),
+                    ),
+                    (
+                        "io_conversions",
+                        lambda: service.client.execute(
+                            f"/* value:io_conversions */ SELECT {ifmt_expr} AS input_format, {ofmt_expr} AS output_format, "
+                            f"count() AS cnt, avg({io_in_expr} / nullIf(toFloat64({io_out_expr}), 0)) AS avg_ratio "
+                            f"FROM request_facts WHERE {where} AND {ifmt_expr} IS NOT NULL AND {ofmt_expr} IS NOT NULL "
+                            f"GROUP BY input_format, output_format ORDER BY cnt DESC LIMIT 20",
+                            params,
+                        ),
+                    ),
+                    (
+                        "io_series",
+                        lambda: service.client.execute(
+                            f"/* value:io_series */ SELECT "
+                            f"toDateTime(intDiv(toUInt32(event_timestamp), {bucket_sec}) * {bucket_sec}, 'UTC') AS bucket, "
+                            f"countIf({ofmt_expr} IS NOT NULL) AS io_count, "
+                            f"sumIf({bytes_expr}, {ofmt_expr} IS NOT NULL) AS io_bytes, "
+                            f"sumIf({io_in_expr} - {io_out_expr}, {io_in_expr} IS NOT NULL AND {io_out_expr} IS NOT NULL) AS actual_saved "
+                            f"FROM request_facts WHERE {where} GROUP BY bucket ORDER BY bucket",
+                            params,
+                        ),
+                    ),
+                ],
                 source="fact",
+                max_workers=5,
+                thread_name_prefix="hs-val-io",
             )
+            io_sum_rows = io_res["io_summary"]
             io_s = io_sum_rows[0] if io_sum_rows else {}
             io_count = int(io_s.get("io_count") or 0)
             img_count = int(io_s.get("image_requests") or 0)
@@ -872,17 +992,7 @@ def value_summary(
             in_b = io_s.get("input_bytes")
             out_b = io_s.get("output_bytes")
             actual_saved = io_s.get("actual_saved") if has_io_pairs else None
-            fmt_rows = trace.run(
-                "io_formats",
-                lambda: service.client.execute(
-                    f"/* value:io_formats */ SELECT coalesce({ofmt_expr}, nullIf(splitByChar('/', {ctype_expr})[2], '')) AS format, "
-                    f"count() AS cnt FROM request_facts "
-                    f"WHERE {where} AND ({ofmt_expr} IS NOT NULL OR startsWith({ctype_expr}, 'image/')) "
-                    f"GROUP BY format HAVING format IS NOT NULL AND format != '' ORDER BY cnt DESC",
-                    params,
-                ),
-                source="fact",
-            )
+            fmt_rows = io_res["io_formats"]
             fmt_total = sum(int(r.get("cnt") or 0) for r in fmt_rows)
             fmt_dist = [
                 {
@@ -896,43 +1006,9 @@ def value_summary(
             modern_cnt = sum(
                 int(r["cnt"]) for r in fmt_rows if str(r.get("format", "")).lower() in ("webp", "avif", "jpegxl", "jxl")
             )
-            opp_rows = trace.run(
-                "io_opportunities",
-                lambda: service.client.execute(
-                    f"/* value:io_opportunities */ SELECT url, count() AS request_count, "
-                    f"sum({bytes_expr}) AS total_bytes, avg({bytes_expr}) / 1024.0 AS avg_kb "
-                    f"FROM request_facts WHERE {where} "
-                    f"AND {ctype_expr} IN ('image/jpeg', 'image/jpg', 'image/png', 'image/gif') "
-                    f"AND {ofmt_expr} IS NULL AND {bytes_expr} > 51200 "
-                    f"GROUP BY url ORDER BY total_bytes DESC LIMIT 20",
-                    params,
-                ),
-                source="fact",
-            )
-            conv_rows = trace.run(
-                "io_conversions",
-                lambda: service.client.execute(
-                    f"/* value:io_conversions */ SELECT {ifmt_expr} AS input_format, {ofmt_expr} AS output_format, "
-                    f"count() AS cnt, avg({io_in_expr} / nullIf(toFloat64({io_out_expr}), 0)) AS avg_ratio "
-                    f"FROM request_facts WHERE {where} AND {ifmt_expr} IS NOT NULL AND {ofmt_expr} IS NOT NULL "
-                    f"GROUP BY input_format, output_format ORDER BY cnt DESC LIMIT 20",
-                    params,
-                ),
-                source="fact",
-            )
-            io_ser_rows = trace.run(
-                "io_series",
-                lambda: service.client.execute(
-                    f"/* value:io_series */ SELECT "
-                    f"toDateTime(intDiv(toUInt32(event_timestamp), {bucket_sec}) * {bucket_sec}, 'UTC') AS bucket, "
-                    f"countIf({ofmt_expr} IS NOT NULL) AS io_count, "
-                    f"sumIf({bytes_expr}, {ofmt_expr} IS NOT NULL) AS io_bytes, "
-                    f"sumIf({io_in_expr} - {io_out_expr}, {io_in_expr} IS NOT NULL AND {io_out_expr} IS NOT NULL) AS actual_saved "
-                    f"FROM request_facts WHERE {where} GROUP BY bucket ORDER BY bucket",
-                    params,
-                ),
-                source="fact",
-            )
+            opp_rows = io_res["io_opportunities"]
+            conv_rows = io_res["io_conversions"]
+            io_ser_rows = io_res["io_series"]
             io_ts = [
                 {"time": safe_iso(r["bucket"]), "value": int(r["io_count"])}
                 for r in io_ser_rows
