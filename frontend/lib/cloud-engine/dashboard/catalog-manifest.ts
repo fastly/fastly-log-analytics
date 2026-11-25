@@ -49,7 +49,7 @@ export function filterUnavailableCustomFields<T extends CustomCard>(
   return customFields.filter((f) => availableFieldIds.has(f.id));
 }
 
-export const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
+export const MAX_MANIFEST_BYTES = 16 * 1024 * 1024;
 export const MAX_IDENTITIES = 16_384;
 const MAX_REPLAY = 32;
 const MAX_SNAPSHOTS = 8;

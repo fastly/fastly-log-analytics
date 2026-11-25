@@ -9,7 +9,7 @@ import {
   readManifestSnapshot,
   type ManifestSnapshot,
 } from "./manifest-store";
-import { MAX_IDENTITIES } from "./catalog-manifest";
+import { MAX_IDENTITIES, MAX_MANIFEST_BYTES } from "./catalog-manifest";
 import { readStoreError } from "./file-store";
 
 const scope = '["https://example.test","session","service"]';
@@ -265,7 +265,7 @@ describe("manifest snapshots", () => {
     const files = [
       {
         ...original.manifest.files[0],
-        key: "x".repeat(4 * 1024 * 1024),
+        key: "x".repeat(MAX_MANIFEST_BYTES),
       },
     ];
     entries.set(

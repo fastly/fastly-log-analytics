@@ -916,6 +916,21 @@ fn files_filters_by_overlap_and_shapes_entries() {
 }
 
 #[test]
+fn files_omits_unused_parquet_metadata_from_manifest_entries() {
+    let fake = Fake::new(BASE + 3600);
+    put_raw(&fake, BASE + 60, "a", &[line(BASE + 60, "a")]);
+    assert_eq!(tick(&fake).unwrap().converted, 1);
+    let query = format!("from={}&to={}", iso_url(BASE), iso_url(BASE + 3600));
+    let page = files_page(&fake, &query).unwrap();
+    let files = page["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1);
+    assert!(
+        files[0].get("metadata").is_none(),
+        "manifest entries must not serialize per-file parquet metadata bloat onto /api/files"
+    );
+}
+
+#[test]
 fn files_returns_a_compact_in_place_of_its_sources_and_keeps_uncovered_windows() {
     let fake = Fake::new(BASE + 10 * 86_400);
     seed_files(&fake, 4);

@@ -6,7 +6,14 @@ import {
   observeManifestCommit,
   type ManifestFile,
 } from "./manifest";
-import { ManifestRequestError, SNAPSHOT_REUSE_MS } from "./catalog-manifest";
+import {
+  accountManifestPage,
+  MAX_IDENTITIES,
+  MAX_MANIFEST_BYTES,
+  ManifestRequestError,
+  SNAPSHOT_REUSE_MS,
+  type ManifestBudget,
+} from "./catalog-manifest";
 import { manifestSnapshotUrl, persistManifestSnapshot } from "./manifest-store";
 
 const H = 3_600_000;
@@ -1519,6 +1526,40 @@ describe("closed-hour manifest cache", () => {
     expect(keys(rawResult.files)).toEqual(keys([f2]));
     expect(rawResult.summaryFiles).toBeUndefined();
     expect(rawResult.catalogGeneration).toBe(55);
+  });
+
+  it("allows realistic multi-thousand-file manifests past 4 MiB while enforcing MAX_MANIFEST_BYTES", () => {
+    const budget: ManifestBudget = { bytes: 0, identities: new Set() };
+    const realisticKey =
+      "cVnu9mYB3Cvmob3lsqjQU3/processed/request/catalog1/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/year=2026/month=11/day=25/hour=16/window=1795536000_1795536060_abcdef012345_1.parquet";
+    const files: ManifestFile[] = Array.from({ length: MAX_IDENTITIES }, (_, i) => ({
+      key: `${realisticKey}#${i}`,
+      start: iso(T0),
+      end: iso(T0 + 60_000),
+      size: 12_345,
+      rows: 250,
+    }));
+    const serializedBytes = new TextEncoder().encode(
+      JSON.stringify({ files }),
+    ).byteLength;
+    expect(serializedBytes).toBeGreaterThan(4 * 1024 * 1024);
+    expect(() => accountManifestPage({ files }, budget)).not.toThrow();
+    expect(budget.identities.size).toBe(MAX_IDENTITIES);
+
+    const overBudget: ManifestBudget = { bytes: 0, identities: new Set() };
+    expect(() =>
+      accountManifestPage(
+        {
+          files: [
+            {
+              ...file(T0),
+              key: "x".repeat(MAX_MANIFEST_BYTES),
+            },
+          ],
+        },
+        overBudget,
+      ),
+    ).toThrow("File manifest exceeded the metadata byte limit");
   });
 });
 

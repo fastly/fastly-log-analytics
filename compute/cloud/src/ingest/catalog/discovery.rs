@@ -82,9 +82,6 @@ pub fn entry(file: &Output, generation: u64) -> Value {
         "identity": if file.md5.is_empty() {file.key.clone()} else {file.md5.clone()},
         "catalog_generation": generation,
     });
-    if let Some(metadata) = &file.metadata {
-        value["metadata"] = serde_json::to_value(metadata).unwrap_or(Value::Null);
-    }
     if let Some(name) = crate::telemetry::compact::parse_compact_name(&file.key) {
         value["sources"] = name.sources.into();
         value["span"] = json!([rfc3339(name.a as i64), rfc3339(name.b as i64)]);
