@@ -85,13 +85,22 @@ class DecodeResult:
     quarantined_rows: int
 
 
+MAX_DECOMPRESSED_OBJECT_BYTES = 128 * 1024 * 1024
+_DECOMPRESS_CHUNK_BYTES = 256 * 1024
+
+
 def decode_source_object(
-    source: ArchiveSourceObject, payload: bytes, *, transform_version: str, domain: str | None = None
+    source: ArchiveSourceObject,
+    payload: bytes,
+    *,
+    transform_version: str,
+    domain: str | None = None,
+    max_decompressed_bytes: int | None = None,
 ) -> DecodeResult:
     selected_domain = domain or source.domain
     if selected_domain not in {"request", "rum_vitals", "rum_errors"}:
         raise ValueError("source decoder supports request, rum_vitals, and rum_errors domains")
-    raw_payload = _decode_payload(payload)
+    raw_payload = _decode_payload(payload, max_decompressed_bytes=max_decompressed_bytes)
     events: list[dict[str, Any]] = []
     dead_letters: list[DeadLetterRecord] = []
     source_version = source.version or source.checksum
@@ -152,18 +161,38 @@ def decode_source_object(
     )
 
 
-def _decode_payload(payload: bytes) -> bytes:
+def _read_bounded_stream(stream: Any, max_bytes: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = stream.read(_DECOMPRESS_CHUNK_BYTES)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise ValueError("Decompressed payload exceeds maximum allowed size")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _decode_payload(payload: bytes, *, max_decompressed_bytes: int | None = None) -> bytes:
+    limit = MAX_DECOMPRESSED_OBJECT_BYTES if max_decompressed_bytes is None else max_decompressed_bytes
+    if limit <= 0:
+        raise ValueError("max_decompressed_bytes must be positive")
     if payload[:2] == b"\x1f\x8b":
         try:
-            return gzip.decompress(payload)
+            with gzip.GzipFile(fileobj=io.BytesIO(payload), mode="rb") as reader:
+                return _read_bounded_stream(reader, limit)
         except (OSError, EOFError) as exc:
             raise ValueError("source gzip payload is invalid") from exc
     if payload[:4] == b"\x28\xb5\x2f\xfd":
         try:
             with zstd.ZstdDecompressor().stream_reader(io.BytesIO(payload)) as reader:
-                return reader.read()
+                return _read_bounded_stream(reader, limit)
         except zstd.ZstdError as exc:
             raise ValueError("source zstd payload is invalid") from exc
+    if len(payload) > limit:
+        raise ValueError("Decompressed payload exceeds maximum allowed size")
     return payload
 
 

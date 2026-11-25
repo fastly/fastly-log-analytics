@@ -19,6 +19,69 @@ logger = logging.getLogger("backend.core.ingest")
 _ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 _GZIP_MAGIC = b"\x1f\x8b"
 _COMPRESSED_STREAM_ERRORS = (gzip.BadGzipFile, zstd.ZstdError, EOFError, OSError)
+MAX_DECOMPRESSED_OBJECT_BYTES = 128 * 1024 * 1024
+MAX_CORRUPT_CONTAINER_CAPTURE_BYTES = 64 * 1024 * 1024
+_DECOMPRESS_CHUNK_BYTES = 256 * 1024
+
+
+class _BoundedStreamReader:
+    """Binary stream wrapper enforcing a hard ceiling on total decompressed bytes read."""
+
+    def __init__(self, stream: Any, max_bytes: int) -> None:
+        if max_bytes <= 0:
+            raise ValueError("max_decompressed_bytes must be positive")
+        self._stream = stream
+        self._max_bytes = max_bytes
+        self._bytes_read = 0
+
+    def _account(self, data: bytes) -> bytes:
+        self._bytes_read += len(data)
+        if self._bytes_read > self._max_bytes:
+            raise ValueError("Decompressed log exceeds maximum allowed size")
+        return data
+
+    def read(self, size: int = -1) -> bytes:
+        if size is None or size < 0:
+            chunks: list[bytes] = []
+            while True:
+                remaining = self._max_bytes - self._bytes_read
+                step = min(_DECOMPRESS_CHUNK_BYTES, remaining + 1)
+                chunk = self._stream.read(step)
+                if not chunk:
+                    break
+                chunks.append(self._account(chunk))
+            return b"".join(chunks)
+        if size == 0:
+            return b""
+        remaining = self._max_bytes - self._bytes_read
+        capped = min(size, remaining + 1)
+        return self._account(self._stream.read(capped))
+
+    def readline(self, size: int = -1) -> bytes:
+        remaining = self._max_bytes - self._bytes_read
+        limit = remaining + 1 if size is None or size < 0 else min(size, remaining + 1)
+        return self._account(self._stream.readline(limit))
+
+    def __iter__(self) -> _BoundedStreamReader:
+        return self
+
+    def __next__(self) -> bytes:
+        line = self.readline()
+        if not line:
+            raise StopIteration
+        return line
+
+    def close(self) -> None:
+        self._stream.close()
+
+    def __enter__(self) -> _BoundedStreamReader:
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        self.close()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._stream, name)
 
 
 def _detect_compression(path: str) -> str:
@@ -39,7 +102,8 @@ def _detect_compression(path: str) -> str:
 
 
 @contextlib.contextmanager
-def _open_compressed_log(path: str):
+def _open_compressed_log(path: str, *, max_decompressed_bytes: int | None = None):
+    limit = MAX_DECOMPRESSED_OBJECT_BYTES if max_decompressed_bytes is None else max_decompressed_bytes
     codec = _detect_compression(path)
     if codec == "zstd":
         with open(path, "rb") as raw_fh:
@@ -47,13 +111,13 @@ def _open_compressed_log(path: str):
                 raise zstd.ZstdError("invalid zstd header")
             raw_fh.seek(0)
             with zstd.ZstdDecompressor().stream_reader(raw_fh) as reader:
-                yield io.BufferedReader(reader)
+                yield _BoundedStreamReader(io.BufferedReader(reader), limit)
     elif codec == "gzip":
         with gzip.open(path, "rb") as fh:
-            yield fh
+            yield _BoundedStreamReader(fh, limit)
     else:
         with open(path, "rb") as fh:
-            yield fh
+            yield _BoundedStreamReader(fh, limit)
 
 
 _INGEST_OUTCOME_COUNTER_KEYS = (
@@ -111,12 +175,13 @@ def _capture_corrupt_container(
     error: BaseException,
     *,
     full_outcome: bool = True,
+    max_bytes: int = MAX_CORRUPT_CONTAINER_CAPTURE_BYTES,
 ) -> dict[str, int]:
     from backend.core.metadata.ingest_log import capture_evidence
 
     try:
         with open(local_file, "rb") as raw:
-            payload = raw.read()
+            payload = raw.read(max_bytes)
         result = capture_evidence(
             service_id,
             source_type,

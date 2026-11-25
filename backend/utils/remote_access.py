@@ -169,6 +169,7 @@ _ANALYST_BLOCKED_SUBPATH_REGEX: tuple[re.Pattern[str], ...] = (
     re.compile(r"^/api/services/[^/]+/log-fields$"),
     re.compile(r"^/api/services/[^/]+/custom-fields(/.*)?$"),
     re.compile(r"^/api/services/[^/]+/log-field-audit$"),
+    re.compile(r"^/api/services/[^/]+/control-room/wizard(/.*)?$"),
 )
 _ANALYST_BLOCKED_SCORING_SUFFIXES: tuple[str, ...] = (
     "/config",

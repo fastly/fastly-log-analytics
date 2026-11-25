@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 
 from backend.core.metadata.base import list_audit, record_audit
-from backend.core.request_context import ServiceId, require_service_access
+from backend.core.request_context import ServiceId, require_admin, require_service_access
 from backend.models.common import (
     DEFAULT_ERROR_RESPONSES,
     LogFieldAuditFeature,
@@ -70,6 +70,7 @@ def log_field_audit(
     "/services/{service_id}/control-room/wizard/state",
     response_model=WizardStateResponse,
     response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
 )
 @query_errors()
 def wizard_state(
@@ -95,6 +96,7 @@ def wizard_state(
     "/services/{service_id}/control-room/wizard/step",
     response_model=WizardStepResponse,
     response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
 )
 @query_errors()
 def wizard_step(

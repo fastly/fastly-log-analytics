@@ -163,14 +163,14 @@ services:
       # SSO-exclusive deployments only: set to 0 to disable passcode login.
       - SHARE_PASSCODE_LOGIN_ENABLED=${SHARE_PASSCODE_LOGIN_ENABLED:-}
       # PostgreSQL operational metadata + ClickHouse analytical store (unified v3 storage).
-      # Points to the local containers on loopback with fallback password.
-      - METADATA_DSN=postgresql://fla:${POSTGRES_PASSWORD:-fla_local_dev}@127.0.0.1:5432/fla
+      # Points to the local containers on loopback; production passwords are required (fail-closed).
+      - METADATA_DSN=postgresql://fla:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@127.0.0.1:5432/fla
       - CLICKHOUSE_URL=${CLICKHOUSE_URL:-http://127.0.0.1:8123}
       - CLICKHOUSE_ENABLED=true
       - CLICKHOUSE_HOST=${CLICKHOUSE_HOST:-127.0.0.1}
       - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-8123}
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-fla}
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-fla_local_dev}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD is required}
       - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-fla}
       - CLICKHOUSE_SECURE=${CLICKHOUSE_SECURE:-false}
     depends_on:
@@ -208,13 +208,13 @@ services:
       - HIGH_SCALE_WORKER_THREADS=1
       - HIGH_SCALE_MAX_BATCH_BYTES=6291456
       - HIGH_SCALE_MAX_BATCH_OBJECTS=10
-      - METADATA_DSN=postgresql://fla:${POSTGRES_PASSWORD:-fla_local_dev}@127.0.0.1:5432/fla
+      - METADATA_DSN=postgresql://fla:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@127.0.0.1:5432/fla
       - CLICKHOUSE_URL=${CLICKHOUSE_URL:-http://127.0.0.1:8123}
       - CLICKHOUSE_ENABLED=true
       - CLICKHOUSE_HOST=${CLICKHOUSE_HOST:-127.0.0.1}
       - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-8123}
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-fla}
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-fla_local_dev}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD is required}
       - CLICKHOUSE_DATABASE=${CLICKHOUSE_DATABASE:-fla}
       - CLICKHOUSE_SECURE=${CLICKHOUSE_SECURE:-false}
     depends_on:
@@ -279,7 +279,7 @@ services:
     command: ["postgres", "-c", "listen_addresses=127.0.0.1"]
     environment:
       - POSTGRES_USER=fla
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-fla_local_dev}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       - POSTGRES_DB=fla
     volumes: !override
       - /mnt/app-data/postgres:/var/lib/postgresql/data
@@ -307,8 +307,8 @@ services:
     environment:
       - CLICKHOUSE_DB=${CLICKHOUSE_DATABASE:-fla}
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-fla}
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-fla_local_dev}
-      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD is required}
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=0
     volumes: !override
       - /mnt/app-data/clickhouse:/var/lib/clickhouse
     healthcheck:

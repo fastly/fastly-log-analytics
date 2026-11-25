@@ -16,7 +16,7 @@ from backend.config import get_fastly_api_key
 from backend.core.clickhouse import get_clickhouse_client
 from backend.core.fastly.client import FASTLY_LOG_FIELDS, api_key_or_mock
 from backend.core.fos_client import _get_fos_client
-from backend.core.request_context import get_source
+from backend.core.request_context import get_source, require_admin
 from backend.core.service_defaults import (
     DEFAULT_LOG_PERIOD_SECONDS,
     DEFAULT_SNAPSHOT_INTERVAL_MINUTES,
@@ -55,7 +55,12 @@ from backend.utils.router_utils import query_errors, raise_internal
 
 logger = logging.getLogger(__name__)
 
-usage_router = APIRouter(prefix="/api/usage", tags=["usage"], responses=DEFAULT_ERROR_RESPONSES)
+usage_router = APIRouter(
+    prefix="/api/usage",
+    tags=["usage"],
+    responses=DEFAULT_ERROR_RESPONSES,
+    dependencies=[Depends(require_admin)],
+)
 router = usage_router
 
 _USAGE_CACHE_CONTROL = "private, max-age=30, stale-while-revalidate=120"

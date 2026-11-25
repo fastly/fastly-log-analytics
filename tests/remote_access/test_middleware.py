@@ -763,7 +763,7 @@ _READ_PATHS = (
     "/api/security/bundle /api/security/threat-intel /api/query/schema/{service_id} "
     "/api/high-scale/request-facts /api/high-scale/services/{service_id}/exports/{export_id} "
     "/api/high-scale/services/{service_id}/queries/{job_id} /api/services/{service_id}/cmcd/status "
-    "/api/services/{service_id}/control-room/wizard/state /api/services/{service_id}/control-room/{tab} "
+    "/api/services/{service_id}/control-room/{tab} "
     "/api/services/{service_id}/realtime-seed"
 ).split() + [
     *(f"/api/services/{{service_id}}/scoring/{s}" for s in _SCORING_READS),

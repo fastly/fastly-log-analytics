@@ -741,7 +741,17 @@ def submit_query(
             start=start,
             end=end,
         )
-        job_id = jobs.submit(plan, producer)
+        session_id = getattr(ctx.analyst_session, "session_id", None) if ctx.analyst_session is not None else None
+        owner_key = f"analyst:{session_id}" if session_id else "admin"
+        try:
+            job_id = jobs.submit(plan, producer, owner_key=owner_key)
+        except RuntimeError as exc:
+            if getattr(exc, "status_code", None) == 429:
+                raise HTTPException(
+                    status_code=429,
+                    detail=make_error("historical_job_rate_limited", str(exc)),
+                ) from None
+            raise
         return HighScaleQueryResponse.with_telemetry(
             service_id=ctx.service_id,
             domain=req.domain,

@@ -82,6 +82,8 @@ spec:
         runAsGroup: 3000
         runAsNonRoot: true
         runAsUser: 3000
+        seccompProfile:
+          type: RuntimeDefault
       initContainers:
       - name: init-keeper-config
         image: {{ .Values.keeper.image.repository }}:{{ .Values.keeper.image.tag }}

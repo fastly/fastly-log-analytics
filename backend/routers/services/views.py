@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query, Response
 
 from backend.core import metadata as metadata_db
-from backend.core.request_context import get_source
+from backend.core.request_context import get_source, require_admin
 from backend.models.common import DEFAULT_ERROR_RESPONSES, AuditLogsResponse, CronRunsResponse
 from backend.repositories.assets import delete_cron_log, get_cron_logs, purge_cron_logs
 from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
@@ -17,8 +17,18 @@ from backend.utils.router_utils import query_errors
 
 logger = logging.getLogger(__name__)
 
-audit_router = APIRouter(prefix="/api/audit-logs", tags=["audit-logs"], responses=DEFAULT_ERROR_RESPONSES)
-cron_router = APIRouter(prefix="/api/cron-runs", tags=["cron-runs"], responses=DEFAULT_ERROR_RESPONSES)
+audit_router = APIRouter(
+    prefix="/api/audit-logs",
+    tags=["audit-logs"],
+    responses=DEFAULT_ERROR_RESPONSES,
+    dependencies=[Depends(require_admin)],
+)
+cron_router = APIRouter(
+    prefix="/api/cron-runs",
+    tags=["cron-runs"],
+    responses=DEFAULT_ERROR_RESPONSES,
+    dependencies=[Depends(require_admin)],
+)
 router = APIRouter()
 
 _AUDIT_LOGS_CACHE: BoundedTTLCache[tuple[Any, ...], tuple[int, list[dict[str, Any]]]] = BoundedTTLCache(

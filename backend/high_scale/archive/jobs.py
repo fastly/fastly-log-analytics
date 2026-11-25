@@ -70,12 +70,19 @@ class HistoricalJob:
     error: str | None
 
 
+class HistoricalJobLimitError(RuntimeError):
+    """Raised when per-owner concurrency or aggregate memory limits reject a historical job."""
+
+    status_code: int = 429
+
+
 @dataclass
 class _JobRecord:
     job_id: str
     plan: QueryPlan
     created_at: datetime
     expires_at: datetime
+    owner_key: str | None = None
     state: HistoricalJobState = HistoricalJobState.QUEUED
     terminal_at: datetime | None = None
     rows: list[dict[str, Any]] = field(default_factory=list)
@@ -93,11 +100,13 @@ class HistoricalJobManager:
         self,
         *,
         max_workers: int = 2,
-        max_jobs: int = 1000,
+        max_jobs: int = 128,
         max_rows: int = 50_000,
         ttl: timedelta = timedelta(minutes=15),
         terminal_grace_ttl: timedelta = timedelta(minutes=5),
         max_output_bytes: int = 8 * 1024 * 1024,
+        max_total_output_bytes: int = 64 * 1024 * 1024,
+        max_active_per_owner: int = 2,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         for valid, msg in (
@@ -107,18 +116,27 @@ class HistoricalJobManager:
             (ttl > timedelta(0), "ttl must be positive"),
             (terminal_grace_ttl >= timedelta(0), "terminal grace ttl must be non-negative"),
             (max_output_bytes > 0, "max_output_bytes must be positive"),
+            (max_total_output_bytes > 0, "max_total_output_bytes must be positive"),
+            (max_active_per_owner > 0, "max_active_per_owner must be positive"),
         ):
             if not valid:
                 raise ValueError(msg)
         self._max_jobs, self._max_rows, self._ttl = max_jobs, max_rows, ttl
         self._terminal_grace_ttl, self._max_output_bytes = terminal_grace_ttl, max_output_bytes
+        self._max_total_output_bytes = max_total_output_bytes
+        self._max_active_per_owner = max_active_per_owner
         self._clock = clock or (lambda: datetime.now(UTC))
         self._jobs: dict[str, _JobRecord] = {}
         self._lock = RLock()
         self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="historical-job")
 
     def submit(
-        self, plan: QueryPlan, producer: Callable[[], Iterable[Mapping[str, Any]]], *, now: datetime | None = None
+        self,
+        plan: QueryPlan,
+        producer: Callable[[], Iterable[Mapping[str, Any]]],
+        *,
+        now: datetime | None = None,
+        owner_key: str | None = None,
     ) -> str:
         """Queue a producer for a validated, bounded cold plan."""
         if plan.tier is not QueryTier.COLD_JOB or not plan.queued or not plan.bounded:
@@ -129,10 +147,20 @@ class HistoricalJobManager:
         observed = self._utc(now or self._clock())
         with self._lock:
             self._purge_locked(observed)
+            if owner_key is not None:
+                active_for_owner = sum(
+                    1 for rec in self._jobs.values() if rec.owner_key == owner_key and rec.state in _ACTIVE_STATES
+                )
+                if active_for_owner >= self._max_active_per_owner:
+                    raise HistoricalJobLimitError(
+                        f"too many active historical jobs for caller (limit {self._max_active_per_owner})"
+                    )
+            if not self._ensure_output_budget_locked(additional_bytes=0):
+                raise HistoricalJobLimitError("historical job retained output memory budget is full")
             if len(self._jobs) >= self._max_jobs:
                 raise RuntimeError("historical job capacity is full")
             job_id = uuid4().hex
-            record = _JobRecord(job_id, plan, observed, observed + self._ttl)
+            record = _JobRecord(job_id, plan, observed, observed + self._ttl, owner_key=owner_key)
             self._jobs[job_id] = record
             record.future = self._executor.submit(self._run, record, producer)
             return job_id
@@ -203,6 +231,15 @@ class HistoricalJobManager:
                             error="historical job output exceeds byte limit",
                         )
                         return
+                    if not self._ensure_output_budget_locked(additional_bytes=row_bytes, exclude_job_id=record.job_id):
+                        record.rows, record.output_bytes = [], 0
+                        self._finish_locked(
+                            record,
+                            HistoricalJobState.FAILED,
+                            self._utc(self._clock()),
+                            error="historical job aggregate output memory budget exceeded",
+                        )
+                        return
                     record.rows.append(row)
                     record.output_bytes += row_bytes
             with self._lock:
@@ -237,6 +274,26 @@ class HistoricalJobManager:
     ) -> None:
         if record.state not in _TERMINAL_STATES:
             record.state, record.terminal_at, record.error, record.future = state, observed, error, None
+
+    def _ensure_output_budget_locked(self, *, additional_bytes: int, exclude_job_id: str | None = None) -> bool:
+        total = sum(rec.output_bytes for rec in self._jobs.values())
+        if total + additional_bytes <= self._max_total_output_bytes:
+            return True
+        evictable = sorted(
+            (
+                rec
+                for rec in self._jobs.values()
+                if rec.state in _TERMINAL_STATES and rec.output_bytes > 0 and rec.job_id != exclude_job_id
+            ),
+            key=lambda rec: (rec.terminal_at or rec.created_at, rec.created_at),
+        )
+        for victim in evictable:
+            total -= victim.output_bytes
+            victim.rows = []
+            victim.output_bytes = 0
+            if total + additional_bytes <= self._max_total_output_bytes:
+                return True
+        return total + additional_bytes <= self._max_total_output_bytes
 
     def _purge_locked(self, observed: datetime) -> None:
         stale = [

@@ -29,6 +29,8 @@ spec:
         runAsGroup: 3000
         runAsNonRoot: true
         runAsUser: 3000
+        seccompProfile:
+          type: RuntimeDefault
       initContainers:
       - name: init-macros
         image: {{ $.Values.image.repository }}:{{ $.Values.image.tag }}
