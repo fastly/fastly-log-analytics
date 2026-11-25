@@ -212,6 +212,20 @@ _COMMITTED_MANIFEST_INDEX_DDL = (
     f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {COMMITTED_MANIFEST_INDEX} "
     "ON high_scale_archive_manifests (service_id, created_at, manifest_id) WHERE state = 'manifest_committed'"
 )
+SOURCE_OBJECTS_BILLING_INDEX = "high_scale_source_objects_billing_idx"
+_SOURCE_OBJECTS_BILLING_INDEX_DDL = (
+    f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {SOURCE_OBJECTS_BILLING_INDEX} "
+    "ON high_scale_source_objects (service_id, discovered_at) INCLUDE (size_bytes, status, updated_at, domain)"
+)
+ARCHIVE_MANIFESTS_BILLING_INDEX = "high_scale_archive_manifests_billing_idx"
+_ARCHIVE_MANIFESTS_BILLING_INDEX_DDL = (
+    f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {ARCHIVE_MANIFESTS_BILLING_INDEX} "
+    "ON high_scale_archive_manifests (service_id, created_at) INCLUDE (artifact_size, archive_expired_at, state, domain)"
+)
+_CONCURRENT_BILLING_INDEXES: tuple[tuple[str, str], ...] = (
+    (SOURCE_OBJECTS_BILLING_INDEX, _SOURCE_OBJECTS_BILLING_INDEX_DDL),
+    (ARCHIVE_MANIFESTS_BILLING_INDEX, _ARCHIVE_MANIFESTS_BILLING_INDEX_DDL),
+)
 # A concurrent build waits for every older transaction in the database; an idle-in-transaction session would
 # otherwise stall the booting worker forever. Timing out leaves an INVALID index the next boot rebuilds.
 _INDEX_BUILD_LOCK_TIMEOUT = "60s"
@@ -338,7 +352,17 @@ class PostgresControlPlane:
                 if locked is None or not locked[0]:
                     return "skipped"
                 try:
-                    return _build_committed_manifest_index(connection)
+                    status = _build_committed_manifest_index(connection)
+                    for idx_name, idx_ddl in _CONCURRENT_BILLING_INDEXES:
+                        try:
+                            _build_concurrent_index(connection, idx_name, idx_ddl)
+                        except psycopg.Error:
+                            logger.warning(
+                                "high-scale billing index %s build failed; usage queries scan without it",
+                                idx_name,
+                                exc_info=True,
+                            )
+                    return status
                 finally:
                     connection.execute("SELECT pg_advisory_unlock(%s)", (COMMITTED_MANIFEST_INDEX_LOCK_KEY,))
             finally:
@@ -1201,7 +1225,8 @@ class PostgresControlPlane:
                 "count(*) FILTER (WHERE archive_expired_at IS NULL), "
                 "coalesce(sum(artifact_size) FILTER (WHERE archive_expired_at > statement_timestamp() - interval '30 days'), 0), "
                 "coalesce(sum(artifact_size) FILTER (WHERE archive_expired_at IS NULL AND domain LIKE 'rum%%'), 0) "
-                "FROM high_scale_archive_manifests WHERE service_id = %s AND state <> 'artifact_uploading'",
+                "FROM high_scale_archive_manifests WHERE service_id = %s AND state <> 'artifact_uploading' "
+                "AND (archive_expired_at IS NULL OR archive_expired_at > statement_timestamp() - interval '30 days')",
                 (service_id,),
             ).fetchone()
         return {
@@ -1488,7 +1513,7 @@ class PostgresControlPlane:
                     "FROM high_scale_source_objects "
                     "WHERE service_id = %s "
                     "AND (discovered_at IS NULL OR discovered_at < %s) "
-                    "AND (status NOT IN ('source_deleted', 'source_missing') "
+                    "AND (status = ANY(ARRAY['discovered', 'claimed', 'appended', 'archived', 'acknowledged']) "
                     "OR updated_at > %s OR discovered_at > %s "
                     "OR (discovered_at IS NULL AND updated_at > %s))",
                     (
@@ -2327,21 +2352,25 @@ class PostgresControlPlane:
         return cls._archive_manifest(connection, manifest_id, for_update=True)
 
 
-def _build_committed_manifest_index(connection: Any) -> str:
+def _build_concurrent_index(connection: Any, index_name: str, ddl: str) -> str:
     row = connection.execute(
-        "SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass(%s)", (COMMITTED_MANIFEST_INDEX,)
+        "SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass(%s)", (index_name,)
     ).fetchone()
     if row is not None and row[0]:
         return "present"
     if row is not None:
-        logger.warning("dropping invalid %s left by an interrupted concurrent build", COMMITTED_MANIFEST_INDEX)
-        connection.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {COMMITTED_MANIFEST_INDEX}")
+        logger.warning("dropping invalid %s left by an interrupted concurrent build", index_name)
+        connection.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {index_name}")
     connection.execute(f"SET lock_timeout = '{_INDEX_BUILD_LOCK_TIMEOUT}'")
     try:
-        connection.execute(_COMMITTED_MANIFEST_INDEX_DDL)
+        connection.execute(ddl)
     finally:
         connection.execute("RESET lock_timeout")
     return "built" if row is None else "rebuilt"
+
+
+def _build_committed_manifest_index(connection: Any) -> str:
+    return _build_concurrent_index(connection, COMMITTED_MANIFEST_INDEX, _COMMITTED_MANIFEST_INDEX_DDL)
 
 
 def _fetch_required(connection: Any, sql: str, params: Sequence[Any], key: Any, *, for_update: bool = False) -> Any:

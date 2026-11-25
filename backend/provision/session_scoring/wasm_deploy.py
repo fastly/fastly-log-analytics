@@ -408,12 +408,20 @@ def delete_scoring_service(
 
 
 _VCL_FINGERPRINT_SECRET = "drift-fingerprint"
+_PACKAGE_SHA_CACHE: dict[tuple[str, int, int], str] = {}
 
 
 def _package_sha(path: Path = _SCORER_PACKAGE) -> str | None:
     """sha256 of the committed Wasm package bytes — the exact bytes the     backend uploads on deploy. Returns None if the file is missing/unreadable     (a fresh checkout without the prebuilt package)."""
     try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
+        st = path.stat()
+        cache_key = (str(path), st.st_mtime_ns, st.st_size)
+        cached = _PACKAGE_SHA_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        _PACKAGE_SHA_CACHE[cache_key] = digest
+        return digest
     except OSError:
         return None
 

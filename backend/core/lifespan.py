@@ -81,6 +81,14 @@ def _initialize_service(cfg: dict):
                 except Exception as e:
                     logger.warning("[fastapi] Service %s: sync-status pre-warm failed: %s", sid, e)
 
+                # Pre-warm Fastly scoring status probes so the first /admin/session-scoring
+                # load does not block on synchronous Fastly API calls.
+                try:
+                    _scoring_vcl_mod = importlib.import_module("backend.routers.session_scoring.scoring_vcl")
+                    _scoring_vcl_mod.prewarm_scoring_status(sid)
+                except Exception as e:
+                    logger.warning("[fastapi] Service %s: scoring-status pre-warm failed: %s", sid, e)
+
                 logger.info("[fastapi] Service %s initialised.", sid)
         except Exception as e:
             logger.warning("[fastapi] Could not initialise service %s: %s", sid, e)
@@ -401,6 +409,12 @@ async def _application_lifespan(app: FastAPI):
         )
         if registered_high_scale:
             logging.info("[fastapi] Registered %d high-scale service(s).", len(registered_high_scale))
+            try:
+                from backend.high_scale.archive.clickhouse_batch import install_clickhouse_schema
+
+                await asyncio.to_thread(install_clickhouse_schema, clickhouse)
+            except Exception as e:
+                logging.warning("[fastapi] High-scale ClickHouse schema sync failed at startup: %s", e)
 
             # Per-service least-privilege ClickHouse identities for analyst SQL (no-op without a console secret).
             def _provision() -> tuple[str, ...]:

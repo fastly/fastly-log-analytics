@@ -1263,7 +1263,7 @@ class NgwafWorkspacesResponse(_Tolerant):
 
 
 def get_active_version(service_id: str, token: str) -> int | None:
-    info = get_active_version_info(service_id, token, timeout=None, max_retries=None)
+    info = get_active_version_info(service_id, token)
     return info["number"] if info else None
 
 
@@ -1292,10 +1292,17 @@ def get_active_version_info(
     return None
 
 
-def get_generated_vcl(service_id: str, version: int, token: str) -> str | None:
+def get_generated_vcl(
+    service_id: str, version: int, token: str, *, timeout: int | None = 8, max_retries: int | None = 0
+) -> str | None:
     """Return the fully-compiled (generated) VCL for a service version, or None."""
+    extra_kwargs: dict[str, int] = {}
+    if timeout is not None:
+        extra_kwargs["timeout"] = timeout
+    if max_retries is not None:
+        extra_kwargs["max_retries"] = max_retries
     try:
-        result = fastly("GET", f"/service/{service_id}/version/{version}/generated_vcl", token=token)
+        result = fastly("GET", f"/service/{service_id}/version/{version}/generated_vcl", token=token, **extra_kwargs)
     except RuntimeError:
         return None
     content = result.get("content") if isinstance(result, dict) else None

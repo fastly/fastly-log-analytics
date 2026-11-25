@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query
 
@@ -34,11 +35,31 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _SECRET_KEYS = frozenset({"aes_key_hex", "request_secret"})
-_scoring_svc_version_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=256, ttl_seconds=60.0)
-_scoring_pragma_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=256, ttl_seconds=60.0)
+_scoring_svc_version_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=256, ttl_seconds=300.0)
+_scoring_pragma_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=256, ttl_seconds=300.0)
 # "Not ready" is kept briefly so one page load's status reads share a Fastly
 # probe, yet Fastly enabling the pragmas still shows up within the TTL.
 _scoring_pragma_missing_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=256, ttl_seconds=30.0)
+_probe_inflight_guard = threading.Lock()
+_probe_inflight_locks: dict[tuple[int, str], threading.Lock] = {}
+
+
+def invalidate_scoring_status_cache(service_id: str, scoring_service_id: str | None = None) -> None:
+    """Drop cached Fastly status probes for a service after enable/disable mutations."""
+    _scoring_pragma_cache.pop(service_id, None)
+    _scoring_pragma_missing_cache.pop(service_id, None)
+    if scoring_service_id:
+        _scoring_svc_version_cache.pop(scoring_service_id, None)
+    else:
+        _scoring_svc_version_cache.clear()
+
+
+def prewarm_scoring_status(service_id: str) -> None:
+    """Best-effort startup pre-warm of Fastly scoring status probes."""
+    try:
+        scoring_status(service_id)
+    except Exception:
+        logger.debug("[scoring-status] pre-warm skipped for %s", service_id, exc_info=True)
 
 
 def _safe_scoring_dict(scoring: dict | None) -> dict:
@@ -86,14 +107,27 @@ def _require_scoring_enabled_and_token(service_id: str, token: str = "") -> tupl
 
 def _cached_fastly_probe(cache: _BoundedTTLCache, key: str, fn, log_label: str, *, cache_if=lambda v: v is not None):
     val = cache.get(key)
-    if val is None:
-        try:
-            val = fn()
-        except Exception:  # pragma: no cover - defensive
-            logger.warning("[scoring-status] %s failed for %s", log_label, key, exc_info=True)
-            val = None
-        if cache_if(val):
-            cache[key] = val
+    if val is not None:
+        return val
+    lock_key = (id(cache), key)
+    with _probe_inflight_guard:
+        lock = _probe_inflight_locks.get(lock_key)
+        if lock is None:
+            lock = threading.Lock()
+            _probe_inflight_locks[lock_key] = lock
+    with lock:
+        val = cache.get(key)
+        if val is None:
+            try:
+                val = fn()
+            except Exception:  # pragma: no cover - defensive
+                logger.warning("[scoring-status] %s failed for %s", log_label, key, exc_info=True)
+                val = None
+            if cache_if(val):
+                cache[key] = val
+    with _probe_inflight_guard:
+        if not lock.locked() and _probe_inflight_locks.get(lock_key) is lock:
+            _probe_inflight_locks.pop(lock_key, None)
     return val
 
 
@@ -161,6 +195,7 @@ def scoring_enable(
         return {"type": "done", "message": "Session scoring enabled.", "scoring": safe_scoring}
 
     def _after_done() -> None:
+        invalidate_scoring_status_cache(service_id, safe_scoring_state.get("scoring_service_id"))
         _record_scoring_toggle_audit(
             service_id,
             "scoring_enabled",
@@ -201,12 +236,18 @@ def scoring_disable(
     svcconfig.mutate_config(
         service_id, lambda c: c["scoring"].__setitem__("enabled", False) if "scoring" in c else None
     )
+    invalidate_scoring_status_cache(service_id)
+
+    def _after_done() -> None:
+        invalidate_scoring_status_cache(service_id)
+        _record_scoring_toggle_audit(service_id, "scoring_disabled")
+
     return stream_iac_reconcile(
         service_id,
         resolved_token,
         start_message=f"Disabling session scoring for {service_id}...",
         done_event={"type": "done", "message": "Session scoring disabled."},
-        after_done=lambda: _record_scoring_toggle_audit(service_id, "scoring_disabled"),
+        after_done=_after_done,
         log_label="scoring_disable",
         logger_obj=logger,
     )

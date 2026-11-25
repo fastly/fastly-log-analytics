@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query
@@ -141,10 +142,14 @@ def _read_l2_enforce_state(service_id: str, config_store_id: str, token: str) ->
     cached = _l2_enforce_cache.get(cache_key)
     if cached is not None:
         return cached
+    keys = (_SCORING_ENABLED_AT_KEY, _L2_ENFORCE_ENABLED_KEY, _L2_ENABLED_AT_KEY)
+    with ThreadPoolExecutor(max_workers=len(keys), thread_name_prefix="scoring-l2-enforce") as pool:
+        futs = [pool.submit(_l2_get_item, config_store_id, k, token) for k in keys]
+        scoring_enabled_at_raw, l2_enforce_raw, l2_enabled_at_raw = (f.result() for f in futs)
     block = _build_l2_enforce_block(
-        scoring_enabled_at_raw=_l2_get_item(config_store_id, _SCORING_ENABLED_AT_KEY, token),
-        l2_enforce_raw=_l2_get_item(config_store_id, _L2_ENFORCE_ENABLED_KEY, token),
-        l2_enabled_at_raw=_l2_get_item(config_store_id, _L2_ENABLED_AT_KEY, token),
+        scoring_enabled_at_raw=scoring_enabled_at_raw,
+        l2_enforce_raw=l2_enforce_raw,
+        l2_enabled_at_raw=l2_enabled_at_raw,
         now_epoch=int(datetime.now(UTC).timestamp()),
     )
     _l2_enforce_cache[cache_key] = block

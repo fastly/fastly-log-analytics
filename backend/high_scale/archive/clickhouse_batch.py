@@ -46,9 +46,9 @@ _SCHEMA_FILES = [
 ]
 
 
-def install_clickhouse_schema() -> None:
+def install_clickhouse_schema(client: HttpClickHouseClient | None = None) -> None:
     """Install the idempotent ClickHouse schema required by high-scale workers."""
-    client = get_clickhouse_client()
+    client = client or get_clickhouse_client()
     if not client:
         return
     sql_root = Path(__file__).resolve().parent.parent / "sql"
