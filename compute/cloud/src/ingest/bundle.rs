@@ -2962,6 +2962,16 @@ impl<R: Runtime> Ctx<'_, '_, R> {
             if let Some(from) = fold_from {
                 fold_ms = self.vcpu_seen.saturating_sub(from);
             }
+            // Don't start another mid-batch fold if the observed per-fold vCPU would carry us
+            // past the write cutoff and push the trailing partial encode over 700 ms.
+            if done > resumed
+                && done + 1 < limit
+                && fold_ms > 0
+                && self.vcpu_seen + fold_ms >= WRITE_VCPU_STOP_MS
+            {
+                self.report.stopped = Some("vcpu");
+                break;
+            }
             // A Wasm fold is ~50 ms: one started just under the fold stop, then the partial
             // write (about two folds' worth), would end past the write gate and the snapshot
             // would wait a turn, so stop folding early instead.
@@ -3695,6 +3705,7 @@ pub fn bundle_datasets<R: Runtime>(
     let follows = |first: &Result<BundleReport, String>| {
         first.as_ref().map_or(true, |r| r.stopped.is_none())
             && runtime.admin_remaining_calls() >= reserve + min_calls
+            && runtime.vcpu_ms() < VCPU_STOP_MS / 2
     };
     if cmcd_first {
         let first = cmcd_bundle(store, cdn_key, reserve, cmcd_record, true);

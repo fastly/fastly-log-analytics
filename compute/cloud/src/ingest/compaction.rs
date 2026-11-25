@@ -48,6 +48,9 @@ pub const DELETE_GRACE_S: u64 = 660;
 pub const PART_BYTES: usize = 8 * 1024 * 1024;
 /// Larger windows are left alone; this bounds the bytes held at once.
 pub const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
+/// Caps live worker compact output so browser whole-file reads stay fast (< 1.5 s in parallel)
+/// while remaining well above 1 MiB.
+pub const MAX_COMPACT_BYTES: u64 = 3 * 1024 * 1024;
 /// Keeps a compact's sources within the 512-byte key limit of `/api/file` callers.
 pub const MAX_SOURCES: usize = 32;
 /// A window this recently written may belong to a plan that is later abandoned.
@@ -155,6 +158,11 @@ pub fn rum_due(state: Option<&Value>, rum_watermark_gen: Option<&str>, now: u64)
     })
 }
 
+/// Effective byte target for live worker passes, capping configured sizes at [`MAX_COMPACT_BYTES`].
+fn worker_target_bytes(configured: Option<u64>) -> Option<u64> {
+    configured.map(|target| target.min(MAX_COMPACT_BYTES))
+}
+
 pub(super) fn handle_authorized_worker<R: Runtime>(
     runtime: &R,
     request: &crate::http::Request,
@@ -192,7 +200,7 @@ pub(super) fn handle_authorized_worker<R: Runtime>(
     {
         return crate::http::Response::new(400, "Invalid service").private();
     }
-    let Some(target) = service.compaction.target_bytes() else {
+    let Some(target) = worker_target_bytes(service.compaction.target_bytes()) else {
         return response(serde_json::json!({"status":"ok","report":Report::default()}));
     };
     let Some((access_key, secret_key)) = crate::admin::fos_credentials(runtime, &service) else {
@@ -2463,5 +2471,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rt.fos_lists.get(), 0);
+    }
+
+    #[test]
+    fn worker_target_bytes_caps_large_targets_and_preserves_smaller_ones() {
+        assert_eq!(worker_target_bytes(None), None);
+        assert_eq!(worker_target_bytes(Some(128 << 20)), Some(MAX_COMPACT_BYTES));
+        assert_eq!(worker_target_bytes(Some(2 << 20)), Some(2 << 20));
     }
 }
