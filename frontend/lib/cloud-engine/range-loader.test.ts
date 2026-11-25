@@ -882,7 +882,7 @@ describe("Cloud first-page analytical range loading", () => {
     const at = new Date(Date.parse(from) + 1000);
     const vitalBytes = parquetWriteBuffer({ columnData: [
       { name: "timestamp", type: "TIMESTAMP", data: [at, at, at] },
-      { name: "metric_name", type: "STRING", data: ["LCP", "CLS", "pageLoadTime"] },
+      { name: "metric_name", type: "STRING", data: ["LCP", "CLS", "page_load"] },
       { name: "metric_value", type: "DOUBLE", data: [2000, 0.05, 3500] },
       ...["pathname", "browser", "os", "device", "cid", "req_id"].map((name, index) => ({
         name, type: "STRING" as const,
@@ -910,7 +910,7 @@ describe("Cloud first-page analytical range loading", () => {
       beacon_count: 2, pageview_count: 1, error_count: 1,
       environments: { browsers: { Chrome: 1 } },
       vitals: { lcp: { p75: 2 }, cls: { p75: 0.05 } },
-      worst_pages: [{ path: "/home", avg_load_time: 2.75, lcp_p75: 2 }],
+      worst_pages: [{ path: "/home", avg_load_time: 3.5, lcp_p75: 2 }],
       errors: [{ message: "Failure", file: "app.js", line: 12, col: 4, count: 1 }],
     });
     expect(await cloudRumUsage({ start_time: from, end_time: to, signal }, 0.005)).toMatchObject({

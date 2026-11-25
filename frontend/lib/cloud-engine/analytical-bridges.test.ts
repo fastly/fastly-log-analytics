@@ -54,15 +54,15 @@ describe("Cloud analytical wire bridges", () => {
       environments: { browsers: { Chrome: 3 } },
       errors: [{ message: "Failure", file: "app.js", line: 12, col: 4, count: 1 }],
       vitals: { lcp: { p75: 2.1 } },
-      worst_pages: [{ path: "/home", avg_load_time: 2, lcp_p75: 2.1, error_rate: 25 }],
+      worst_pages: [{ path: "/home", avg_load_time: null, lcp_p75: 2.1, error_rate: 25 }],
     });
-    expect(result.trends.pageviews).toEqual([3]);
+    expect(result.trends.pageviews).toEqual([...Array(23).fill(0), 3]);
     await engine.executeSql(`INSERT INTO client_vitals (
       scoped_key, timestamp, ts_ms, metric_name, metric_value, page_url, request_event_id
-    ) VALUES ('v', epoch_ms(${at}), ${at}, 'pageLoadTime', 3500, '/home', 'r0')`);
+    ) VALUES ('v', epoch_ms(${at}), ${at}, 'page_load', 3500, '/home', 'r0')`);
     const navigation = await cloudRumAnalytics(params);
     expect(navigation.beacon_count).toBe(4);
-    expect(navigation.worst_pages[0].avg_load_time).toBe(2.375);
+    expect(navigation.worst_pages[0].avg_load_time).toBe(3.5);
     const live = await cloudRumLiveEvents(params);
     expect(live).toHaveLength(5);
     expect(live.filter((row) => row.os === "Test OS")).toHaveLength(3);

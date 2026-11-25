@@ -571,12 +571,17 @@ def test_session_ctes_avoid_sibling_select_aliases_for_clickhouse_24_8() -> None
     """ClickHouse 24.8 rejects GROUP BY SELECT lists referencing sibling aliases."""
     import re
 
-    for cte_name in ("_SESSIONS_INDEX_FAST_CTE", "_SESSIONS_SLIM_INDEX_FAST_CTE", "_SESSIONS_FAST_CTE"):
+    expected_aliases = {
+        "_SESSIONS_INDEX_FAST_CTE": ("p_min_ms", "p_max_ms", "raw_ts"),
+        "_SESSIONS_SLIM_INDEX_FAST_CTE": ("p_min_ms", "p_max_ms", "raw_ts"),
+        "_SESSIONS_FAST_CTE": ("p_min_ms", "p_max_ms", "raw_ev", "raw_bytes"),
+    }
+    for cte_name, aliases in expected_aliases.items():
         cte = getattr(hs_sessions, cte_name)
-        m = re.search(r"pair_grouped AS \(\s*SELECT(.*?)FROM pair_keys\s+GROUP BY", cte, re.DOTALL)
+        m = re.search(r"pair_grouped AS \(\s*SELECT(.*?)FROM raw_events\s+GROUP BY", cte, re.DOTALL)
         assert m is not None, cte_name
         pair_grouped_select = m.group(1)
-        for alias in ("p_min_ms", "p_max_ms", "raw_ts", "raw_ev", "raw_bytes"):
+        for alias in aliases:
             assert f"AS {alias}" in pair_grouped_select, (cte_name, alias)
             without_decl = pair_grouped_select.replace(f"AS {alias}", "")
             assert not re.search(rf"\b{alias}\b", without_decl), (
