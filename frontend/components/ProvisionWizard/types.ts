@@ -43,6 +43,7 @@ export interface ProvisionConfig {
   fos_region: string
   fos_endpoint: string
   fos_bucket_name: string
+  fos_bucket_generated: boolean
   fos_prefix: string
   fos_access_key: string
   fos_secret_key: string
@@ -52,6 +53,7 @@ export interface ProvisionConfig {
   log_period: number
   cdn_service_name: string
   cdn_prefix: string
+  cdn_domain_generated: boolean
   cdn_shield: string
   cdn_url: string
   cdn_secret: string
@@ -78,6 +80,7 @@ export const INITIAL_CONFIG: ProvisionConfig = {
   fos_region: "us-east-1",
   fos_endpoint: "",
   fos_bucket_name: "",
+  fos_bucket_generated: false,
   fos_prefix: "",
   fos_access_key: "",
   fos_secret_key: "",
@@ -88,6 +91,7 @@ export const INITIAL_CONFIG: ProvisionConfig = {
   rum_log_period: SERVICE_DEFAULTS.rumLogPeriodSeconds,
   cdn_service_name: "",
   cdn_prefix: "",
+  cdn_domain_generated: false,
   cdn_shield: "iad-va-us",
   cdn_url: "",
   cdn_secret: "",

@@ -1095,6 +1095,7 @@ sub sec22_edge_deliver_strips_internal_headers_and_surrogate_key {
   set resp.http.x-flp-worker-key = "internal-key";
   set resp.http.x-flp-clock-secret = "internal-clock";
   set resp.http.x-flp-shell = "admin";
+  set resp.http.x-flp-log-dropped = "3";
   set resp.http.x-compress-hint = "on";
   testing.call_subroutine("vcl_deliver");
   assert.is_notset(resp.http.Surrogate-Key);
@@ -1106,5 +1107,6 @@ sub sec22_edge_deliver_strips_internal_headers_and_surrogate_key {
   assert.is_notset(resp.http.x-flp-worker-key);
   assert.is_notset(resp.http.x-flp-clock-secret);
   assert.is_notset(resp.http.x-flp-shell);
+  assert.is_notset(resp.http.x-flp-log-dropped);
   assert.is_notset(resp.http.x-compress-hint);
 }

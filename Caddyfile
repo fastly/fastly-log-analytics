@@ -46,6 +46,13 @@
 (security_headers) {
 	header {
 		-Server
+		-X-Service-Id
+		-X-FOS-Bucket
+		-X-FOS-Bucket-Name
+		-X-Upstream-Host
+		-X-Backend-Host
+		-X-Served-By
+		-X-Edgecompute-Host
 		# HSTS: tells browsers to always use HTTPS for this domain for 1 year.
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		# Clickjacking protection.
@@ -185,7 +192,7 @@
 		respond `Contact: https://www.fastly.com/security/report-security-issue
 Expires: 2027-06-17T00:00:00Z
 Preferred-Languages: en
-Canonical: https://fastly-log-analytics.global.ssl.fastly.net/.well-known/security.txt
+Canonical: https://{http.request.host}/.well-known/security.txt
 Policy: https://github.com/fastly/fastly-log-analytics/blob/main/SECURITY.md
 ` 200
 	}

@@ -462,8 +462,7 @@ fn js_string_literal(value: &str) -> String {
 /// ID (`Server-Timing: rid`) and a non-zero transfer size, so browser-cache hits, third-party
 /// files and the beacon itself are never reported. A page view reports up to 50 requests at once
 /// and then one more every five seconds.
-pub fn generate_rum_tracker_js(service_id: &str, config: &Config) -> String {
-    let service_id_js = js_string_literal(service_id);
+pub fn generate_rum_tracker_js(_service_id: &str, config: &Config) -> String {
     let beacon_endpoint_js = js_string_literal("/rum-beacon");
     let vitals = config.capture_vitals;
     let performance = config.capture_performance;
@@ -476,7 +475,6 @@ pub fn generate_rum_tracker_js(service_id: &str, config: &Config) -> String {
     format!(
         r#"/* Faro Web SDK wrapper */
 (function() {{
-  var SERVICE_ID = {service_id_js};
   var BEACON_ENDPOINT = {beacon_endpoint_js};
   var CAPTURE_VITALS = {vitals};
   var CAPTURE_PERFORMANCE = {performance};
@@ -655,8 +653,8 @@ pub fn generate_rum_tracker_js(service_id: &str, config: &Config) -> String {
         cid = cookieMatch[1];
       }}
     }}
-    var head = BEACON_ENDPOINT + '?service_id=' + enc(SERVICE_ID) + (cid ? '&cid=' + enc(cid) : '') +
-      '&p=' + enc(batch.path) + '&sr=' + SAMPLE_RATE + '&esr=' + ERROR_SAMPLE_RATE +
+    var head = BEACON_ENDPOINT + '?' + (cid ? 'cid=' + enc(cid) + '&' : '') +
+      'p=' + enc(batch.path) + '&sr=' + SAMPLE_RATE + '&esr=' + ERROR_SAMPLE_RATE +
       (RESOURCES_SAMPLED ? '&rsr=' + RESOURCE_SAMPLE_RATE : '');
     var urls = [];
     var url = head;
@@ -804,7 +802,7 @@ pub fn generate_rum_tracker_js(service_id: &str, config: &Config) -> String {
         name: 'rum-app',
         version: '1.0.0'
       }},
-      url: BEACON_ENDPOINT + '?service_id=' + enc(SERVICE_ID),
+      url: BEACON_ENDPOINT,
       instrumentations: instrumentations,
       samplingRate: 1,
       batching: {{

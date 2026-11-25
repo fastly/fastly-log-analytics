@@ -1257,6 +1257,7 @@ def test_deploy_and_delete_remote_frontend_flows():
         {"number": 1, "service_id": "service123"},
         {"name": domain_name},
         {"name": "gce_vm_origin"},
+        {"id": "snippet1"},
         {"number": 1, "active": True},
     ]
     calls: list[tuple] = []
@@ -1273,10 +1274,17 @@ def test_deploy_and_delete_remote_frontend_flows():
             token="fake-token",
         )
     assert res == {"service_id": "service123", "version": 1, "domain_name": domain_name, "origin_host": origin_host}
-    assert len(calls) == 5 and calls[0] == ("POST", "/service", {"name": service_name, "type": "vcl"})
+    assert len(calls) == 6 and calls[0] == ("POST", "/service", {"name": service_name, "type": "vcl"})
 
     # With override_host + SSL
-    resp_ssl = [{"id": "service123"}, {"number": 1}, {"name": domain_name}, {"name": "gce_vm_origin"}, {"active": True}]
+    resp_ssl = [
+        {"id": "service123"},
+        {"number": 1},
+        {"name": domain_name},
+        {"name": "gce_vm_origin"},
+        {"id": "snippet1"},
+        {"active": True},
+    ]
     calls_ssl: list[tuple] = []
     with patch(
         "backend.provision.fastly_api.fastly",
@@ -1347,11 +1355,16 @@ def test_deploy_and_delete_remote_frontend_flows():
         (1, "HTTP 400 POST /service/service123/version\n    Failed to create version", "Verify Draft Version"),
         (2, "HTTP 422 POST /service/service123/version/1/domain\n    Invalid domain name", "Attach Domain"),
         (3, "HTTP 400 POST /service/service123/version/1/backend\n    Invalid backend config", "Attach Backend Origin"),
-        (4, "HTTP 500 PUT /service/service123/version/1/activate\n    Could not activate", "Activate Version"),
+        (
+            4,
+            "HTTP 400 POST /service/service123/version/1/snippet\n    Invalid snippet",
+            "Attach Security Snippet",
+        ),
+        (5, "HTTP 500 PUT /service/service123/version/1/activate\n    Could not activate", "Activate Version"),
     ],
 )
 def test_deploy_remote_frontend_failures(step_fail, client_err, expected_step):
-    ok_responses = [{"id": "service123"}, {"number": 1}, {}, {}, {"active": True}]
+    ok_responses = [{"id": "service123"}, {"number": 1}, {}, {}, {}, {"active": True}]
     state = {"i": 0}
 
     def fake_fastly(method, path, body=None, *, token, **kwargs):
@@ -1604,6 +1617,7 @@ def test_generate_rum_tracker_js_invariants():
     assert "Faro.ErrorsInstrumentation" in js and "if (Faro.ErrorInstrumentation)" not in js
     assert "new Faro.ErrorInstrumentation()" not in js and "no error instrumentation export found" in js
     assert "script.src = '/js/faro-sdk.js';" in js and not re.search(r"https?://", js)
+    assert "var SERVICE_ID" not in js and "svc_test" not in js and "service_id=" not in js
 
 
 def test_generate_rum_tracker_js_matches_cloud_generator(monkeypatch) -> None:
@@ -1689,7 +1703,7 @@ runTimers();
     call = out["fetchCalls"][0]
     assert call["options"] == {"method": "POST", "body": "", "keepalive": True}
     assert call["url"] == (
-        "/rum-beacon?service_id=svc_test&cid=fixture-client&p=%2Fdashboard&sr=1&esr=1"
+        "/rum-beacon?cid=fixture-client&p=%2Fdashboard&sr=1&esr=1"
         "&m=LCP:1200:good,CLS:0.1:good&e=ReferenceError%3A%20boom|app.js|12|4"
     )
 
@@ -2362,10 +2376,12 @@ def test_write_only_dictionary_parity():
 def test_sec14_rum_tracker_js_escapes_script_and_string_breakout(monkeypatch) -> None:
     monkeypatch.setattr(svcconfig, "load_config", lambda _sid: {})
     injected_sid = "svc'; globalThis.pwned = 1; //</script><script>alert(1)</script>&x=1"
-    injected_beacon = "/rum-beacon'); globalThis.pwned = 2; //{service_id}"
+    injected_beacon = "/rum-beacon'); globalThis.pwned = 2; //</script><script>alert(1)</script>"
     js = generate_rum_tracker_js(injected_sid, beacon_endpoint=injected_beacon)
     assert "</script>" not in js.lower()
-    assert "globalThis.pwned = 1;" in js  # inside JSON string literal only, never executed!
+    assert "var SERVICE_ID" not in js
+    assert injected_sid not in js
+    assert "globalThis.pwned = 2;" in js  # inside JSON string literal only, never executed!
 
     program = r"""
 const fs = require('node:fs');
@@ -2416,7 +2432,8 @@ process.stdout.write(JSON.stringify({ pwned: sandbox.pwned, calls }));
     from urllib.parse import parse_qs, urlparse
 
     qparams = parse_qs(urlparse(out["calls"][0]["url"]).query, keep_blank_values=True)
-    assert qparams["service_id"] == [injected_sid]
+    assert "service_id" not in qparams
+    assert qparams["cid"] == ["c1"]
 
 
 @pytest.mark.security_regression

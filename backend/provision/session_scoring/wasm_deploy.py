@@ -150,8 +150,13 @@ def ensure_scoring_service(
             status_cb(f"✅ Scoring service '{name}' already exists.")
         scoring_service_id = existing["id"]
         domain = (preferred_domain or "").strip() or _persisted_scoring_domain(logging_service_id)
-        if not domain and isinstance(existing.get("versions"), list) and existing["versions"]:
-            domain = _fetch_existing_scoring_domain(scoring_service_id, token, versions=existing["versions"])
+        if not domain:
+            versions = existing.get("versions")
+            domain = _fetch_existing_scoring_domain(
+                scoring_service_id,
+                token,
+                versions=versions if isinstance(versions, list) and versions else None,
+            )
         if not domain:
             domain = _scoring_domain(logging_service_id)
         keys_store = _find_config_store(KEYS_STORE_NAME_TEMPLATE.format(sid=scoring_service_id), token)

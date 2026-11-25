@@ -523,7 +523,7 @@ pub fn bucket(
                             created = true;
                             break;
                         }
-                        if result.status == 409 {
+                        if result.status == 409 || result.status == 403 {
                             if attempt + 1 == MAX_BUCKET_COLLISION_ATTEMPTS {
                                 return Err(Error::new(409, "bucket_name_collision"));
                             }

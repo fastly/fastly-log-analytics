@@ -800,6 +800,7 @@ def test_deploy_and_delete_remote_frontend_variants():
         {"number": 1, "service_id": "service123"},
         {"name": "test-domain.global.ssl.fastly.net"},
         {"name": "gce_vm_origin"},
+        {"id": "snippet1"},
         {"number": 1, "active": True},
     ]
     calls: list[tuple] = []
@@ -819,9 +820,9 @@ def test_deploy_and_delete_remote_frontend_variants():
         "domain_name": "test-domain.global.ssl.fastly.net",
         "origin_host": "1.2.3.4",
     }
-    assert len(calls) == 5
+    assert len(calls) == 6
 
-    responses_ssl = [{"id": "service123"}, {"number": 1}, {}, {}, {"active": True}]
+    responses_ssl = [{"id": "service123"}, {"number": 1}, {}, {}, {}, {"active": True}]
     calls_ssl: list[tuple] = []
 
     def _record_ssl_call(method, path, body=None, **kw):
@@ -904,11 +905,16 @@ def test_deploy_and_delete_remote_frontend_variants():
         (1, "HTTP 400 POST /service/service123/version\n    Failed to create version", "Verify Draft Version"),
         (2, "HTTP 422 POST /service/service123/version/1/domain\n    Invalid domain name", "Attach Domain"),
         (3, "HTTP 400 POST /service/service123/version/1/backend\n    Invalid backend config", "Attach Backend Origin"),
-        (4, "HTTP 500 PUT /service/service123/version/1/activate\n    Could not activate", "Activate Version"),
+        (
+            4,
+            "HTTP 400 POST /service/service123/version/1/snippet\n    Invalid snippet",
+            "Attach Security Snippet",
+        ),
+        (5, "HTTP 500 PUT /service/service123/version/1/activate\n    Could not activate", "Activate Version"),
     ],
 )
 def test_deploy_remote_frontend_failures(step_fail, client_err, expected_step):
-    ok_responses = [{"id": "service123"}, {"number": 1}, {}, {}, {"active": True}]
+    ok_responses = [{"id": "service123"}, {"number": 1}, {}, {}, {}, {"active": True}]
     state = {"i": 0}
 
     def fake_fastly(method, path, body=None, *, token, **kwargs):

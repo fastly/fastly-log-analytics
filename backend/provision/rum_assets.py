@@ -201,7 +201,7 @@ def _js_bool_literal(value: object, *, default: bool = True) -> str:
     return "true" if bool(value) else "false"
 
 
-def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon") -> str:
+def generate_rum_tracker_js(service_id: str = "", beacon_endpoint: str = "/rum-beacon") -> str:
     """Generate the Faro Web SDK wrapper JS.
 
     This creates a minimal loader that:
@@ -216,15 +216,21 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
     The beacon endpoint defaults to /rum-beacon
     but can be customized if needed.
 
+    ``service_id`` is accepted for backwards-compatibility and used only to
+    load local per-service RUM sampling/capture settings. It is intentionally
+    never emitted into the public JS tracker or beacon query string because
+    edge VCL logs ``req.service_id`` natively without exposing the customer's
+    raw Fastly Service ID to unauthenticated browsers.
+
     This body is identical regardless of which Faro version is pinned (the
     URL is always the constant "/js/faro-sdk.js"), so it never needs
     re-uploading on a version bump — only once, the first time RUM is
     enabled for a service, which ``upload_rum_tracker_js``'s MD5-vs-ETag
     check already handles idempotently.
     """
-    beacon_url = str(beacon_endpoint).replace("{service_id}", str(service_id))
+    beacon_url = str(beacon_endpoint)
 
-    cfg = svcconfig.load_config(service_id) or {}
+    cfg = (svcconfig.load_config(service_id) or {}) if service_id else {}
     rum_cfg = cfg.get("rum") or {}
 
     capture_vitals_js = _js_bool_literal(rum_cfg.get("capture_vitals", True), default=True)
@@ -238,12 +244,10 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
         rum_cfg.get("resource_sample_rate"), default=DEFAULT_RESOURCE_SAMPLE_RATE
     )
 
-    service_id_js = _js_json_literal(service_id)
     beacon_url_js = _js_json_literal(beacon_url)
 
     return f"""/* Faro Web SDK wrapper */
 (function() {{
-  var SERVICE_ID = {service_id_js};
   var BEACON_ENDPOINT = {beacon_url_js};
   var CAPTURE_VITALS = {capture_vitals_js};
   var CAPTURE_PERFORMANCE = {capture_performance_js};
@@ -422,8 +426,8 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
         cid = cookieMatch[1];
       }}
     }}
-    var head = BEACON_ENDPOINT + '?service_id=' + enc(SERVICE_ID) + (cid ? '&cid=' + enc(cid) : '') +
-      '&p=' + enc(batch.path) + '&sr=' + SAMPLE_RATE + '&esr=' + ERROR_SAMPLE_RATE +
+    var head = BEACON_ENDPOINT + '?' + (cid ? 'cid=' + enc(cid) + '&' : '') +
+      'p=' + enc(batch.path) + '&sr=' + SAMPLE_RATE + '&esr=' + ERROR_SAMPLE_RATE +
       (RESOURCES_SAMPLED ? '&rsr=' + RESOURCE_SAMPLE_RATE : '');
     var urls = [];
     var url = head;
@@ -571,7 +575,7 @@ def generate_rum_tracker_js(service_id: str, beacon_endpoint: str = "/rum-beacon
         name: 'rum-app',
         version: '1.0.0'
       }},
-      url: BEACON_ENDPOINT + '?service_id=' + enc(SERVICE_ID),
+      url: BEACON_ENDPOINT,
       instrumentations: instrumentations,
       samplingRate: 1,
       batching: {{

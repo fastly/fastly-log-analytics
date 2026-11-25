@@ -27,6 +27,7 @@ struct Sec22Platform {
     clock: AtomicU64,
     random_counter: AtomicU64,
     bucket_put_409_remaining: AtomicUsize,
+    bucket_put_403_remaining: AtomicUsize,
     scorer_domain_409_remaining: AtomicUsize,
     fos_buckets_seen_on_put: Mutex<Vec<String>>,
     kv_bucket_before_fos_put: Mutex<Vec<String>>,
@@ -41,6 +42,7 @@ impl Sec22Platform {
             clock: AtomicU64::new(1_800_000_000),
             random_counter: AtomicU64::new(1),
             bucket_put_409_remaining: AtomicUsize::new(0),
+            bucket_put_403_remaining: AtomicUsize::new(0),
             scorer_domain_409_remaining: AtomicUsize::new(0),
             fos_buckets_seen_on_put: Mutex::new(Vec::new()),
             kv_bucket_before_fos_put: Mutex::new(Vec::new()),
@@ -277,6 +279,16 @@ impl Runtime for Sec22Platform {
                     retry_after: None,
                 });
             }
+            let rem_403 = self.bucket_put_403_remaining.load(Ordering::SeqCst);
+            if rem_403 > 0 {
+                self.bucket_put_403_remaining.fetch_sub(1, Ordering::SeqCst);
+                return Ok(FosResponse {
+                    status: 403,
+                    body: Vec::new(),
+                    cdn_cache: None,
+                    retry_after: None,
+                });
+            }
         }
         self.adapter.fos(request)
     }
@@ -445,6 +457,71 @@ fn sec22_generated_bucket_retries_409_collision_and_persists_winner() {
     let svc =
         platform.ok("GET", "/api/admin/services/fixtureService", json!({}))["service"].clone();
     assert_eq!(svc["fos_bucket"].as_str().unwrap(), seen[2]);
+}
+
+#[test]
+fn sec22_explicit_opaque_bucket_with_bucket_generated_flag_controls_collision_rotation() {
+    // Non-empty fos_bucket + bucket_generated: true arms 409/403 collision-retry rotation.
+    let platform = Sec22Platform::new();
+    platform.bucket_put_409_remaining.store(1, Ordering::SeqCst);
+    platform.bucket_put_403_remaining.store(1, Ordering::SeqCst);
+    let initial = "fla-111111111111111111111111";
+
+    let job = platform.ok(
+        "POST",
+        "/api/admin/provision/execute",
+        Sec22Platform::provision_body(json!({
+            "fos_bucket": initial,
+            "bucket_generated": true,
+        })),
+    )["job"]
+        .clone();
+    let done = platform.drain_job(job);
+    assert_eq!(done["status"], "complete", "{done}");
+
+    let seen = platform.fos_buckets_seen_on_put.lock().unwrap().clone();
+    let kv_before = platform.kv_bucket_before_fos_put.lock().unwrap().clone();
+    assert_eq!(
+        seen.len(),
+        3,
+        "expected 409 + 403 collisions + 1 success: {seen:?}"
+    );
+    assert_eq!(seen[0], initial);
+    assert_ne!(seen[1], initial);
+    assert_ne!(seen[2], seen[1]);
+    assert!(is_opaque_bucket(&seen[2]));
+    assert_eq!(kv_before, seen);
+    let svc =
+        platform.ok("GET", "/api/admin/services/fixtureService", json!({}))["service"].clone();
+    assert_eq!(svc["fos_bucket"].as_str().unwrap(), seen[2]);
+
+    // Non-empty fos_bucket + bucket_generated: false preserves adopt behavior on 409.
+    let adopt_platform = Sec22Platform::new();
+    adopt_platform
+        .bucket_put_409_remaining
+        .store(1, Ordering::SeqCst);
+    let explicit = "fla-222222222222222222222222";
+    let adopt_job = adopt_platform.ok(
+        "POST",
+        "/api/admin/provision/execute",
+        Sec22Platform::provision_body(json!({
+            "fos_bucket": explicit,
+            "bucket_generated": false,
+        })),
+    )["job"]
+        .clone();
+    let adopt_done = adopt_platform.drain_job(adopt_job);
+    assert_eq!(adopt_done["status"], "complete", "{adopt_done}");
+    let adopt_seen = adopt_platform
+        .fos_buckets_seen_on_put
+        .lock()
+        .unwrap()
+        .clone();
+    assert_eq!(adopt_seen, vec![explicit.to_owned()]);
+    let adopted_svc = adopt_platform.ok("GET", "/api/admin/services/fixtureService", json!({}))
+        ["service"]
+        .clone();
+    assert_eq!(adopted_svc["fos_bucket"].as_str().unwrap(), explicit);
 }
 
 #[test]

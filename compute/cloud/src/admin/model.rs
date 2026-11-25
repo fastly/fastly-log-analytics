@@ -381,6 +381,8 @@ pub struct Provision {
     pub service_id: String,
     #[serde(default, alias = "fos_bucket_name")]
     pub fos_bucket: String,
+    #[serde(default)]
+    pub bucket_generated: Option<bool>,
     pub fos_region: String,
     #[serde(default)]
     pub fos_prefix: String,

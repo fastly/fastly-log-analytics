@@ -278,8 +278,9 @@ def api_service_update_credentials(request: Request, service_id: str, body: Serv
     api_token, access_key, secret_key = body.api_token.strip(), body.access_key.strip(), body.secret_key.strip()
     if api_token:
         from backend.core.fastly.client import fastly
+        from backend.provision.opaque_names import generate_opaque_label
 
-        desc = f"fos-log-analysis-{service_id}-{int(time.time())}"
+        desc = f"fos-log-analysis-{generate_opaque_label('key')}"
         try:
             key = fastly(
                 "POST",

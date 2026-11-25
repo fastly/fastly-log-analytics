@@ -597,6 +597,7 @@ sub vcl_deliver {
     unset resp.http.x-flp-worker-key;
     unset resp.http.x-flp-clock-secret;
     unset resp.http.x-flp-shell;
+    unset resp.http.x-flp-log-dropped;
     unset resp.http.x-compress-hint;
     if (req.http.x-flp-shell == "admin" && resp.status == 200 && resp.http.Content-Type ~ "^text/(html|plain)") {
       set resp.http.Vary = "Cookie";

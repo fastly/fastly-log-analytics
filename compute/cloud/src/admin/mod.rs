@@ -1349,7 +1349,10 @@ fn provision(
         .transpose()?;
     let explicit_bucket = input.fos_bucket.trim();
     let (fos_bucket, bucket_generated) = if !explicit_bucket.is_empty() {
-        (explicit_bucket.to_owned(), false)
+        (
+            explicit_bucket.to_owned(),
+            input.bucket_generated.unwrap_or(false),
+        )
     } else if let Some(existing_bucket) = previous
         .as_ref()
         .map(|svc| svc.fos_bucket.trim())

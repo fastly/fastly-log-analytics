@@ -1676,3 +1676,97 @@ describe('DeleteDataDialog & TeardownDialog', () => {
   })
 
 })
+
+describe('SEC-22 Item #6 — ProvisionWizard generated flags & collision-retry signaling', () => {
+  it('marks fos_bucket_generated and cdn_domain_generated true on validate defaults and sends them in runDeploy', () => {
+    let current = { ...INITIAL_CONFIG }
+    const setConfig = vi.fn((updater: (prev: typeof INITIAL_CONFIG) => typeof INITIAL_CONFIG) => {
+      current = updater(current)
+    })
+    const onSuccess = buildValidateOnSuccess({
+      token: 'tok',
+      setTokenInfo: vi.fn(),
+      setConfig,
+      setStep: vi.fn(),
+      mode: 'provision',
+    })
+    onSuccess({
+      service_name: 'Acme Store',
+      defaults: {
+        endpoint_name: 'Fastly Object Storage Logs',
+        fos_region: 'us-east-1',
+        fos_bucket_name: 'fla-0123456789abcdef01234567',
+        cdn_prefix: 'fla-fedcba9876543210fedcba98',
+      },
+    } as never)
+
+    expect(current.fos_bucket_generated).toBe(true)
+    expect(current.cdn_domain_generated).toBe(true)
+
+    const start = vi.fn()
+    runDeploy({
+      token: 'tok',
+      selectedService: { id: 'svc-1', name: 'Acme Store' } as never,
+      config: current,
+      setIsDeploying: vi.fn(),
+      start,
+    })
+    expect(start).toHaveBeenCalledWith(
+      '/api/provision/execute',
+      expect.objectContaining({
+        bucket_generated: true,
+        cdn_domain_generated: true,
+      }),
+    )
+  })
+
+  it('clears fos_bucket_generated and cdn_domain_generated to false when user edits inputs in StorageStep', () => {
+    let latestConfig = {
+      ...INITIAL_CONFIG,
+      logging_enabled: true,
+      fos_bucket_name: 'fla-0123456789abcdef01234567',
+      fos_bucket_generated: true,
+      cdn_prefix: 'fla-fedcba9876543210fedcba98',
+      cdn_domain_generated: true,
+    }
+    const setConfig = vi.fn((next: typeof latestConfig) => {
+      latestConfig = next
+    })
+    const makeState = () =>
+      makeFooterState({
+        step: 'storage',
+        checkDomain: vi.fn(),
+        setConfig,
+        domainMessage: '',
+        config: latestConfig,
+      } as Partial<WizardState>)
+
+    const { rerender } = renderWithQuery(<StorageStep s={makeState()} />)
+    const bucketInput = screen.getByDisplayValue('fla-0123456789abcdef01234567')
+    fireEvent.change(bucketInput, { target: { value: 'my-custom-bucket' } })
+    expect(latestConfig.fos_bucket_name).toBe('my-custom-bucket')
+    expect(latestConfig.fos_bucket_generated).toBe(false)
+
+    rerender(<StorageStep s={makeState()} />)
+    const cdnInput = screen.getByDisplayValue('fla-fedcba9876543210fedcba98')
+    fireEvent.change(cdnInput, { target: { value: 'my-custom-cdn' } })
+    expect(latestConfig.cdn_prefix).toBe('my-custom-cdn')
+    expect(latestConfig.cdn_domain_generated).toBe(false)
+
+    const start = vi.fn()
+    runDeploy({
+      token: 'tok',
+      selectedService: { id: 'svc-1', name: 'Acme Store' } as never,
+      config: latestConfig,
+      setIsDeploying: vi.fn(),
+      start,
+    })
+    expect(start).toHaveBeenCalledWith(
+      '/api/provision/execute',
+      expect.objectContaining({
+        bucket_generated: false,
+        cdn_domain_generated: false,
+      }),
+    )
+  })
+})

@@ -138,7 +138,7 @@ fn a_pageview_flush_sends_every_metric_and_error_in_one_beacon_the_ingester_expa
     assert_eq!(requests[1]["via"], "beacon");
     let urls = urls(&result);
     assert!(
-        urls[0].starts_with("/rum-beacon?service_id=svc1&"),
+        urls[0].starts_with("/rum-beacon?") && !urls[0].contains("service_id="),
         "{}",
         urls[0]
     );
@@ -456,9 +456,9 @@ fn sec20d_validate_service_id_and_js_escaping_prevent_script_breakout() {
     let tracker = rum::generate_rum_tracker_js(hostile, &rum::Config::default());
     assert!(!tracker.contains("</script>"));
     assert!(!tracker.contains("/* Faro Web SDK wrapper for service"));
-    assert!(tracker
-        .contains(r#"var SERVICE_ID = "svc'; globalThis.pwned = true; */ \u003c/script\u003e";"#));
-    assert!(tracker.contains("'?service_id=' + enc(SERVICE_ID)"));
+    assert!(!tracker.contains("var SERVICE_ID"));
+    assert!(!tracker.contains(hostile));
+    assert!(!tracker.contains("service_id="));
 
     let script = format!(
         "var PRESET_DRAW = 0.1;\nglobalThis.pwned = false;\n{HARNESS}\n{tracker}\n\
@@ -488,7 +488,7 @@ fn sec20d_validate_service_id_and_js_escaping_prevent_script_breakout() {
     assert_eq!(parsed["pwned"], false);
     let first_url = parsed["urls"][0].as_str().unwrap();
     assert!(
-        first_url.contains("service_id=svc'%3B%20globalThis.pwned%20%3D%20true"),
+        first_url.starts_with("/rum-beacon?") && !first_url.contains("service_id="),
         "{first_url}"
     );
 }

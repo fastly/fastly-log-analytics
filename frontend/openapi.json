@@ -74950,6 +74950,16 @@
               }
             ],
             "title": "Rum Custom Condition"
+          },
+          "bucket_generated": {
+            "type": "boolean",
+            "title": "Bucket Generated",
+            "default": false
+          },
+          "cdn_domain_generated": {
+            "type": "boolean",
+            "title": "Cdn Domain Generated",
+            "default": false
           }
         },
         "type": "object",

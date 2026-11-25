@@ -777,3 +777,28 @@ def test_campaign_b3_edge_csp_parity_and_object_src_none(tmp_path: pathlib.Path)
                 check=False,
             )
             assert proc.returncode == 0, f"{rel}: {proc.stderr}"
+
+
+def test_sec22_caddy_gateways_strip_internal_headers_and_dynamic_security_txt_canonical() -> None:
+    stripped_headers = (
+        "-X-Service-Id",
+        "-X-FOS-Bucket",
+        "-X-FOS-Bucket-Name",
+        "-X-Upstream-Host",
+        "-X-Backend-Host",
+        "-X-Served-By",
+        "-X-Edgecompute-Host",
+    )
+    for rel in (
+        "Caddyfile",
+        "deploy/chart/fastly-log-analytics/templates/public-gateway.yaml",
+        "caddy/Caddyfile.multipod",
+        "caddy/Caddyfile.local",
+    ):
+        txt = (REPO_ROOT / rel).read_text(encoding="utf-8")
+        for directive in stripped_headers:
+            assert directive in txt, f"{rel} missing {directive}"
+
+    caddyfile = (REPO_ROOT / "Caddyfile").read_text(encoding="utf-8")
+    assert "Canonical: https://{http.request.host}/.well-known/security.txt" in caddyfile
+    assert "Canonical: https://fastly-log-analytics.global.ssl.fastly.net/.well-known/security.txt" not in caddyfile

@@ -2364,6 +2364,10 @@ def test_scoring_matrix_store_names_and_write_only_parity():
     def _reuse_fastly(method, path, *_a, **_kw):
         if (method, path) == ("GET", "/service"):
             return [{"id": SCORE_SVC, "name": f"Session Scoring Service for {LOG_SVC}"}]
+        if (method, path) == ("GET", f"/service/{SCORE_SVC}/version"):
+            return [{"number": 1, "active": True}]
+        if (method, path) == ("GET", f"/service/{SCORE_SVC}/version/1/domain"):
+            return [{"name": "fla-0123456789abcdef01234567.edgecompute.app"}]
         if (method, path) == ("GET", "/resources/stores/config"):
             return [
                 {"id": KEYS_STORE, "name": f"scoring_keys_{SCORE_SVC}"},

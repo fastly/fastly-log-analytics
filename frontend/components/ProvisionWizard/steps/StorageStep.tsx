@@ -4,7 +4,7 @@ import React from 'react'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { useForm, type PathValue } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
-import type { WizardState } from '../types'
+import type { ProvisionConfig, WizardState } from '../types'
 import { storageStepSchema, type StorageStepFormValues } from '../wizardSchemas'
 import { CdnFrontSection } from './DomainStep'
 import {
@@ -24,7 +24,10 @@ export function StorageStep({ s }: { s: WizardState }) {
   })
   const update = <K extends keyof StorageStepFormValues>(key: K, val: StorageStepFormValues[K]) => {
     setValue(key, val as PathValue<StorageStepFormValues, K>, { shouldDirty: true, shouldValidate: true })
-    setConfig({ ...config, [key]: val })
+    const generatedPatch: Partial<ProvisionConfig> = {}
+    if (key === "fos_bucket_name") generatedPatch.fos_bucket_generated = false
+    if (key === "cdn_prefix") generatedPatch.cdn_domain_generated = false
+    setConfig({ ...config, [key]: val, ...generatedPatch })
   }
   const updateMany = (patch: Partial<StorageStepFormValues>) => {
     for (const [k, v] of Object.entries(patch) as [
@@ -33,7 +36,10 @@ export function StorageStep({ s }: { s: WizardState }) {
     ][]) {
       setValue(k, v as PathValue<StorageStepFormValues, typeof k>, { shouldDirty: true, shouldValidate: true })
     }
-    setConfig({ ...config, ...patch })
+    const generatedPatch: Partial<ProvisionConfig> = {}
+    if ("fos_bucket_name" in patch) generatedPatch.fos_bucket_generated = false
+    if ("cdn_prefix" in patch) generatedPatch.cdn_domain_generated = false
+    setConfig({ ...config, ...patch, ...generatedPatch })
   }
 
   return (

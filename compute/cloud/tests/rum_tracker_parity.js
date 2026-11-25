@@ -1,6 +1,5 @@
 /* Faro Web SDK wrapper */
 (function() {
-  var SERVICE_ID = "svc1";
   var BEACON_ENDPOINT = "/rum-beacon";
   var CAPTURE_VITALS = true;
   var CAPTURE_PERFORMANCE = true;
@@ -179,8 +178,8 @@
         cid = cookieMatch[1];
       }
     }
-    var head = BEACON_ENDPOINT + '?service_id=' + enc(SERVICE_ID) + (cid ? '&cid=' + enc(cid) : '') +
-      '&p=' + enc(batch.path) + '&sr=' + SAMPLE_RATE + '&esr=' + ERROR_SAMPLE_RATE +
+    var head = BEACON_ENDPOINT + '?' + (cid ? 'cid=' + enc(cid) + '&' : '') +
+      'p=' + enc(batch.path) + '&sr=' + SAMPLE_RATE + '&esr=' + ERROR_SAMPLE_RATE +
       (RESOURCES_SAMPLED ? '&rsr=' + RESOURCE_SAMPLE_RATE : '');
     var urls = [];
     var url = head;
@@ -328,7 +327,7 @@
         name: 'rum-app',
         version: '1.0.0'
       },
-      url: BEACON_ENDPOINT + '?service_id=' + enc(SERVICE_ID),
+      url: BEACON_ENDPOINT,
       instrumentations: instrumentations,
       samplingRate: 1,
       batching: {

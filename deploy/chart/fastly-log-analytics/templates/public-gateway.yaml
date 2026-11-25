@@ -29,6 +29,13 @@ data:
       }
       header {
         -Server
+        -X-Service-Id
+        -X-FOS-Bucket
+        -X-FOS-Bucket-Name
+        -X-Upstream-Host
+        -X-Backend-Host
+        -X-Served-By
+        -X-Edgecompute-Host
         Strict-Transport-Security "max-age=31536000; includeSubDomains"
         X-Frame-Options "DENY"
         X-Content-Type-Options "nosniff"

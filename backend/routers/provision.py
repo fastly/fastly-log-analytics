@@ -1031,17 +1031,24 @@ def provision_execute(req: ProvisionExecuteRequest):
     if not (cfg.get("fos_bucket_name") or "").strip():
         cfg["fos_bucket_name"] = generate_opaque_bucket_name()
         cfg["_system_generated_bucket"] = True
+    elif req.bucket_generated:
+        cfg["_system_generated_bucket"] = True
     _validate_fos_bucket_name(cfg["fos_bucket_name"])
     _validate_fos_prefix(cfg.get("fos_prefix", ""))
 
     if cfg.get("cdn_url"):
         cfg["cdn_url"], domain = _validate_and_normalize_cdn_url(cfg["cdn_url"])
+        if req.cdn_domain_generated:
+            cfg["_system_generated_cdn_domain"] = True
         available, reason = _check_domain_available(domain, timeout=5)
         if not available and reason and "DNS" not in reason:
-            raise HTTPException(
-                status_code=400,
-                detail=make_error("domain_unavailable", reason, domain=domain),
-            )
+            if req.cdn_domain_generated:
+                cfg["cdn_url"] = f"https://{generate_opaque_cdn_prefix()}.global.ssl.fastly.net"
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=make_error("domain_unavailable", reason, domain=domain),
+                )
     else:
         cfg["cdn_url"] = f"https://{generate_opaque_cdn_prefix()}.global.ssl.fastly.net"
         cfg["_system_generated_cdn_domain"] = True

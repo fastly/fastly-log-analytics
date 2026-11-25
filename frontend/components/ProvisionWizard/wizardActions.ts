@@ -189,6 +189,8 @@ export function runDeploy({ token, selectedService, config, setIsDeploying, star
     rum_enabled: config.rum_enabled,
     rum_custom_condition: config.rum_custom_condition,
     faro_version: config.faro_version || null,
+    bucket_generated: Boolean(config.fos_bucket_generated),
+    cdn_domain_generated: Boolean(config.cdn_domain_generated),
   }
   if (config.cdn_prefix) body.cdn_url = `https://${config.cdn_prefix}.global.ssl.fastly.net`
   if (config.capture === "attached") body.capture = "attached"
@@ -312,21 +314,37 @@ export function buildValidateOnSuccess(deps: ValidateMutationDeps) {
     const defaults = data?.defaults
     if (defaults) {
       const isIngest = deps.mode === "ingest"
-      deps.setConfig((prev) => ({
-        ...prev,
-        endpoint_name: defaults.endpoint_name || "Fastly Object Storage Logs",
-        fos_region: defaults.fos_region || "us-east-1",
-        fos_bucket_name:
-          defaults.fos_bucket_name?.trim().toLowerCase() ||
-          prev.fos_bucket_name ||
-          (isIngest ? "" : generateOpaqueBucketName()),
-        fos_prefix: defaults.fos_prefix || "",
-        cdn_service_name: defaults.cdn_service_name || `${data.service_name} (CDN)`,
-        cdn_prefix:
-          defaults.cdn_prefix?.trim().toLowerCase() ||
-          prev.cdn_prefix ||
-          (isIngest ? "" : generateOpaqueSubdomainPrefix()),
-      }))
+      deps.setConfig((prev) => {
+        const defaultBucket = defaults.fos_bucket_name?.trim().toLowerCase() || ""
+        const defaultCdnPrefix = defaults.cdn_prefix?.trim().toLowerCase() || ""
+        const nextBucket = defaultBucket || prev.fos_bucket_name || (isIngest ? "" : generateOpaqueBucketName())
+        const nextCdnPrefix = defaultCdnPrefix || prev.cdn_prefix || (isIngest ? "" : generateOpaqueSubdomainPrefix())
+        const bucketGenerated = isIngest
+          ? false
+          : defaultBucket
+            ? true
+            : prev.fos_bucket_name
+              ? Boolean(prev.fos_bucket_generated)
+              : true
+        const cdnDomainGenerated = isIngest
+          ? false
+          : defaultCdnPrefix
+            ? true
+            : prev.cdn_prefix
+              ? Boolean(prev.cdn_domain_generated)
+              : true
+        return {
+          ...prev,
+          endpoint_name: defaults.endpoint_name || "Fastly Object Storage Logs",
+          fos_region: defaults.fos_region || "us-east-1",
+          fos_bucket_name: nextBucket,
+          fos_bucket_generated: bucketGenerated,
+          fos_prefix: defaults.fos_prefix || "",
+          cdn_service_name: defaults.cdn_service_name || `${data.service_name} (CDN)`,
+          cdn_prefix: nextCdnPrefix,
+          cdn_domain_generated: cdnDomainGenerated,
+        }
+      })
     }
     deps.setStep(deps.mode === "ingest" ? "connect" : "features")
   }

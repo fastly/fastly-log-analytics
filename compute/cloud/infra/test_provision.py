@@ -49,7 +49,9 @@ def test_plan_is_deterministic_isolated_and_contains_no_credentials() -> None:
             "kv": "flp_state",
         }
     )
-    assert first["public_base_url"] == "https://team-a.global.ssl.fastly.net"
+    assert first["public_base_url"] == "https://" + first["domains"]["front"]
+    assert re.fullmatch(r"^fla-[0-9a-f]{24}\.global\.ssl\.fastly\.net$", first["domains"]["front"])
+    assert first["domains"]["front"] != second["domains"]["front"]
     assert first["domains"]["compute"] != second["domains"]["compute"]
     assert first["domains"]["worker"] != second["domains"]["worker"]
     assert first["domains"]["compute"] != first["domains"]["worker"]
@@ -102,7 +104,7 @@ def test_storage_backends_use_the_shared_front_peer_and_fixed_regional_hosts() -
     plan = provision.resource_plan("team-a")
     for role in ("compute", "worker"):
         backends = {item["name"]: item for item in plan["backends"][role]}
-        assert backends["flp_front"]["address"] == "team-a.global.ssl.fastly.net"
+        assert backends["flp_front"]["address"] == plan["domains"]["front"]
         assert backends["fos_eu_central_1"]["address"] == ("eu-central-1.object.fastlystorage.app")
         assert all(
             item["address"] == item["override_host"] == item["ssl_cert_hostname"] == item["ssl_sni_hostname"]
@@ -2187,8 +2189,14 @@ def test_sec22_default_compute_and_worker_domains_are_independent_csprng_opaque(
     plan_a = provision.resource_plan("acme-prod")
     plan_b = provision.resource_plan("acme-prod")
 
-    assert plan_a["domains"]["front"] == "acme-prod.global.ssl.fastly.net"
-    assert plan_a["generated_domains"] == {"front": False, "compute": True, "worker": True}
+    front_re = re.compile(r"^fla-[0-9a-f]{24}\.global\.ssl\.fastly\.net$")
+    assert front_re.fullmatch(plan_a["domains"]["front"]), f"unexpected front host: {plan_a['domains']['front']}"
+    assert front_re.fullmatch(plan_b["domains"]["front"]), f"unexpected front host: {plan_b['domains']['front']}"
+    assert "acme" not in plan_a["domains"]["front"]
+    assert "prod" not in plan_a["domains"]["front"]
+    assert plan_a["domains"]["front"] != plan_b["domains"]["front"]
+    assert plan_a["public_base_url"] == "https://" + plan_a["domains"]["front"]
+    assert plan_a["generated_domains"] == {"front": True, "compute": True, "worker": True}
 
     opaque_re = re.compile(r"^fla-[0-9a-f]{24}\.edgecompute\.app$")
     for role in ("compute", "worker"):

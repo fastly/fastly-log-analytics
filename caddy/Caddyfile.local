@@ -40,6 +40,13 @@
 :80 {
 	header {
 		-Server
+		-X-Service-Id
+		-X-FOS-Bucket
+		-X-FOS-Bucket-Name
+		-X-Upstream-Host
+		-X-Backend-Host
+		-X-Served-By
+		-X-Edgecompute-Host
 		X-Frame-Options "DENY"
 		X-Content-Type-Options "nosniff"
 		Referrer-Policy "strict-origin-when-cross-origin"

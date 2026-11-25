@@ -422,14 +422,7 @@ def resource_plan(
     }
     hosts: dict[str, str] = {}
     generated_domains: dict[str, bool] = {}
-    if public_host:
-        hosts["front"] = domain(public_host)
-    elif persisted.get("front"):
-        hosts["front"] = domain(persisted["front"])
-    else:
-        hosts["front"] = domain(f"{name}.global.ssl.fastly.net")
-    generated_domains["front"] = False
-    for role in ("compute", "worker"):
+    for role in ("front", "compute", "worker"):
         if explicit[role]:
             hosts[role] = domain(explicit[role])  # type: ignore[arg-type]
             generated_domains[role] = False

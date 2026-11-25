@@ -535,3 +535,213 @@ def test_unauthenticated_remote_rum_js_does_not_leak_active_service_id():
 
     assert resolved is None
     mock_active.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# (f) SEC-22 Follow-Up Wave 1 regressions (Items #1, #5, #6, #8, #9)
+# ---------------------------------------------------------------------------
+
+
+def test_rum_tracker_js_omits_service_id_from_public_js_and_beacon_url(monkeypatch):
+    from backend.provision.rum_assets import generate_rum_tracker_js
+
+    monkeypatch.setattr(svcconfig, "load_config", lambda _sid: {})
+    js = generate_rum_tracker_js("SensitiveCustomerSvcId99")
+    assert "SensitiveCustomerSvcId99" not in js
+    assert "var SERVICE_ID" not in js
+    assert "service_id=" not in js
+    assert 'var BEACON_ENDPOINT = "/rum-beacon";' in js
+    assert "url: BEACON_ENDPOINT," in js
+
+
+@pytest.mark.parametrize("versions_val", [None, []])
+def test_ensure_scoring_service_queries_existing_domain_when_versions_missing_or_empty(versions_val):
+    existing_svc: dict[str, object] = {
+        "id": "opaque-scorer-id",
+        "name": "Session Scoring Service for SvcMissingVers",
+    }
+    if versions_val is not None:
+        existing_svc["versions"] = versions_val
+
+    seen_paths: list[str] = []
+
+    def fake_fastly(method, path, data=None, token=None, **_kwargs):
+        seen_paths.append(f"{method} {path}")
+        if method == "GET" and path == "/service/opaque-scorer-id/version":
+            return [{"number": 7, "active": True}]
+        if method == "GET" and path == "/service/opaque-scorer-id/version/7/domain":
+            return [{"name": "fla-0123456789abcdef01234567.edgecompute.app"}]
+        if method == "GET" and "/resources/stores/config/" in path and "/item/" in path:
+            return {"item_value": "deadbeef" * 8}
+        return {}
+
+    with (
+        patch("backend.provision.session_scoring.wasm_deploy.fastly", side_effect=fake_fastly),
+        patch(
+            "backend.provision.session_scoring.wasm_deploy._find_scoring_service",
+            return_value=existing_svc,
+        ),
+        patch(
+            "backend.provision.session_scoring.wasm_deploy._find_config_store",
+            side_effect=[{"id": "ks-1"}, {"id": "cs-1"}],
+        ),
+        patch(
+            "backend.provision.session_scoring.wasm_deploy._find_kv_store",
+            return_value={"store_id": "kv-1"},
+        ),
+        patch("backend.provision.session_scoring.wasm_deploy._ensure_scoring_enabled_at", return_value=None),
+        patch("backend.provision.session_scoring.wasm_deploy._persisted_scoring_domain", return_value=""),
+    ):
+        meta = wasm_deploy.ensure_scoring_service("SvcMissingVers", "tok")
+
+    assert meta["scoring_domain"] == "fla-0123456789abcdef01234567.edgecompute.app"
+    assert "GET /service/opaque-scorer-id/version" in seen_paths
+    assert "GET /service/opaque-scorer-id/version/7/domain" in seen_paths
+
+
+def test_provision_execute_arms_collision_retry_flags_when_generated_flags_true():
+    import asyncio
+
+    from backend.models.common.provision import ProvisionExecuteRequest
+
+    async def _drain(it):
+        return [chunk async for chunk in it]
+
+    captured_cfgs: list[dict[str, object]] = []
+
+    def fake_provision(cfg):
+        captured_cfgs.append(dict(cfg))
+        yield {"type": "log", "message": "ok"}
+
+    req = ProvisionExecuteRequest(
+        token="tok",
+        service_id="SvcUiWiz1",
+        service_name="UI Wizard Svc",
+        fos_bucket_name="fla-0123456789abcdef01234567",
+        cdn_url="https://fla-fedcba9876543210fedcba98.global.ssl.fastly.net",
+        bucket_generated=True,
+        cdn_domain_generated=True,
+    )
+    with (
+        patch("backend.utils.pop_utils.fetch_pop_locations", return_value=None),
+        patch("backend.routers.provision._check_domain_available", return_value=(True, "")),
+        patch("backend.provision.provision", side_effect=fake_provision),
+    ):
+        resp = provision_router.provision_execute(req)
+        asyncio.run(_drain(resp.body_iterator))
+
+    assert len(captured_cfgs) == 1
+    assert captured_cfgs[0].get("_system_generated_bucket") is True
+    assert captured_cfgs[0].get("_system_generated_cdn_domain") is True
+
+    # User-supplied values (flags False) must NOT arm system-generated flags
+    captured_cfgs.clear()
+    req_custom = ProvisionExecuteRequest(
+        token="tok",
+        service_id="SvcUiWiz2",
+        service_name="UI Wizard Svc",
+        fos_bucket_name="user-custom-bucket",
+        cdn_url="https://user-custom-cdn.global.ssl.fastly.net",
+        bucket_generated=False,
+        cdn_domain_generated=False,
+    )
+    with (
+        patch("backend.utils.pop_utils.fetch_pop_locations", return_value=None),
+        patch("backend.routers.provision._check_domain_available", return_value=(True, "")),
+        patch("backend.provision.provision", side_effect=fake_provision),
+    ):
+        resp2 = provision_router.provision_execute(req_custom)
+        asyncio.run(_drain(resp2.body_iterator))
+
+    assert len(captured_cfgs) == 1
+    assert captured_cfgs[0].get("_system_generated_bucket") is None
+    assert captured_cfgs[0].get("_system_generated_cdn_domain") is None
+
+
+def test_deploy_remote_frontend_defaults_opaque_domain_retries_409_and_strips_headers():
+    from backend.provision.fastly_api import deploy_remote_frontend
+
+    domain_attempts: list[str] = []
+    snippet_payloads: list[dict[str, object]] = []
+
+    def fake_fastly(method, path, body=None, *, token, **_kwargs):
+        if method == "POST" and path == "/service":
+            return {"id": "rem-svc-1"}
+        if method == "POST" and path == "/service/rem-svc-1/version":
+            return {"number": 1}
+        if method == "POST" and path == "/service/rem-svc-1/version/1/domain":
+            dom = (body or {}).get("name", "")
+            domain_attempts.append(dom)
+            if len(domain_attempts) < 3:
+                raise RuntimeError("HTTP 409 POST /domain: Domain already taken")
+            return {"name": dom}
+        if method == "POST" and path == "/service/rem-svc-1/version/1/snippet":
+            snippet_payloads.append(dict(body or {}))
+            return {"id": "snip-1"}
+        return {"active": True}
+
+    with patch("backend.provision.fastly_api.fastly", side_effect=fake_fastly):
+        res = deploy_remote_frontend(
+            service_name="Remote Portal",
+            domain_name="",
+            origin_host="origin.example.com",
+            origin_port=443,
+            use_ssl=True,
+            token="tok",
+        )
+
+    assert len(domain_attempts) == 3
+    winner = domain_attempts[-1]
+    assert res["domain_name"] == winner
+    assert winner.endswith(".global.ssl.fastly.net")
+    label = winner.removesuffix(".global.ssl.fastly.net")
+    assert _DNS_LABEL_RE.match(label) and label.startswith("fla-")
+    assert len(set(domain_attempts)) == 3
+
+    assert len(snippet_payloads) == 1
+    assert snippet_payloads[0]["type"] == "deliver"
+    content = str(snippet_payloads[0]["content"])
+    for hdr in (
+        "resp.http.X-Service-Id",
+        "resp.http.X-FOS-Bucket",
+        "resp.http.X-FOS-Bucket-Name",
+        "resp.http.X-Upstream-Host",
+        "resp.http.X-Backend-Host",
+        "resp.http.X-Edgecompute-Host",
+        "resp.http.Server",
+        "resp.http.X-Powered-By",
+    ):
+        assert f"unset {hdr};" in content
+
+
+def test_rotate_fos_credentials_uses_opaque_key_description():
+    from backend.models.common.services import ServiceCredentialsBody
+    from backend.routers.services import crud as services_crud
+
+    created_descs: list[str] = []
+
+    def fake_fastly(method, path, body=None, *, token=None, **_kwargs):
+        if method == "POST" and path == "/resources/object-storage/access-keys":
+            created_descs.append(str((body or {}).get("description", "")))
+            return {"access_key": "AK_NEW", "secret_key": "SK_NEW"}
+        return {}
+
+    fake_req = SimpleNamespace(state=SimpleNamespace(is_remote=False))
+    body = ServiceCredentialsBody(api_token="admin-tok", access_key="", secret_key="")
+
+    with (
+        patch("backend.routers.services.crud.require_service_in_scope", return_value=None),
+        patch(
+            "backend.routers.services.crud.load_service_config",
+            return_value={"fos_region": "us-east-1", "fos_bucket": "fla-0123456789abcdef01234567"},
+        ),
+        patch("backend.routers.services.crud.mutate_service_config", return_value=None),
+        patch("backend.core.fastly.client.fastly", side_effect=fake_fastly),
+    ):
+        res = services_crud.api_service_update_credentials(fake_req, "SensitiveSvcId777", body)
+
+    assert res["ok"] is True
+    assert len(created_descs) == 1
+    desc = created_descs[0]
+    assert "SensitiveSvcId777" not in desc
+    assert re.match(r"^fos-log-analysis-key-[0-9a-f]{24}$", desc), f"unexpected key description: {desc}"

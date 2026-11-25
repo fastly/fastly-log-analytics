@@ -14808,6 +14808,16 @@ export interface components {
             faro_version?: string | null;
             /** Rum Custom Condition */
             rum_custom_condition?: string | null;
+            /**
+             * Bucket Generated
+             * @default false
+             */
+            bucket_generated: boolean;
+            /**
+             * Cdn Domain Generated
+             * @default false
+             */
+            cdn_domain_generated: boolean;
         };
         /** ProvisionIngestResponse */
         ProvisionIngestResponse: {

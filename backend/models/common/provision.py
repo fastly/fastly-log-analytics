@@ -134,6 +134,8 @@ class ProvisionExecuteRequest(BaseModel):
     rum_log_period: str | None = None
     faro_version: str | None = None
     rum_custom_condition: str | None = None
+    bucket_generated: bool = False
+    cdn_domain_generated: bool = False
 
 
 class ProvisionValidateRequest(BaseModel):

@@ -1110,6 +1110,19 @@ def _fastly_api_request(method: str, path: str, *, token: str, json_data: Any = 
         raise RuntimeError(f"Fastly API error during {step}: {exc}") from exc
 
 
+_REMOTE_FRONTEND_DELIVER_SNIPPET_NAME = "fla_remote_frontend_strip_headers"
+_REMOTE_FRONTEND_DELIVER_SNIPPET = """\
+unset resp.http.X-Service-Id;
+unset resp.http.X-FOS-Bucket;
+unset resp.http.X-FOS-Bucket-Name;
+unset resp.http.X-Upstream-Host;
+unset resp.http.X-Backend-Host;
+unset resp.http.X-Edgecompute-Host;
+unset resp.http.Server;
+unset resp.http.X-Powered-By;
+"""
+
+
 def deploy_remote_frontend(
     service_name: str,
     domain_name: str,
@@ -1120,6 +1133,18 @@ def deploy_remote_frontend(
     override_host: str | None = None,
 ) -> dict[str, Any]:
     """Deploy a remote frontend service to Fastly."""
+    from backend.provision.opaque_names import (
+        MAX_COLLISION_ATTEMPTS,
+        generate_opaque_cdn_prefix,
+        is_domain_collision_error,
+    )
+
+    cleaned_domain = (domain_name or "").strip()
+    system_generated_domain = not cleaned_domain
+    effective_domain = (
+        f"{generate_opaque_cdn_prefix()}.global.ssl.fastly.net" if system_generated_domain else cleaned_domain
+    )
+
     service_data = _fastly_api_request(
         "POST", "/service", token=token, json_data={"name": service_name, "type": "vcl"}, step="Create Service"
     )
@@ -1134,13 +1159,22 @@ def deploy_remote_frontend(
     if version is None:
         raise RuntimeError("Failed to retrieve version number from response during Verify Draft Version")
 
-    _fastly_api_request(
-        "POST",
-        f"/service/{service_id}/version/{version}/domain",
-        token=token,
-        json_data={"name": domain_name},
-        step="Attach Domain",
-    )
+    attempts = MAX_COLLISION_ATTEMPTS if system_generated_domain else 1
+    for attempt in range(1, attempts + 1):
+        try:
+            _fastly_api_request(
+                "POST",
+                f"/service/{service_id}/version/{version}/domain",
+                token=token,
+                json_data={"name": effective_domain},
+                step="Attach Domain",
+            )
+            break
+        except RuntimeError as exc:
+            if system_generated_domain and attempt < attempts and is_domain_collision_error(exc):
+                effective_domain = f"{generate_opaque_cdn_prefix()}.global.ssl.fastly.net"
+                continue
+            raise
 
     backend_payload: dict[str, Any] = {
         "name": "gce_vm_origin",
@@ -1163,13 +1197,26 @@ def deploy_remote_frontend(
         step="Attach Backend Origin",
     )
     _fastly_api_request(
+        "POST",
+        f"/service/{service_id}/version/{version}/snippet",
+        token=token,
+        json_data={
+            "name": _REMOTE_FRONTEND_DELIVER_SNIPPET_NAME,
+            "type": "deliver",
+            "dynamic": 0,
+            "priority": 100,
+            "content": _REMOTE_FRONTEND_DELIVER_SNIPPET,
+        },
+        step="Attach Security Snippet",
+    )
+    _fastly_api_request(
         "PUT", f"/service/{service_id}/version/{version}/activate", token=token, step="Activate Version"
     )
 
     return {
         "service_id": service_id,
         "version": version,
-        "domain_name": domain_name,
+        "domain_name": effective_domain,
         "origin_host": origin_host,
     }
 

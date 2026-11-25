@@ -552,8 +552,10 @@ sub test_scorer_cookie_unset_when_only_customer_cookies_present {
     assert "Secure" in deliver_cookie_vcl, "rum_cid Set-Cookie missing '; Secure'"
 
     js = rum_assets.generate_rum_tracker_js("svc'; alert(1);//", "/rum-beacon'; fetch('//evil');//")
-    assert "var SERVICE_ID = 'svc'; alert(1);//'" not in js
-    assert 'alert(1);//"' in js or "\\u0027" in js or json.dumps("svc'; alert(1);//") in js
+    assert "var SERVICE_ID" not in js
+    assert "svc'; alert(1);//" not in js
+    assert "var BEACON_ENDPOINT = '/rum-beacon'; fetch('//evil');//" not in js
+    assert "fetch('//evil');//" in js or "\\u0027" in js or json.dumps("/rum-beacon'; fetch('//evil');//") in js
 
     backend_payloads: list[dict[str, Any]] = []
 
