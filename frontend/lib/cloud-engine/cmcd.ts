@@ -70,6 +70,7 @@ export interface CmcdQueryParams {
   filters?: FiltersPayload;
   bucket_seconds?: number;
   top_n?: number;
+  sections?: readonly string[] | null;
   engine?: Pick<DuckDBAnalyticalEngine, "executeSql" | "getPresentColumns"> & Partial<Pick<DuckDBReadContext, "getCustomColumnTypes">>;
   rollupSource?: CmcdRollupSource;
   customColumnTypes?: ReturnType<DuckDBReadContext["getCustomColumnTypes"]>;
@@ -212,8 +213,18 @@ export function emptyCmcdAggregates() {
     object_type_dist: [] as Record<string, unknown>[],
     streaming_format_dist: [] as Record<string, unknown>[],
     session_duration_dist: [] as Record<string, unknown>[],
+    bitrate_ladder: [] as Record<string, unknown>[],
+    stream_type_dist: [] as Record<string, unknown>[],
   };
 }
+
+const BITRATE_LADDER_TIERS: Record<number, string> = {
+  1: "< 1 Mbps (SD)",
+  2: "1–2.5 Mbps (720p)",
+  3: "2.5–5 Mbps (1080p)",
+  4: "5–10 Mbps (1440p)",
+  5: "10+ Mbps (4K)",
+};
 
 
 function buildCmcdWhere(params: CmcdQueryParams): string {
@@ -287,6 +298,7 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       COUNT(cmcd_bl) AS has_bl,
       COUNT(cmcd_br) AS has_br,
       COUNT(cmcd_mtp) AS has_mtp,
+      COUNT(NULLIF(cmcd_st, '')) AS has_st,
       COUNT(cmcd_su) AS has_su,
       COUNT(NULLIF(cmcd_cid, '')) AS has_cid,
       AVG(cmcd_br) FILTER (WHERE cmcd_ot = 'v')::DOUBLE AS video_avg_bitrate,
@@ -314,7 +326,7 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
         (floor(ts_ms / ${bucketMs}) * ${bucketMs})::BIGINT AS bucket_ms,
         NULLIF(cmcd_ot, '') AS ot_key,
         NULLIF(cmcd_sf, '') AS sf_key,
-        cmcd_sid, cmcd_cid, cmcd_br, cmcd_bl, cmcd_bs, cmcd_mtp, cmcd_ot, cmcd_tb, cmcd_su,
+        cmcd_sid, cmcd_cid, cmcd_br, cmcd_bl, cmcd_bs, cmcd_mtp, cmcd_ot, cmcd_st, cmcd_tb, cmcd_su,
         ttfb_ms, ttfb, time_elapsed_usec, elapsed
       FROM requests
       WHERE ${where}
@@ -449,38 +461,65 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
     ? "COUNT(DISTINCT NULLIF(cmcd_sid, '')) FILTER (WHERE cmcd_bs IS TRUE) * 100.0 / NULLIF(COUNT(DISTINCT NULLIF(cmcd_sid, '')), 0)"
     : "NULL";
 
-  const wantCid = has("cid");
-  const wantGeo = hasBsEffective;
+  const sectionSet = params.sections?.length ? new Set(params.sections) : null;
+  const wantSection = (name: string) => !sectionSet || sectionSet.has(name);
+  const wantCid = wantSection("top_content") && has("cid");
+  const wantGeo = (wantSection("rebuffer_by_country") || wantSection("rebuffer_by_asn")) && hasBsEffective;
+  const wantLadder = wantSection("bitrate_ladder") && has("br");
+  const wantSt = wantSection("stream_type_dist") && has("st");
+  const wantSessionMetrics =
+    wantSection("overview") || wantSection("sessions_ts") || wantSection("session_duration_dist");
+
+  const axes: Array<{ id: "cid" | "country" | "asn" | "ladder" | "st"; expr: string; groupCols: string; having: string }> = [];
+  if (wantCid) {
+    axes.push({ id: "cid", expr: "content_id", groupCols: "(content_id)", having: "content_id IS NOT NULL" });
+  }
+  if (wantGeo) {
+    axes.push({ id: "country", expr: "country_key", groupCols: "(country_key)", having: "country_key IS NOT NULL" });
+    axes.push({ id: "asn", expr: "asn_key", groupCols: "(asn_key, asn_name_key)", having: "asn_key IS NOT NULL" });
+  }
+  if (wantLadder) {
+    axes.push({ id: "ladder", expr: "br_tier", groupCols: "(br_tier)", having: "br_tier IS NOT NULL" });
+  }
+  if (wantSt) {
+    axes.push({ id: "st", expr: "st_key", groupCols: "(st_key)", having: "st_key IS NOT NULL" });
+  }
+
+  const grpById: Partial<Record<"cid" | "country" | "asn" | "ladder" | "st", number>> = {};
   const breakdownSql = (() => {
-    if (!wantCid && !wantGeo) return null;
-    const grpSql = wantCid && wantGeo
-      ? "GROUPING(content_id, country_key, asn_key)::INTEGER"
-      : wantCid
-        ? "3::INTEGER"
-        : "(CASE GROUPING(country_key, asn_key) WHEN 1 THEN 5 ELSE 6 END)::INTEGER";
-    const groupBySql = wantCid && wantGeo
-      ? "GROUP BY GROUPING SETS ((content_id), (country_key), (asn_key, asn_name_key))"
-      : wantCid
-        ? "GROUP BY content_id"
-        : "GROUP BY GROUPING SETS ((country_key), (asn_key, asn_name_key))";
-    const havingSql = wantCid && wantGeo
-      ? "HAVING (GROUPING(content_id, country_key, asn_key) = 3 AND content_id IS NOT NULL) OR (GROUPING(content_id, country_key, asn_key) = 5 AND country_key IS NOT NULL) OR (GROUPING(content_id, country_key, asn_key) = 6 AND asn_key IS NOT NULL)"
-      : wantCid
-        ? "HAVING content_id IS NOT NULL"
-        : "HAVING (GROUPING(country_key, asn_key) = 1 AND country_key IS NOT NULL) OR (GROUPING(country_key, asn_key) = 2 AND asn_key IS NOT NULL)";
-    const cidCol = wantCid ? "content_id" : "NULL::VARCHAR AS content_id";
-    const geoCols = wantGeo
-      ? "country_key, asn_key, asn_name_key"
-      : "NULL::VARCHAR AS country_key, NULL::BIGINT AS asn_key, NULL::VARCHAR AS asn_name_key";
-    const tieBreak = wantCid && wantGeo
-      ? "asn_key ASC NULLS LAST, content_id ASC NULLS LAST, country_key ASC NULLS LAST"
-      : wantCid
-        ? "content_id ASC NULLS LAST"
-        : "asn_key ASC NULLS LAST, country_key ASC NULLS LAST";
+    if (axes.length === 0) return null;
+    const n = axes.length;
+    const allMask = (1 << n) - 1;
+    const groupingCols = axes.map((a) => a.expr).join(", ");
+    const grpExpr = n === 1 ? "0::INTEGER" : `GROUPING(${groupingCols})::INTEGER`;
+    const havingParts: string[] = [];
+    axes.forEach((a, idx) => {
+      const grpVal = n === 1 ? 0 : allMask ^ (1 << (n - 1 - idx));
+      grpById[a.id] = grpVal;
+      havingParts.push(n === 1 ? a.having : `(GROUPING(${groupingCols}) = ${grpVal} AND ${a.having})`);
+    });
+    const segRebufferRateSql = hasBsEffective
+      ? "COUNT(*) FILTER (WHERE cmcd_bs IS TRUE) * 100.0 / NULLIF(COUNT(*), 0)"
+      : "NULL::DOUBLE";
+    const tieBreakCols = [
+      ...(wantLadder ? ["br_tier ASC NULLS LAST"] : []),
+      ...(wantGeo ? ["asn_key ASC NULLS LAST"] : []),
+      ...(wantCid ? ["content_id ASC NULLS LAST"] : []),
+      ...(wantGeo ? ["country_key ASC NULLS LAST"] : []),
+      ...(wantSt ? ["st_key ASC NULLS LAST"] : []),
+    ];
+    const ladderGrp = grpById.ladder;
+    const stGrp = grpById.st;
+    const unlimitedGrps = [ladderGrp, stGrp].filter((v): v is number => v !== undefined);
+    const qualifyLimit = unlimitedGrps.length > 0
+      ? `row_number() OVER (PARTITION BY ${grpExpr} ORDER BY COUNT(DISTINCT NULLIF(cmcd_sid, '')) DESC, ${tieBreakCols.join(", ")}) <= ${topN} OR grp IN (${unlimitedGrps.join(", ")})`
+      : `row_number() OVER (PARTITION BY ${grpExpr} ORDER BY COUNT(DISTINCT NULLIF(cmcd_sid, '')) DESC, ${tieBreakCols.join(", ")}) <= ${topN}`;
     return `SELECT
-      ${grpSql} AS grp,
-      ${cidCol},
-      ${geoCols},
+      ${grpExpr} AS grp,
+      ${wantCid ? "content_id" : "NULL::VARCHAR AS content_id"},
+      ${wantGeo ? "country_key, asn_key, asn_name_key" : "NULL::VARCHAR AS country_key, NULL::BIGINT AS asn_key, NULL::VARCHAR AS asn_name_key"},
+      ${wantLadder ? "br_tier" : "NULL::INTEGER AS br_tier"},
+      ${wantSt ? "st_key" : "NULL::VARCHAR AS st_key"},
       COUNT(DISTINCT NULLIF(cmcd_sid, ''))::BIGINT AS sessions,
       COUNT(*)::BIGINT AS requests,
       (COUNT(*) FILTER (WHERE cmcd_bs IS TRUE))::BIGINT AS rebuffer_events,
@@ -488,6 +527,7 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       AVG(cmcd_bl) FILTER (WHERE ${video})::DOUBLE AS avg_buffer_length,
       ${wantGeo ? `QUANTILE_CONT(cmcd_mtp, 0.5) FILTER (WHERE ${video})::DOUBLE` : "NULL::DOUBLE"} AS median_throughput,
       ${rebufferRateSql} AS rebuffer_rate,
+      ${segRebufferRateSql} AS seg_rebuffer_rate,
       AVG(cmcd_mtp)::DOUBLE AS avg_throughput_kbps
     FROM (
       SELECT
@@ -495,21 +535,32 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
         COALESCE(NULLIF(geo_country, ''), NULLIF(country, '')) AS country_key,
         COALESCE(client_asn, asn)::BIGINT AS asn_key,
         COALESCE(NULLIF(as_name, ''), 'AS' || CAST(COALESCE(client_asn, asn) AS VARCHAR)) AS asn_name_key,
+        CASE
+          WHEN (${video}) AND cmcd_br IS NOT NULL AND cmcd_br > 0 THEN
+            CASE
+              WHEN cmcd_br < 1000 THEN 1
+              WHEN cmcd_br < 2500 THEN 2
+              WHEN cmcd_br < 5000 THEN 3
+              WHEN cmcd_br < 10000 THEN 4
+              ELSE 5
+            END
+          ELSE NULL
+        END AS br_tier,
+        NULLIF(cmcd_st, '') AS st_key,
         cmcd_sid, cmcd_bs, cmcd_br, cmcd_bl, cmcd_mtp, cmcd_ot
       FROM requests
       WHERE ${where}
     ) base
-    ${groupBySql}
-    ${havingSql}
-    QUALIFY row_number() OVER (
-      PARTITION BY ${grpSql}
-      ORDER BY COUNT(DISTINCT NULLIF(cmcd_sid, '')) DESC, ${tieBreak}
-    ) <= ${topN}
-    ORDER BY grp, sessions DESC, ${tieBreak}`;
+    GROUP BY GROUPING SETS (${axes.map((a) => a.groupCols).join(", ")})
+    HAVING ${havingParts.join(" OR ")}
+    QUALIFY ${qualifyLimit}
+    ORDER BY grp, sessions DESC, ${tieBreakCols.join(", ")}`;
   })();
 
   const [sessionAggRows, breakdownRows] = await Promise.all([
-    engine.executeSql<Record<string, unknown>>(
+    !wantSessionMetrics
+      ? Promise.resolve([] as Record<string, unknown>[])
+      : engine.executeSql<Record<string, unknown>>(
       `WITH sessions AS (
         SELECT
           cmcd_sid AS sid,
@@ -591,9 +642,25 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
     };
   });
 
-  const topContentRows = breakdownRows.filter((r) => Number(r.grp) === 3);
-  const countryRows = breakdownRows.filter((r) => Number(r.grp) === 5);
-  const asnRows = breakdownRows.filter((r) => Number(r.grp) === 6);
+  const topContentRows = grpById.cid === undefined ? [] : breakdownRows.filter((r) => Number(r.grp) === grpById.cid);
+  const countryRows = grpById.country === undefined ? [] : breakdownRows.filter((r) => Number(r.grp) === grpById.country);
+  const asnRows = grpById.asn === undefined ? [] : breakdownRows.filter((r) => Number(r.grp) === grpById.asn);
+  const ladderRows = grpById.ladder === undefined
+    ? []
+    : breakdownRows
+        .filter((r) => Number(r.grp) === grpById.ladder && r.br_tier != null)
+        .sort((a, b) => Number(a.br_tier) - Number(b.br_tier));
+  const stRows = grpById.st === undefined
+    ? []
+    : breakdownRows
+        .filter((r) => Number(r.grp) === grpById.st && r.st_key != null)
+        .sort((a, b) => {
+          const diff = Number(b.sessions ?? 0) - Number(a.sessions ?? 0);
+          if (diff !== 0) return diff;
+          const ak = String(a.st_key);
+          const bk = String(b.st_key);
+          return ak < bk ? -1 : ak > bk ? 1 : 0;
+        });
 
   return {
     available: true,
@@ -688,6 +755,24 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
           : 0,
     })),
     session_duration_dist,
+    bitrate_ladder: !wantLadder
+      ? []
+      : ladderRows
+          .filter((r) => Number(r.br_tier) in BITRATE_LADDER_TIERS)
+          .map((r) => ({
+            tier: BITRATE_LADDER_TIERS[Number(r.br_tier)],
+            request_count: Number(r.requests ?? 0),
+            session_count: Number(r.sessions ?? 0),
+            avg_bitrate: r.avg_bitrate == null ? null : roundTo(Number(r.avg_bitrate), 2),
+            rebuffer_rate: hasBsEffective && r.seg_rebuffer_rate != null ? roundTo(Number(r.seg_rebuffer_rate), 2) : null,
+          })),
+    stream_type_dist: !wantSt
+      ? []
+      : stRows.map((r) => ({
+          stream_type: String(r.st_key ?? "unknown"),
+          session_count: Number(r.sessions ?? 0),
+          request_count: Number(r.requests ?? 0),
+        })),
   };
 }
 

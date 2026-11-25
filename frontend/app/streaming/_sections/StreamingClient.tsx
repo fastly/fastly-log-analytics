@@ -1,9 +1,11 @@
 'use client'
 
 import React from 'react'
+import Link from 'next/link'
 import { parseAsInteger, useQueryState } from 'nuqs'
-import { AlertTriangle, BarChart3, Clock, Gauge, Play, TrendingUp, Wifi } from 'lucide-react'
+import { AlertTriangle, BarChart3, Clock, ExternalLink, Gauge, Play, TrendingUp, Wifi } from 'lucide-react'
 import { client, unwrapClient } from '@/lib/api'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import {
   usePlotlyRangeZoom,
   useReportCancelQueries,
@@ -20,9 +22,11 @@ import { RawWindowNote, readRawWindow } from '@/components/network/rollupLabels'
 import { StatCard } from '@/components/ui/confirm-dialog'
 import {
   cmcdLabel,
+  EMPTY_ROWS,
   OBJECT_TYPE_LABELS,
   STREAMING_FORMAT_LABELS,
   STREAMING_INFO,
+  STREAM_TYPE_LABELS,
 } from './StreamingConstants'
 import { StreamingChartsGrid } from './StreamingChartsGrid'
 
@@ -81,6 +85,35 @@ function StreamingBody({
   const data = cmcdQuery.data
   const overview = data?.overview
   const hasStreamingData = Boolean(data?.available && data?.has_data)
+  const needsCloudExtended =
+    isCloudMode() &&
+    hasStreamingData &&
+    !data?.bitrate_ladder?.length &&
+    !data?.stream_type_dist?.length
+  const extendedQuery = useServiceQuery(
+    analyticsReportQueryKey({
+      namespace: ['cmcd', 'aggregates', 'extended'],
+      serviceId: activeServiceId,
+      rangeToken: rangeKey,
+      anchor,
+      filterPayload,
+      keyParts: bucketSeconds !== 300 || topN !== 30 ? [bucketSeconds, topN] : [],
+    }),
+    ({ signal }) =>
+      unwrapClient(
+        client.POST('/api/cmcd/aggregates', {
+          signal,
+          body: {
+            filters: filterPayload,
+            bucket_seconds: bucketSeconds,
+            top_n: topN,
+            sections: ['bitrate_ladder', 'stream_type_dist'],
+            ...rangeBody,
+          },
+        }),
+      ),
+    { enabled: needsCloudExtended, staleTime: 30_000, refetchInterval: 30_000 },
+  )
   const queryStatus = {
     isLoading: cmcdQuery.isLoading,
     isFetching: cmcdQuery.isFetching,
@@ -185,6 +218,23 @@ function StreamingBody({
     return dist.map((d) => ({ ...d, streaming_format: cmcdLabel(STREAMING_FORMAT_LABELS, d.streaming_format ?? '') }))
   }, [data?.streaming_format_dist])
 
+  const extData = extendedQuery.data
+  const primaryLadder = data?.bitrate_ladder
+  const fallbackLadder = extData?.bitrate_ladder
+  const bitrateLadderRows = primaryLadder?.length ? primaryLadder : fallbackLadder ?? EMPTY_ROWS
+
+  const primaryStreamTypes = data?.stream_type_dist
+  const fallbackStreamTypes = extData?.stream_type_dist
+  const streamTypeRows = React.useMemo(() => {
+    const dist = primaryStreamTypes?.length ? primaryStreamTypes : fallbackStreamTypes
+    if (!dist?.length) return EMPTY_ROWS
+    return dist.map((d) => ({ ...d, stream_type: cmcdLabel(STREAM_TYPE_LABELS, d.stream_type ?? '') }))
+  }, [primaryStreamTypes, fallbackStreamTypes])
+
+  const streamingSessionsHref = activeServiceId
+    ? `/sessions?streaming=true&service=${encodeURIComponent(activeServiceId)}`
+    : '/sessions?streaming=true'
+
   if (data && !data.available) {
     return (
       <div className="flex flex-col items-center justify-center gap-4 py-16 text-center">
@@ -226,9 +276,22 @@ function StreamingBody({
     </div>
   )
 
+  const streamingToolbar = (
+    <div className="flex justify-end items-center min-h-[28px] mb-3">
+      <Link
+        href={streamingSessionsHref}
+        className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1 text-xs font-medium text-foreground hover:bg-muted transition-colors"
+      >
+        <ExternalLink className="h-3.5 w-3.5" />
+        Inspect Streaming Sessions
+      </Link>
+    </div>
+  )
+
   if (data && !hasStreamingData) {
     return (
       <>
+        {streamingToolbar}
         {overviewGrid}
         <AnalyticsCard title="Streaming Telemetry" icon={<Play className="h-4 w-4" />} {...queryStatus} isEmpty className="h-[320px]">
           <div />
@@ -240,6 +303,7 @@ function StreamingBody({
   return (
     <>
       <RawWindowNote window={readRawWindow(data)} />
+      {streamingToolbar}
       {overviewGrid}
       <StreamingChartsGrid
         data={data}
@@ -254,6 +318,8 @@ function StreamingBody({
         durationDistData={durationDistData}
         objectTypeData={objectTypeData}
         streamingFormatRows={streamingFormatRows}
+        bitrateLadderRows={bitrateLadderRows}
+        streamTypeRows={streamTypeRows}
       />
     </>
   )

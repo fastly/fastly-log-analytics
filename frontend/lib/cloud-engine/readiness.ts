@@ -689,6 +689,13 @@ function hasKeyStemSegment(
         segStart = i;
       }
     }
+    if (kind === 1) {
+      while (i + 1 < len) {
+        const nc = raw.charCodeAt(i + 1);
+        if (nc < 97 || nc > 122) break;
+        i += 1;
+      }
+    }
     prevKind = kind;
   }
   return false;
@@ -1784,10 +1791,11 @@ function consumeJsonSecretValueAfterQuote(
   const decodedKey = unescapeJsonKey(keyCandidate, isSqlUnicodeEscape);
   if (!isSecretJsonKey(decodedKey)) return pos;
   const keyAuthScheme = extractAuthSchemeFromKey(decodedKey, true);
+  const cookieMode = isCookieKey(decodedKey, true);
   p = afterSepVal;
   if (
     p >= len
-    || (line1.startsWith("[url]", p) && !isCookieKey(decodedKey, true) && !isMultiParamAuthHeader(decodedKey, keyAuthScheme, true))
+    || (line1.startsWith("[url]", p) && !cookieMode && !isMultiParamAuthHeader(decodedKey, keyAuthScheme, true))
   ) {
     return pos;
   }
@@ -1818,7 +1826,7 @@ function consumeJsonSecretValueAfterQuote(
       if (valStart >= len) return Math.max(afterSchemeSep, valStart);
       if (
         (line1.startsWith("[url]", valStart) || tryScanRawUrlEnd(line1, valStart) !== -1)
-        && !isCookieKey(decodedKey, true)
+        && !cookieMode
         && !isMultiParamAuthHeader(decodedKey, matchedScheme, true)
       ) {
         return afterSchemeSep;
@@ -1826,7 +1834,6 @@ function consumeJsonSecretValueAfterQuote(
     }
   }
 
-  const cookieMode = isCookieKey(decodedKey, true);
   const authParamMode = isMultiParamAuthHeader(decodedKey, matchedScheme, true);
 
   let valEnd: number;

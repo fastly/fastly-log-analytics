@@ -240,6 +240,14 @@ describe("Feature F24 — CMCD Streaming Media cloud-engine", () => {
       expect(res.object_type_dist).toHaveLength(1);
       expect(res.streaming_format_dist).toHaveLength(2);
       expect(res.session_duration_dist).toHaveLength(1);
+      expect(res.bitrate_ladder).toEqual([
+        { tier: "2.5–5 Mbps (1080p)", request_count: 2, session_count: 2, avg_bitrate: 3750, rebuffer_rate: 50 },
+        { tier: "5–10 Mbps (1440p)", request_count: 1, session_count: 1, avg_bitrate: 6000, rebuffer_rate: 0 },
+      ]);
+      expect(res.stream_type_dist).toEqual([
+        { stream_type: "l", session_count: 1, request_count: 2 },
+        { stream_type: "v", session_count: 1, request_count: 1 },
+      ]);
     }
     await engine.reset();
   });

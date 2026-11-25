@@ -242,8 +242,8 @@ export function LatencyHeatmap({
               />
             </div>
             <div className="flex justify-between w-full mt-1 text-[10px] uppercase font-bold text-muted-foreground">
-              <span>TTFB</span>
-              <span>TTLB</span>
+              <span>TTFB{summary.data?.ottfb_p50_ms != null ? ` (${summary.data.ottfb_p50_ms.toFixed(1)}ms)` : ''}</span>
+              <span>TTLB{summary.data?.ottlb_p50_ms != null ? ` (${summary.data.ottlb_p50_ms.toFixed(1)}ms)` : ''}</span>
             </div>
           </div>
         </AnalyticsCard>

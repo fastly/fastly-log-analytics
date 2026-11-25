@@ -268,6 +268,8 @@ SECTIONS = (
     "object_type_dist",
     "streaming_format_dist",
     "session_duration_dist",
+    "bitrate_ladder",
+    "stream_type_dist",
 )
 
 
@@ -277,7 +279,7 @@ class TestWireCmcd:
         present = {
             "events": 9,
             "sessions": 3,
-            **{f"has_{k}": 1 for k in ("bl", "br", "bs", "mtp", "ot", "sf", "su", "tb", "cid", "country", "asn")},
+            **{f"has_{k}": 1 for k in ("bl", "br", "bs", "mtp", "ot", "sf", "st", "su", "tb", "cid", "country", "asn")},
         }
         bucket = "2026-09-14 10:05:00"
         canned = {
@@ -366,6 +368,26 @@ class TestWireCmcd:
                     "kind": "sf",
                     "k": "h",
                     "session_count": 3,
+                    "rebuffer_rate": None,
+                    "avg_br": None,
+                    "avg_bl": None,
+                    "median_mtp": None,
+                },
+                {
+                    "kind": "ladder",
+                    "k": "3",
+                    "session_count": 2,
+                    "request_count": 6,
+                    "rebuffer_rate": 16.67,
+                    "avg_br": 4000.0,
+                    "avg_bl": None,
+                    "median_mtp": None,
+                },
+                {
+                    "kind": "st",
+                    "k": "v",
+                    "session_count": 3,
+                    "request_count": 9,
                     "rebuffer_rate": None,
                     "avg_br": None,
                     "avg_bl": None,

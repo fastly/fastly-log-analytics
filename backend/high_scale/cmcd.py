@@ -85,6 +85,13 @@ CacheRegistry.register("hs_cmcd_aggregates_memo", _memo.cache)
 _DEFAULT_WINDOW = timedelta(days=1)
 _BUCKET_FORMAT = "%Y-%m-%d %H:%M:%S"
 _DURATION_BUCKETS = {1: "<30s", 2: "30s–2m", 3: "2–5m", 4: "5–10m", 5: "10–30m", 6: "30m–1h", 7: ">1h"}
+_BITRATE_LADDER_TIERS = {
+    1: "< 1 Mbps (SD)",
+    2: "1–2.5 Mbps (720p)",
+    3: "2.5–5 Mbps (1080p)",
+    4: "5–10 Mbps (1440p)",
+    5: "10+ Mbps (4K)",
+}
 _FILTER_COLUMNS = {"country": "country", "asn": "asn"}
 _EVENTS_SELECT = """
     SELECT event_timestamp AS ts,
@@ -92,6 +99,7 @@ _EVENTS_SELECT = """
            cmcd['cid'] AS cid,
            cmcd['ot'] AS ot,
            cmcd['sf'] AS sf,
+           cmcd['st'] AS st,
            country,
            {asn_expr},
            toFloat64OrNull(cmcd['bl']) AS bl,
@@ -329,6 +337,7 @@ def _cmcd_aggregates_compute(
         "countIf(mtp IS NOT NULL) AS has_mtp",
         "countIf(ot != '') AS has_ot",
         "countIf(sf != '') AS has_sf",
+        "countIf(st != '') AS has_st",
         "countIf(su IS NOT NULL) AS has_su",
         "countIf(tb IS NOT NULL) AS has_tb",
         "countIf(cid != '') AS has_cid",
@@ -353,7 +362,10 @@ def _cmcd_aggregates_compute(
     )[0]
     if not int(probe["events"] or 0):
         return empty_cmcd_aggregates(available=True, section_timings=trace.timings())
-    has = {key: bool(int(probe[f"has_{key}"] or 0)) for key in ("bl", "br", "bs", "mtp", "ot", "sf", "su", "tb", "cid")}
+    has = {
+        key: bool(int(probe.get(f"has_{key}") or 0))
+        for key in ("bl", "br", "bs", "mtp", "ot", "sf", "st", "su", "tb", "cid")
+    }
     # cmcd_bs is a sparse flag (1/true only on starvation, empty/NULL otherwise), so buffer-length
     # telemetry proves starvation tracking is active even in healthy windows with zero starvations.
     has_bs_effective = has["bs"] or has["bl"]
@@ -588,10 +600,13 @@ def _cmcd_aggregates_compute(
     want_asn = wanted("rebuffer_by_asn") and has_asn and has_bs_effective
     want_ot = wanted("object_type_dist") and has["ot"]
     want_sf = wanted("streaming_format_dist") and has["sf"]
+    want_ladder = wanted("bitrate_ladder") and has["br"]
+    want_st = wanted("stream_type_dist") and has["st"]
     breakdown_branches: list[str] = []
     if want_content:
         breakdown_branches.append(
             "SELECT * FROM (SELECT 'content' AS kind, cid AS k, toUInt64(count()) AS session_count, "
+            "toUInt64(0) AS request_count, "
             "toNullable(sum(had_rebuffer) * 100.0 / nullIf(count(), 0)) AS rebuffer_rate, "
             "toNullable(sumIf(avg_br * br_reqs, avg_br IS NOT NULL) / nullIf(sumIf(br_reqs, avg_br IS NOT NULL), 0)) AS avg_br, "
             "toNullable(sumIf(avg_bl * bl_reqs, avg_bl IS NOT NULL) / nullIf(sumIf(bl_reqs, avg_bl IS NOT NULL), 0)) AS avg_bl, "
@@ -605,6 +620,7 @@ def _cmcd_aggregates_compute(
     if want_country:
         breakdown_branches.append(
             "SELECT * FROM (SELECT 'country' AS kind, country AS k, toUInt64(count()) AS session_count, "
+            "toUInt64(0) AS request_count, "
             "toNullable(sum(had_rebuffer) * 100.0 / nullIf(count(), 0)) AS rebuffer_rate, "
             "CAST(NULL, 'Nullable(Float64)') AS avg_br, CAST(NULL, 'Nullable(Float64)') AS avg_bl, "
             "toNullable(sumIf(median_mtp * mtp_reqs, median_mtp IS NOT NULL) / nullIf(sumIf(mtp_reqs, median_mtp IS NOT NULL), 0)) AS median_mtp FROM ("
@@ -616,6 +632,7 @@ def _cmcd_aggregates_compute(
     if want_asn:
         breakdown_branches.append(
             "SELECT * FROM (SELECT 'asn' AS kind, toString(asn) AS k, toUInt64(count()) AS session_count, "
+            "toUInt64(0) AS request_count, "
             "toNullable(sum(had_rebuffer) * 100.0 / nullIf(count(), 0)) AS rebuffer_rate, "
             "toNullable(sumIf(avg_br * br_reqs, avg_br IS NOT NULL) / nullIf(sumIf(br_reqs, avg_br IS NOT NULL), 0)) AS avg_br, "
             "toNullable(sumIf(avg_bl * bl_reqs, avg_bl IS NOT NULL) / nullIf(sumIf(bl_reqs, avg_bl IS NOT NULL), 0)) AS avg_bl, "
@@ -628,17 +645,40 @@ def _cmcd_aggregates_compute(
         )
     if want_ot:
         breakdown_branches.append(
-            "SELECT 'ot' AS kind, ot AS k, toUInt64(count()) AS session_count, "
+            "SELECT 'ot' AS kind, ot AS k, toUInt64(count()) AS session_count, toUInt64(count()) AS request_count, "
             "CAST(NULL, 'Nullable(Float64)') AS rebuffer_rate, CAST(NULL, 'Nullable(Float64)') AS avg_br, "
             "CAST(NULL, 'Nullable(Float64)') AS avg_bl, CAST(NULL, 'Nullable(Float64)') AS median_mtp "
             f"FROM ({events}) WHERE ot != '' GROUP BY ot"
         )
     if want_sf:
         breakdown_branches.append(
-            "SELECT 'sf' AS kind, sf AS k, toUInt64(uniqExact(sid)) AS session_count, "
+            "SELECT 'sf' AS kind, sf AS k, toUInt64(uniqExact(sid)) AS session_count, toUInt64(count()) AS request_count, "
             "CAST(NULL, 'Nullable(Float64)') AS rebuffer_rate, CAST(NULL, 'Nullable(Float64)') AS avg_br, "
             "CAST(NULL, 'Nullable(Float64)') AS avg_bl, CAST(NULL, 'Nullable(Float64)') AS median_mtp "
             f"FROM ({events}) WHERE sf != '' GROUP BY sf"
+        )
+    if want_ladder:
+        reb_expr = (
+            "toNullable(countIf(bs = 1) * 100.0 / nullIf(count(), 0)) AS rebuffer_rate, "
+            if has_bs_effective
+            else "CAST(NULL, 'Nullable(Float64)') AS rebuffer_rate, "
+        )
+        breakdown_branches.append(
+            "SELECT 'ladder' AS kind, "
+            "toString(multiIf(br < 1000, 1, br < 2500, 2, br < 5000, 3, br < 10000, 4, 5)) AS k, "
+            "toUInt64(uniqExactIf(sid, sid != '')) AS session_count, toUInt64(count()) AS request_count, "
+            f"{reb_expr}"
+            "toNullable(avg(br)) AS avg_br, CAST(NULL, 'Nullable(Float64)') AS avg_bl, "
+            "CAST(NULL, 'Nullable(Float64)') AS median_mtp "
+            f"FROM ({events}) WHERE ({video}) AND br IS NOT NULL AND br > 0 GROUP BY k"
+        )
+    if want_st:
+        breakdown_branches.append(
+            "SELECT 'st' AS kind, st AS k, toUInt64(uniqExactIf(sid, sid != '')) AS session_count, "
+            "toUInt64(count()) AS request_count, "
+            "CAST(NULL, 'Nullable(Float64)') AS rebuffer_rate, CAST(NULL, 'Nullable(Float64)') AS avg_br, "
+            "CAST(NULL, 'Nullable(Float64)') AS avg_bl, CAST(NULL, 'Nullable(Float64)') AS median_mtp "
+            f"FROM ({events}) WHERE st != '' GROUP BY st"
         )
     if breakdown_branches:
 
@@ -708,6 +748,35 @@ def _cmcd_aggregates_compute(
                 )
                 out["streaming_format_dist"] = [
                     {"streaming_format": row["k"], "session_count": int(row["session_count"])} for row in sf_rows
+                ]
+            if want_ladder:
+                ladder_rows = sorted(
+                    by_kind.get("ladder", []),
+                    key=lambda r: int(r["k"]),
+                )
+                out["bitrate_ladder"] = [
+                    {
+                        "tier": _BITRATE_LADDER_TIERS[int(row["k"])],
+                        "request_count": int(row.get("request_count") or 0),
+                        "session_count": int(row["session_count"]),
+                        "avg_bitrate": _round(row.get("avg_br")),
+                        "rebuffer_rate": _round(row.get("rebuffer_rate")) if has_bs_effective else None,
+                    }
+                    for row in ladder_rows
+                    if int(row["k"]) in _BITRATE_LADDER_TIERS
+                ]
+            if want_st:
+                st_rows = sorted(
+                    by_kind.get("st", []),
+                    key=lambda r: (-int(r["session_count"]), str(r["k"])),
+                )
+                out["stream_type_dist"] = [
+                    {
+                        "stream_type": row["k"],
+                        "session_count": int(row["session_count"]),
+                        "request_count": int(row.get("request_count") or 0),
+                    }
+                    for row in st_rows
                 ]
             return out
 

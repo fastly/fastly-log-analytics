@@ -52075,6 +52075,22 @@
             "type": "array",
             "title": "Session Duration Dist",
             "default": []
+          },
+          "bitrate_ladder": {
+            "items": {
+              "$ref": "#/components/schemas/CmcdBitrateLadderRow"
+            },
+            "type": "array",
+            "title": "Bitrate Ladder",
+            "default": []
+          },
+          "stream_type_dist": {
+            "items": {
+              "$ref": "#/components/schemas/CmcdStreamTypeRow"
+            },
+            "type": "array",
+            "title": "Stream Type Dist",
+            "default": []
           }
         },
         "type": "object",
@@ -52082,6 +52098,52 @@
           "available"
         ],
         "title": "CmcdAggregatesResponse"
+      },
+      "CmcdBitrateLadderRow": {
+        "properties": {
+          "tier": {
+            "type": "string",
+            "title": "Tier"
+          },
+          "request_count": {
+            "type": "integer",
+            "title": "Request Count"
+          },
+          "session_count": {
+            "type": "integer",
+            "title": "Session Count"
+          },
+          "avg_bitrate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Bitrate"
+          },
+          "rebuffer_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rebuffer Rate"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "tier",
+          "request_count",
+          "session_count"
+        ],
+        "title": "CmcdBitrateLadderRow"
       },
       "CmcdBitratePoint": {
         "properties": {
@@ -52493,7 +52555,9 @@
                     "object_type_dist",
                     "streaming_format_dist",
                     "startup_ts",
-                    "session_duration_dist"
+                    "session_duration_dist",
+                    "bitrate_ladder",
+                    "stream_type_dist"
                   ]
                 },
                 "type": "array"
@@ -52668,6 +52732,30 @@
         ],
         "title": "CmcdStatusResponse",
         "description": "``GET /api/services/{id}/cmcd/status``; only ``enabled`` is set when CMCD is off."
+      },
+      "CmcdStreamTypeRow": {
+        "properties": {
+          "stream_type": {
+            "type": "string",
+            "title": "Stream Type"
+          },
+          "session_count": {
+            "type": "integer",
+            "title": "Session Count"
+          },
+          "request_count": {
+            "type": "integer",
+            "title": "Request Count"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "stream_type",
+          "session_count",
+          "request_count"
+        ],
+        "title": "CmcdStreamTypeRow"
       },
       "CmcdStreamingFormatRow": {
         "properties": {

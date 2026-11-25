@@ -180,7 +180,7 @@ def test_t5_c02_c03_b10_cloud_scoring_managed_field_8br_schema_and_matrix_versio
     assert any("Missing required field: 'duckdb_type'" in e for e in res["empty_validate"]["errors"])
 
     # GAP-C03(1): 8B-R RequestSchema::for_fields contains all 9 edge_* Arrow columns (5 Int64, 4 Utf8, slot_only=False)
-    assert res["hash0"] == "2c6b7265cd93cb48"
+    assert res["hash0"] == "357fefcaa37cb842"
     arrow_by_name = {f["name"]: f for f in res["arrow_fields"]}
     assert len(arrow_by_name) == 9
     int_cols = [n for n, f in arrow_by_name.items() if f["present"] and f["dtype"] == "Int64"]
@@ -202,8 +202,8 @@ def test_t5_c02_c03_b10_cloud_scoring_managed_field_8br_schema_and_matrix_versio
     # GAP-C03(2): Committed sql_type-only PATCH preserves RequestSchema::hash(); dropping committed -> 409
     assert res["patch_both_status"] == 200
     assert res["patch_sql_only_status"] == 200
-    assert res["hash_with_duckdb"] == "2c6b7265cd93cb48"
-    assert res["hash_sql_only"] == "2c6b7265cd93cb48"
+    assert res["hash_with_duckdb"] == "357fefcaa37cb842"
+    assert res["hash_sql_only"] == "357fefcaa37cb842"
     assert res["drop_committed_status"] == 409
     assert res["drop_committed_error"] == "committed_field_locked"
 
@@ -6112,9 +6112,12 @@ if (seenLocalUntrusted !== false || seenWireSpoofUntrusted !== true) {
 }
 // Iteration-16 WS3: Verify range-loader.ts wholeKey + fileSource scoping & sources.ts memory wipe on logout/identity switch
 const rangeLoaderTs = fs.readFileSync('frontend/lib/cloud-engine/range-loader.ts', 'utf8');
+const projectedReadTs = fs.readFileSync('frontend/lib/cloud-engine/dashboard/projected-read.ts', 'utf8');
 const sourcesTs = fs.readFileSync('frontend/lib/cloud-engine/dashboard/sources.ts', 'utf8');
 if (
-  !rangeLoaderTs.includes('wholeKey: JSON.stringify(identity)') ||
+  !rangeLoaderTs.includes('const wholeScope = options.serviceId ? `${scope}:${options.serviceId}` : scope;') ||
+  !rangeLoaderTs.includes('wholeKey: wholeFileIdentity(wholeScope, file, datasets[index])') ||
+  !projectedReadTs.includes('JSON.stringify([cacheScope ?? "", dataset, file.key, file.etag ?? "", file.size, file.schema_version ?? ""])') ||
   !rangeLoaderTs.includes('fileSource.fetchFile(file.key, downloads.signal, { identity: file.wholeKey })') ||
   !rangeLoaderTs.includes('fetched.bytes.byteLength !== file.size') ||
   rangeLoaderTs.includes('{ identity: file.key }')

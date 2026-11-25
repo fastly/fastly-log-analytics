@@ -121,6 +121,14 @@ export const STREAMING_INFO = {
     title: 'Rebuffer Rate by ASN',
     body: <p className="text-sm text-muted-foreground">Rebuffer rate broken down by the viewer&apos;s Autonomous System (ISP/network provider). Useful for identifying ISP-specific delivery issues — e.g., a single ISP with a disproportionately high rebuffer rate may indicate a peering or last-mile problem.</p>,
   },
+  bitrate_ladder: {
+    title: 'ABR Bitrate Ladder',
+    body: <p className="text-sm text-muted-foreground">Video segment requests grouped by encoded bitrate tier (<code>br</code>), along with session reach and starvation rate per rendition tier.</p>,
+  },
+  stream_type_dist: {
+    title: 'Stream Type Distribution',
+    body: <p className="text-sm text-muted-foreground">Split of CMCD playback sessions and segment requests between Live (<code>l</code>) and VOD (<code>v</code>) streams via the CMCD <code>st</code> key.</p>,
+  },
 }
 
 export const SESSIONS_LAYOUT: PlotlyLayout = {
@@ -179,4 +187,16 @@ export const REBUFFER_ASN_COLUMNS = [
 export const STREAMING_FORMAT_COLUMNS = [
   { accessorKey: 'streaming_format', header: 'Format' },
   { accessorKey: 'session_count', header: 'Sessions' },
+]
+export const BITRATE_LADDER_COLUMNS = [
+  { accessorKey: 'tier', header: 'Bitrate Tier' },
+  { accessorKey: 'session_count', header: 'Sessions', cell: ({ getValue }: { getValue: () => unknown }) => formatRoundedMetric(getValue()) },
+  { accessorKey: 'request_count', header: 'Segments', cell: ({ getValue }: { getValue: () => unknown }) => formatRoundedMetric(getValue()) },
+  { accessorKey: 'avg_bitrate', header: 'Avg Bitrate (kbps)', cell: ({ getValue }: { getValue: () => unknown }) => formatRoundedMetric(getValue()) },
+  { accessorKey: 'rebuffer_rate', header: 'Starvation %', cell: ({ getValue }: { getValue: () => unknown }) => formatRebufferRate(getValue()) },
+]
+export const STREAM_TYPE_COLUMNS = [
+  { accessorKey: 'stream_type', header: 'Stream Type' },
+  { accessorKey: 'session_count', header: 'Sessions', cell: ({ getValue }: { getValue: () => unknown }) => formatRoundedMetric(getValue()) },
+  { accessorKey: 'request_count', header: 'Requests', cell: ({ getValue }: { getValue: () => unknown }) => formatRoundedMetric(getValue()) },
 ]

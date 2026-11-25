@@ -568,7 +568,7 @@ def test_session_filters_fencing_sorting_paging_and_flags() -> None:
 
 @pytest.mark.no_postgres
 def test_session_ctes_avoid_sibling_select_aliases_for_clickhouse_24_8() -> None:
-    """ClickHouse 24.8 rejects GROUP BY SELECT lists referencing sibling aliases."""
+    """ClickHouse 24.8 rejects GROUP BY SELECT lists referencing sibling aliases and untyped/mixed if() branches."""
     import re
 
     expected_aliases = {
@@ -587,6 +587,14 @@ def test_session_ctes_avoid_sibling_select_aliases_for_clickhouse_24_8() -> None
             assert not re.search(rf"\b{alias}\b", without_decl), (
                 f"{cte_name} references sibling alias {alias} in pair_grouped SELECT"
             )
+        raw_m = re.search(r"WITH raw_events AS \(\s*SELECT(.*?)FROM request_facts", cte, re.DOTALL)
+        assert raw_m is not None, cte_name
+        assert "AS edge," not in raw_m.group(1) and "AS status," not in raw_m.group(1), cte_name
+        assert ", []" not in cte and ",\n                []" not in cte, (
+            f"{cte_name} contains untyped [] literal inside if()"
+        )
+        assert "starts[sess_idx + 1] - 1, length(" not in cte
+        assert "starts[sess_idx + 1] - starts[sess_idx], length(" not in cte
         assert "pair_sorted AS (" in cte and "pair_sessions AS (" in cte
 
 

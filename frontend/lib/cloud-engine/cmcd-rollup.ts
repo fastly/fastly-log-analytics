@@ -250,7 +250,8 @@ export function cmcdRollupEligible(params: CmcdQueryParams): boolean {
     params.filter_ot ||
     params.filter_st ||
     params.filter_cid ||
-    hasFilterValues(params.filters)
+    hasFilterValues(params.filters) ||
+    params.sections?.some((s) => s === "bitrate_ladder" || s === "stream_type_dist")
   ) {
     return false;
   }
@@ -970,5 +971,7 @@ async function cmcdFromFiles(
     object_type_dist,
     streaming_format_dist,
     session_duration_dist,
+    bitrate_ladder: [],
+    stream_type_dist: [],
   };
 }

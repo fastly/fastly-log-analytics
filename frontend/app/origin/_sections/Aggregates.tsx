@@ -3,7 +3,7 @@
 import React from 'react'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { cn, formatCount } from '@/lib/utils'
+import { cn, formatBytes, formatCount } from '@/lib/utils'
 import type { components } from '@/types/api'
 
 export type OriginAggregates = components['schemas']['OriginAggregatesResponse']
@@ -61,7 +61,28 @@ export function Aggregates({ summary }: { summary: SectionQuery<OriginSummary> }
       title: 'Origin TTFB (P95)',
       help: 'The 95th percentile of backend response times. Indicates the tail latency experienced by the slowest 5% of requests.',
       value: msValue(d?.ottfb_p95_ms),
-      sub: 'Tail latency (95th percentile)',
+      sub: d?.ottfb_p75_ms != null ? `P75: ${msValue(d.ottfb_p75_ms)} · 95th percentile` : 'Tail latency (95th percentile)',
+      danger: false,
+    },
+    {
+      title: 'Origin TTFB (P99)',
+      help: 'The 99th percentile of backend first-byte latency. Highlights worst-case origin stalls, cold starts, or database lock contention.',
+      value: msValue(d?.ottfb_p99_ms),
+      sub: 'Extreme tail latency (slowest 1%)',
+      danger: false,
+    },
+    {
+      title: 'Origin TTLB (P95)',
+      help: '95th percentile total time from forwarding the request until the final response byte arrives from your origin. A wide gap above Origin TTFB points to large payloads or slow upstream bandwidth.',
+      value: msValue(d?.ottlb_p95_ms),
+      sub: d?.ottlb_p50_ms != null ? `Median (P50): ${msValue(d.ottlb_p50_ms)}` : 'Full origin transfer time (95th pct)',
+      danger: false,
+    },
+    {
+      title: 'CDN Overhead (P50)',
+      help: 'Median difference between total Fastly request elapsed time and origin TTLB (elapsed − ottlb), isolating Fastly processing and client-delivery overhead from origin latency.',
+      value: msValue(d?.cdn_overhead_p50_ms),
+      sub: 'Median Fastly edge/shield delta',
       danger: false,
     },
     {
@@ -75,7 +96,14 @@ export function Aggregates({ summary }: { summary: SectionQuery<OriginSummary> }
       title: 'Fetch Volume',
       help: 'The total number of requests sent to the backend (cache misses and passes) during this time window.',
       value: d ? formatCount((d.total_misses || 0) + (d.total_passes || 0)) : '—',
-      sub: 'Total cache misses & passes',
+      sub: d ? `${formatCount(d.total_misses || 0)} misses · ${formatCount(d.total_passes || 0)} passes` : 'Total cache misses & passes',
+      danger: false,
+    },
+    {
+      title: 'Origin Payload (P50)',
+      help: 'Median size of response payloads fetched from your origin across cache misses and passes.',
+      value: d?.obytes_p50 != null ? formatBytes(d.obytes_p50) : '—',
+      sub: 'Median backend response bytes',
       danger: false,
     },
   ]

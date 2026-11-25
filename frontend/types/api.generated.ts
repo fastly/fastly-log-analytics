@@ -6923,6 +6923,31 @@ export interface components {
              * @default []
              */
             session_duration_dist: components["schemas"]["CmcdSessionDurationRow"][];
+            /**
+             * Bitrate Ladder
+             * @default []
+             */
+            bitrate_ladder: components["schemas"]["CmcdBitrateLadderRow"][];
+            /**
+             * Stream Type Dist
+             * @default []
+             */
+            stream_type_dist: components["schemas"]["CmcdStreamTypeRow"][];
+        };
+        /** CmcdBitrateLadderRow */
+        CmcdBitrateLadderRow: {
+            /** Tier */
+            tier: string;
+            /** Request Count */
+            request_count: number;
+            /** Session Count */
+            session_count: number;
+            /** Avg Bitrate */
+            avg_bitrate?: number | null;
+            /** Rebuffer Rate */
+            rebuffer_rate?: number | null;
+        } & {
+            [key: string]: unknown;
         };
         /** CmcdBitratePoint */
         CmcdBitratePoint: {
@@ -7061,7 +7086,7 @@ export interface components {
              */
             top_n: number;
             /** Sections */
-            sections?: ("overview" | "sessions_ts" | "buffer_health_ts" | "bitrate_ts" | "throughput_ts" | "top_content" | "rebuffer_by_country" | "rebuffer_by_asn" | "object_type_dist" | "streaming_format_dist" | "startup_ts" | "session_duration_dist")[] | null;
+            sections?: ("overview" | "sessions_ts" | "buffer_health_ts" | "bitrate_ts" | "throughput_ts" | "top_content" | "rebuffer_by_country" | "rebuffer_by_asn" | "object_type_dist" | "streaming_format_dist" | "startup_ts" | "session_duration_dist" | "bitrate_ladder" | "stream_type_dist")[] | null;
         };
         /** CmcdSessionDurationRow */
         CmcdSessionDurationRow: {
@@ -7122,6 +7147,17 @@ export interface components {
             version?: number | null;
             /** Enabled At */
             enabled_at?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** CmcdStreamTypeRow */
+        CmcdStreamTypeRow: {
+            /** Stream Type */
+            stream_type: string;
+            /** Session Count */
+            session_count: number;
+            /** Request Count */
+            request_count: number;
         } & {
             [key: string]: unknown;
         };

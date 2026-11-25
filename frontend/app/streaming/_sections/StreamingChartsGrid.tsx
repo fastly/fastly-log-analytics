@@ -7,6 +7,7 @@ import { AnalyticsCard, TimeSeriesChart, type AnalyticsCardError } from '@/compo
 import { DataTable } from '@/components/DataTable'
 import type { components, PlotlyTrace } from '@/types/api'
 import {
+  BITRATE_LADDER_COLUMNS,
   BITRATE_LAYOUT,
   BUFFER_LAYOUT,
   CONTENT_COLUMNS,
@@ -20,10 +21,13 @@ import {
   STARTUP_LAYOUT,
   STREAMING_FORMAT_COLUMNS,
   STREAMING_INFO,
+  STREAM_TYPE_COLUMNS,
   THROUGHPUT_LAYOUT,
 } from './StreamingConstants'
 
 type CmcdAggregatesResponse = components['schemas']['CmcdAggregatesResponse']
+type CmcdBitrateLadderRow = NonNullable<CmcdAggregatesResponse['bitrate_ladder']>[number]
+type CmcdStreamTypeRow = NonNullable<CmcdAggregatesResponse['stream_type_dist']>[number]
 
 export interface StreamingChartsGridProps {
   data: CmcdAggregatesResponse | undefined
@@ -48,6 +52,8 @@ export interface StreamingChartsGridProps {
   durationDistData: PlotlyTrace[]
   objectTypeData: PlotlyTrace[]
   streamingFormatRows: Array<{ streaming_format: string; session_count: number }>
+  bitrateLadderRows: CmcdBitrateLadderRow[]
+  streamTypeRows: CmcdStreamTypeRow[]
 }
 
 export function StreamingChartsGrid({
@@ -63,6 +69,8 @@ export function StreamingChartsGrid({
   durationDistData,
   objectTypeData,
   streamingFormatRows,
+  bitrateLadderRows,
+  streamTypeRows,
 }: StreamingChartsGridProps) {
   return (
     <>
@@ -196,7 +204,7 @@ export function StreamingChartsGrid({
         </AnalyticsCard>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
         <AnalyticsCard
           title="Rebuffer Rate by Country"
           icon={<Globe className="h-4 w-4" />}
@@ -217,6 +225,30 @@ export function StreamingChartsGrid({
           helpContent={STREAMING_INFO.rebuffer_by_asn.body}
         >
           <DataTable columns={REBUFFER_ASN_COLUMNS} data={data?.rebuffer_by_asn ?? EMPTY_ROWS} />
+        </AnalyticsCard>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <AnalyticsCard
+          title="ABR Bitrate Ladder"
+          icon={<Gauge className="h-4 w-4" />}
+          {...queryStatus}
+          isEmpty={!bitrateLadderRows.length}
+          helpTitle={STREAMING_INFO.bitrate_ladder.title}
+          helpContent={STREAMING_INFO.bitrate_ladder.body}
+        >
+          <DataTable columns={BITRATE_LADDER_COLUMNS} data={bitrateLadderRows} />
+        </AnalyticsCard>
+
+        <AnalyticsCard
+          title="Stream Type (Live vs VOD)"
+          icon={<Play className="h-4 w-4" />}
+          {...queryStatus}
+          isEmpty={!streamTypeRows.length}
+          helpTitle={STREAMING_INFO.stream_type_dist.title}
+          helpContent={STREAMING_INFO.stream_type_dist.body}
+        >
+          <DataTable columns={STREAM_TYPE_COLUMNS} data={streamTypeRows} />
         </AnalyticsCard>
       </div>
     </>

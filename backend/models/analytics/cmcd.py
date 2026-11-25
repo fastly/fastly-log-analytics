@@ -24,6 +24,8 @@ CmcdSectionName = Literal[
     "streaming_format_dist",
     "startup_ts",
     "session_duration_dist",
+    "bitrate_ladder",
+    "stream_type_dist",
 ]
 
 
@@ -119,6 +121,20 @@ class CmcdSessionDurationRow(WireSafeModel):
     session_count: int
 
 
+class CmcdBitrateLadderRow(WireSafeModel):
+    tier: str
+    request_count: int
+    session_count: int
+    avg_bitrate: float | None = None
+    rebuffer_rate: float | None = None
+
+
+class CmcdStreamTypeRow(WireSafeModel):
+    stream_type: str
+    session_count: int
+    request_count: int
+
+
 class CmcdAggregatesResponse(BaseResponse):
     available: bool
     has_data: bool = True
@@ -134,3 +150,5 @@ class CmcdAggregatesResponse(BaseResponse):
     sessions_ts: list[CmcdSessionsPoint] = []
     startup_ts: list[CmcdStartupPoint] = []
     session_duration_dist: list[CmcdSessionDurationRow] = []
+    bitrate_ladder: list[CmcdBitrateLadderRow] = []
+    stream_type_dist: list[CmcdStreamTypeRow] = []

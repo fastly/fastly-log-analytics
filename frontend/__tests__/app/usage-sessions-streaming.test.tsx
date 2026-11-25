@@ -740,10 +740,26 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
             avg_buffer_length: 3958.4825789645065,
           },
         ],
+        bitrate_ladder: [
+          { tier: '2.5–5 Mbps (1080p)', session_count: 10, request_count: 42, avg_bitrate: 3800, rebuffer_rate: 1.5 },
+        ],
+        stream_type_dist: [
+          { stream_type: 'l', session_count: 8, request_count: 35 },
+          { stream_type: 'v', session_count: 4, request_count: 12 },
+        ],
       },
     } as never)
     renderWithQuery(<StreamingClient />, { queryClient })
     expect(await screen.findByText('live-stream-1')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /Inspect Streaming Sessions/i })).toHaveAttribute(
+      'href',
+      expect.stringContaining('/sessions?streaming=true'),
+    )
+    expect(screen.getByText('ABR Bitrate Ladder')).toBeInTheDocument()
+    expect(screen.getByText('2.5–5 Mbps (1080p)')).toBeInTheDocument()
+    expect(screen.getByText('Stream Type (Live vs VOD)')).toBeInTheDocument()
+    expect(screen.getByText('Live')).toBeInTheDocument()
+    expect(screen.getByText('VOD')).toBeInTheDocument()
     const row = screen.getByText('live-stream-1').closest('tr')
     expect(row).not.toBeNull()
     expect(within(row!).getByText('2,396')).toBeInTheDocument()
