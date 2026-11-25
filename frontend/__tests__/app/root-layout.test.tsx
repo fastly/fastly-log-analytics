@@ -1,20 +1,24 @@
 /**
- * Verifies RootLayout streams its shell immediately without awaiting /api/bootstrap
- * and hydrates streamed bootstrap data safely on the client.
+ * Verifies RootLayout awaits fetchBootstrapServerSide() synchronously before rendering
+ * so SSR routes receive dehydrated bootstrap state and sidebar metadata in the initial HTML,
+ * while guarding cookies()/headers() during STATIC_EXPORT builds.
  *
  * @vitest-environment jsdom
  */
 import React from 'react'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { render, waitFor } from '@testing-library/react'
-import { QueryClient, QueryClientProvider, dehydrate } from '@tanstack/react-query'
-import { queryKeys } from '@/lib/api'
-import { StreamedBootstrapSeed } from '@/components/QueryProvider'
 
 const { fetchBootstrapMock, cookiesMock, headersMock } = vi.hoisted(() => ({
   fetchBootstrapMock: vi.fn(),
   cookiesMock: vi.fn(async () => ({ get: () => undefined })),
-  headersMock: vi.fn(async () => new Headers({ host: 'fastly-log-analytics.example.com', 'x-proxied-by-caddy': 'true', 'x-nonce': 'nonce-123' })),
+  headersMock: vi.fn(
+    async () =>
+      new Headers({
+        host: 'fastly-log-analytics.example.com',
+        'x-proxied-by-caddy': 'true',
+        'x-nonce': 'nonce-123',
+      }),
+  ),
 }))
 
 vi.mock('next/font/google', () => ({
@@ -35,16 +39,12 @@ vi.mock('@/components/AppLayout', () => ({
 vi.mock('@/components/ServerFooter', () => ({
   ServerFooter: () => <footer data-testid="server-footer" />,
 }))
-vi.mock('@/components/QueryProvider', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/components/QueryProvider')>()
-  return {
-    ...actual,
-    default: ({ children }: { children: React.ReactNode }) => <div data-testid="query-provider">{children}</div>,
-    ReloadLoopGuard: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-    StoreHydrator: () => null,
-    WebVitalsReporter: () => null,
-  }
-})
+vi.mock('@/components/QueryProvider', () => ({
+  default: ({ children }: { children: React.ReactNode }) => <div data-testid="query-provider">{children}</div>,
+  ReloadLoopGuard: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+  StoreHydrator: () => null,
+  WebVitalsReporter: () => null,
+}))
 vi.mock('@/components/AnalyticsCard', () => ({
   ErrorBoundaryWithRouteReset: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }))
@@ -57,83 +57,41 @@ vi.mock('@/lib/ssr/upstream', async (importOriginal) => {
 })
 
 import RootLayout from '@/app/layout'
-import { BootstrapHydration } from '@/components/BootstrapHydration'
 
-describe('RootLayout streaming bootstrap shell', () => {
+describe('RootLayout synchronous SSR bootstrap', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    delete process.env.STATIC_EXPORT
   })
 
-  it('resolves RootLayout shell synchronously without waiting for fetchBootstrapServerSide', async () => {
-    fetchBootstrapMock.mockImplementation(() => new Promise(() => {}))
+  it('hydrates bootstrap dehydratedState and RUM script before returning RootLayout HTML', async () => {
+    fetchBootstrapMock.mockResolvedValue({
+      active_service_id: 'svc-1',
+      services: [{ service_id: 'svc-1', name: 'Svc 1', rum_enabled: true, cmcd_enabled: true }],
+    })
+
+    const tree = (await RootLayout({ children: <div>Child page</div> })) as React.ReactElement<{
+      children: [React.ReactElement<{ children: React.ReactNode[] }>, React.ReactElement]
+    }>
+    expect(fetchBootstrapMock).toHaveBeenCalledTimes(1)
+
+    const head = tree.props.children[0]
+    const headChildren = React.Children.toArray(head.props.children) as React.ReactElement<{
+      src?: string
+      nonce?: string
+    }>[]
+    const rumScript = headChildren.find((child) => child?.props?.src === '/js/rum.js')
+    expect(rumScript).toBeDefined()
+    expect(rumScript?.props?.nonce).toBe('nonce-123')
+  })
+
+  it('skips cookies() and headers() when STATIC_EXPORT=1', async () => {
+    process.env.STATIC_EXPORT = '1'
+    fetchBootstrapMock.mockResolvedValue(null)
 
     const tree = await RootLayout({ children: <div>Child page</div> })
     expect(tree).toBeTruthy()
-    expect(fetchBootstrapMock).not.toHaveBeenCalled()
-  })
-
-  it('BootstrapHydration emits RUM script and StreamedBootstrapSeed when bootstrap resolves', async () => {
-    const bootstrapPayload = {
-      active_service_id: 'svc-1',
-      services: [{ service_id: 'svc-1', name: 'Svc 1', rum_enabled: true }],
-    }
-    fetchBootstrapMock.mockResolvedValue(bootstrapPayload)
-
-    const el = await BootstrapHydration({
-      host: 'fastly-log-analytics.example.com',
-      proxiedByCaddy: true,
-      nonce: 'nonce-123',
-    })
-    const queryClient = new QueryClient()
-    const { container, unmount } = render(
-      <QueryClientProvider client={queryClient}>{el}</QueryClientProvider>,
-    )
-
-    try {
-      const script =
-        document.head.querySelector('script[src="/js/rum.js"]') ??
-        container.querySelector('script[src="/js/rum.js"]')
-      expect(script).not.toBeNull()
-      expect(script?.getAttribute('nonce')).toBe('nonce-123')
-      await waitFor(() => {
-        expect(queryClient.getQueryData(queryKeys.bootstrap())).toEqual(bootstrapPayload)
-      })
-    } finally {
-      unmount()
-      for (const node of document.head.querySelectorAll('script[src="/js/rum.js"]')) {
-        node.remove()
-      }
-    }
-  })
-
-  it('StreamedBootstrapSeed hydrates query cache without overwriting fresher client data', async () => {
-    const serverClient = new QueryClient()
-    serverClient.setQueryData(queryKeys.bootstrap(), { active_service_id: 'svc-ssr', services: [] })
-    const dehydrated = dehydrate(serverClient)
-
-    const clientA = new QueryClient()
-    render(
-      <QueryClientProvider client={clientA}>
-        <StreamedBootstrapSeed state={dehydrated} />
-      </QueryClientProvider>,
-    )
-    await waitFor(() => {
-      expect(clientA.getQueryData(queryKeys.bootstrap())).toEqual({
-        active_service_id: 'svc-ssr',
-        services: [],
-      })
-    })
-
-    const clientB = new QueryClient()
-    clientB.setQueryData(queryKeys.bootstrap(), { active_service_id: 'svc-fresh', services: [] })
-    render(
-      <QueryClientProvider client={clientB}>
-        <StreamedBootstrapSeed state={dehydrated} />
-      </QueryClientProvider>,
-    )
-    expect(clientB.getQueryData(queryKeys.bootstrap())).toEqual({
-      active_service_id: 'svc-fresh',
-      services: [],
-    })
+    expect(cookiesMock).not.toHaveBeenCalled()
+    expect(headersMock).not.toHaveBeenCalled()
   })
 })

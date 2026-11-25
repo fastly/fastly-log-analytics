@@ -265,7 +265,12 @@ def share_logout(request: Request, response: Response):
     return ShareLogoutResponse(ok=True)
 
 
-def _require_analyst_session(request: Request, *, pending_first: bool = True):
+def _require_analyst_session(
+    request: Request,
+    *,
+    pending_first: bool = True,
+    allow_tos_pending: bool | None = None,
+):
     first, second = (PENDING_COOKIE_NAME, COOKIE_NAME) if pending_first else (COOKIE_NAME, PENDING_COOKIE_NAME)
     sid = request.cookies.get(first) or request.cookies.get(second)
     mgr = get_tunnel_manager()
@@ -274,7 +279,12 @@ def _require_analyst_session(request: Request, *, pending_first: bool = True):
         if not pending_first:
             mgr.record_heartbeat_unauth()
         raise HTTPException(status_code=401, detail={"error": "unauthenticated"})
-    binding_err = validate_analyst_request_binding(request, session, mgr=mgr, allow_tos_pending=pending_first)
+    binding_err = validate_analyst_request_binding(
+        request,
+        session,
+        mgr=mgr,
+        allow_tos_pending=pending_first if allow_tos_pending is None else allow_tos_pending,
+    )
     if binding_err is not None:
         status_code, err_code = binding_err
         raise HTTPException(status_code=status_code, detail={"error": err_code})
@@ -318,7 +328,9 @@ def share_acknowledge_tos(payload: TosAckPayload, request: Request, response: Re
 
 @share_auth_router.get("/heartbeat", response_model=ShareHeartbeatResponse)
 def share_heartbeat(request: Request):
-    mgr, session = _require_analyst_session(request, pending_first=False)
+    # Heartbeat must remain available while the analyst is on the ToS gate
+    # (pending cookie) while still enforcing IP whitelist and fingerprint binding.
+    mgr, session = _require_analyst_session(request, pending_first=False, allow_tos_pending=True)
     if request.headers.get("x-user-active") == "1":
         mgr.touch_session(session.session_id, last_activity="heartbeat (active)")
     return ShareHeartbeatResponse(ok=True, last_active=session.last_active_time)

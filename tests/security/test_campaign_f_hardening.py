@@ -75,11 +75,13 @@ def test_auth01_share_endpoints_enforce_fingerprint_and_ip_whitelist(_isolated_s
         hdrs = {"User-Agent": ua_legit, "Cookie": f"analyst_pending_session_id={pending_sess.session_id}"}
         assert bad_ip_client.get("/api/share/tos", headers=hdrs).status_code == 403
         assert bad_ip_client.post("/api/share/acknowledge", json={"version": "v1"}, headers=hdrs).status_code == 403
+        assert bad_ip_client.get("/api/share/heartbeat", headers=hdrs).status_code == 403
 
-    # 2. Legitimate IP + fingerprint succeeds on /tos and /acknowledge (rotates to active session).
+    # 2. Legitimate IP + fingerprint succeeds on /tos, pending /heartbeat, and /acknowledge (rotates to active session).
     with TestClient(app, client=("198.51.100.10", 50000), base_url="https://share.example.com") as legit_ip_client:
         ok_hdrs = {"User-Agent": ua_legit, "Cookie": f"analyst_pending_session_id={pending_sess.session_id}"}
         assert legit_ip_client.get("/api/share/tos", headers=ok_hdrs).status_code == 200
+        assert legit_ip_client.get("/api/share/heartbeat", headers=ok_hdrs).status_code == 200
         ack = legit_ip_client.post("/api/share/acknowledge", json={"version": "v1"}, headers=ok_hdrs)
         assert ack.status_code == 200
         rotated_sid = ack.cookies.get("analyst_session_id")
