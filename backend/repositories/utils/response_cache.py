@@ -157,6 +157,13 @@ def cache_put(cache: BoundedTTLCache, key: str, value: dict, *, strip: tuple[str
 
 
 _RESPONSE_MEMOS: list[ResponseMemo] = []
+_SERVICE_CACHE_INVALIDATORS: list[Callable[[str], int]] = []
+
+
+def register_service_cache_invalidator(fn: Callable[[str], int]) -> None:
+    """Register a callback invoked by ``invalidate_service_cache(service_id)``."""
+    if fn not in _SERVICE_CACHE_INVALIDATORS:
+        _SERVICE_CACHE_INVALIDATORS.append(fn)
 
 
 class ResponseMemo:
@@ -225,4 +232,9 @@ def invalidate_service_cache(service_id: str | dict = "") -> int:
                 cleared += len(memo.cache)
                 memo.cache.clear()
                 memo._telemetry_cache.clear()
+    for invalidator in list(_SERVICE_CACHE_INVALIDATORS):
+        try:
+            cleared += int(invalidator(svc) or 0)
+        except Exception:
+            pass
     return cleared

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import sys
+import threading
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -18,8 +20,8 @@ from backend.models.admin import (
     LogAccountingTotals,
     SustainedLossAlert,
 )
-from backend.utils.bounded_cache import BoundedTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
+from backend.utils.bounded_cache import SWRTTLCache
 from backend.utils.router_utils import raise_internal
 
 from ._router import router
@@ -27,14 +29,96 @@ from ._router import router
 logger = logging.getLogger(__name__)
 
 
-_FASTLY_COUNTS_TTL = 45.0
-_FASTLY_COUNTS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=_FASTLY_COUNTS_TTL)
+_FASTLY_COUNTS_TTL = 60.0
+_FASTLY_COUNTS_STALE_TTL = 1800.0
+_FASTLY_COUNTS_CACHE: SWRTTLCache = SWRTTLCache(
+    maxsize=256, ttl_seconds=_FASTLY_COUNTS_TTL, stale_ttl_seconds=_FASTLY_COUNTS_STALE_TTL
+)
 
-_CLICKHOUSE_COUNTS_TTL = 45.0
-_CLICKHOUSE_COUNTS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=_CLICKHOUSE_COUNTS_TTL)
+_CLICKHOUSE_COUNTS_TTL = 60.0
+_CLICKHOUSE_COUNTS_STALE_TTL = 1800.0
+_CLICKHOUSE_COUNTS_CACHE: SWRTTLCache = SWRTTLCache(
+    maxsize=256, ttl_seconds=_CLICKHOUSE_COUNTS_TTL, stale_ttl_seconds=_CLICKHOUSE_COUNTS_STALE_TTL
+)
 
-_LOCAL_COUNTS_TTL = 45.0
-_LOCAL_COUNTS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=_LOCAL_COUNTS_TTL)
+_LOCAL_COUNTS_TTL = 60.0
+_LOCAL_COUNTS_STALE_TTL = 1800.0
+_LOCAL_COUNTS_CACHE: SWRTTLCache = SWRTTLCache(
+    maxsize=256, ttl_seconds=_LOCAL_COUNTS_TTL, stale_ttl_seconds=_LOCAL_COUNTS_STALE_TTL
+)
+
+_LATEST_INGEST_TTL = 60.0
+_LATEST_INGEST_STALE_TTL = 1800.0
+_LATEST_INGEST_CACHE: SWRTTLCache = SWRTTLCache(
+    maxsize=256, ttl_seconds=_LATEST_INGEST_TTL, stale_ttl_seconds=_LATEST_INGEST_STALE_TTL
+)
+
+_swr_guard = threading.Lock()
+_swr_locks: dict[tuple[int, Any], threading.Lock] = {}
+_swr_bg_inflight: set[tuple[int, Any]] = set()
+_NONE_SENTINEL = object()
+
+
+def _swr_fetch[T](
+    cache: SWRTTLCache,
+    key: Any,
+    fn: Callable[[], T],
+    *,
+    label: str,
+    cache_if: Callable[[T], bool] = lambda _v: True,
+) -> T:
+    """Singleflight + stale-while-revalidate wrapper around an ``SWRTTLCache``."""
+    cached = cache.get(key)
+    if cached is not None:
+        return None if cached is _NONE_SENTINEL else cached  # type: ignore[return-value]
+
+    lock_key = (id(cache), key)
+    stale = cache.get_stale(key) if isinstance(cache, SWRTTLCache) else None
+    if stale is not None:
+        with _swr_guard:
+            already_refreshing = lock_key in _swr_bg_inflight
+            if not already_refreshing:
+                _swr_bg_inflight.add(lock_key)
+        if not already_refreshing:
+
+            def _refresh() -> None:
+                try:
+                    fresh = fn()
+                    if cache_if(fresh):
+                        cache[key] = _NONE_SENTINEL if fresh is None else fresh
+                except Exception:  # pragma: no cover - defensive
+                    logger.debug("[log-accounting] background %s refresh failed for %s", label, key, exc_info=True)
+                finally:
+                    try:
+                        from backend.core.metadata import pg_pool
+
+                        pg_pool.release_thread_connection()
+                    except Exception:
+                        pass
+                    with _swr_guard:
+                        _swr_bg_inflight.discard(lock_key)
+
+            threading.Thread(target=_refresh, name=f"log-acct-swr-{label}", daemon=True).start()
+        return None if stale is _NONE_SENTINEL else stale  # type: ignore[return-value]
+
+    with _swr_guard:
+        lock = _swr_locks.get(lock_key)
+        if lock is None:
+            lock = threading.Lock()
+            _swr_locks[lock_key] = lock
+    try:
+        with lock:
+            cached = cache.get(key)
+            if cached is not None:
+                return None if cached is _NONE_SENTINEL else cached  # type: ignore[return-value]
+            val = fn()
+            if cache_if(val):
+                cache[key] = _NONE_SENTINEL if val is None else val
+            return val
+    finally:
+        with _swr_guard:
+            if not lock.locked() and _swr_locks.get(lock_key) is lock:
+                _swr_locks.pop(lock_key, None)
 
 
 def _fetch_fastly_request_counts(
@@ -44,28 +128,27 @@ def _fetch_fastly_request_counts(
     from backend.core.fastly.client import StatsResponse, fastly_platform_metrics
 
     cache_key = (logging_svc_id, from_ts, to_ts, by, edge_only)
-    cached: dict[str, int] | None = _FASTLY_COUNTS_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
 
-    payload = fastly_platform_metrics(
-        entity_id=logging_svc_id,
-        granularity=by,
-        from_epoch=from_ts,
-        to_epoch=to_ts,
-        metrics=("requests", "edge_requests"),
-        token=api_key,
-    )
+    def _load() -> dict[str, int]:
+        payload = fastly_platform_metrics(
+            entity_id=logging_svc_id,
+            granularity=by,
+            from_epoch=from_ts,
+            to_epoch=to_ts,
+            metrics=("requests", "edge_requests"),
+            token=api_key,
+        )
 
-    width = 13 if by == "hour" else 10
-    out: dict[str, int] = {}
-    for r in StatsResponse.model_validate(payload).data:
-        if r.start_time is None:
-            continue
-        bucket = datetime.fromtimestamp(r.start_time, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S")[:width]
-        out[bucket] = out.get(bucket, 0) + (r.edge_requests if edge_only else r.requests)
-    _FASTLY_COUNTS_CACHE[cache_key] = out
-    return out
+        width = 13 if by == "hour" else 10
+        out: dict[str, int] = {}
+        for r in StatsResponse.model_validate(payload).data:
+            if r.start_time is None:
+                continue
+            bucket = datetime.fromtimestamp(r.start_time, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S")[:width]
+            out[bucket] = out.get(bucket, 0) + (r.edge_requests if edge_only else r.requests)
+        return out
+
+    return _swr_fetch(_FASTLY_COUNTS_CACHE, cache_key, _load, label="fastly")
 
 
 LOG_ACCOUNTING_LOSS_THRESHOLD = 0.05
@@ -83,40 +166,37 @@ def _clickhouse_row_counts_per_bucket(
         int(end.timestamp()),
         by,
     )
-    cached: dict[str, int] | None = _CLICKHOUSE_COUNTS_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
 
-    try:
-        from backend.core.clickhouse import get_clickhouse_client
+    def _load() -> dict[str, int] | None:
+        try:
+            from backend.core.clickhouse import get_clickhouse_client
 
-        client = get_clickhouse_client()
-        if client is None:
-            return {}
-        trunc_fn = "toStartOfHour" if by == "hour" else "toStartOfDay"
-        fmt = "%Y-%m-%dT%H" if by == "hour" else "%Y-%m-%d"
-        sql = (
-            f"SELECT formatDateTime({trunc_fn}(req_start_time, 'UTC'), '{fmt}') AS bucket, "
-            "count() AS n "
-            "FROM request_facts "
-            "WHERE service_id = {service_id:String} "
-            "  AND req_start_time >= {start:DateTime64(3, 'UTC')} "
-            "  AND req_start_time < {end:DateTime64(3, 'UTC')} "
-            "GROUP BY bucket"
-        )
-        query_fn = getattr(client, "query", None)
-        if callable(query_fn):
-            res = query_fn(
-                sql,
-                parameters={
-                    "service_id": service_id,
-                    "start": start.astimezone(UTC),
-                    "end": end.astimezone(UTC),
-                },
+            client = get_clickhouse_client()
+            if client is None:
+                return None
+            trunc_fn = "toStartOfHour" if by == "hour" else "toStartOfDay"
+            fmt = "%Y-%m-%dT%H" if by == "hour" else "%Y-%m-%d"
+            sql = (
+                f"SELECT formatDateTime({trunc_fn}(req_start_time, 'UTC'), '{fmt}') AS bucket, "
+                "count() AS n "
+                "FROM request_facts "
+                "WHERE service_id = {service_id:String} "
+                "  AND req_start_time >= {start:DateTime64(3, 'UTC')} "
+                "  AND req_start_time < {end:DateTime64(3, 'UTC')} "
+                "GROUP BY bucket"
             )
-            rows = getattr(res, "result_rows", None) or []
-            out = {str(b): int(n) for b, n in rows}
-        else:
+            query_fn = getattr(client, "query", None)
+            if callable(query_fn):
+                res = query_fn(
+                    sql,
+                    parameters={
+                        "service_id": service_id,
+                        "start": start.astimezone(UTC),
+                        "end": end.astimezone(UTC),
+                    },
+                )
+                rows = getattr(res, "result_rows", None) or []
+                return {str(b): int(n) for b, n in rows}
             dict_rows = client.execute(
                 sql.replace("req_start_time", "event_timestamp"),
                 {
@@ -125,12 +205,13 @@ def _clickhouse_row_counts_per_bucket(
                     "end": end.astimezone(UTC),
                 },
             )
-            out = {str(r["bucket"]): int(r["n"]) for r in (dict_rows or []) if "bucket" in r and "n" in r}
-        _CLICKHOUSE_COUNTS_CACHE[cache_key] = out
-        return out
-    except Exception as e:
-        logger.debug("[log-accounting] ClickHouse counts unavailable, falling back to metadata: %s", e)
-        return {}
+            return {str(r["bucket"]): int(r["n"]) for r in (dict_rows or []) if "bucket" in r and "n" in r}
+        except Exception as e:
+            logger.debug("[log-accounting] ClickHouse counts unavailable, falling back to metadata: %s", e)
+            return None
+
+    res = _swr_fetch(_CLICKHOUSE_COUNTS_CACHE, cache_key, _load, label="clickhouse", cache_if=lambda v: v is not None)
+    return res if res is not None else {}
 
 
 def compute_log_accounting(source: dict[str, Any], hours: int = 24, by: str = "hour") -> dict[str, Any]:
@@ -219,30 +300,51 @@ def compute_log_accounting(source: dict[str, Any], hours: int = 24, by: str = "h
             int(end_clamp.timestamp()),
             width,
         )
-        cached: dict[str, tuple[int, int]] | None = _LOCAL_COUNTS_CACHE.get(cache_key)
-        if cached is not None:
-            return cached
-        if high_scale_control is not None:
-            out = high_scale_control.request_flush_accounting(service_id, start, end_clamp, width)
-        else:
-            out = metadata_db.get_log_accounting_counts(
-                service_id, sql_start_iso, sql_end_iso, width, start_bucket, end_bucket
-            )
-        _LOCAL_COUNTS_CACHE[cache_key] = out
-        return out
+
+        def _load() -> dict[str, tuple[int, int]]:
+            try:
+                if high_scale_control is not None:
+                    return high_scale_control.request_flush_accounting(service_id, start, end_clamp, width)
+                return metadata_db.get_log_accounting_counts(
+                    service_id, sql_start_iso, sql_end_iso, width, start_bucket, end_bucket
+                )
+            finally:
+                if high_scale_control is None:
+                    try:
+                        from backend.core.metadata import pg_pool
+
+                        pg_pool.release_thread_connection()
+                    except Exception:
+                        pass
+
+        return _swr_fetch(_LOCAL_COUNTS_CACHE, cache_key, _load, label="local")
 
     def _latest_ingest() -> str | None:
-        if high_scale_control is not None:
-            latest = high_scale_control.latest_request_ingest(service_id)
-            return latest.astimezone(UTC).isoformat() if latest else None
-        return metadata_db.get_latest_ingest_ts(service_id)
+        cache_key = (service_id, high_scale_control is not None)
+
+        def _load() -> str | None:
+            try:
+                if high_scale_control is not None:
+                    latest = high_scale_control.latest_request_ingest(service_id)
+                    return latest.astimezone(UTC).isoformat() if latest else None
+                return metadata_db.get_latest_ingest_ts(service_id)
+            finally:
+                if high_scale_control is None:
+                    try:
+                        from backend.core.metadata import pg_pool
+
+                        pg_pool.release_thread_connection()
+                    except Exception:
+                        pass
+
+        return _swr_fetch(_LATEST_INGEST_CACHE, cache_key, _load, label="latest_ingest")
 
     def _run_timed(fn: Any) -> tuple[Any, float]:
         t0 = _time.perf_counter()
         res = fn()
         return res, round((_time.perf_counter() - t0) * 1000, 2)
 
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="log-accounting") as pool:
         fut_fastly = pool.submit(
             contextvars.copy_context().run,
             _run_timed,
@@ -258,16 +360,23 @@ def compute_log_accounting(source: dict[str, Any], hours: int = 24, by: str = "h
             _run_timed,
             lambda: _clickhouse_row_counts_per_bucket(source, start, end_clamp, by),
         )
+        fut_latest = pool.submit(
+            contextvars.copy_context().run,
+            _run_timed,
+            _latest_ingest,
+        )
         try:
             fastly_counts, ms_fastly = fut_fastly.result()
         except Exception as e:
             raise_internal(logger, e, code="fastly_stats_failed", status=502)
         local_counts, ms_sqlite = fut_sqlite.result()
         ch_counts, ms_ch = fut_ch.result()
+        latest_ingest_str, ms_latest = fut_latest.result()
 
     timer.entries.append({"section": "fastly_fetch", "time_ms": ms_fastly})
     timer.entries.append({"section": "sqlite_counts", "time_ms": ms_sqlite})
     timer.entries.append({"section": "clickhouse_counts", "time_ms": ms_ch})
+    timer.entries.append({"section": "latest_ingest", "time_ms": ms_latest})
 
     all_buckets = sorted(set(fastly_counts.keys()) | set(local_counts.keys()) | set(ch_counts.keys()))
     buckets: list[LogAccountingBucket] = []
@@ -333,7 +442,6 @@ def compute_log_accounting(source: dict[str, Any], hours: int = 24, by: str = "h
                 )
             run_start = None
 
-    latest_ingest_str = timer.call("latest_ingest", _latest_ingest)
     catchup: dict[str, Any] | None
     if latest_ingest_str:
         latest_dt = datetime.fromisoformat(latest_ingest_str.replace(" ", "T")).replace(tzinfo=UTC)
@@ -399,6 +507,27 @@ def api_log_accounting(
     return payload
 
 
+def prewarm_log_accounting(service_id: str) -> None:
+    """Best-effort startup pre-warm of 24h hourly log accounting caches."""
+    try:
+        from backend.core import fos_client as _fos
+
+        src = _fos.get_source_for_service(service_id)
+        if not src:
+            return
+        compute_log_accounting(src, hours=24, by="hour")
+    except Exception:
+        logger.debug("[log-accounting] pre-warm skipped for %s", service_id, exc_info=True)
+    finally:
+        try:
+            from backend.core.metadata import pg_pool
+
+            pg_pool.release_thread_connection()
+        except Exception:
+            pass
+
+
 _CacheRegistry.register("routers.admin.log_accounting._FASTLY_COUNTS_CACHE", _FASTLY_COUNTS_CACHE)
 _CacheRegistry.register("routers.admin.log_accounting._CLICKHOUSE_COUNTS_CACHE", _CLICKHOUSE_COUNTS_CACHE)
 _CacheRegistry.register("routers.admin.log_accounting._LOCAL_COUNTS_CACHE", _LOCAL_COUNTS_CACHE)
+_CacheRegistry.register("routers.admin.log_accounting._LATEST_INGEST_CACHE", _LATEST_INGEST_CACHE)

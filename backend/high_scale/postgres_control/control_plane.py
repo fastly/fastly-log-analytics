@@ -217,14 +217,30 @@ _SOURCE_OBJECTS_BILLING_INDEX_DDL = (
     f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {SOURCE_OBJECTS_BILLING_INDEX} "
     "ON high_scale_source_objects (service_id, discovered_at) INCLUDE (size_bytes, status, updated_at, domain)"
 )
+SOURCE_OBJECTS_UPDATED_BILLING_INDEX = "high_scale_source_objects_updated_billing_idx"
+_SOURCE_OBJECTS_UPDATED_BILLING_INDEX_DDL = (
+    f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {SOURCE_OBJECTS_UPDATED_BILLING_INDEX} "
+    "ON high_scale_source_objects (service_id, updated_at) "
+    "INCLUDE (size_bytes, status, discovered_at) "
+    "WHERE status IN ('source_deleted', 'source_missing')"
+)
 ARCHIVE_MANIFESTS_BILLING_INDEX = "high_scale_archive_manifests_billing_idx"
 _ARCHIVE_MANIFESTS_BILLING_INDEX_DDL = (
     f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {ARCHIVE_MANIFESTS_BILLING_INDEX} "
     "ON high_scale_archive_manifests (service_id, created_at) INCLUDE (artifact_size, archive_expired_at, state, domain)"
 )
+ARCHIVE_MANIFESTS_EXPIRED_BILLING_INDEX = "high_scale_archive_manifests_expired_billing_idx"
+_ARCHIVE_MANIFESTS_EXPIRED_BILLING_INDEX_DDL = (
+    f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {ARCHIVE_MANIFESTS_EXPIRED_BILLING_INDEX} "
+    "ON high_scale_archive_manifests (service_id, archive_expired_at) "
+    "INCLUDE (artifact_size, created_at, state, domain) "
+    "WHERE state <> 'artifact_uploading'"
+)
 _CONCURRENT_BILLING_INDEXES: tuple[tuple[str, str], ...] = (
     (SOURCE_OBJECTS_BILLING_INDEX, _SOURCE_OBJECTS_BILLING_INDEX_DDL),
+    (SOURCE_OBJECTS_UPDATED_BILLING_INDEX, _SOURCE_OBJECTS_UPDATED_BILLING_INDEX_DDL),
     (ARCHIVE_MANIFESTS_BILLING_INDEX, _ARCHIVE_MANIFESTS_BILLING_INDEX_DDL),
+    (ARCHIVE_MANIFESTS_EXPIRED_BILLING_INDEX, _ARCHIVE_MANIFESTS_EXPIRED_BILLING_INDEX_DDL),
 )
 # A concurrent build waits for every older transaction in the database; an idle-in-transaction session would
 # otherwise stall the booting worker forever. Timing out leaves an INVALID index the next boot rebuilds.
@@ -1529,10 +1545,11 @@ class PostgresControlPlane:
                 start_utc,
                 gb_hour_denom,
             )
-            # Three disjoint, index-targeted branches avoid scanning historical source_deleted rows
+            # Four disjoint, index-targeted branches avoid scanning historical source_deleted rows
             # outside the billing window: (1) live statuses via claim_idx, (2) deleted/missing
-            # discovered in (min_cutoff, end_utc) via covering billing_idx, (3) older/null-discovered
-            # deleted/missing with recent updated_at via updated_idx.
+            # discovered in (min_cutoff, end_utc) via covering billing_idx, (3a) older-discovered
+            # rows deleted during [start_utc, ...) bounded tightly to updated_at > start_utc via
+            # updated_billing_idx, and (3b) null-discovered rows via billing_idx (NULLs are indexed).
             with self.transaction(read_only=True) as connection:
                 return connection.execute(
                     "SELECT COALESCE(SUM(live_gbh), 0.0), COALESCE(SUM(del_gbh), 0.0), "
@@ -1558,8 +1575,14 @@ class PostgresControlPlane:
                     "FROM high_scale_source_objects "
                     "WHERE service_id = %s "
                     "AND status IN ('source_deleted', 'source_missing') "
-                    "AND updated_at > %s "
-                    "AND ((discovered_at <= %s AND updated_at > %s) OR discovered_at IS NULL)"
+                    "AND updated_at > %s AND discovered_at <= %s "
+                    "UNION ALL "
+                    f"SELECT 0.0::double precision, COALESCE(SUM({del_expr}), 0.0), "
+                    f"COALESCE(SUM({min_expr}), 0.0), COALESCE(SUM({del_inc_expr}), 0) "
+                    "FROM high_scale_source_objects "
+                    "WHERE service_id = %s "
+                    "AND status IN ('source_deleted', 'source_missing') "
+                    "AND discovered_at IS NULL AND updated_at > %s"
                     ") AS src_billing",
                     (
                         end_utc,
@@ -1574,9 +1597,11 @@ class PostgresControlPlane:
                         end_utc,
                         *del_params,
                         service_id,
-                        min_cutoff,
-                        min_cutoff,
                         start_utc,
+                        min_cutoff,
+                        *del_params,
+                        service_id,
+                        min_cutoff,
                     ),
                 ).fetchone()
 
@@ -1641,12 +1666,17 @@ class PostgresControlPlane:
                     "AND created_at > %s AND created_at < %s "
                     "UNION ALL "
                     f"SELECT 0.0::double precision, COALESCE(SUM({del_expr}), 0.0), "
+                    f"COALESCE(SUM({min_expr}), 0.0), 0 "
+                    "FROM high_scale_archive_manifests "
+                    "WHERE service_id = %s AND state <> 'artifact_uploading' "
+                    "AND archive_expired_at > %s AND created_at <= %s "
+                    "UNION ALL "
+                    f"SELECT 0.0::double precision, COALESCE(SUM({del_expr}), 0.0), "
                     f"COALESCE(SUM({min_expr}), 0.0), "
                     "COALESCE(SUM(CASE WHEN created_at IS NULL THEN 1 ELSE 0 END), 0) "
                     "FROM high_scale_archive_manifests "
                     "WHERE service_id = %s AND state <> 'artifact_uploading' "
-                    "AND archive_expired_at > %s "
-                    "AND ((created_at <= %s AND archive_expired_at > %s) OR created_at IS NULL)"
+                    "AND created_at IS NULL AND archive_expired_at > %s"
                     ") AS arc_billing",
                     (
                         end_utc,
@@ -1661,9 +1691,11 @@ class PostgresControlPlane:
                         end_utc,
                         *exp_params,
                         service_id,
-                        min_cutoff,
-                        min_cutoff,
                         start_utc,
+                        min_cutoff,
+                        *exp_params,
+                        service_id,
+                        min_cutoff,
                     ),
                 ).fetchone()
 

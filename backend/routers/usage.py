@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextvars
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -44,9 +45,10 @@ from backend.repositories.utils.response_cache import (
     ResponseMemo,
     bucket_time_to_minute,
     digest_cache_key,
+    register_service_cache_invalidator,
 )
 from backend.repositories.utils.response_shaping import SectionTimer
-from backend.utils.bounded_cache import BoundedTTLCache
+from backend.utils.bounded_cache import BoundedTTLCache, SWRTTLCache
 from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 from backend.utils.date_utils import window_to_epoch
 from backend.utils.router_utils import query_errors, raise_internal
@@ -71,12 +73,35 @@ _EDGE_RATIO_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=64, ttl_seconds=60.
 _EDGE_RATIO_NONE = object()
 _RUM_BREAKDOWN_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=60.0)
 _USAGE_RESPONSE_MEMO = ResponseMemo(ttl=60.0, maxsize=256, prewarmer=False)
+_USAGE_ROLLING_STORAGE_CACHE: SWRTTLCache = SWRTTLCache(maxsize=64, ttl_seconds=60.0, stale_ttl_seconds=900.0)
+_rolling_storage_bg_guard = threading.Lock()
+_rolling_storage_bg_inflight: set[Any] = set()
 _CacheRegistry.register("routers.usage._FASTLY_STATS_CACHE", _FASTLY_STATS_CACHE)
 _CacheRegistry.register("routers.usage._STORAGE_INSPECTION_CACHE", _STORAGE_INSPECTION_CACHE)
 _CacheRegistry.register("routers.usage._PREFILL_META_CACHE", _PREFILL_META_CACHE)
 _CacheRegistry.register("routers.usage._PREFILL_ENDPOINT_CACHE", _PREFILL_ENDPOINT_CACHE)
 _CacheRegistry.register("routers.usage._EDGE_RATIO_CACHE", _EDGE_RATIO_CACHE)
 _CacheRegistry.register("routers.usage._RUM_BREAKDOWN_CACHE", _RUM_BREAKDOWN_CACHE)
+_CacheRegistry.register("routers.usage._USAGE_ROLLING_STORAGE_CACHE", _USAGE_ROLLING_STORAGE_CACHE)
+
+
+def _invalidate_rolling_storage_cache(service_id: str) -> int:
+    cache = _USAGE_ROLLING_STORAGE_CACHE
+    if not service_id:
+        n = len(cache)
+        cache.clear()
+        return n
+    removed = 0
+    with cache.lock:
+        for layer in (cache._cache, cache._stale):
+            keys = [k for k in list(layer.keys()) if isinstance(k, tuple) and k and k[0] == service_id]
+            for k in keys:
+                layer.pop(k, None)
+                removed += 1
+    return removed
+
+
+register_service_cache_invalidator(_invalidate_rolling_storage_cache)
 
 STORAGE_PLATFORM_METRICS = (
     "object_storage_buckets_count",
@@ -694,6 +719,56 @@ def _get_log_activity(src: dict[str, Any], start_str: str, end_str: str, by: str
     return {**out, "_debug_queries": [], "_debug_calls": []}
 
 
+def _rolling_storage_cache_key(
+    service_id: str,
+    src: dict[str, Any],
+    start_dt: datetime,
+    end_dt: datetime,
+    now: datetime,
+    *,
+    delete_after: bool,
+    retention_days: int,
+) -> tuple[Any, ...] | None:
+    """Return a rolling-window SWR key when [start_dt, end_dt] is a live window ending near ``now``."""
+    if abs((now - end_dt).total_seconds()) > 180.0:
+        return None
+    duration_seconds = (end_dt - start_dt).total_seconds()
+    if duration_seconds < 3600.0:
+        return None
+    rounded_hours = round(duration_seconds / 3600.0)
+    if rounded_hours < 1 or abs(duration_seconds - rounded_hours * 3600.0) > 180.0:
+        return None
+    return (
+        service_id,
+        src.get("name"),
+        src.get("bucket"),
+        src.get("prefix"),
+        int(rounded_hours),
+        bool(delete_after),
+        int(retention_days),
+    )
+
+
+def prewarm_usage_storage(service_id: str) -> None:
+    """Best-effort startup pre-warm of the rolling 24h current-storage billing summary."""
+    try:
+        from backend.core import fos_client as _fos
+
+        src = _fos.get_source_for_service(service_id)
+        if not src or not src.get("bucket"):
+            return
+        usage_current_storage(start="", end="", source=src)
+    except Exception:
+        logger.debug("[usage] current-storage pre-warm skipped for %s", service_id, exc_info=True)
+    finally:
+        try:
+            from backend.core.metadata import pg_pool
+
+            pg_pool.release_thread_connection()
+        except Exception:
+            pass
+
+
 @usage_router.get(
     "/current-storage",
     response_model=CurrentStorageResponse,
@@ -746,6 +821,22 @@ def usage_current_storage(
         cached_storage = _USAGE_RESPONSE_MEMO.get_with_telemetry(storage_memo_key)
         if cached_storage is not None:
             return CurrentStorageResponse.with_telemetry(**cached_storage)
+
+        rolling_key = _rolling_storage_cache_key(
+            service_id,
+            src,
+            start_dt,
+            end_dt,
+            now,
+            delete_after=bool(delete_after),
+            retention_days=retention_days,
+        )
+        if rolling_key is not None:
+            fresh_rolling = _USAGE_ROLLING_STORAGE_CACHE.get(rolling_key)
+            if fresh_rolling is not None:
+                return CurrentStorageResponse.with_telemetry(
+                    **{**fresh_rolling, "start": start_str, "end": end_str, "is_cached": True}
+                )
 
         def _compute_storage() -> dict[str, Any]:
             if (cached_inner := _USAGE_RESPONSE_MEMO.get_with_telemetry(storage_memo_key)) is not None:
@@ -1029,7 +1120,38 @@ def usage_current_storage(
             }
             if storage_reads_ok:
                 _USAGE_RESPONSE_MEMO.put(storage_memo_key, payload)
+                if rolling_key is not None:
+                    _USAGE_ROLLING_STORAGE_CACHE[rolling_key] = dict(payload)
             return payload
+
+        if rolling_key is not None:
+            stale_rolling = _USAGE_ROLLING_STORAGE_CACHE.get_stale(rolling_key)
+            if stale_rolling is not None:
+                with _rolling_storage_bg_guard:
+                    already_refreshing = rolling_key in _rolling_storage_bg_inflight
+                    if not already_refreshing:
+                        _rolling_storage_bg_inflight.add(rolling_key)
+                if not already_refreshing:
+
+                    def _refresh_rolling_storage() -> None:
+                        try:
+                            _compute_storage()
+                        except Exception:
+                            logger.debug("usage_current_storage: background SWR refresh failed", exc_info=True)
+                        finally:
+                            try:
+                                from backend.core.metadata import pg_pool
+
+                                pg_pool.release_thread_connection()
+                            except Exception:
+                                pass
+                            with _rolling_storage_bg_guard:
+                                _rolling_storage_bg_inflight.discard(rolling_key)
+
+                    threading.Thread(target=_refresh_rolling_storage, name="usage-storage-swr", daemon=True).start()
+                return CurrentStorageResponse.with_telemetry(
+                    **{**stale_rolling, "start": start_str, "end": end_str, "is_cached": True}
+                )
 
         result_payload = _USAGE_RESPONSE_MEMO.coalesce(f"usage_current_storage:{storage_memo_key}", _compute_storage)
         resp: CurrentStorageResponse = CurrentStorageResponse.with_telemetry(**result_payload)

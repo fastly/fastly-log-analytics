@@ -88,11 +88,29 @@ def _initialize_service(cfg: dict):
                     except Exception as e:
                         logger.warning("[fastapi] Service %s: scoring-status pre-warm failed: %s", sid, e)
 
-                with ThreadPoolExecutor(max_workers=2, thread_name_prefix="startup-warm") as warm_pool:
+                def _warm_log_accounting() -> None:
+                    try:
+                        _accounting_mod = importlib.import_module("backend.routers.admin.log_accounting")
+                        _accounting_mod.prewarm_log_accounting(sid)
+                    except Exception as e:
+                        logger.warning("[fastapi] Service %s: log-accounting pre-warm failed: %s", sid, e)
+
+                def _warm_usage_storage() -> None:
+                    try:
+                        _usage_mod = importlib.import_module("backend.routers.usage")
+                        _usage_mod.prewarm_usage_storage(sid)
+                    except Exception as e:
+                        logger.warning("[fastapi] Service %s: usage-storage pre-warm failed: %s", sid, e)
+
+                with ThreadPoolExecutor(max_workers=4, thread_name_prefix="startup-warm") as warm_pool:
                     f_sync = warm_pool.submit(_warm_sync_status)
                     f_scoring = warm_pool.submit(_warm_scoring_status)
+                    f_accounting = warm_pool.submit(_warm_log_accounting)
+                    f_usage = warm_pool.submit(_warm_usage_storage)
                     f_sync.result()
                     f_scoring.result()
+                    f_accounting.result()
+                    f_usage.result()
 
                 logger.info("[fastapi] Service %s initialised.", sid)
         except Exception as e:

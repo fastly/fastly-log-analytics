@@ -157,11 +157,11 @@ def test_storage_billing_summary_uses_bounded_union_all_branches():
     src_sql = [s for s in executed_sql if "FROM high_scale_source_objects" in s][0]
     arc_sql = [s for s in executed_sql if "FROM high_scale_archive_manifests" in s][0]
 
-    assert src_sql.count("UNION ALL") == 2
+    assert src_sql.count("UNION ALL") == 3
     assert "discovered_at > %s AND discovered_at < %s" in src_sql
     assert "updated_at > %s" in src_sql
 
-    assert arc_sql.count("UNION ALL") == 2
+    assert arc_sql.count("UNION ALL") == 3
     assert "created_at > %s AND created_at < %s" in arc_sql
     assert "archive_expired_at > %s" in arc_sql
 
@@ -173,6 +173,7 @@ def test_usage_current_storage_groups_metadata_reads_on_one_thread_and_releases_
     from backend.routers import usage
 
     usage._USAGE_RESPONSE_MEMO.cache.clear()
+    usage._USAGE_ROLLING_STORAGE_CACHE.clear()
     usage._STORAGE_INSPECTION_CACHE.clear()
 
     meta_threads: list[int] = []
