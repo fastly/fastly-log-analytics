@@ -516,7 +516,7 @@ def test_dispatch_analyst_post_to_non_allowlisted_path_returns_403(client):
 
 
 @pytest.mark.security_regression
-def test_unauthenticated_telemetry_beacon_allowed_without_session(client):
+def test_unauthenticated_telemetry_beacon_rejected_without_session(client):
     _start_share()
     client.cookies.clear()
     for path, payload in (
@@ -524,7 +524,7 @@ def test_unauthenticated_telemetry_beacon_allowed_without_session(client):
         ("/api/ux-events?service=svcA", {"event": "some_ui_action", "pathname": "/share-login", "details": {}}),
     ):
         r = client.post(path, json=payload, headers=_WRITE_HEADERS)
-        assert r.status_code == 200 and r.json().get("ok") is True
+        assert r.status_code == 401 and r.json().get("error") == "unauthenticated"
 
 
 @pytest.mark.security_regression

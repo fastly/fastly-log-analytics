@@ -399,6 +399,23 @@ def test_sec10_session_token_secret_fallback_hierarchy_and_helm_template(monkeyp
 def test_sec10_web_vitals_rejects_cross_origin_remote_and_rate_limits(monkeypatch):
     mgr = tunnel.get_tunnel_manager()
     mgr.start_sharing(public_endpoint="https://share.example.com")
+    invite = share_db.create_remote_invite(
+        name="Rate Limit Analyst",
+        email="rl@example.com",
+        passcode="pine-ridge-brook-77",
+        expires_at_utc=None,
+        ip_whitelist=None,
+        service_ids=["svc-a"],
+    )
+    if tos := share_db.get_latest_tos():
+        share_db.mark_tos_accepted(invite["id"], tos["version"])
+    inv_row = share_db.get_remote_invite(invite["id"])
+    assert inv_row is not None
+    ua_str = "Mozilla/5.0 Chrome/125.0"
+    sess = mgr.create_session(
+        invite=inv_row, ip_address="203.0.113.50", user_agent=ua_str, headers={"user-agent": ua_str}
+    )
+    auth_cookie = f"analyst_session_id={sess.session_id}"
 
     app = FastAPI()
     app.include_router(web_vitals_mod.router)
@@ -406,19 +423,24 @@ def test_sec10_web_vitals_rejects_cross_origin_remote_and_rate_limits(monkeypatc
     sample = {"name": "LCP", "value": 120.0, "rating": "good", "id": "v1", "pathname": "/", "delta": 10.0}
 
     with TestClient(app, client=("203.0.113.50", 50000), base_url="https://share.example.com") as remote_client:
-        # Missing Origin/Referer/Sec-Fetch-Site on unauth remote -> 403
-        r_no_origin = remote_client.post("/api/web-vitals", json=sample, headers={"X-Proxied-By-Caddy": "true"})
-        assert r_no_origin.status_code == 403
+        # Unauthenticated remote -> 401
+        r_no_auth = remote_client.post("/api/web-vitals", json=sample, headers={"X-Proxied-By-Caddy": "true"})
+        assert r_no_auth.status_code == 401
 
-        # Cross-origin Origin -> 403
+        # Authenticated remote with cross-origin Origin -> 403
         r_evil = remote_client.post(
             "/api/web-vitals",
             json=sample,
-            headers={"X-Proxied-By-Caddy": "true", "Origin": "https://evil.example"},
+            headers={
+                "X-Proxied-By-Caddy": "true",
+                "Origin": "https://evil.example",
+                "User-Agent": ua_str,
+                "Cookie": auth_cookie,
+            },
         )
         assert r_evil.status_code == 403
 
-        # Sec-Fetch-Site: cross-site -> 403 even with Origin
+        # Sec-Fetch-Site: cross-site -> 403 even with Origin + session
         r_sfs = remote_client.post(
             "/api/web-vitals",
             json=sample,
@@ -426,23 +448,23 @@ def test_sec10_web_vitals_rejects_cross_origin_remote_and_rate_limits(monkeypatc
                 "X-Proxied-By-Caddy": "true",
                 "Origin": "https://share.example.com",
                 "Sec-Fetch-Site": "cross-site",
+                "User-Agent": ua_str,
+                "Cookie": auth_cookie,
             },
         )
         assert r_sfs.status_code == 403
 
-        # Valid same-origin Origin -> 200 up to WEB_VITALS_RATE_LIMIT, then 429!
+        # Authenticated valid same-origin Origin -> 200 up to WEB_VITALS_RATE_LIMIT, then 429!
+        valid_headers = {
+            "X-Proxied-By-Caddy": "true",
+            "Origin": "https://share.example.com",
+            "User-Agent": ua_str,
+            "Cookie": auth_cookie,
+        }
         for _ in range(web_vitals_mod.WEB_VITALS_RATE_LIMIT):
-            r_ok = remote_client.post(
-                "/api/web-vitals",
-                json=sample,
-                headers={"X-Proxied-By-Caddy": "true", "Origin": "https://share.example.com"},
-            )
+            r_ok = remote_client.post("/api/web-vitals", json=sample, headers=valid_headers)
             assert r_ok.status_code == 200
-        r_429 = remote_client.post(
-            "/api/web-vitals",
-            json=sample,
-            headers={"X-Proxied-By-Caddy": "true", "Origin": "https://share.example.com"},
-        )
+        r_429 = remote_client.post("/api/web-vitals", json=sample, headers=valid_headers)
         assert r_429.status_code == 429
         assert "Retry-After" in r_429.headers
 
@@ -805,22 +827,21 @@ def test_sec10_web_vitals_strict_origin_cohort_attribution_and_ipv6_churn(
         r_admin = local_c.post("/api/web-vitals", json=sample, headers={"Origin": "http://localhost:3000"})
         assert r_admin.status_code == 200
 
-    # 2. Remote unauthenticated Sec-Fetch-Site: same-origin WITHOUT Origin/Referer -> 403!
+    # 2. Remote unauthenticated callers are rejected with 401 (even with valid Origin or Sec-Fetch-Site)
     with TestClient(app, client=("198.51.100.77", 50000), base_url="https://share.example.com") as rem_c:
         r_sfs_only = rem_c.post(
             "/api/web-vitals",
             json=sample,
             headers={"X-Proxied-By-Caddy": "true", "Sec-Fetch-Site": "same-origin"},
         )
-        assert r_sfs_only.status_code == 403
+        assert r_sfs_only.status_code == 401
 
-        # Remote unauthenticated WITH valid Origin -> 200 and cohort == "analyst" (never pollutes "admin"!)
         r_rem_unauth = rem_c.post(
             "/api/web-vitals",
             json={**sample, "id": "v-rem-unauth"},
             headers={"X-Proxied-By-Caddy": "true", "Origin": "https://share.example.com"},
         )
-        assert r_rem_unauth.status_code == 200
+        assert r_rem_unauth.status_code == 401
 
         # Remote with valid analyst_session_id cookie -> 200 and cohort == "analyst" without bumping idle timer
         before_active = sess.last_active_time
@@ -839,29 +860,27 @@ def test_sec10_web_vitals_strict_origin_cohort_attribution_and_ipv6_churn(
 
     records = [json.loads(line) for line in sink.read_text(encoding="utf-8").splitlines() if line.strip()]
     by_id = {r["id"]: r["cohort"] for r in records}
-    assert by_id == {"v-iter2": "admin", "v-rem-unauth": "analyst", "v-rem-auth": "analyst"}
+    assert by_id == {"v-iter2": "admin", "v-rem-auth": "analyst"}
 
     # 3. IPv6 /64 rotation + >4,096 single-hit IP churn cannot evict saturated /64 subnet!
     web_vitals_mod._reset_web_vitals_limiter_for_tests()
+    v6_sess = mgr.create_session(
+        invite=inv_row, ip_address="2001:db8:99::1", user_agent=ua_str, headers={"user-agent": ua_str}
+    )
+    v6_headers = {
+        "X-Proxied-By-Caddy": "true",
+        "Origin": "https://share.example.com",
+        "User-Agent": ua_str,
+        "Cookie": f"analyst_session_id={v6_sess.session_id}",
+    }
     for i in range(web_vitals_mod.WEB_VITALS_RATE_LIMIT):
         with TestClient(app, client=(f"2001:db8:99::{i + 1:x}", 50000), base_url="https://share.example.com") as v6_c:
-            assert (
-                v6_c.post(
-                    "/api/web-vitals",
-                    json=sample,
-                    headers={"X-Proxied-By-Caddy": "true", "Origin": "https://share.example.com"},
-                ).status_code
-                == 200
-            )
+            assert v6_c.post("/api/web-vitals", json=sample, headers=v6_headers).status_code == 200
     for j in range(4105):
         probe_ip = f"198.18.{j // 256}.{j % 256}"
         web_vitals_mod._WEB_VITALS_LIMITER.try_acquire_with_retry(
             f"wv:{probe_ip}", max_events=web_vitals_mod.WEB_VITALS_RATE_LIMIT
         )
     with TestClient(app, client=("2001:db8:99::ffff", 50000), base_url="https://share.example.com") as v6_end:
-        r_v6_429 = v6_end.post(
-            "/api/web-vitals",
-            json=sample,
-            headers={"X-Proxied-By-Caddy": "true", "Origin": "https://share.example.com"},
-        )
+        r_v6_429 = v6_end.post("/api/web-vitals", json=sample, headers=v6_headers)
         assert r_v6_429.status_code == 429

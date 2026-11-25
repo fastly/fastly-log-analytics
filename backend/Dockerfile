@@ -3,8 +3,12 @@
 # Reuse the gateway's pinned Go 1.27.3 toolchain rather than an older release binary.
 FROM caddy:2.11.9-builder@sha256:3fddbec729442a56b942d4c9eaef1df80893dbf2cf5b86701bfae6aad1408eeb AS falco-builder
 ARG FALCO_VERSION=2.3.0
+ARG FALCO_SHA256=9a92e85dea65f1eebec5134f8921c21c98618e24966925a01c20dc6206b09519
 RUN apk add --no-cache --upgrade 'ca-certificates>=20261020-r0' 'ca-certificates-bundle>=20261020-r0'
-RUN wget -qO- "https://github.com/ysugimoto/falco/archive/refs/tags/v${FALCO_VERSION}.tar.gz" | tar -xz -C /tmp \
+RUN wget -qO /tmp/falco.tar.gz "https://github.com/ysugimoto/falco/archive/refs/tags/v${FALCO_VERSION}.tar.gz" \
+    && echo "${FALCO_SHA256}  /tmp/falco.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/falco.tar.gz -C /tmp \
+    && rm -f /tmp/falco.tar.gz \
     && CGO_ENABLED=0 go build -C "/tmp/falco-${FALCO_VERSION}" -mod=readonly \
     -ldflags "-X main.version=${FALCO_VERSION}" -o /usr/local/bin/falco ./cmd/falco \
     && rm -rf "/tmp/falco-${FALCO_VERSION}" \
@@ -24,8 +28,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN python -m pip install --no-cache-dir --upgrade pip==26.2.2
 
-# Install uv
-COPY --from=ghcr.io/astral-sh/uv:0.6.14 /uv /uvx /bin/
+# Install uv (pinned by OCI index digest)
+COPY --from=ghcr.io/astral-sh/uv:0.6.14@sha256:3362a526af7eca2fcd8604e6a07e873fb6e4286d8837cb753503558ce1213664 /uv /uvx /bin/
 
 WORKDIR /app
 

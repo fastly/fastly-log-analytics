@@ -11,10 +11,10 @@ auth:
   password: ""
   database: fastly_log_analytics
   existingSecret: ""
-  # Whether the application user (auth.username) may manage access (CREATE USER, GRANT, ...). It defaults to true
-  # for compatibility, so the app can provision the analyst-console identities itself. Prefer false together with
-  # provisioner.enabled: a user that can run SQL should not be able to mint users.
-  accessManagement: true
+  # Whether the application user (auth.username) may manage access (CREATE USER, GRANT, ...). Defaults to false
+  # for least privilege: a user that runs application SQL should not be able to mint users. Enable provisioner.enabled
+  # to provision per-service analyst-console identities, or set true only for legacy single-user installs.
+  accessManagement: false
 
 # A separate account used only during backend startup to provision the per-service analyst-console identities
 # (docs/runbooks/high-scale-analyst-console.md). It holds access management plus SELECT / CREATE VIEW / DROP VIEW
@@ -74,3 +74,9 @@ service:
   type: ClusterIP
   httpPort: 8123
   tcpPort: 9000
+
+networkPolicy:
+  enabled: true
+  # Optional list of Kubernetes NetworkPolicyPeer entries permitted to reach
+  # ClickHouse HTTP/TCP ports. When empty, defaults to pods in the same namespace.
+  allowedIngressFrom: []

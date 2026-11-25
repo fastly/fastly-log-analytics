@@ -1,0 +1,84 @@
+{{- include "clickhouse.validate" . -}}
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "clickhouse.fullname" . }}-clickhouse
+  labels:
+    {{- include "clickhouse.labels" . | nindent 4 }}
+    app.kubernetes.io/component: clickhouse
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "clickhouse.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: clickhouse
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        {{- if .Values.networkPolicy.allowedIngressFrom }}
+        {{- toYaml .Values.networkPolicy.allowedIngressFrom | nindent 8 }}
+        {{- else }}
+        - podSelector: {}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.httpPort }}
+        - protocol: TCP
+          port: {{ .Values.service.tcpPort }}
+{{- if .Values.keeper.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "clickhouse.fullname" . }}-keeper
+  labels:
+    {{- include "clickhouse.labels" . | nindent 4 }}
+    app.kubernetes.io/component: keeper
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "clickhouse.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: keeper
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "clickhouse.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: clickhouse
+        - podSelector:
+            matchLabels:
+              {{- include "clickhouse.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: keeper
+      ports:
+        - protocol: TCP
+          port: 9181
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "clickhouse.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: keeper
+      ports:
+        - protocol: TCP
+          port: 9444
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "clickhouse.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: keeper
+      ports:
+        - protocol: TCP
+          port: 9181
+        - protocol: TCP
+          port: 9444
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{- end }}
+{{- end }}

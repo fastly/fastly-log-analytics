@@ -107,6 +107,11 @@ def _verify_web_vitals_caller(request: Request) -> Literal["admin", "analyst"]:
     analyst_session, is_remote, cohort = _resolve_caller_identity(request)
 
     if is_remote or analyst_session is not None:
+        if analyst_session is None:
+            raise HTTPException(
+                status_code=401,
+                detail=make_error("unauthenticated", "Authentication required for remote telemetry submissions"),
+            )
         if origin and not _origin_allowed_strict(origin):
             raise HTTPException(
                 status_code=403,
@@ -116,13 +121,6 @@ def _verify_web_vitals_caller(request: Request) -> Literal["admin", "analyst"]:
             raise HTTPException(
                 status_code=403,
                 detail=make_error("origin_not_allowed", "Telemetry referer is not allowed"),
-            )
-        if analyst_session is None and not (
-            (origin and _origin_allowed_strict(origin)) or (ref_origin and _origin_allowed_strict(ref_origin))
-        ):
-            raise HTTPException(
-                status_code=403,
-                detail=make_error("origin_not_allowed", "Same-origin telemetry context required"),
             )
     elif origin:
         host = (request.headers.get("host") or "").strip().lower()

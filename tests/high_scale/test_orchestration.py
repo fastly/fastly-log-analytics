@@ -3469,7 +3469,7 @@ def _statefulset_env(docs: list[dict]) -> dict[str, str]:
 @_HELM_GATE
 def test_the_chart_renders_unchanged_by_default() -> None:
     docs = _render()
-    assert _statefulset_env(docs)["CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT"] == "1"
+    assert _statefulset_env(docs)["CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT"] == "0"
     assert "CLICKHOUSE_PROVISIONER_PASSWORD" not in _statefulset_env(docs)
     config_map = next(d for d in docs if d["kind"] == "ConfigMap" and "-config" in d["metadata"]["name"])
     assert "provisioner-user.xml" not in config_map["data"]

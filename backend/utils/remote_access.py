@@ -139,8 +139,6 @@ _UNAUTH_ANALYST_PATHS = {
     "/js/rum.js",
     "/js/faro-sdk.js",
     "/rum-beacon",
-    "/api/web-vitals",
-    "/api/ux-events",
 }
 _ANALYST_BLOCKED_PREFIXES = (
     "/api/admin/",

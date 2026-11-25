@@ -4,7 +4,7 @@
 # caddy:2.11.7-builder (Go 1.27.3)
 FROM caddy:2.11.9-builder@sha256:3fddbec729442a56b942d4c9eaef1df80893dbf2cf5b86701bfae6aad1408eeb AS builder
 RUN apk add --no-cache --upgrade 'ca-certificates>=20261020-r0' 'ca-certificates-bundle>=20261020-r0'
-RUN xcaddy build v2.11.7 --with github.com/mholt/caddy-ratelimit
+RUN xcaddy build v2.11.7 --with github.com/mholt/caddy-ratelimit@v0.1.0
 
 # caddy:2.11.7-alpine
 FROM caddy:2.11.9-alpine@sha256:0bbb055bda6793c999bde78b1b5ce3e89f829fb031af2cf50056ea1246559fee

@@ -35,10 +35,8 @@ spec:
         - name: frontend
           image: "{{ .Values.image.repository }}-frontend:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          {{- with .Values.securityContext }}
           securityContext:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
+            {{- merge (dict "readOnlyRootFilesystem" true) (deepCopy (.Values.securityContext | default dict)) | toYaml | nindent 12 }}
           ports:
             - name: http
               containerPort: 3000
@@ -86,7 +84,12 @@ spec:
           volumeMounts:
             - name: next-cache
               mountPath: /app/.next/cache
+            - name: tmp
+              mountPath: /tmp
       volumes:
         - name: next-cache
           emptyDir:
             sizeLimit: 1Gi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 128Mi
