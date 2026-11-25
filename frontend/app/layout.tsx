@@ -3,6 +3,7 @@ import { Suspense } from "react";
 import { Inter } from "next/font/google";
 import { cookies, headers } from "next/headers";
 import "./globals.css";
+import "maplibre-gl/dist/maplibre-gl.css";
 import QueryProvider, { ReloadLoopGuard, StoreHydrator, WebVitalsReporter } from "@/components/QueryProvider";
 import { BootstrapHydration } from "@/components/BootstrapHydration";
 import { ThemeProvider } from "next-themes";
@@ -101,9 +102,11 @@ export default async function RootLayout({
               tripped state also halts the WebVitals POSTs that flooded RUM. */}
           <ReloadLoopGuard>
           <QueryProvider>
-            <Suspense fallback={null}>
-              <BootstrapHydration host={host} proxiedByCaddy={proxiedByCaddy} nonce={nonce} />
-            </Suspense>
+            {!isStaticExport && (
+              <Suspense fallback={null}>
+                <BootstrapHydration host={host} proxiedByCaddy={proxiedByCaddy} nonce={nonce} />
+              </Suspense>
+            )}
             {/* Rehydrate the persisted Zustand stores (service / timezone /
                 debug) AFTER mount. They use persist({ skipHydration:true })
                 so the first client render matches the server's default
