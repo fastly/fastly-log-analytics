@@ -6050,6 +6050,14 @@ def test_sec_t5_iter40_scrub_ip_text_ipv6_trailing_colon_port_and_short_hex() ->
     assert scrub_ip_text("2001:db8:1:2:3:4:5:6:80:extra") == "2001:db8:1:::80:extra"
     assert scrub_ip_text("::2001:db8:abcd:ef01::1") == "::2001:db8:abcd::"
 
+    # 7. ITER43: 8-group & compressed IPv6 followed by :<word> starting with hex letters (e.g., :error, :failed):
+    assert scrub_ip_text("2001:db8:1:2:3:4:5:6:error") == "2001:db8:1:::error"
+    assert scrub_ip_text("2001:db8:1:2:3:4:5:6:extra") == "2001:db8:1:::extra"
+    assert scrub_ip_text("2001:db8:1:2:3:4:5:6:auth") == "2001:db8:1:::auth"
+    assert scrub_ip_text("2001:db8:1:2:3:4:5:6:failed") == "2001:db8:1:::failed"
+    assert scrub_ip_text("2001:db8::1:error") == "2001:db8:::error"
+    assert scrub_ip_text("2001:db8::1:failed") == "2001:db8:::failed"
+
 
 @pytest.mark.security_regression
 def test_sec_t5_iter40_live_chdb_paren_free_replace() -> None:
