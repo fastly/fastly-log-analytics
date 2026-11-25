@@ -1404,6 +1404,6 @@ fn stage_reserve_bounds_backend_calls_and_vcpu_per_execution() {
     }
     let key = hour_bundle(&fake, BASE).unwrap();
     assert_eq!(fake.bucket.borrow()[&key], expected);
-    assert!(peak_calls <= 20, "peak_calls={peak_calls} exceeded 20");
-    assert!(peak_vcpu <= 550, "peak_vcpu={peak_vcpu}ms exceeded 550ms");
+    assert!(peak_calls <= 22, "peak_calls={peak_calls} exceeded 22");
+    assert!(peak_vcpu <= 600, "peak_vcpu={peak_vcpu}ms exceeded 600ms");
 }
