@@ -36,6 +36,12 @@ export interface StreamingChartsGridProps {
     isFetching: boolean
     error: AnalyticsCardError | null
   }
+  extendedQueryStatus?: {
+    isLoading: boolean
+    isFetching: boolean
+    error: AnalyticsCardError | null
+  }
+  extendedSectionRef?: React.RefObject<HTMLDivElement | null>
   tsProps: {
     startTime: string | null
     endTime: string | null
@@ -59,6 +65,8 @@ export interface StreamingChartsGridProps {
 export function StreamingChartsGrid({
   data,
   queryStatus,
+  extendedQueryStatus = queryStatus,
+  extendedSectionRef,
   tsProps,
   sessionsData,
   sessionStartsData,
@@ -228,11 +236,11 @@ export function StreamingChartsGrid({
         </AnalyticsCard>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+      <div ref={extendedSectionRef} className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <AnalyticsCard
           title="ABR Bitrate Ladder"
           icon={<Gauge className="h-4 w-4" />}
-          {...queryStatus}
+          {...extendedQueryStatus}
           isEmpty={!bitrateLadderRows.length}
           helpTitle={STREAMING_INFO.bitrate_ladder.title}
           helpContent={STREAMING_INFO.bitrate_ladder.body}
@@ -243,7 +251,7 @@ export function StreamingChartsGrid({
         <AnalyticsCard
           title="Stream Type (Live vs VOD)"
           icon={<Play className="h-4 w-4" />}
-          {...queryStatus}
+          {...extendedQueryStatus}
           isEmpty={!streamTypeRows.length}
           helpTitle={STREAMING_INFO.stream_type_dist.title}
           helpContent={STREAMING_INFO.stream_type_dist.body}

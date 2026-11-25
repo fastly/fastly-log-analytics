@@ -775,6 +775,69 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     expect(screen.queryByText(/3958\.4825/)).not.toBeInTheDocument()
   })
 
+  test('Cloud streaming defers below-the-fold bitrate_ladder and stream_type_dist query until entering view', async () => {
+    useMockDataTable = false
+    setCloudModeRuntime(true)
+    let triggerIntersect: (() => void) | null = null
+    vi.stubGlobal('IntersectionObserver', class {
+      private cb: IntersectionObserverCallback
+      constructor(cb: IntersectionObserverCallback) {
+        this.cb = cb
+      }
+      observe(target: Element) {
+        triggerIntersect = () => {
+          this.cb([{ isIntersecting: true, target } as IntersectionObserverEntry], this as unknown as IntersectionObserver)
+        }
+      }
+      disconnect() {}
+    })
+    try {
+      mockPost.mockImplementation(async (_path: string, opts?: { body?: { sections?: string[] } }) => {
+        if (opts?.body?.sections?.includes('bitrate_ladder')) {
+          return {
+            data: {
+              ...CMCD_FIXTURE,
+              bitrate_ladder: [
+                { tier: '2.5–5 Mbps (1080p)', session_count: 10, request_count: 42, avg_bitrate: 3800, rebuffer_rate: 1.5 },
+              ],
+              stream_type_dist: [
+                { stream_type: 'l', session_count: 8, request_count: 35 },
+              ],
+            },
+          } as never
+        }
+        return {
+          data: {
+            ...CMCD_FIXTURE,
+            bitrate_ladder: [],
+            stream_type_dist: [],
+          },
+        } as never
+      })
+
+      renderWithQuery(<StreamingClient />, { queryClient })
+      expect(await screen.findByText('1,234')).toBeInTheDocument()
+      // Only the primary summary-backed query ran; the raw extended query stays deferred below the fold.
+      expect(mockPost).toHaveBeenCalledTimes(1)
+      expect(triggerIntersect).not.toBeNull()
+
+      // Scrolling the bottom grid into view triggers the extended query and renders its tables.
+      triggerIntersect!()
+      await waitFor(() => {
+        expect(mockPost).toHaveBeenCalledWith(
+          '/api/cmcd/aggregates',
+          expect.objectContaining({
+            body: expect.objectContaining({ sections: ['bitrate_ladder', 'stream_type_dist'] }),
+          }),
+        )
+      })
+      expect(await screen.findByText('2.5–5 Mbps (1080p)')).toBeInTheDocument()
+      expect(screen.getByText('Live')).toBeInTheDocument()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   describe('CostCalculator calc logic with RUM', () => {
     test('returns correct calculations for DEFAULTS', () => {
       const results = calculate(DEFAULTS)

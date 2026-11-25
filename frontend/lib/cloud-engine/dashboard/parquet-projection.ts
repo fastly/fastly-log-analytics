@@ -67,6 +67,9 @@ export const WHOLE_FALLBACK_MANY_RANGES_RATIO = 0.60;
 export const WHOLE_FALLBACK_HIGH_FANOUT_MIN = 16;
 export const WHOLE_FALLBACK_HIGH_FANOUT_RATIO = 0.45;
 export const WHOLE_FALLBACK_HIGH_FANOUT_MAX_BYTES = 8 * 1024 * 1024;
+export const WHOLE_FALLBACK_EXTREME_FANOUT_MIN = 24;
+export const WHOLE_FALLBACK_EXTREME_FANOUT_RATIO = 0.30;
+export const WHOLE_FALLBACK_EXTREME_FANOUT_MAX_BYTES = 16 * 1024 * 1024;
 
 /**
  * Whether a post-footer projection plan should fall back to a single shared whole-file fetch
@@ -82,6 +85,11 @@ export function shouldFallbackToWhole(
   if (plannedRangeBytes >= fileSize * WHOLE_FALLBACK_RANGE_RATIO) return true;
   if (plan.ranges.length >= WHOLE_FALLBACK_MANY_RANGES_MIN
     && plannedRangeBytes >= fileSize * WHOLE_FALLBACK_MANY_RANGES_RATIO) {
+    return true;
+  }
+  if (plan.ranges.length >= WHOLE_FALLBACK_EXTREME_FANOUT_MIN
+    && (plannedRangeBytes >= fileSize * WHOLE_FALLBACK_EXTREME_FANOUT_RATIO
+      || fileSize <= WHOLE_FALLBACK_EXTREME_FANOUT_MAX_BYTES)) {
     return true;
   }
   return plan.ranges.length >= WHOLE_FALLBACK_HIGH_FANOUT_MIN

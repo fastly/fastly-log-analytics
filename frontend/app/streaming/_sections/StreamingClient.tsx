@@ -16,7 +16,7 @@ import { useFilterStore } from '@/stores/filterStore'
 import type { FiltersPayload, PlotlyTrace } from '@/types/api'
 import { CHART_COLORS, formatCountMaybe, formatDate, formatDuration, resolveRangeWire } from '@/lib/utils'
 import { analyticsReportQueryKey } from '@/lib/report-query-key'
-import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
+import { AnalyticsCard, type AnalyticsCardError, useInViewOnce } from '@/components/AnalyticsCard'
 import { ReportLayout } from '@/components/ReportLayout'
 import { RawWindowNote, readRawWindow } from '@/components/network/rollupLabels'
 import { StatCard } from '@/components/ui/confirm-dialog'
@@ -90,6 +90,11 @@ function StreamingBody({
     hasStreamingData &&
     !data?.bitrate_ladder?.length &&
     !data?.stream_type_dist?.length
+  const extendedSectionRef = React.useRef<HTMLDivElement>(null)
+  const extendedVisible = useInViewOnce(extendedSectionRef, {
+    rootMargin: '100px',
+    enabled: needsCloudExtended,
+  })
   const extendedQuery = useServiceQuery(
     analyticsReportQueryKey({
       namespace: ['cmcd', 'aggregates', 'extended'],
@@ -112,13 +117,20 @@ function StreamingBody({
           },
         }),
       ),
-    { enabled: needsCloudExtended, staleTime: 30_000, refetchInterval: 30_000 },
+    { enabled: needsCloudExtended && extendedVisible, staleTime: 30_000, refetchInterval: 30_000 },
   )
   const queryStatus = {
     isLoading: cmcdQuery.isLoading,
     isFetching: cmcdQuery.isFetching,
     error: cmcdQuery.error as AnalyticsCardError | null,
   }
+  const extendedQueryStatus = needsCloudExtended
+    ? {
+        isLoading: cmcdQuery.isLoading || (extendedVisible && extendedQuery.isLoading),
+        isFetching: cmcdQuery.isFetching || (extendedVisible && extendedQuery.isFetching),
+        error: (cmcdQuery.error ?? extendedQuery.error) as AnalyticsCardError | null,
+      }
+    : queryStatus
   const tsProps = { startTime, endTime, timezone, height: '100%', onRelayout: handleChartRelayout }
 
   const bufferHealthData = React.useMemo(() => {
@@ -308,6 +320,8 @@ function StreamingBody({
       <StreamingChartsGrid
         data={data}
         queryStatus={queryStatus}
+        extendedQueryStatus={extendedQueryStatus}
+        extendedSectionRef={extendedSectionRef}
         tsProps={tsProps}
         sessionsData={sessionsData}
         sessionStartsData={sessionStartsData}
