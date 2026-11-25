@@ -6037,6 +6037,19 @@ def test_sec_t5_iter40_scrub_ip_text_ipv6_trailing_colon_port_and_short_hex() ->
     assert scrub_ip_text("16:42:00:2001:0db8:85a3:0000:0000:8a2e:0370:733a") == "16:42:00:2001:db8:85a3::"
     assert scrub_ip_text("c1:2001:0db8:85a3:0000:0000:8a2e:0370:733a") == "c1:2001:db8:85a3::"
 
+    # 6. ITER42: post-IPv6 UA spans (no IPv4 leak / UA corruption), IPv4-embedded IPv6 with :port/:text,
+    #    8-group IPv6 + :port:extra, and '::' prefix before compressed IPv6:
+    assert (
+        scrub_ip_text("src=2001:0db8:85a3:0000:0000:8a2e:0370:733a Chrome/120.0.0.1 client=198.51.100.42")
+        == "src=2001:db8:85a3:: Chrome/120.0.0.1 client=198.51.100.xxx"
+    )
+    assert scrub_ip_text("::ffff:192.168.10.20:80:err") == ":::80:err"
+    assert scrub_ip_text("::ffff:192.168.10.20:8") == ":::8"
+    assert scrub_ip_text("2001:db8::192.168.10.20:80:abc") == "2001:db8:::80:abc"
+    assert scrub_ip_text("2001:db8:1:2:3:4:192.168.10.20:80:abc") == "2001:db8:1:::80:abc"
+    assert scrub_ip_text("2001:db8:1:2:3:4:5:6:80:extra") == "2001:db8:1:::80:extra"
+    assert scrub_ip_text("::2001:db8:abcd:ef01::1") == "::2001:db8:abcd::"
+
 
 @pytest.mark.security_regression
 def test_sec_t5_iter40_live_chdb_paren_free_replace() -> None:

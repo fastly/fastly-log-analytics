@@ -445,13 +445,17 @@ _UA_PROD_VER_RE = re.compile(
 _EMBEDDED_IPV4_RE = re.compile(r"(?<!\d)(?<!\d\.)(?:\d{1,3}\.){3}\d{1,3}(?![\d]|\.\d)")
 _EMBEDDED_IPV6_RE = re.compile(
     r"(?<![A-Za-z0-9])(?:"
+    r"(?:"
     r"(?:[A-Fa-f0-9]{1,4}:){6}(?:\d{1,3}\.){3}\d{1,3}"
     r"|(?:[A-Fa-f0-9]{1,4}:){1,5}:(?:[A-Fa-f0-9]{1,4}:){0,4}(?:\d{1,3}\.){3}\d{1,3}"
     r"|::(?:[A-Fa-f0-9]{1,4}:){0,5}(?:\d{1,3}\.){3}\d{1,3}"
-    r"|[A-Fa-f0-9]{1,4}(?::[A-Fa-f0-9]{1,4}){2,7}"
+    r")(?![A-Za-z0-9]|\.\d)"
+    r"|(?:"
+    r"[A-Fa-f0-9]{1,4}(?::[A-Fa-f0-9]{1,4}){2,7}"
     r"|(?:[A-Fa-f0-9]{1,4}:){1,7}:(?:[A-Fa-f0-9]{1,4}(?::[A-Fa-f0-9]{1,4}){0,5})?"
     r"|::(?:[A-Fa-f0-9]{1,4}(?::[A-Fa-f0-9]{1,4}){0,6})"
-    r")(?![A-Fa-f0-9]|:(?!(?:[1-9]\d{1,4})(?![A-Fa-f0-9]|:[A-Fa-f0-9:]))[A-Fa-f0-9:])"
+    r")(?![A-Fa-f0-9]|\.\d|:(?!(?:[1-9]\d{1,4})(?![A-Fa-f0-9]|:(?:[A-Fa-f0-9]{1,4}(?![A-Za-z0-9])|:)))[A-Fa-f0-9:])"
+    r")"
 )
 _SAVED_VIEW_STRUCTURAL_KEYS = frozenset(
     {
@@ -899,7 +903,7 @@ def scrub_ip_text(val: str) -> str:
     """Mask IPv4/IPv6 literals embedded in URLs or free text while preserving UA version tokens."""
     if not isinstance(val, str) or not val or ("." not in val and ":" not in val):
         return val
-    ua_spans = [(m.start(), m.end()) for m in _UA_PROD_VER_RE.finditer(val)]
+    ua_spans: list[tuple[int, int]] = []
 
     def _in_ua(start: int, end: int) -> bool:
         return any(s <= start and end <= e for s, e in ua_spans)
@@ -928,7 +932,7 @@ def scrub_ip_text(val: str) -> str:
                     while k > 0 and (out[k - 1].isalnum() or out[k - 1] in "_-"):
                         k -= 1
                     before_dcolon = out[k : start - 2]
-                    if not before_dcolon or (
+                    if (not before_dcolon and "::" not in cand) or (
                         1 <= len(before_dcolon) <= 4
                         and not before_dcolon.isalpha()
                         and all(ch in "0123456789abcdefABCDEF" for ch in before_dcolon)
@@ -952,6 +956,7 @@ def scrub_ip_text(val: str) -> str:
     if ":" in out:
         out = _EMBEDDED_IPV6_RE.sub(_sub_v6, out)
     if "." in out:
+        ua_spans = [(m.start(), m.end()) for m in _UA_PROD_VER_RE.finditer(out)]
         out = _EMBEDDED_IPV4_RE.sub(_sub_v4, out)
     return out
 

@@ -1278,7 +1278,12 @@ function scanQuotesAndUrlsPass(
         const ch = line1[i];
         if (useBackslashEscape) {
           if (ch === "\\") {
-            i += 2;
+            const nextCh = i + 1 < limit ? line1[i + 1] : "";
+            if (nextCh === "\\" || nextCh === "'") {
+              i += 2;
+              continue;
+            }
+            i += 1;
             continue;
           }
           if (!isEscapeSingle) {

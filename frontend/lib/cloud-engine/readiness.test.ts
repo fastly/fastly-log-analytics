@@ -2893,6 +2893,16 @@ it("SEC-T5-ITER40-FE-03: prevents non-contraction apostrophe mismatch and cross-
         ["1234ms", "500", "GiB", "table", "column"],
         "Error: Binder Error: [redacted]",
       ],
+      [
+        "Error: 'a\\' \\can't HTTP 403 100 MB session valid'",
+        ["HTTP", "403", "100", "MB", "session", "valid"],
+        "Error: Error: [redacted]",
+      ],
+      [
+        "Error: 'a\\' \\\\can't \\doesn't HTTP 403 100 MB session valid'",
+        ["HTTP", "403", "100", "MB", "session", "valid"],
+        "Error: Error: [redacted]",
+      ],
     ];
     for (const [msg, forbidden, expectedExact] of cases) {
       const err = new Error(msg);
