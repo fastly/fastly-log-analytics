@@ -387,6 +387,7 @@ pub trait Runtime: SetupStores {
 #[derive(Default)]
 struct Trace {
     actor: Option<String>,
+    debug_calls_allowed: bool,
     rows: Vec<Value>,
     dropped: u64,
 }
@@ -557,7 +558,10 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
         if trace.actor.is_some() {
             response = response.header("x-flp-vcpu-ms", vcpu_ms.to_string());
         }
-        if trace.actor.is_some() && request.header("x-debug-responses") == Some("1") {
+        let wants_debug_response = trace.actor.is_some()
+            && trace.debug_calls_allowed
+            && request.header("x-debug-responses") == Some("1");
+        if wants_debug_response {
             if let Some(trace_id) = trace_id_from_parent(request.header("traceparent")) {
                 response = response.header("x-flp-trace-id", trace_id);
             }
@@ -613,10 +617,7 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
         }
         let debug_calls =
             drain_runtime_rows_with_page_load_id(self.runtime, &buffer, page_load_id.as_deref());
-        if trace.actor.is_some()
-            && request.header("x-debug-responses") == Some("1")
-            && !debug_calls.is_empty()
-        {
+        if wants_debug_response && !debug_calls.is_empty() {
             if let Ok(encoded) = serde_json::to_string(&debug_calls) {
                 response = response.header("x-flp-debug-calls", encoded);
             }
@@ -856,7 +857,23 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
                 .push(("auth", auth_started.elapsed()));
             let auth_epoch = authenticated.as_ref().map_or(0, |(_, epoch)| *epoch);
             let user = authenticated.map(|(user, _)| user);
-            self.trace.borrow_mut().actor = user.as_ref().map(|user| user.id.clone());
+            let debug_calls_allowed = if request.header("x-debug-responses") == Some("1") {
+                user.as_ref().is_some_and(|user| {
+                    self.state.load().ok().is_some_and(|record| {
+                        auth::settings::allows_debug_role(
+                            &record.state.usage_logging.api_call_debug_visibility,
+                            user.role,
+                        )
+                    })
+                })
+            } else {
+                false
+            };
+            {
+                let mut trace = self.trace.borrow_mut();
+                trace.actor = user.as_ref().map(|user| user.id.clone());
+                trace.debug_calls_allowed = debug_calls_allowed;
+            }
             if request.method == "POST" && path == "/api/telemetry/query" {
                 user.as_ref().ok_or(AuthError::Unauthorized)?;
                 return Ok(self.beacon(request));

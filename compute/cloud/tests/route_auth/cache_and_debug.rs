@@ -149,6 +149,17 @@ fn admin_pages_accept_head_requests_and_enforce_session_gate() {
 #[test]
 fn page_load_id_is_recorded_in_telemetry_and_debug_headers_are_emitted() {
     let h = Harness::new();
+    let patch = h.send_with(
+        "PATCH",
+        "/api/admin/usage-logging",
+        "admin",
+        Some("https://logs.example.com"),
+        &serde_json::to_vec(&json!({
+            "api_call_debug_visibility": "admins"
+        }))
+        .unwrap(),
+    );
+    assert_eq!(patch.status, 200);
     h.platform
         .api_log
         .record("GET", "/service/fixtureService", Some(200), 5, None, "");

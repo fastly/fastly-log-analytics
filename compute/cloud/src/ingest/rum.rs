@@ -20,6 +20,27 @@ pub const STREAM: &str = "rum";
 pub const VITALS: &str = "client_vitals";
 pub const ERRORS: &str = "client_errors";
 const SCHEMA_VERSION: &str = "rum-v1";
+
+/// Per-beacon upper bounds to prevent unauthenticated memory-amplification OOM DoS
+/// inside the 128 MiB Wasm worker.
+pub const MAX_METRICS_PER_BEACON: usize = 64;
+pub const MAX_RESOURCES_PER_BEACON: usize = 64;
+pub const MAX_ERRORS_PER_BEACON: usize = 16;
+pub const MAX_BEACON_PATH_BYTES: usize = 512;
+pub const MAX_BEACON_FIELD_BYTES: usize = 512;
+pub const MAX_BEACON_ERROR_BYTES: usize = 1024;
+
+fn truncate_utf8(mut s: String, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.truncate(end);
+    s
+}
 const TAIL: [&str; 13] = [
     "pathname",
     "browser",
@@ -209,12 +230,18 @@ fn faro_metrics(payload: &Map<String, Value>, line: &Map<String, Value>) -> Vec<
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    let browser_name = first(&browser, &["name"])
-        .or_else(|| first(line, &["browser"]))
-        .unwrap_or_else(|| "Chrome".into());
-    let os_name = first(&os, &["name"])
-        .or_else(|| first(line, &["os"]))
-        .unwrap_or_else(|| "macOS".into());
+    let browser_name = truncate_utf8(
+        first(&browser, &["name"])
+            .or_else(|| first(line, &["browser"]))
+            .unwrap_or_else(|| "Chrome".into()),
+        MAX_BEACON_FIELD_BYTES,
+    );
+    let os_name = truncate_utf8(
+        first(&os, &["name"])
+            .or_else(|| first(line, &["os"]))
+            .unwrap_or_else(|| "macOS".into()),
+        MAX_BEACON_FIELD_BYTES,
+    );
     let device = if truthy(browser.get("mobile")).is_some() {
         "Mobile"
     } else {
@@ -223,16 +250,22 @@ fn faro_metrics(payload: &Map<String, Value>, line: &Map<String, Value>) -> Vec<
     let url = first(&page, &["url"])
         .or_else(|| first(line, &["url"]))
         .unwrap_or_default();
-    let pathname = if url.is_empty() {
-        "/".to_owned()
-    } else {
-        url_path(&url).to_owned()
-    };
-    let cid = first(line, &["rum_cid", "cid"]).unwrap_or_default();
+    let pathname = truncate_utf8(
+        if url.is_empty() {
+            "/".to_owned()
+        } else {
+            url_path(&url).to_owned()
+        },
+        MAX_BEACON_PATH_BYTES,
+    );
+    let cid = truncate_utf8(
+        first(line, &["rum_cid", "cid"]).unwrap_or_default(),
+        MAX_BEACON_FIELD_BYTES,
+    );
     let entry = |name: String, value: Option<Value>, rating: String| Metric {
-        name: Some(name),
+        name: Some(truncate_utf8(name, MAX_BEACON_FIELD_BYTES)),
         value,
-        rating: Some(rating),
+        rating: Some(truncate_utf8(rating, MAX_BEACON_FIELD_BYTES)),
         pathname: Some(pathname.clone()),
         cid: Some(cid.clone()),
         browser: Some(browser_name.clone()),
@@ -243,40 +276,54 @@ fn faro_metrics(payload: &Map<String, Value>, line: &Map<String, Value>) -> Vec<
         req_id: None,
         resource_url: None,
     };
-    let list = |key: &str| {
+    let list = |key: &str| -> &[Value] {
         payload
             .get(key)
             .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default()
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     };
     let mut out = Vec::new();
-    for m in list("measurements").iter().filter_map(Value::as_object) {
+    let mut metric_count = 0usize;
+    let mut error_count = 0usize;
+    'measurements: for m in list("measurements").iter().filter_map(Value::as_object) {
+        if metric_count >= MAX_METRICS_PER_BEACON {
+            break;
+        }
         if m.get("type").and_then(Value::as_str) != Some("web-vitals") {
             continue;
         }
-        let rating = m
-            .get("context")
-            .and_then(Value::as_object)
-            .and_then(|c| first(c, &["rating"]))
-            .or_else(|| {
-                m.get("meta")
-                    .and_then(Value::as_object)
-                    .and_then(|c| first(c, &["rating"]))
-            })
-            .unwrap_or_default();
+        let rating = truncate_utf8(
+            m.get("context")
+                .and_then(Value::as_object)
+                .and_then(|c| first(c, &["rating"]))
+                .or_else(|| {
+                    m.get("meta")
+                        .and_then(Value::as_object)
+                        .and_then(|c| first(c, &["rating"]))
+                })
+                .unwrap_or_default(),
+            MAX_BEACON_FIELD_BYTES,
+        );
         for (k, v) in m
             .get("values")
             .and_then(Value::as_object)
             .into_iter()
             .flatten()
         {
+            if metric_count >= MAX_METRICS_PER_BEACON {
+                break 'measurements;
+            }
             if k != "delta" {
                 out.push(entry(k.clone(), Some(v.clone()), rating.clone()));
+                metric_count += 1;
             }
         }
     }
-    for e in list("events").iter().filter_map(Value::as_object) {
+    'events: for e in list("events").iter().filter_map(Value::as_object) {
+        if metric_count >= MAX_METRICS_PER_BEACON {
+            break;
+        }
         let Some(name) = first(e, &["name"]) else {
             continue;
         };
@@ -285,7 +332,11 @@ fn faro_metrics(payload: &Map<String, Value>, line: &Map<String, Value>) -> Vec<
                 .or_else(|| truthy(e.get("values")))
                 .and_then(Value::as_object);
             for (k, v) in values.into_iter().flatten() {
+                if metric_count >= MAX_METRICS_PER_BEACON {
+                    break 'events;
+                }
                 out.push(entry(k.clone(), Some(v.clone()), String::new()));
+                metric_count += 1;
             }
         } else {
             out.push(entry(
@@ -293,32 +344,44 @@ fn faro_metrics(payload: &Map<String, Value>, line: &Map<String, Value>) -> Vec<
                 Some(1.0.into()),
                 String::new(),
             ));
+            metric_count += 1;
         }
     }
     for log in list("logs").iter().filter_map(Value::as_object) {
+        if metric_count >= MAX_METRICS_PER_BEACON {
+            break;
+        }
         let level = first(log, &["level"]).unwrap_or_else(|| "info".into());
         out.push(entry("log".into(), Some(1.0.into()), level));
+        metric_count += 1;
     }
     for exception in list("exceptions").iter().filter_map(Value::as_object) {
-        let message =
-            first(exception, &["value", "message"]).unwrap_or_else(|| "Unknown error".into());
+        if error_count >= MAX_ERRORS_PER_BEACON {
+            break;
+        }
+        let message = truncate_utf8(
+            first(exception, &["value", "message"]).unwrap_or_else(|| "Unknown error".into()),
+            MAX_BEACON_ERROR_BYTES,
+        );
         let frame = exception
             .get("stacktrace")
             .and_then(Value::as_object)
             .and_then(|s| s.get("frames"))
             .and_then(Value::as_array)
             .and_then(|frames| frames.first())
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
+            .and_then(Value::as_object);
+        let filename = truncate_utf8(
+            frame
+                .and_then(|f| first(f, &["filename"]))
+                .unwrap_or_else(|| "unknown.js".into()),
+            MAX_BEACON_PATH_BYTES,
+        );
+        let lineno = frame.map_or(0, |f| int(truthy(f.get("lineno"))));
+        let colno = frame.map_or(0, |f| int(truthy(f.get("colno"))));
         let mut metric = entry("exception".into(), None, String::new());
-        metric.error = Some((
-            message,
-            first(&frame, &["filename"]).unwrap_or_else(|| "unknown.js".into()),
-            int(truthy(frame.get("lineno"))),
-            int(truthy(frame.get("colno"))),
-        ));
+        metric.error = Some((message, filename, lineno, colno));
         out.push(metric);
+        error_count += 1;
     }
     if out.is_empty() {
         out.push(entry("pageview".into(), Some(1.0.into()), String::new()));
@@ -403,21 +466,30 @@ fn query_metric(line: &Map<String, Value>) -> Metric {
     }
     let error = error_message.map(|message| {
         (
-            message,
-            error_file.unwrap_or_else(|| "unknown.js".into()),
+            truncate_utf8(message, MAX_BEACON_ERROR_BYTES),
+            truncate_utf8(
+                error_file.unwrap_or_else(|| "unknown.js".into()),
+                MAX_BEACON_PATH_BYTES,
+            ),
             error_line,
             error_col,
         )
     });
     Metric {
-        name,
+        name: name.map(|n| truncate_utf8(n, MAX_BEACON_FIELD_BYTES)),
         value,
-        rating,
-        pathname: Some(pathname.unwrap_or_else(|| "/".into()).replace("//", "/")),
-        cid: Some(cid.unwrap_or_default()),
-        browser: first(line, &["browser"]),
-        os: first(line, &["os"]),
-        device: first(line, &["device"]),
+        rating: rating.map(|r| truncate_utf8(r, MAX_BEACON_FIELD_BYTES)),
+        pathname: Some(truncate_utf8(
+            pathname.unwrap_or_else(|| "/".into()).replace("//", "/"),
+            MAX_BEACON_PATH_BYTES,
+        )),
+        cid: Some(truncate_utf8(
+            cid.unwrap_or_default(),
+            MAX_BEACON_FIELD_BYTES,
+        )),
+        browser: first(line, &["browser"]).map(|b| truncate_utf8(b, MAX_BEACON_FIELD_BYTES)),
+        os: first(line, &["os"]).map(|o| truncate_utf8(o, MAX_BEACON_FIELD_BYTES)),
+        device: first(line, &["device"]).map(|d| truncate_utf8(d, MAX_BEACON_FIELD_BYTES)),
         error,
         sample_rate: None,
         req_id: None,
@@ -445,22 +517,33 @@ fn vcl_query_metrics(line: &Map<String, Value>) -> Option<Vec<Metric>> {
     let mut q_cid: Option<String> = None;
     let mut q_pathname: Option<String> = None;
     for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
-        let val = v.into_owned();
         match k.as_ref() {
-            "rum_metric_name" => raw_names.push(val),
-            "rum_metric_value" => raw_values.push(val),
-            "rum_metric_rating" => raw_ratings.push(val),
-            "rum_error_message" => raw_err_msgs.push(val),
-            "rum_error_file" => raw_err_files.push(val),
-            "rum_error_line" => raw_err_lines.push(val),
-            "rum_error_col" => raw_err_cols.push(val),
-            "cid" | "rum_cid" if q_cid.as_ref().is_none_or(String::is_empty) && !val.is_empty() => {
-                q_cid = Some(val);
+            "rum_metric_name" if raw_names.len() < MAX_METRICS_PER_BEACON => {
+                raw_names.push(truncate_utf8(v.into_owned(), MAX_BEACON_FIELD_BYTES));
             }
-            "rum_pathname"
-                if q_pathname.as_ref().is_none_or(String::is_empty) && !val.is_empty() =>
-            {
-                q_pathname = Some(val);
+            "rum_metric_value" if raw_values.len() < MAX_METRICS_PER_BEACON => {
+                raw_values.push(truncate_utf8(v.into_owned(), MAX_BEACON_FIELD_BYTES));
+            }
+            "rum_metric_rating" if raw_ratings.len() < MAX_METRICS_PER_BEACON => {
+                raw_ratings.push(truncate_utf8(v.into_owned(), MAX_BEACON_FIELD_BYTES));
+            }
+            "rum_error_message" if raw_err_msgs.len() < MAX_ERRORS_PER_BEACON => {
+                raw_err_msgs.push(truncate_utf8(v.into_owned(), MAX_BEACON_ERROR_BYTES));
+            }
+            "rum_error_file" if raw_err_files.len() < MAX_ERRORS_PER_BEACON => {
+                raw_err_files.push(truncate_utf8(v.into_owned(), MAX_BEACON_PATH_BYTES));
+            }
+            "rum_error_line" if raw_err_lines.len() < MAX_ERRORS_PER_BEACON => {
+                raw_err_lines.push(truncate_utf8(v.into_owned(), MAX_BEACON_FIELD_BYTES));
+            }
+            "rum_error_col" if raw_err_cols.len() < MAX_ERRORS_PER_BEACON => {
+                raw_err_cols.push(truncate_utf8(v.into_owned(), MAX_BEACON_FIELD_BYTES));
+            }
+            "cid" | "rum_cid" if q_cid.as_ref().is_none_or(String::is_empty) && !v.is_empty() => {
+                q_cid = Some(truncate_utf8(v.into_owned(), MAX_BEACON_FIELD_BYTES));
+            }
+            "rum_pathname" if q_pathname.as_ref().is_none_or(String::is_empty) && !v.is_empty() => {
+                q_pathname = Some(truncate_utf8(v.into_owned(), MAX_BEACON_PATH_BYTES));
             }
             _ => {}
         }
@@ -470,16 +553,22 @@ fn vcl_query_metrics(line: &Map<String, Value>) -> Option<Vec<Metric>> {
     if non_empty_metrics + non_empty_errors <= 1 {
         return None;
     }
-    let cid = q_cid
-        .or_else(|| first(line, &["rum_cid", "cid"]))
-        .unwrap_or_default();
-    let pathname = q_pathname
-        .or_else(|| first(line, &["rum_pathname"]).map(decode_if_encoded))
-        .unwrap_or_else(|| "/".into())
-        .replace("//", "/");
-    let browser = first(line, &["browser"]);
-    let os = first(line, &["os"]);
-    let device = first(line, &["device"]);
+    let cid = truncate_utf8(
+        q_cid
+            .or_else(|| first(line, &["rum_cid", "cid"]))
+            .unwrap_or_default(),
+        MAX_BEACON_FIELD_BYTES,
+    );
+    let pathname = truncate_utf8(
+        q_pathname
+            .or_else(|| first(line, &["rum_pathname"]).map(decode_if_encoded))
+            .unwrap_or_else(|| "/".into())
+            .replace("//", "/"),
+        MAX_BEACON_PATH_BYTES,
+    );
+    let browser = first(line, &["browser"]).map(|b| truncate_utf8(b, MAX_BEACON_FIELD_BYTES));
+    let os = first(line, &["os"]).map(|o| truncate_utf8(o, MAX_BEACON_FIELD_BYTES));
+    let device = first(line, &["device"]).map(|d| truncate_utf8(d, MAX_BEACON_FIELD_BYTES));
     let mut out = Vec::new();
     let last_name_idx = raw_names.len().saturating_sub(1);
     for (idx, name) in raw_names.iter().enumerate() {
@@ -548,10 +637,13 @@ fn vcl_query_metrics(line: &Map<String, Value>) -> Option<Vec<Metric>> {
             os: os.clone(),
             device: device.clone(),
             error: Some((
-                err_msg,
-                first(line, &["rum_error_file"])
-                    .map(decode_if_encoded)
-                    .unwrap_or_else(|| "unknown.js".into()),
+                truncate_utf8(err_msg, MAX_BEACON_ERROR_BYTES),
+                truncate_utf8(
+                    first(line, &["rum_error_file"])
+                        .map(decode_if_encoded)
+                        .unwrap_or_else(|| "unknown.js".into()),
+                    MAX_BEACON_PATH_BYTES,
+                ),
                 int(line.get("rum_error_line")),
                 int(line.get("rum_error_col")),
             )),
@@ -584,8 +676,11 @@ fn batch_metrics(line: &Map<String, Value>) -> Option<Vec<Metric>> {
             .find(|(key, value)| *key == name && !value.is_empty())
             .map(|(_, value)| decode(value))
     };
-    let pathname = param("p").unwrap_or_else(|| "/".into());
-    let cid = param("cid").unwrap_or_default();
+    let pathname = truncate_utf8(
+        param("p").unwrap_or_else(|| "/".into()),
+        MAX_BEACON_PATH_BYTES,
+    );
+    let cid = truncate_utf8(param("cid").unwrap_or_default(), MAX_BEACON_FIELD_BYTES);
     let rate = |name: &str| {
         param(name)
             .and_then(|rate| rate.parse::<f64>().ok())
@@ -603,19 +698,34 @@ fn batch_metrics(line: &Map<String, Value>) -> Option<Vec<Metric>> {
         ..Metric::default()
     };
     let mut out = Vec::new();
+    let mut metric_count = 0usize;
+    let mut resource_count = 0usize;
+    let mut error_count = 0usize;
     for (key, value) in &params {
         match *key {
             "m" => {
                 for metric in value.split(',').filter(|m| !m.is_empty()) {
+                    if metric_count >= MAX_METRICS_PER_BEACON {
+                        break;
+                    }
                     let mut parts = metric.split(':').map(decode);
-                    let name = parts.next().unwrap_or_default();
-                    let value = parts.next().map(Value::String);
-                    out.push(entry(name, value, parts.next().unwrap_or_default()));
+                    let name =
+                        truncate_utf8(parts.next().unwrap_or_default(), MAX_BEACON_FIELD_BYTES);
+                    let value = parts
+                        .next()
+                        .map(|v| Value::String(truncate_utf8(v, MAX_BEACON_FIELD_BYTES)));
+                    let rating =
+                        truncate_utf8(parts.next().unwrap_or_default(), MAX_BEACON_FIELD_BYTES);
+                    out.push(entry(name, value, rating));
+                    metric_count += 1;
                 }
             }
             "r" => {
                 // `rid:path:ms`, the client time-to-last-byte of one request that reached the edge.
                 for resource in value.split(',').filter(|r| !r.is_empty()) {
+                    if resource_count >= MAX_RESOURCES_PER_BEACON {
+                        break;
+                    }
                     let mut parts = resource.split(':').map(decode);
                     let (rid, path) = (parts.next(), parts.next());
                     let ttlb = parts.next().and_then(|ms| ms.parse::<f64>().ok());
@@ -627,27 +737,36 @@ fn batch_metrics(line: &Map<String, Value>) -> Option<Vec<Metric>> {
                     }
                     let mut metric = entry("ttlb".into(), Some(Value::from(ttlb)), String::new());
                     metric.sample_rate = resource_sample_rate;
-                    metric.req_id = Some(rid);
-                    metric.resource_url = Some(path);
+                    metric.req_id = Some(truncate_utf8(rid, MAX_BEACON_FIELD_BYTES));
+                    metric.resource_url = Some(truncate_utf8(path, MAX_BEACON_PATH_BYTES));
                     out.push(metric);
+                    resource_count += 1;
                 }
             }
             "e" => {
+                if error_count >= MAX_ERRORS_PER_BEACON {
+                    continue;
+                }
                 let mut parts = value.split('|').map(decode);
                 let message = parts.next().filter(|m| !m.is_empty());
                 let Some(message) = message else {
                     continue;
                 };
-                let file = parts
-                    .next()
-                    .filter(|f| !f.is_empty())
-                    .unwrap_or_else(|| "unknown.js".into());
+                let message = truncate_utf8(message, MAX_BEACON_ERROR_BYTES);
+                let file = truncate_utf8(
+                    parts
+                        .next()
+                        .filter(|f| !f.is_empty())
+                        .unwrap_or_else(|| "unknown.js".into()),
+                    MAX_BEACON_PATH_BYTES,
+                );
                 let mut number = || int(parts.next().map(Value::String).as_ref());
                 let (error_line, error_col) = (number(), number());
                 let mut metric = entry("exception".into(), None, String::new());
                 metric.error = Some((message, file, error_line, error_col));
                 metric.sample_rate = error_sample_rate;
                 out.push(metric);
+                error_count += 1;
             }
             _ => {}
         }
@@ -823,38 +942,85 @@ fn parse_line(bytes: &[u8], service_id: &str) -> Parsed {
         .or_else(|| batch_metrics(&line))
         .or_else(|| vcl_query_metrics(&line))
         .unwrap_or_else(|| vec![query_metric(&line)]);
-    let or = |value: &Option<String>, key: &str, default: &str| {
-        value
-            .clone()
-            .filter(|v| !v.is_empty())
-            .or_else(|| first(&line, &[key]))
-            .unwrap_or_else(|| default.into())
-    };
+    let line_browser = first(&line, &["browser"])
+        .map(|v| truncate_utf8(v, MAX_BEACON_FIELD_BYTES))
+        .unwrap_or_else(|| "Chrome".into());
+    let line_os = first(&line, &["os"])
+        .map(|v| truncate_utf8(v, MAX_BEACON_FIELD_BYTES))
+        .unwrap_or_else(|| "macOS".into());
+    let line_device = first(&line, &["device"])
+        .map(|v| truncate_utf8(v, MAX_BEACON_FIELD_BYTES))
+        .unwrap_or_else(|| "Desktop".into());
+    let line_req_id = first(&line, &["fastly_req_id"])
+        .map(|v| truncate_utf8(v, MAX_BEACON_FIELD_BYTES))
+        .unwrap_or_default();
+    let line_city = first(&line, &["city", "geo_city"])
+        .map(|v| truncate_utf8(v, MAX_BEACON_FIELD_BYTES))
+        .unwrap_or_default();
+    let line_region = first(&line, &["region", "geo_region"])
+        .map(|v| truncate_utf8(v, MAX_BEACON_FIELD_BYTES))
+        .unwrap_or_default();
+    let line_country = first(&line, &["country", "geo_country_code"])
+        .map(|v| truncate_utf8(v, MAX_BEACON_FIELD_BYTES))
+        .unwrap_or_default();
+    let line_pop = first(&line, &["pop", "server_pop"])
+        .map(|v| truncate_utf8(v, MAX_BEACON_FIELD_BYTES))
+        .unwrap_or_default();
+    let line_tls = first(&line, &["tls", "tls_version"])
+        .map(|v| truncate_utf8(v, MAX_BEACON_FIELD_BYTES))
+        .unwrap_or_default();
+    let line_asn = first(&line, &["asn"])
+        .map(|v| truncate_utf8(v, MAX_BEACON_FIELD_BYTES))
+        .unwrap_or_default();
     let rows = metrics
         .into_iter()
         .map(|metric| {
             let tail = [
+                truncate_utf8(
+                    metric
+                        .pathname
+                        .clone()
+                        .filter(|p| !p.is_empty())
+                        .unwrap_or_else(|| "/".into()),
+                    MAX_BEACON_PATH_BYTES,
+                ),
                 metric
-                    .pathname
+                    .browser
                     .clone()
-                    .filter(|p| !p.is_empty())
-                    .unwrap_or_else(|| "/".into()),
-                or(&metric.browser, "browser", "Chrome"),
-                or(&metric.os, "os", "macOS"),
-                or(&metric.device, "device", "Desktop"),
-                metric.cid.clone().unwrap_or_default(),
+                    .filter(|v| !v.is_empty())
+                    .map(|v| truncate_utf8(v, MAX_BEACON_FIELD_BYTES))
+                    .unwrap_or_else(|| line_browser.clone()),
+                metric
+                    .os
+                    .clone()
+                    .filter(|v| !v.is_empty())
+                    .map(|v| truncate_utf8(v, MAX_BEACON_FIELD_BYTES))
+                    .unwrap_or_else(|| line_os.clone()),
+                metric
+                    .device
+                    .clone()
+                    .filter(|v| !v.is_empty())
+                    .map(|v| truncate_utf8(v, MAX_BEACON_FIELD_BYTES))
+                    .unwrap_or_else(|| line_device.clone()),
+                truncate_utf8(
+                    metric.cid.clone().unwrap_or_default(),
+                    MAX_BEACON_FIELD_BYTES,
+                ),
                 metric
                     .req_id
                     .clone()
-                    .or_else(|| first(&line, &["fastly_req_id"]))
-                    .unwrap_or_default(),
-                first(&line, &["city", "geo_city"]).unwrap_or_default(),
-                first(&line, &["region", "geo_region"]).unwrap_or_default(),
-                first(&line, &["country", "geo_country_code"]).unwrap_or_default(),
-                first(&line, &["pop", "server_pop"]).unwrap_or_default(),
-                first(&line, &["tls", "tls_version"]).unwrap_or_default(),
-                metric.resource_url.clone().unwrap_or_default(),
-                first(&line, &["asn"]).unwrap_or_default(),
+                    .map(|v| truncate_utf8(v, MAX_BEACON_FIELD_BYTES))
+                    .unwrap_or_else(|| line_req_id.clone()),
+                line_city.clone(),
+                line_region.clone(),
+                line_country.clone(),
+                line_pop.clone(),
+                line_tls.clone(),
+                truncate_utf8(
+                    metric.resource_url.clone().unwrap_or_default(),
+                    MAX_BEACON_PATH_BYTES,
+                ),
+                line_asn.clone(),
             ];
             Row { metric, tail }
         })
