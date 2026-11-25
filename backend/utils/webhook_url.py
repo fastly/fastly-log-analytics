@@ -113,6 +113,7 @@ def _is_restricted_ip(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bo
     return (
         not addr.is_global
         or addr.is_private
+        or addr.is_site_local
         or addr.is_loopback
         or addr.is_link_local
         or addr.is_multicast
@@ -131,6 +132,8 @@ def restricted_webhook_host(host: str) -> bool:
     try:
         address = ipaddress.ip_address(bare)
     except ValueError:
+        if ":" in bare:
+            return True
         return _is_non_canonical_ipv4_literal(bare)
     return _is_restricted_ip(address)
 

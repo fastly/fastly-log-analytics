@@ -555,3 +555,33 @@ def test_webhook_destination_brackets_ipv6_host_header(monkeypatch: pytest.Monke
     dest_no_port = webhook_url.validate_webhook_destination("https://[2606:4700:4700::1111]/hook")
     assert dest_no_port.host == "[2606:4700:4700::1111]"
     assert dest_no_port.url == "https://[2606:4700:4700::1111]/hook"
+
+
+@pytest.mark.parametrize(
+    "site_local_host",
+    [
+        "fec0::1",
+        "fec0:0:0:ffff::1",
+        "feff::1",
+    ],
+)
+def test_webhook_blocks_ipv6_site_local_fec0(site_local_host: str) -> None:
+    assert webhook_url.restricted_webhook_host(site_local_host) is True
+    url = f"http://[{site_local_host}]/hook"
+    with pytest.raises(ValueError):
+        webhook_url.validate_webhook_url_syntax(url)
+    with pytest.raises(ValueError):
+        webhook_url.validate_webhook_destination(url)
+
+
+@pytest.mark.parametrize(
+    "non_canonical_v6",
+    [
+        "00000::1",
+        "::ffff:127.0.0.01",
+        "fe80::00001",
+        "64:ff9b::0177.0.0.1",
+    ],
+)
+def test_restricted_webhook_host_blocks_non_canonical_ipv6(non_canonical_v6: str) -> None:
+    assert webhook_url.restricted_webhook_host(non_canonical_v6) is True
