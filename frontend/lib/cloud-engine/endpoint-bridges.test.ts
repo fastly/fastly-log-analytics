@@ -210,6 +210,9 @@ describe("Cloud endpoint bridges", () => {
     }));
     expect(await (await handleCloudAnalyticalRequest(request("/api/admin/log-accounting")))!.json())
       .toMatchObject({ by: "day", totals: { gap: 20, gap_pct: 0.2 } });
+    fetcher.mockImplementation(async () => new Response(JSON.stringify({ error: "fastly_stats_failed" }), { status: 502 }));
+    expect(await (await handleCloudAnalyticalRequest(request("/api/admin/log-accounting")))!.json())
+      .toMatchObject({ available: false, measurement_basis: "native_sample_adjusted_daily" });
   });
 
   it("shows an accepted invite's last sign-in and each user's latest sign-in on the share page", async () => {

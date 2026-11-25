@@ -1,4 +1,4 @@
-import { adminRequest, getLoggedTraffic, type QuarantineItem } from "./telemetry/admin";
+import { AdminApiError, adminRequest, getLoggedTraffic, type QuarantineItem } from "./telemetry/admin";
 
 // High-Scale's sustained-loss rule (log_accounting.py): 2+ consecutive completed buckets at a 5%+ gap.
 const LOSS_THRESHOLD = 0.05;
@@ -27,8 +27,24 @@ function sustainedLoss(buckets: Bucket[]) {
 }
 
 export async function cloudLogAccounting(request: Request): Promise<Response> {
-  const traffic = await getLoggedTraffic(request.signal);
   const hours = Math.min(720, Math.max(24, Number(new URL(request.url).searchParams.get("hours")) || 24));
+  let traffic;
+  try {
+    traffic = await getLoggedTraffic(request.signal);
+  } catch (error) {
+    if (error instanceof AdminApiError && error.status !== 401 && error.status !== 403) {
+      const nowS = Math.floor(Date.now() / 1000);
+      return Response.json({
+        available: false,
+        reason: error.message || "Fastly logged traffic accounting is unavailable for this service.",
+        by: "day",
+        from_ts: new Date((nowS - hours * 3600) * 1000).toISOString(),
+        to_ts: new Date(nowS * 1000).toISOString(),
+        measurement_basis: "native_sample_adjusted_daily",
+      });
+    }
+    throw error;
+  }
   const from = Math.max(traffic.from, traffic.to - hours * 3600);
   const days = traffic.days.filter((day) => day.day >= from && day.day < traffic.to);
   if (!days.length || days.some((day) => day.expected_rows == null || day.ingested_rows == null)) {
