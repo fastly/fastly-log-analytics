@@ -25,6 +25,7 @@ export async function BootstrapHydration({
   proxiedByCaddy: boolean;
   nonce?: string;
 }) {
+  if (process.env.STATIC_EXPORT === "1") return null;
   const bootstrap = await fetchBootstrapServerSide();
   if (!bootstrap) return null;
 
