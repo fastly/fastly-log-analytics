@@ -14,6 +14,8 @@ import sys
 import threading
 import urllib.parse
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 import boto3
@@ -516,6 +518,55 @@ def _delete_objects_robust(fos_client, bucket: str, keys: list[str]) -> int:
 
 
 ASN_CACHE_TTL_DAYS = 30
+_ASN_HANDLE_PREFIX_RE = re.compile(r"^[A-Z0-9][A-Z0-9_-]*$")
+_BARE_ASN_RE = re.compile(r"^AS\d+$", re.IGNORECASE)
+_COUNTRY_SUFFIX_RE = re.compile(r",\s*[A-Z]{2}$")
+_ASN_NAMES_TSV = Path(__file__).resolve().parents[2] / "frontend" / "public" / "geo" / "asn-names.tsv"
+
+
+def normalize_asn_org_name(name: str | None) -> str:
+    """Strip leading RIR handles while preserving legitimate uppercase organization names."""
+    clean = (name or "").strip()
+    if not clean:
+        return ""
+    if " - " in clean:
+        head, tail = clean.split(" - ", 1)
+        if _ASN_HANDLE_PREFIX_RE.match(head.strip()):
+            clean = tail.strip()
+    if " " in clean:
+        token, rest = clean.split(" ", 1)
+        rest = rest.strip()
+        rest_sans_country = _COUNTRY_SUFFIX_RE.sub("", rest).strip()
+        if rest and rest_sans_country and _ASN_HANDLE_PREFIX_RE.match(token) and not _BARE_ASN_RE.match(rest):
+            if (
+                token.startswith("AS")
+                and token[2:].isdigit()
+                or any(ch in token for ch in "-_0123456789")
+                or rest.lower().startswith(token.lower())
+            ):
+                return rest
+    return clean
+
+
+@lru_cache(maxsize=1)
+def _bundled_asn_names() -> dict[int, str]:
+    if not _ASN_NAMES_TSV.is_file():
+        return {}
+    out: dict[int, str] = {}
+    try:
+        with _ASN_NAMES_TSV.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if "\t" not in line:
+                    continue
+                raw_asn, raw_name = line.split("\t", 1)
+                raw_asn = raw_asn.strip()
+                if raw_asn.isdigit():
+                    norm = normalize_asn_org_name(raw_name)
+                    if norm:
+                        out[int(raw_asn)] = norm
+    except Exception:
+        return {}
+    return out
 
 
 def get_asn_names(service_id: str, asns: list) -> dict:
@@ -528,9 +579,11 @@ def get_asn_names(service_id: str, asns: list) -> dict:
         cached = metadata_db.lookup_asn_names(service_id, asns_clean, max_age_days=ASN_CACHE_TTL_DAYS)
     except Exception:
         cached = {}
-    need = [a for a in asns_clean if a not in cached]
+    cached = {k: (normalize_asn_org_name(v) or f"AS{k}") for k, v in cached.items()}
+    need = [a for a in asns_clean if a not in cached or _BARE_ASN_RE.match(cached[a])]
     resolved: dict[int, str] = {}
     if need:
+        bundled = _bundled_asn_names()
         try:
             import cymruwhois  # type: ignore
 
@@ -554,12 +607,12 @@ def get_asn_names(service_id: str, asns: list) -> dict:
             for res in c.lookupmany([f"AS{asn}" for asn in need]):
                 if res and res.asn:
                     asn_int = int(res.asn)
-                    raw_owner = res.owner or f"AS{asn_int}"
-                    resolved[asn_int] = raw_owner.split(" - ", 1)[1] if " - " in raw_owner else raw_owner
+                    norm = normalize_asn_org_name(res.owner)
+                    resolved[asn_int] = norm or bundled.get(asn_int) or f"AS{asn_int}"
         except Exception as exc:
             logger.warning("ASN resolution failed: %s", type(exc).__name__)
         for asn in need:
-            resolved.setdefault(asn, f"AS{asn}")
+            resolved.setdefault(asn, bundled.get(asn) or f"AS{asn}")
         if resolved:
             try:
                 metadata_db.upsert_asn_names(service_id, resolved)
@@ -572,7 +625,8 @@ def get_asn_names(service_id: str, asns: list) -> dict:
 
 
 def format_asn_label(asn: int, name: str) -> str:
-    return f"AS{asn}" if not name or (name.startswith("AS") and name[2:].isdigit()) else f"{name} ({asn})"
+    clean = normalize_asn_org_name(name)
+    return f"AS{asn}" if not clean or (clean.startswith("AS") and clean[2:].isdigit()) else f"{clean} ({asn})"
 
 
 def enrich_asn_labels(values: list[dict], service_id: str) -> list[dict]:

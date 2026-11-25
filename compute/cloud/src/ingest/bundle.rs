@@ -78,6 +78,8 @@ use std::{
 pub const HOUR_TOP_K: usize = 500;
 /// Values kept per field in a day bundle (fla `DAY_BUNDLE_TOP_K`).
 pub const DAY_TOP_K: usize = 500;
+/// URLs written in a day bundle for `urls/url` (/performance and /origin Slowest URLs).
+pub const DAY_URL_K: usize = 1000;
 /// ASNs a day bundle writes per `series5` bucket set: the 30 a page shows by default.
 pub const SERIES_ASN_TOP_K: usize = 30;
 /// Cities a day bundle writes in `series5` (the /network map).
@@ -995,6 +997,7 @@ impl Group {
         match (self.name, field) {
             ("series5", "asn") => summary::SERIES_ASN_K,
             ("series5", "city") => summary::SERIES_CITY_K,
+            ("urls", "url") => summary::URL_K,
             ("header_ip", _) => summary::HEADER_IP_K,
             ("tls_fp", _) => summary::TLS_FP_K,
             ("value", field) => summary::value_keep(field),
@@ -1017,6 +1020,7 @@ impl Group {
             Unit::Hour => self.keep(field),
             Unit::Day if self.name == "series5" && field == "asn" => SERIES_ASN_TOP_K,
             Unit::Day if self.name == "series5" && field == "city" => SERIES_CITY_TOP_K,
+            Unit::Day if self.name == "urls" && field == "url" => DAY_URL_K,
             Unit::Day if self.name == "proxy" => summary::SAMPLE_K,
             Unit::Day if self.name == "ins_lat" => self.keep(field),
             Unit::Day => self.keep(field).min(DAY_TOP_K),
@@ -1230,6 +1234,128 @@ struct GroupAcc {
 impl GroupAcc {
     fn requests(rows: &BTreeMap<i64, Vec<Cell>>) -> i64 {
         rows.values().map(|c| int(&c[0])).sum()
+    }
+
+    /// `(requests, elapsed_max_us, elapsed_avg_us, ttfb_max_us)` for a `urls/url` entry (`URL_COLS`).
+    fn url_metrics(rows: &BTreeMap<i64, Vec<Cell>>) -> (i64, i64, i64, i64) {
+        let mut reqs: i64 = 0;
+        let mut elapsed_sum = 0.0f64;
+        let mut elapsed_cnt: i64 = 0;
+        let mut elapsed_max: i64 = 0;
+        let mut ttfb_max: i64 = 0;
+        for c in rows.values() {
+            reqs = reqs.saturating_add(int(c.first().unwrap_or(&Cell::Null)));
+            if let Some(Cell::F(s)) = c.get(1) {
+                elapsed_sum += *s;
+            }
+            if let Some(Cell::I(cnt)) = c.get(2) {
+                elapsed_cnt = elapsed_cnt.saturating_add(*cnt);
+            }
+            if let Some(Cell::H(h)) = c.get(3) {
+                if !h.is_empty() {
+                    ttfb_max = ttfb_max.max(h.max);
+                }
+            }
+            if let Some(Cell::H(h)) = c.get(4) {
+                if !h.is_empty() {
+                    elapsed_max = elapsed_max.max(h.max);
+                }
+            }
+        }
+        let elapsed_avg = if elapsed_cnt > 0 {
+            (elapsed_sum / elapsed_cnt as f64) as i64
+        } else {
+            0
+        };
+        (reqs, elapsed_max, elapsed_avg, ttfb_max)
+    }
+
+    fn url_selection_flags(
+        entries: &[(&String, &BTreeMap<i64, Vec<Cell>>)],
+        cut: usize,
+    ) -> Vec<bool> {
+        let n = entries.len();
+        if n <= cut {
+            return vec![true; n];
+        }
+        let metrics: Vec<(i64, i64, i64, i64)> = entries
+            .iter()
+            .map(|(_, rows)| Self::url_metrics(rows))
+            .collect();
+        let mut selected = vec![false; n];
+        let mut order: Vec<usize> = (0..n).collect();
+        let reserve = summary::SLOW_URL_RESERVE.min(cut);
+        for cmp_kind in 0..3 {
+            let cmp = |&i: &usize, &j: &usize| -> Ordering {
+                let a = metrics[i];
+                let b = metrics[j];
+                let ord = match cmp_kind {
+                    0 => b.1.cmp(&a.1).then_with(|| b.2.cmp(&a.2)),
+                    1 => b.2.cmp(&a.2).then_with(|| b.1.cmp(&a.1)),
+                    _ => b.3.cmp(&a.3).then_with(|| b.1.cmp(&a.1)),
+                };
+                ord.then_with(|| b.0.cmp(&a.0))
+                    .then_with(|| entries[i].0.cmp(entries[j].0))
+            };
+            if reserve > 0 && reserve < order.len() {
+                order.select_nth_unstable_by(reserve - 1, cmp);
+            }
+            for &idx in order.iter().take(reserve) {
+                selected[idx] = true;
+            }
+        }
+        let quota = cut.saturating_sub(selected.iter().filter(|&&s| s).count());
+        if quota > 0 {
+            let mut rest: Vec<usize> = (0..n).filter(|&i| !selected[i]).collect();
+            let cmp = |&i: &usize, &j: &usize| {
+                let a = metrics[i];
+                let b = metrics[j];
+                b.0.cmp(&a.0)
+                    .then_with(|| b.1.cmp(&a.1))
+                    .then_with(|| b.3.cmp(&a.3))
+                    .then_with(|| entries[i].0.cmp(entries[j].0))
+            };
+            if quota < rest.len() {
+                rest.select_nth_unstable_by(quota - 1, cmp);
+            }
+            for &idx in rest.iter().take(quota) {
+                selected[idx] = true;
+            }
+        }
+        selected
+    }
+
+    fn retain_urls(&mut self, keep: usize) -> bool {
+        if self.values.len() <= keep {
+            return false;
+        }
+        if keep == 0 {
+            self.values.clear();
+            return true;
+        }
+        let entries: Vec<(&String, &BTreeMap<i64, Vec<Cell>>)> = self.values.iter().collect();
+        let selected = Self::url_selection_flags(&entries, keep);
+        let drop_keys: std::collections::HashSet<String> = entries
+            .into_iter()
+            .zip(selected)
+            .filter_map(|((k, _), keep_flag)| (!keep_flag).then(|| k.clone()))
+            .collect();
+        self.values.retain(|k, _| !drop_keys.contains(k));
+        true
+    }
+
+    fn ranked_urls(&self, cut: usize) -> Vec<(&String, &BTreeMap<i64, Vec<Cell>>)> {
+        let entries: Vec<(&String, &BTreeMap<i64, Vec<Cell>>)> = self.values.iter().collect();
+        let selected = Self::url_selection_flags(&entries, cut);
+        let mut kept: Vec<_> = entries
+            .into_iter()
+            .zip(selected)
+            .filter_map(|(entry, keep_flag)| {
+                keep_flag.then_some((Self::requests(entry.1), entry.0, entry.1))
+            })
+            .collect();
+        kept.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+        kept.into_iter().map(|(_, v, rows)| (v, rows)).collect()
     }
 
     /// Values by `(requests desc, value asc)`.
@@ -1693,7 +1819,13 @@ impl Acc {
         });
         for (group, fields) in GROUPS.iter().zip(&mut self.groups) {
             for (field, acc) in fields.iter_mut() {
-                if retain_top(&mut acc.values, group.keep(field), GroupAcc::requests) {
+                let cut = group.keep(field);
+                let cut_any = if group.name == "urls" && field == "url" {
+                    acc.retain_urls(cut)
+                } else {
+                    retain_top(&mut acc.values, cut, GroupAcc::requests)
+                };
+                if cut_any {
                     acc.truncated = true;
                 }
             }
@@ -2395,8 +2527,12 @@ impl Acc {
                 if !self.group_covered(group, &field, acc) {
                     continue;
                 }
-                let mut ranked = acc.ranked();
-                let cut = unit.map_or(ranked.len(), |u| group.written(&field, u));
+                let cut = unit.map_or(acc.values.len(), |u| group.written(&field, u));
+                let mut ranked = if group.name == "urls" && field == "url" {
+                    acc.ranked_urls(cut)
+                } else {
+                    acc.ranked()
+                };
                 let truncated = acc.truncated || ranked.len() > cut;
                 ranked.truncate(cut);
                 out.push(&[
@@ -5196,5 +5332,58 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn hour_and_day_bundles_retain_slow_urls_across_partial_and_prune() {
+        let mut acc = Acc::new(Unit::Hour);
+        let urls_idx = GROUPS.iter().position(|g| g.name == "urls").unwrap();
+        let insert_url = |acc: &mut Acc, url: &str, ttfb_us: Option<i64>, elapsed_us: i64| {
+            let mut lat = Hist::default();
+            if let Some(t) = ttfb_us {
+                lat.add(t);
+            }
+            let mut elapsed = Hist::default();
+            elapsed.add(elapsed_us);
+            let group_acc = acc.group_acc(urls_idx, "url");
+            group_acc.total += 1;
+            group_acc.values.insert(
+                url.to_owned(),
+                BTreeMap::from([(
+                    0,
+                    vec![
+                        Cell::I(1),
+                        Cell::F(elapsed_us as f64),
+                        Cell::I(1),
+                        if lat.is_empty() {
+                            Cell::Null
+                        } else {
+                            Cell::H(Box::new(lat))
+                        },
+                        Cell::H(Box::new(elapsed)),
+                    ],
+                )]),
+            );
+        };
+        for i in 0..(summary::URL_K + 600) {
+            insert_url(&mut acc, &format!("/a_fast_{i:05}"), None, 1_000);
+        }
+        insert_url(&mut acc, "/z_slow_elapsed", None, 10_111_570);
+        insert_url(&mut acc, "/z_slow_ttfb", Some(7_500_000), 2_000);
+
+        acc.prune();
+        let encoded = acc.encode_partial();
+        let mut resumed = Acc::decode_partial(&encoded, Unit::Hour).unwrap();
+        resumed.prune();
+
+        let kept_urls = &resumed.groups[urls_idx]["url"];
+        assert!(kept_urls.values.contains_key("/z_slow_elapsed"));
+        assert!(kept_urls.values.contains_key("/z_slow_ttfb"));
+
+        let ranked_day = kept_urls.ranked_urls(DAY_URL_K);
+        let day_names: std::collections::HashSet<&str> =
+            ranked_day.iter().map(|(u, _)| u.as_str()).collect();
+        assert!(day_names.contains("/z_slow_elapsed"));
+        assert!(day_names.contains("/z_slow_ttfb"));
     }
 }

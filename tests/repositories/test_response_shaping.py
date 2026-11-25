@@ -362,3 +362,19 @@ def test_cross_engine_modules_import_cleanly(repo_mod_name: str, hs_mod_name: st
     hs_mod: Any = importlib.import_module(hs_mod_name)
     assert repo_mod is not None
     assert hs_mod is not None
+
+
+def test_scatter_rounds_two_decimals_and_normalizes_asn_handles() -> None:
+    from backend.core import fos_client as db_mod
+
+    row = rs.shape_perf_scatter_row(0.8919999999999999, 12.3456, "HIT", coerce_float=True)
+    assert row == {"origin": 0.89, "edge": 12.35, "cache": "HIT"}
+
+    assert db_mod.format_asn_label(43350, "NFORCE NForce Entertainment B.V., NL") == (
+        "NForce Entertainment B.V., NL (43350)"
+    )
+    assert db_mod.format_asn_label(6805, "TDDE-ASN1 Telefonica Germany GmbH & Co.OHG, DE") == (
+        "Telefonica Germany GmbH & Co.OHG, DE (6805)"
+    )
+    assert db_mod.format_asn_label(4181, "TDS TELECOM, US") == "TDS TELECOM, US (4181)"
+    assert db_mod.format_asn_label(29802, "HIVELOCITY, Inc., US") == "HIVELOCITY, Inc., US (29802)"

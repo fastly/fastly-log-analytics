@@ -36,6 +36,8 @@ pub const IP_TOP_K: usize = 500;
 pub const IP_SAMPLE_CAP: u64 = 5000;
 pub const SESSION_K: usize = 2000;
 pub const DIM_K: usize = 2000;
+pub const URL_K: usize = 4000;
+pub const SLOW_URL_RESERVE: usize = 256;
 pub const INS_URL_K: usize = 500;
 pub const INS_IP_K: usize = 500;
 pub const INS_ASN_K: usize = 500;
@@ -1153,7 +1155,7 @@ impl<'a> NetCols<'a> {
 
 /// Latencies in µs, in [`HIST_COLS`] order: TTFB, elapsed, RTT, origin TTFB, origin TTLB, each
 /// with its [`hist::slot`].
-type Lat = [Option<(i64, u8)>; 5];
+type Lat = [Option<(i64, u16)>; 5];
 
 /// One row's values for the v3 rows, computed once and shared by every group it lands in.
 struct Net<'a> {
@@ -1183,7 +1185,7 @@ fn ttfb_us(ttfb: Option<f64>) -> Option<i64> {
     ttfb.map(|t| (t * 1e6).round() as i64)
 }
 
-fn lat(v: Option<i64>) -> Option<(i64, u8)> {
+fn lat(v: Option<i64>) -> Option<(i64, u16)> {
     v.map(|v| (v, hist::slot(v)))
 }
 
@@ -1434,7 +1436,7 @@ impl Transport {
     fn add(
         &mut self,
         bytes: i64,
-        rtt: Option<(i64, u8)>,
+        rtt: Option<(i64, u16)>,
         ploss: Option<f64>,
         rate: Option<f64>,
         retrans: bool,
@@ -1562,7 +1564,7 @@ impl Quality {
 
 /// One row's /origin values, over rows with an origin latency (`COALESCE(ottfb, ttfb * 1e6)`).
 struct OriginRow {
-    lat: (i64, u8),
+    lat: (i64, u16),
     miss: bool,
     pass: bool,
     ost: Option<i64>,
@@ -1647,7 +1649,7 @@ struct UrlAgg {
 }
 
 impl UrlAgg {
-    fn add(&mut self, lat: Option<(i64, u8)>, elapsed: Option<(i64, u8)>) {
+    fn add(&mut self, lat: Option<(i64, u16)>, elapsed: Option<(i64, u16)>) {
         self.requests += 1;
         if let Some((v, slot)) = lat {
             self.lat.add_slot(v, slot);
@@ -1703,6 +1705,87 @@ fn top_untimed<'a, T>(
         keep,
     );
     (ranked, total, truncated)
+}
+
+/// Retains `urls/url` entries across the union of slowest (`elapsed` max, `elapsed` avg, `ttfb` max)
+/// reserves and highest-request entries so high-latency long-tail URLs are not alphabetically evicted.
+fn top_urls<'a>(
+    map: FastMap<Cow<'a, str>, UrlAgg>,
+    keep: usize,
+) -> (Vec<(Cow<'a, str>, UrlAgg)>, i64, bool) {
+    let total = map.values().map(|u| u.requests).sum();
+    let truncated = map.len() > keep;
+    let mut items: Vec<(Cow<'a, str>, UrlAgg)> = map.into_iter().collect();
+    if items.len() <= keep {
+        items.sort_by(|a, b| b.1.requests.cmp(&a.1.requests).then_with(|| a.0.cmp(&b.0)));
+        return (items, total, false);
+    }
+    let metrics: Vec<(i64, i64, i64, i64)> = items
+        .iter()
+        .map(|(_, u)| {
+            let e_max = if u.elapsed.is_empty() {
+                0
+            } else {
+                u.elapsed.max
+            };
+            let e_cnt = u.elapsed.count();
+            let e_avg = if e_cnt == 0 {
+                0
+            } else {
+                (u.elapsed_sum / e_cnt as f64) as i64
+            };
+            let t_max = if u.lat.is_empty() { 0 } else { u.lat.max };
+            (u.requests, e_max, e_avg, t_max)
+        })
+        .collect();
+    let mut selected = vec![false; items.len()];
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    let reserve = SLOW_URL_RESERVE.min(keep);
+    for cmp_kind in 0..3 {
+        let cmp = |&i: &usize, &j: &usize| -> std::cmp::Ordering {
+            let a = metrics[i];
+            let b = metrics[j];
+            let ord = match cmp_kind {
+                0 => b.1.cmp(&a.1).then_with(|| b.2.cmp(&a.2)),
+                1 => b.2.cmp(&a.2).then_with(|| b.1.cmp(&a.1)),
+                _ => b.3.cmp(&a.3).then_with(|| b.1.cmp(&a.1)),
+            };
+            ord.then_with(|| b.0.cmp(&a.0))
+                .then_with(|| items[i].0.cmp(&items[j].0))
+        };
+        if reserve > 0 && reserve < order.len() {
+            order.select_nth_unstable_by(reserve - 1, cmp);
+        }
+        for &idx in order.iter().take(reserve) {
+            selected[idx] = true;
+        }
+    }
+    let already_selected = selected.iter().filter(|&&s| s).count();
+    let remaining_quota = keep.saturating_sub(already_selected);
+    if remaining_quota > 0 {
+        let mut unselected: Vec<usize> = (0..items.len()).filter(|&i| !selected[i]).collect();
+        let cmp = |&i: &usize, &j: &usize| {
+            let a = metrics[i];
+            let b = metrics[j];
+            b.0.cmp(&a.0)
+                .then_with(|| b.1.cmp(&a.1))
+                .then_with(|| b.3.cmp(&a.3))
+                .then_with(|| items[i].0.cmp(&items[j].0))
+        };
+        if remaining_quota < unselected.len() {
+            unselected.select_nth_unstable_by(remaining_quota - 1, cmp);
+        }
+        for &idx in unselected.iter().take(remaining_quota) {
+            selected[idx] = true;
+        }
+    }
+    let mut kept: Vec<(Cow<'a, str>, UrlAgg)> = items
+        .into_iter()
+        .zip(selected)
+        .filter_map(|(item, keep)| keep.then_some(item))
+        .collect();
+    kept.sort_by(|a, b| b.1.requests.cmp(&a.1.requests).then_with(|| a.0.cmp(&b.0)));
+    (kept, total, truncated)
 }
 
 /// `true`, `false` or '' (null): the /origin path leg.
@@ -2706,12 +2789,15 @@ fn write_v3<'a>(
         }
     }
 
-    for (field, map) in [("url", by_url), ("asn", by_raw_asn)] {
-        let (kept, total, truncated) = top_untimed(map, |u| u.requests, DIM_K);
-        push_total(out, bucket, "urls", field, total, truncated);
-        for (value, u) in &kept {
-            u.push(out, bucket, field, value);
-        }
+    let (kept_urls, url_total, url_truncated) = top_urls(by_url, URL_K);
+    push_total(out, bucket, "urls", "url", url_total, url_truncated);
+    for (value, u) in &kept_urls {
+        u.push(out, bucket, "url", value);
+    }
+    let (kept_asns, asn_total, asn_truncated) = top_untimed(by_raw_asn, |u| u.requests, DIM_K);
+    push_total(out, bucket, "urls", "asn", asn_total, asn_truncated);
+    for (value, u) in &kept_asns {
+        u.push(out, bucket, "asn", value);
     }
     let ttl_total: i64 = ttl_buckets.values().sum();
     push_total(out, bucket, "urls", "ttl_bucket", ttl_total, false);
@@ -3330,7 +3416,7 @@ struct InsLatAgg {
 }
 
 impl InsLatAgg {
-    fn add(&mut self, elapsed: Option<(i64, u8)>) {
+    fn add(&mut self, elapsed: Option<(i64, u16)>) {
         self.requests += 1;
         if let Some((v, slot)) = elapsed {
             self.elapsed.add_slot(v, slot);
@@ -3964,5 +4050,37 @@ mod map_metro_tests {
             Some(&Some("751".to_owned()))
         );
         assert_eq!(day_labels.get(r#"["GB","London"]"#), Some(&None));
+    }
+
+    #[test]
+    fn top_urls_retains_slowest_urls_beyond_alphabetical_cutoff() {
+        let mut map: FastMap<Cow<'static, str>, UrlAgg> = FastMap::default();
+        for i in 0..(URL_K + 500) {
+            let mut u = UrlAgg::default();
+            u.add(None, Some(hist_val(1_000)));
+            map.insert(Cow::Owned(format!("/a_fast_{i:05}")), u);
+        }
+        let mut slow_elapsed = UrlAgg::default();
+        slow_elapsed.add(None, Some(hist_val(10_111_570)));
+        map.insert(Cow::Borrowed("/z_slow_elapsed"), slow_elapsed);
+
+        let mut slow_ttfb = UrlAgg::default();
+        slow_ttfb.add(Some(hist_val(8_200_000)), Some(hist_val(2_000)));
+        map.insert(Cow::Borrowed("/z_slow_ttfb"), slow_ttfb);
+
+        let (kept, total, truncated) = top_urls(map, URL_K);
+        assert!(truncated);
+        assert_eq!(total, (URL_K + 502) as i64);
+        assert_eq!(kept.len(), URL_K);
+        let urls: std::collections::HashSet<&str> = kept.iter().map(|(u, _)| u.as_ref()).collect();
+        assert!(urls.contains("/z_slow_elapsed"), "slow elapsed URL evicted");
+        assert!(
+            urls.contains("/z_slow_ttfb"),
+            "slow origin TTFB URL evicted"
+        );
+    }
+
+    fn hist_val(us: i64) -> (i64, u16) {
+        (us, hist::slot(us))
     }
 }

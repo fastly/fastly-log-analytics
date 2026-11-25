@@ -296,21 +296,7 @@ describe("Feature F23 — RUM & Web Vitals cloud-engine", () => {
 
       // Build the matching rum_summary Parquet buffer
       const addHist = (h: Histogram, v: number) => {
-        const clamped = Math.max(-(2 ** 52 - 1), Math.min(2 ** 52 - 1, Math.round(v)));
-        h.min = Math.min(h.min, clamped);
-        h.max = Math.max(h.max, clamped);
-        if (clamped < 100) h.under++;
-        else if (clamped >= 60_000_000) h.over++;
-        else {
-          let lo = 0, hi = 128;
-          while (lo < hi) {
-            const mid = (lo + hi) >>> 1;
-            const bound = Math.round(100 * 600000 ** (mid / 128));
-            if (bound <= clamped) lo = mid + 1;
-            else hi = mid;
-          }
-          h.buckets[lo - 1]++;
-        }
+        h.add(Math.round(v));
       };
 
       const rows: {

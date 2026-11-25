@@ -7,6 +7,7 @@ import {
   setDashboardCacheIdentity,
 } from "./dashboard/client";
 import { cloudCacheIdentity } from "./cache-identity";
+import { isCloudConfigMutation } from "./mode";
 
 z.config({ jitless: true });
 import { assetsScanColumns, handleAssetsRequest, type AssetsQueryParams } from "./assets";
@@ -1643,38 +1644,7 @@ async function handleCloudRequest(
   return response;
 }
 
-export function isCloudConfigMutation(method: string, path: string): boolean {
-  if (method === "POST" && ["/api/provision/execute", "/api/provision/teardown"].includes(path)) {
-    return true;
-  }
-  if (method === "PATCH" && /^\/api\/provision\/services\/[^/]+\/ngwaf-workspace$/.test(path)) {
-    return true;
-  }
-  if (method === "POST" && /^\/api\/admin\/services\/[^/]+\/(?:reconcile|rollback)$/.test(path)) {
-    return true;
-  }
-  if (method === "PATCH" && /^\/api\/admin\/services\/[^/]+$/.test(path)) {
-    return true;
-  }
-  if (method === "POST" && /^\/api\/services\/[^/]+\/rum\/(?:enable|disable|upgrade|settings)$/.test(path)) {
-    return true;
-  }
-  if ((method === "GET" || method === "POST") && /^\/api\/services\/[^/]+\/logging-settings\/update$/.test(path)) {
-    return true;
-  }
-  if (method === "POST" && /^\/api\/services\/[^/]+\/log-fields$/.test(path)) {
-    return true;
-  }
-  if (/^\/api\/services\/[^/]+\/custom-fields(?:\/import|\/[^/]+)?$/.test(path)) {
-    if (path.endsWith("/validate-vcl") || path.endsWith("/export")) return false;
-    return ["POST", "PATCH", "DELETE"].includes(method);
-  }
-  if (method === "POST" && /^\/api\/services\/[^/]+\/scoring\/(?:matrix-versions\/[^/]+\/restore|matrix\/versions\/restore|enable|disable|teardown|retrain|rotate-key)$/.test(path)) {
-    return true;
-  }
-  return ["PUT", "POST", "PATCH", "DELETE"].includes(method) &&
-    /^\/api\/services\/[^/]+\/scoring\/(?:threshold|enforce-threshold|enforce-status-code|exclude-regex|labels(?:\/[^/]+)?)$/.test(path);
-}
+export { isCloudConfigMutation };
 
 async function handleCloudRequestInner(
   request: Request,

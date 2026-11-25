@@ -1,16 +1,21 @@
 //! Mergeable latency histograms for summaries: [`BUCKETS`] log-spaced buckets over
-//! `[100 µs, 60 s)` (about 11% wide, so a quantile read at a bucket's geometric middle is within
-//! about ±5.3%), plus underflow and overflow counts and the exact min and max. Values are integer
-//! microseconds. Merging adds counts, so any split of the rows merges to the same histogram.
+//! `[100 µs, 60 s)` (~2% wide, matching DDSketch `GAMMA = 1.02` so interior quantiles read
+//! at a bucket's geometric middle are within ~1%, and exact `rank == 1` / `rank == n` read
+//! the exact `min` / `max`), plus underflow and overflow counts. Values are integer microseconds.
+//! Merging adds counts, so any split of the rows merges to the same histogram.
 //!
-//! Blob: `[1, varint under, varint over, zigzag min, zigzag max, (u8 bucket, varint count)...]`
+//! V2 blob: `[2, varint under, varint over, zigzag min, zigzag max, (varint bucket, varint count)...]`
+//! V1 blob (legacy, decoded on read): `[1, varint under, varint over, zigzag min, zigzag max, (u8 bucket, varint count)...]`
 //! with buckets ascending and only non-zero ones present; an empty histogram is not written.
-//! `frontend/lib/cloud-engine/dashboard/histogram.ts` reads the same bytes.
+//! `frontend/lib/cloud-engine/dashboard/histogram.ts` reads and writes the same bytes.
 
-pub const VERSION: u8 = 1;
-pub const BUCKETS: usize = 128;
-/// Bucket `i` holds `[BOUNDS[i], BOUNDS[i + 1])`: `round(100 * 600000^(i / 128))` µs.
-pub const BOUNDS: [i64; BUCKETS + 1] = [
+pub const VERSION: u8 = 2;
+pub const BUCKETS: usize = 672;
+const VERSION_V1: u8 = 1;
+const BUCKETS_V1: usize = 128;
+
+/// Legacy v1 bounds: `round(100 * 600000^(i / 128))` µs, decoded on read for backward compatibility.
+const BOUNDS_V1: [i64; BUCKETS_V1 + 1] = [
     100, 111, 123, 137, 152, 168, 187, 207, 230, 255, 283, 314, 348, 386, 429, 475, 528, 585, 649,
     721, 800, 887, 984, 1092, 1212, 1344, 1492, 1655, 1836, 2038, 2261, 2508, 2783, 3088, 3426,
     3802, 4218, 4680, 5193, 5761, 6393, 7093, 7870, 8732, 9688, 10749, 11927, 13233, 14683, 16291,
@@ -23,20 +28,78 @@ pub const BOUNDS: [i64; BUCKETS + 1] = [
     19124557, 21219404, 23543715, 26122624, 28984019, 32158843, 35681427, 39589865, 43926422,
     48737993, 54076608, 60000000,
 ];
-const UNDER: u8 = 254;
-const OVER: u8 = 255;
+
+/// Bucket `i` holds `[BOUNDS[i], BOUNDS[i + 1])`: `round(100 * 600000^(i / 672))` µs.
+pub const BOUNDS: [i64; BUCKETS + 1] = [
+    100, 102, 104, 106, 108, 110, 113, 115, 117, 120, 122, 124, 127, 129, 132, 135, 137, 140, 143,
+    146, 149, 152, 155, 158, 161, 164, 167, 171, 174, 178, 181, 185, 188, 192, 196, 200, 204, 208,
+    212, 216, 221, 225, 230, 234, 239, 244, 249, 254, 259, 264, 269, 274, 280, 286, 291, 297, 303,
+    309, 315, 322, 328, 335, 341, 348, 355, 362, 369, 377, 384, 392, 400, 408, 416, 424, 433, 441,
+    450, 459, 468, 478, 487, 497, 507, 517, 528, 538, 549, 560, 571, 582, 594, 606, 618, 630, 643,
+    656, 669, 682, 696, 710, 724, 739, 753, 768, 784, 800, 816, 832, 848, 865, 883, 900, 918, 937,
+    955, 975, 994, 1014, 1034, 1055, 1076, 1098, 1119, 1142, 1165, 1188, 1212, 1236, 1261, 1286,
+    1312, 1338, 1365, 1392, 1420, 1448, 1477, 1507, 1537, 1567, 1599, 1631, 1663, 1697, 1731, 1765,
+    1800, 1836, 1873, 1911, 1949, 1988, 2028, 2068, 2109, 2152, 2195, 2238, 2283, 2329, 2375, 2423,
+    2471, 2521, 2571, 2623, 2675, 2729, 2783, 2839, 2896, 2953, 3013, 3073, 3134, 3197, 3261, 3326,
+    3393, 3460, 3530, 3600, 3672, 3746, 3820, 3897, 3975, 4054, 4135, 4218, 4302, 4388, 4476, 4566,
+    4657, 4750, 4845, 4942, 5041, 5141, 5244, 5349, 5456, 5565, 5677, 5790, 5906, 6024, 6144, 6267,
+    6393, 6520, 6651, 6784, 6919, 7058, 7199, 7343, 7490, 7639, 7792, 7948, 8107, 8269, 8434, 8603,
+    8775, 8950, 9129, 9312, 9498, 9688, 9882, 10079, 10281, 10487, 10696, 10910, 11128, 11351,
+    11578, 11809, 12045, 12286, 12532, 12783, 13038, 13299, 13565, 13836, 14113, 14395, 14683,
+    14976, 15276, 15581, 15893, 16211, 16535, 16865, 17203, 17547, 17897, 18255, 18620, 18993,
+    19372, 19760, 20155, 20558, 20969, 21388, 21816, 22252, 22697, 23151, 23614, 24086, 24568,
+    25059, 25560, 26071, 26593, 27124, 27667, 28220, 28784, 29360, 29947, 30546, 31156, 31779,
+    32415, 33063, 33724, 34399, 35086, 35788, 36504, 37233, 37978, 38737, 39512, 40302, 41108,
+    41930, 42768, 43624, 44496, 45386, 46293, 47219, 48163, 49126, 50108, 51110, 52132, 53175,
+    54238, 55323, 56429, 57557, 58708, 59882, 61079, 62301, 63546, 64817, 66113, 67435, 68784,
+    70159, 71562, 72993, 74452, 75941, 77460, 79009, 80588, 82200, 83843, 85520, 87230, 88974,
+    90753, 92568, 94419, 96307, 98233, 100197, 102201, 104244, 106329, 108455, 110624, 112836,
+    115092, 117393, 119741, 122135, 124577, 127068, 129609, 132201, 134844, 137540, 140291, 143096,
+    145957, 148876, 151853, 154889, 157986, 161145, 164368, 167654, 171007, 174426, 177914, 181472,
+    185100, 188801, 192577, 196427, 200355, 204362, 208448, 212616, 216867, 221204, 225627, 230139,
+    234741, 239434, 244222, 249106, 254087, 259167, 264350, 269636, 275027, 280527, 286136, 291858,
+    297694, 303646, 309718, 315911, 322228, 328671, 335243, 341947, 348784, 355759, 362872, 370128,
+    377529, 385078, 392778, 400632, 408643, 416815, 425149, 433650, 442322, 451166, 460188, 469390,
+    478776, 488349, 498114, 508074, 518234, 528596, 539166, 549947, 560944, 572161, 583602, 595271,
+    607174, 619315, 631699, 644330, 657214, 670356, 683760, 697433, 711379, 725603, 740112, 754912,
+    770007, 785404, 801109, 817128, 833467, 850133, 867132, 884471, 902157, 920196, 938597, 957365,
+    976508, 996034, 1015951, 1036266, 1056987, 1078122, 1099680, 1121670, 1144098, 1166976,
+    1190310, 1214112, 1238389, 1263152, 1288410, 1314173, 1340451, 1367254, 1394594, 1422480,
+    1450924, 1479937, 1509529, 1539714, 1570502, 1601905, 1633937, 1666609, 1699934, 1733926,
+    1768598, 1803962, 1840034, 1876828, 1914356, 1952636, 1991681, 2031506, 2072128, 2113562,
+    2155825, 2198932, 2242902, 2287751, 2333497, 2380157, 2427751, 2476296, 2525812, 2576318,
+    2627833, 2680379, 2733976, 2788644, 2844406, 2901283, 2959296, 3018470, 3078827, 3140391,
+    3203186, 3267237, 3332569, 3399206, 3467177, 3536506, 3607222, 3679352, 3752924, 3827967,
+    3904511, 3982585, 4062221, 4143448, 4226301, 4310809, 4397008, 4484930, 4574611, 4666084,
+    4759387, 4854555, 4951627, 5050639, 5151631, 5254643, 5359714, 5466887, 5576202, 5687704,
+    5801435, 5917440, 6035764, 6156455, 6279559, 6405125, 6533201, 6663839, 6797088, 6933003,
+    7071634, 7213038, 7357270, 7504385, 7654442, 7807500, 7963618, 8122858, 8285282, 8450954,
+    8619939, 8792303, 8968113, 9147439, 9330350, 9516919, 9707219, 9901324, 10099310, 10301255,
+    10507238, 10717340, 10931644, 11150232, 11373191, 11600609, 11832574, 12069177, 12310512,
+    12556672, 12807754, 13063857, 13325081, 13591528, 13863304, 14140513, 14423266, 14711673,
+    15005846, 15305902, 15611958, 15924134, 16242552, 16567336, 16898616, 17236519, 17581180,
+    17932732, 18291313, 18657065, 19030131, 19410656, 19798790, 20194685, 20598497, 21010383,
+    21430505, 21859028, 22296119, 22741951, 23196698, 23660537, 24133652, 24616226, 25108451,
+    25610518, 26122624, 26644970, 27177761, 27721206, 28275517, 28840912, 29417613, 30005846,
+    30605841, 31217833, 31842063, 32478774, 33128218, 33790647, 34466323, 35155509, 35858476,
+    36575500, 37306861, 38052846, 38813748, 39589865, 40381501, 41188967, 42012579, 42852660,
+    43709538, 44583551, 45475041, 46384357, 47311855, 48257900, 49222861, 50207118, 51211056,
+    52235069, 53279558, 54344932, 55431610, 56540017, 57670587, 58823764, 60000000,
+];
+const UNDER: u16 = u16::MAX - 1;
+const OVER: u16 = u16::MAX;
 /// `min`/`max` are clamped to `±LIMIT` so their zigzag fits a JS number exactly; slots are not.
 const LIMIT: i64 = (1 << 52) - 1;
 
 /// The bucket of `v`, or underflow/overflow.
 #[inline]
-pub fn slot(v: i64) -> u8 {
+pub fn slot(v: i64) -> u16 {
     if v < BOUNDS[0] {
         UNDER
     } else if v >= BOUNDS[BUCKETS] {
         OVER
     } else {
-        (BOUNDS.partition_point(|&b| b <= v) - 1) as u8
+        (BOUNDS.partition_point(|&b| b <= v) - 1) as u16
     }
 }
 
@@ -47,7 +110,7 @@ pub struct Hist {
     pub min: i64,
     pub max: i64,
     /// Ascending, non-zero.
-    pub buckets: Vec<(u8, u64)>,
+    pub buckets: Vec<(u16, u64)>,
 }
 
 impl Default for Hist {
@@ -91,10 +154,11 @@ fn unzigzag(v: u64) -> i64 {
     ((v >> 1) as i64) ^ -((v & 1) as i64)
 }
 
-/// Reads a [`Hist::to_bytes`] blob into `buckets`: `([under, over], [min, max], buckets used)`,
+/// Reads a [`Hist::to_bytes`] blob (v2 or legacy v1) into `buckets`: `([under, over], [min, max], buckets used)`,
 /// or `None` unless it is a well-formed, non-empty histogram.
-fn parse(blob: &[u8], buckets: &mut [(u8, u64); BUCKETS]) -> Option<([u64; 2], [i64; 2], usize)> {
-    if blob.first() != Some(&VERSION) {
+fn parse(blob: &[u8], buckets: &mut [(u16, u64); BUCKETS]) -> Option<([u64; 2], [i64; 2], usize)> {
+    let ver = *blob.first()?;
+    if ver != VERSION && ver != VERSION_V1 {
         return None;
     }
     let mut at = 1;
@@ -104,15 +168,40 @@ fn parse(blob: &[u8], buckets: &mut [(u8, u64); BUCKETS]) -> Option<([u64; 2], [
         unzigzag(get_varint(blob, &mut at)?),
     ];
     let mut n = 0;
+    let mut prev_raw: Option<u64> = None;
     while at < blob.len() {
-        let s = blob[at];
-        at += 1;
+        let raw_s = if ver == VERSION_V1 {
+            let b = *blob.get(at)?;
+            at += 1;
+            u64::from(b)
+        } else {
+            get_varint(blob, &mut at)?
+        };
         let c = get_varint(blob, &mut at)?;
-        if usize::from(s) >= BUCKETS || c == 0 || (n > 0 && buckets[n - 1].0 >= s) {
+        let limit = if ver == VERSION_V1 {
+            BUCKETS_V1
+        } else {
+            BUCKETS
+        };
+        if raw_s as usize >= limit || c == 0 || prev_raw.is_some_and(|p| p >= raw_s) {
             return None;
         }
-        buckets[n] = (s, c);
-        n += 1;
+        prev_raw = Some(raw_s);
+        let mapped_s = if ver == VERSION_V1 {
+            let i = raw_s as usize;
+            let mid = ((BOUNDS_V1[i] as f64) * (BOUNDS_V1[i + 1] as f64))
+                .sqrt()
+                .round() as i64;
+            slot(mid)
+        } else {
+            raw_s as u16
+        };
+        if n > 0 && buckets[n - 1].0 == mapped_s {
+            buckets[n - 1].1 = buckets[n - 1].1.saturating_add(c);
+        } else {
+            buckets[n] = (mapped_s, c);
+            n += 1;
+        }
     }
     ((n > 0 || counts != [0, 0]) && range[0] <= range[1]).then_some((counts, range, n))
 }
@@ -124,7 +213,7 @@ impl Hist {
 
     /// Adds `v`, whose [`slot`] the caller already knows.
     #[inline]
-    pub fn add_slot(&mut self, v: i64, s: u8) {
+    pub fn add_slot(&mut self, v: i64, s: u16) {
         let v = v.clamp(-LIMIT, LIMIT);
         self.min = self.min.min(v);
         self.max = self.max.max(v);
@@ -132,7 +221,7 @@ impl Hist {
     }
 
     #[inline]
-    fn add_count(&mut self, s: u8, n: u64) {
+    fn add_count(&mut self, s: u16, n: u64) {
         match s {
             UNDER => self.under = self.under.saturating_add(n),
             OVER => self.over = self.over.saturating_add(n),
@@ -176,7 +265,12 @@ impl Hist {
         true
     }
 
-    fn merge_parts(&mut self, [under, over]: [u64; 2], [min, max]: [i64; 2], theirs: &[(u8, u64)]) {
+    fn merge_parts(
+        &mut self,
+        [under, over]: [u64; 2],
+        [min, max]: [i64; 2],
+        theirs: &[(u16, u64)],
+    ) {
         self.min = self.min.min(min);
         self.max = self.max.max(max);
         self.under = self.under.saturating_add(under);
@@ -221,14 +315,14 @@ impl Hist {
         if self.is_empty() {
             return None;
         }
-        let mut out = Vec::with_capacity(12 + self.buckets.len() * 3);
+        let mut out = Vec::with_capacity(12 + self.buckets.len() * 4);
         out.push(VERSION);
         put_varint(&mut out, self.under);
         put_varint(&mut out, self.over);
         put_varint(&mut out, zigzag(self.min));
         put_varint(&mut out, zigzag(self.max));
         for &(s, n) in &self.buckets {
-            out.push(s);
+            put_varint(&mut out, u64::from(s));
             put_varint(&mut out, n);
         }
         Some(out)
@@ -246,14 +340,21 @@ impl Hist {
         })
     }
 
-    /// The `q` quantile (nearest rank), read at its bucket's geometric middle and clamped to
-    /// `[min, max]`; underflow reads as `min` and overflow as `max`.
+    /// The `q` quantile (nearest rank), returning exact `min`/`max` for boundary ranks
+    /// (`rank == 1` or `rank == n`), and reading interior ranks at the bucket's geometric
+    /// middle clamped to `[min, max]`.
     pub fn quantile(&self, q: f64) -> Option<f64> {
         let n = self.count();
         if n == 0 {
             return None;
         }
         let rank = ((q.clamp(0.0, 1.0) * n as f64).ceil() as u64).clamp(1, n);
+        if rank == 1 {
+            return Some(self.min as f64);
+        }
+        if rank == n {
+            return Some(self.max as f64);
+        }
         let mut seen = self.under;
         if rank <= seen {
             return Some(self.min as f64);
@@ -278,14 +379,14 @@ mod tests {
         assert_eq!(slot(-5), UNDER);
         assert_eq!(slot(99), UNDER);
         assert_eq!(slot(100), 0);
-        assert_eq!(slot(110), 0);
-        assert_eq!(slot(111), 1);
-        assert_eq!(slot(59_999_999), 127);
+        assert_eq!(slot(101), 0);
+        assert_eq!(slot(102), 1);
+        assert_eq!(slot(59_999_999), (BUCKETS - 1) as u16);
         assert_eq!(slot(60_000_000), OVER);
         for i in 0..BUCKETS {
-            assert_eq!(slot(BOUNDS[i]), i as u8);
-            assert_eq!(slot(BOUNDS[i + 1] - 1), i as u8);
-            assert!(BOUNDS[i + 1] as f64 / BOUNDS[i] as f64 <= 1.12);
+            assert_eq!(slot(BOUNDS[i]), i as u16);
+            assert_eq!(slot(BOUNDS[i + 1] - 1), i as u16);
+            assert!(BOUNDS[i + 1] as f64 / BOUNDS[i] as f64 <= 1.03);
         }
     }
 
@@ -345,9 +446,9 @@ mod tests {
             .for_each(|&v| h.add(v));
         assert_eq!(
             hex::encode(h.to_bytes().unwrap()),
-            "0101016480f6e042000103011602"
+            "0201016480f6e042000114017402"
         );
-        assert_eq!(h.quantile(0.5), Some((137f64 * 152.0).sqrt()));
+        assert_eq!(h.quantile(0.5), Some((149f64 * 152.0).sqrt()));
         assert_eq!(h.quantile(0.0), Some(50.0));
         assert_eq!(h.quantile(1.0), Some(70_000_000.0));
         // Saturated garbage keeps min and max within what a JS number holds exactly.
@@ -356,7 +457,7 @@ mod tests {
         wild.add(i64::MAX);
         assert_eq!(
             hex::encode(wild.to_bytes().unwrap()),
-            "010101fdffffffffffff0ffeffffffffffff0f"
+            "020101fdffffffffffff0ffeffffffffffff0f"
         );
     }
 
@@ -368,7 +469,7 @@ mod tests {
         for q in [0.1, 0.5, 0.95, 0.99] {
             let exact = values[((q * values.len() as f64).ceil() as usize).max(1) - 1] as f64;
             let got = h.quantile(q).unwrap();
-            assert!((got - exact).abs() / exact < 0.055, "{q}: {got} vs {exact}");
+            assert!((got - exact).abs() / exact < 0.015, "{q}: {got} vs {exact}");
         }
         assert_eq!(h.quantile(0.0), Some(1_037.0), "clamped to the exact min");
         let mut tiny = Hist::default();
@@ -390,9 +491,47 @@ mod tests {
         assert_eq!(Hist::from_bytes(&bytes), Some(h));
         assert!(Hist::from_bytes(&bytes[..bytes.len() - 1]).is_none());
         assert!(Hist::from_bytes(&[2]).is_none());
+        assert!(Hist::from_bytes(&[3, 1, 0, 0, 0]).is_none());
         assert!(Hist::from_bytes(&[VERSION, 0, 0, 0, 0]).is_none());
         let mut swapped = bytes.clone();
         swapped.extend([3, 1]);
         assert!(Hist::from_bytes(&swapped).is_none(), "buckets must ascend");
+    }
+
+    #[test]
+    fn exact_min_and_max_order_statistics_and_high_precision_quantiles() {
+        // When rank == 1 (min) or rank == n (max), exact min/max are returned instead of bucket midpoint.
+        let mut small = Hist::default();
+        for _ in 0..15 {
+            small.add(2_500_000);
+        }
+        small.add(10_111_570);
+        assert_eq!(small.quantile(0.0), Some(2_500_000.0));
+        assert_eq!(small.quantile(0.99), Some(10_111_570.0));
+        assert_eq!(small.quantile(1.0), Some(10_111_570.0));
+
+        // Across 10k samples, v2 (672 buckets, ~2% width) keeps interior quantiles within ~1.4%.
+        let mut h = Hist::default();
+        let values: Vec<i64> = (1..=10_000).map(|i| 1_000 + i * 37).collect();
+        values.iter().for_each(|&v| h.add(v));
+        for q in [0.1, 0.5, 0.95, 0.99] {
+            let exact = values[((q * values.len() as f64).ceil() as usize).max(1) - 1] as f64;
+            let got = h.quantile(q).unwrap();
+            assert!((got - exact).abs() / exact < 0.015, "{q}: {got} vs {exact}");
+        }
+        assert_eq!(VERSION, 2);
+    }
+
+    #[test]
+    fn reads_legacy_v1_blob_and_merges_with_v2() {
+        let legacy_v1 = hex::decode("0101016480f6e042000103011602").unwrap();
+        let mut h = Hist::from_bytes(&legacy_v1).expect("v1 blob decodes");
+        assert_eq!(h.count(), 6);
+        assert_eq!(h.min, 50);
+        assert_eq!(h.max, 70_000_000);
+        assert!(h.merge_bytes(&legacy_v1));
+        assert_eq!(h.count(), 12);
+        let roundtrip = Hist::from_bytes(&h.to_bytes().unwrap()).unwrap();
+        assert_eq!(roundtrip, h);
     }
 }

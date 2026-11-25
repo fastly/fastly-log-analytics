@@ -482,7 +482,7 @@ const ALLOWED_GAPS = new Set<string>([
   'PUT /api/services/:service_id/scoring/l2-enforce', 'GET /api/services/:service_id/scoring/matrix-versions', 'POST /api/services/:service_id/scoring/matrix-versions/:version/restore',
   'POST /api/services/:service_id/scoring/rotate-key', 'GET /api/services/:service_id/scoring/audit', 'GET /api/services/:service_id/scoring/threshold', 'PUT /api/services/:service_id/scoring/threshold',
   'GET /api/services/:service_id/scoring/evaluation/per-reason', 'GET /api/services/:service_id/scoring/dashboard', 'GET /api/security/proxies/export',
-  'GET /api/services/:service_id/rum/analytics', 'GET /api/services/:service_id/rum/live-events', 'GET /api/services/:service_id/cmcd/status', 'POST /api/services/:service_id/cmcd/enable',
+  'GET /api/services/:service_id/rum/analytics', 'GET /api/services/:service_id/rum/live-events', 'GET /api/services/:service_id/rum/request-log', 'POST /api/services/:service_id/rollback', 'GET /api/services/:service_id/cmcd/status', 'POST /api/services/:service_id/cmcd/enable',
   'POST /api/services/:service_id/cmcd/disable', 'GET /api/services/:service_id/rum/status', 'POST /api/services/:service_id/rum/settings', 'POST /api/services/:service_id/rum/enable',
   'POST /api/services/:service_id/rum/disable', 'GET /api/services/:service_id/rum/beacon-health', 'GET /api/services/:service_id/rum/health', 'GET /api/services/:service_id/rum/vitals',
   'GET /api/services/:service_id/rum/errors', 'POST /api/services/:service_id/rum/upgrade', 'GET /api/services/:service_id/control-room/:tab', 'POST /api/services/:service_id/control-room/mitigations',

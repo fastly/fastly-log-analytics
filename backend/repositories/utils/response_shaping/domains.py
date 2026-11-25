@@ -1085,8 +1085,8 @@ def shape_perf_scatter_row(
     """Format a single Performance origin-vs-edge latency scatter sample row."""
     if coerce_float:
         return {
-            "origin": float_or_zero(origin_ms),
-            "edge": float_or_zero(edge_ms),
+            "origin": round(float_or_zero(origin_ms), 2),
+            "edge": round(float_or_zero(edge_ms), 2),
             "cache": cache or None,
         }
     return {

@@ -1,12 +1,16 @@
-// Byte-compatible with compute/cloud/src/ingest/hist.rs `Hist`: 128 log-spaced buckets over
-// [100 µs, 60 s) plus underflow, overflow and the exact min and max, in integer microseconds.
-// Blob: `[1, varint under, varint over, zigzag min, zigzag max, (u8 bucket, varint count)...]`.
-const VERSION = 1;
-const BUCKETS = 128;
+// Byte-compatible with compute/cloud/src/ingest/hist.rs `Hist`: 672 log-spaced buckets over
+// [100 µs, 60 s) (~2% wide, matching High-Scale DDSketch GAMMA = 1.02) plus legacy v1 (128
+// buckets) decoding, underflow, overflow and exact min/max in integer microseconds.
+// V2 blob: `[2, varint under, varint over, zigzag min, zigzag max, (varint bucket, varint count)...]`.
+// V1 blob: `[1, varint under, varint over, zigzag min, zigzag max, (u8 bucket, varint count)...]`.
+const VERSION = 2;
+const VERSION_V1 = 1;
+const BUCKETS = 672;
+const BUCKETS_V1 = 128;
 const LIMIT = 2 ** 52 - 1;
 
-/** Bucket `i` holds `[BOUNDS[i], BOUNDS[i + 1])` µs. */
-export const BOUNDS: readonly number[] = [
+/** Legacy v1 bounds (128 buckets over [100 µs, 60 s)), decoded for backward compatibility. */
+const BOUNDS_V1: readonly number[] = [
   100, 111, 123, 137, 152, 168, 187, 207, 230, 255, 283, 314, 348, 386, 429,
   475, 528, 585, 649, 721, 800, 887, 984, 1092, 1212, 1344, 1492, 1655, 1836,
   2038, 2261, 2508, 2783, 3088, 3426, 3802, 4218, 4680, 5193, 5761, 6393, 7093,
@@ -21,6 +25,22 @@ export const BOUNDS: readonly number[] = [
   17236519, 19124557, 21219404, 23543715, 26122624, 28984019, 32158843,
   35681427, 39589865, 43926422, 48737993, 54076608, 60000000,
 ];
+
+/** Bucket `i` holds `[BOUNDS[i], BOUNDS[i + 1])` µs: `round(100 * 600000^(i / 672))`. */
+export const BOUNDS: readonly number[] = Array.from({ length: BUCKETS + 1 }, (_, i) =>
+  i === BUCKETS ? 60_000_000 : Math.round(100 * 600_000 ** (i / BUCKETS)),
+);
+
+function findBucketSlot(v: number): number {
+  let lo = 0;
+  let hi = BUCKETS;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (BOUNDS[mid] <= v) lo = mid;
+    else hi = mid;
+  }
+  return lo;
+}
 
 function readVarint(blob: Uint8Array, at: { i: number }): number | null {
   let value = 0;
@@ -53,9 +73,10 @@ export class Histogram {
   /** Count per bucket index. */
   readonly buckets = new Float64Array(BUCKETS);
 
-  /** A well-formed, non-empty blob, or null. */
+  /** A well-formed, non-empty blob (v2 or legacy v1), or null. */
   static fromBytes(blob: Uint8Array): Histogram | null {
-    if (blob[0] !== VERSION) return null;
+    const ver = blob[0];
+    if (ver !== VERSION && ver !== VERSION_V1) return null;
     const at = { i: 1 };
     const under = readVarint(blob, at);
     if (under === null) return null;
@@ -71,11 +92,18 @@ export class Histogram {
     h.min = unzigzag(min);
     h.max = unzigzag(max);
     let last = -1;
+    const limit = ver === VERSION_V1 ? BUCKETS_V1 : BUCKETS;
     while (at.i < blob.length) {
-      const s = blob[at.i++];
+      const s = ver === VERSION_V1 ? blob[at.i++] : readVarint(blob, at);
+      if (s === null) return null;
       const c = readVarint(blob, at);
-      if (c === null || c === 0 || s >= BUCKETS || s <= last) return null;
-      h.buckets[s] = c;
+      if (c === null || c === 0 || s >= limit || s <= last) return null;
+      if (ver === VERSION_V1) {
+        const mid = Math.round(Math.sqrt(BOUNDS_V1[s] * BOUNDS_V1[s + 1]));
+        h.buckets[findBucketSlot(mid)] += c;
+      } else {
+        h.buckets[s] = c;
+      }
       last = s;
     }
     return (last < 0 && under === 0 && over === 0) || h.min > h.max ? null : h;
@@ -85,16 +113,7 @@ export class Histogram {
   add(v: number) {
     if (v < BOUNDS[0]) this.under++;
     else if (v >= BOUNDS[BUCKETS]) this.over++;
-    else {
-      let lo = 0;
-      let hi = BUCKETS;
-      while (hi - lo > 1) {
-        const mid = (lo + hi) >> 1;
-        if (BOUNDS[mid] <= v) lo = mid;
-        else hi = mid;
-      }
-      this.buckets[lo]++;
-    }
+    else this.buckets[findBucketSlot(v)]++;
     const clamped = Math.max(-LIMIT, Math.min(LIMIT, v));
     this.min = Math.min(this.min, clamped);
     this.max = Math.max(this.max, clamped);
@@ -131,7 +150,7 @@ export class Histogram {
     writeVarint(out, zigzag(this.max));
     this.buckets.forEach((c, s) => {
       if (c > 0) {
-        out.push(s);
+        writeVarint(out, s);
         writeVarint(out, c);
       }
     });
@@ -139,8 +158,9 @@ export class Histogram {
   }
 
   /**
-   * The `q` quantile (nearest rank), read at its bucket's geometric middle and clamped to
-   * [min, max]; underflow reads as min and overflow as max.
+   * The `q` quantile (nearest rank), returning exact `min`/`max` for boundary ranks
+   * (`rank === 1` or `rank === n`), and reading interior ranks at the bucket's geometric
+   * middle clamped to `[min, max]`.
    */
   quantile(q: number): number | null {
     const n = this.count();
@@ -149,6 +169,8 @@ export class Histogram {
       n,
       Math.max(1, Math.ceil(Math.min(1, Math.max(0, q)) * n)),
     );
+    if (rank === 1) return this.min;
+    if (rank === n) return this.max;
     let seen = this.under;
     if (rank <= seen) return this.min;
     for (let s = 0; s < BUCKETS; s++) {

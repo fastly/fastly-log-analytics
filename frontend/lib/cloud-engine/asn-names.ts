@@ -17,7 +17,7 @@ function parseAsnTsv(text: string): Map<number, string> {
     if (tab > start && tab < end) {
       const asn = Number(text.slice(start, tab).trim());
       if (Number.isInteger(asn) && asn > 0) {
-        const name = text.slice(tab + 1, end).trim();
+        const name = normalizeAsnOrgName(text.slice(tab + 1, end));
         if (name) map.set(asn, name);
       }
     }
@@ -84,6 +84,41 @@ function isBareAsnString(value: string): boolean {
 }
 
 /**
+ * Normalizes RIR handles out of CAIDA/Cymru organization names (e.g. `"NFORCE NForce..."`,
+ * `"TDDE-ASN1 Telefonica..."`, `"AS12876 Scaleway..."`, `"OVH OVH SAS, FR"`, `"HANDLE - Org"`)
+ * while preserving legitimate uppercase organization names such as `"TDS TELECOM, US"`.
+ */
+export function normalizeAsnOrgName(name: string | null | undefined): string {
+  let clean = (name ?? "").trim();
+  if (!clean) return "";
+  const dashIdx = clean.indexOf(" - ");
+  if (dashIdx > 0 && /^[A-Z0-9][A-Z0-9_-]*$/.test(clean.slice(0, dashIdx).trim())) {
+    clean = clean.slice(dashIdx + 3).trim();
+  }
+  const spaceIdx = clean.indexOf(" ");
+  if (spaceIdx > 0) {
+    const token = clean.slice(0, spaceIdx);
+    const rest = clean.slice(spaceIdx + 1).trim();
+    const restSansCountry = rest.replace(/,\s*[A-Z]{2}$/, "").trim();
+    if (
+      rest &&
+      restSansCountry &&
+      /^[A-Z0-9][A-Z0-9_-]*$/.test(token) &&
+      !isBareAsnString(rest)
+    ) {
+      const isHandleToken =
+        /^AS\d+$/.test(token) ||
+        /[-_\d]/.test(token) ||
+        rest.toLowerCase().startsWith(token.toLowerCase());
+      if (isHandleToken) {
+        return rest;
+      }
+    }
+  }
+  return clean;
+}
+
+/**
  * Formats an ASN label to match High-Scale's `format_asn_label(asn, name)`:
  * `"<Org Name> (<asn>)"` when a name is known, otherwise `"AS<asn>"`.
  */
@@ -97,10 +132,11 @@ export function formatAsnDisplayLabel(
     return raw || "Unknown ASN";
   }
   const trimmedLogged = typeof loggedName === "string" ? loggedName.trim() : "";
-  const resolved =
+  const rawResolved =
     trimmedLogged && !isBareAsnString(trimmedLogged)
       ? trimmedLogged
       : (cachedAsnMap?.get(num) ?? "");
+  const resolved = normalizeAsnOrgName(rawResolved);
   if (!resolved || isBareAsnString(resolved)) {
     return `AS${num}`;
   }

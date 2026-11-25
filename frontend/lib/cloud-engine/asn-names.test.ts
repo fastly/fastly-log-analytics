@@ -68,4 +68,28 @@ describe("cloud-engine asn-names and country label parity", () => {
     expect(formatCityCountryLabel("", "BR")).toBe("Brazil");
     expect(formatCityCountryLabel("", "")).toBe("Unknown");
   });
+
+  it("strips leading RIR handles while preserving legitimate uppercase org names", () => {
+    setAsnNamesForTest([
+      [43350, "NFORCE NForce Entertainment B.V., NL"],
+      [6805, "TDDE-ASN1 Telefonica Germany GmbH & Co.OHG, DE"],
+      [12876, "AS12876 Scaleway SAS, FR"],
+      [16276, "OVH OVH SAS, FR"],
+      [25180, "EXPONENTIAL-E-AS Exponential-E Ltd., GB"],
+      [216246, "RU-AEZA-AS Aeza Group LLC, RU"],
+      [4181, "TDS TELECOM, US"],
+      [29802, "HIVELOCITY, Inc., US"],
+    ]);
+    expect(formatAsnDisplayLabel(43350)).toBe("NForce Entertainment B.V., NL (43350)");
+    expect(formatAsnDisplayLabel(6805)).toBe("Telefonica Germany GmbH & Co.OHG, DE (6805)");
+    expect(formatAsnDisplayLabel(12876)).toBe("Scaleway SAS, FR (12876)");
+    expect(formatAsnDisplayLabel(16276)).toBe("OVH SAS, FR (16276)");
+    expect(formatAsnDisplayLabel(25180)).toBe("Exponential-E Ltd., GB (25180)");
+    expect(formatAsnDisplayLabel(216246)).toBe("Aeza Group LLC, RU (216246)");
+    expect(formatAsnDisplayLabel(4181)).toBe("TDS TELECOM, US (4181)");
+    expect(formatAsnDisplayLabel(29802)).toBe("HIVELOCITY, Inc., US (29802)");
+    expect(formatAsnDisplayLabel(43350, "NFORCE - NForce Entertainment B.V., NL")).toBe(
+      "NForce Entertainment B.V., NL (43350)",
+    );
+  });
 });

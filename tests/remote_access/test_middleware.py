@@ -67,7 +67,7 @@ def _build_test_app() -> FastAPI:
     def _svc_handler(service_id: str):
         return {"ok": True, "service_id": service_id}
 
-    rum_sub = "status versions beacon-health analytics live-events".split()
+    rum_sub = "status versions beacon-health analytics live-events request-log".split()
     score_sub = (
         "status config audit threshold exclude-regex enforce-status-code labels top-flagged threshold-preview".split()
     )

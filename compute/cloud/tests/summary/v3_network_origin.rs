@@ -551,7 +551,7 @@ fn transport_origin_and_url_rows_match_a_brute_force_computation() {
 #[test]
 fn new_groups_mark_presence_without_data_and_cut_urls_to_the_top_k() {
     // No origin columns at all: every new field still has its dim_totals row.
-    let rows: Vec<Value> = (0..summary::DIM_K as i64 + 5)
+    let rows: Vec<Value> = (0..summary::URL_K as i64 + 5)
         .map(|i| json!({"timestamp": iso(BASE * 1000 + i), "url": format!("/u/{i}")}))
         .chain((0..3).map(|i| json!({"timestamp": iso(BASE * 1000 + i), "url": "/hot"})))
         .collect();
@@ -587,7 +587,7 @@ fn new_groups_mark_presence_without_data_and_cut_urls_to_the_top_k() {
     let (urls, total) = group_rows(&out, "urls", "url");
     assert_eq!(total["requests"], rows.len() as i64);
     assert_eq!(total["truncated"], true);
-    assert_eq!(urls.len(), summary::DIM_K);
+    assert_eq!(urls.len(), summary::URL_K);
     assert_eq!(urls["/hot"]["requests"], 3);
     assert!(group_rows(&out, "origin", "overall").0[""]
         .get("ttfb_hist")
