@@ -3816,6 +3816,152 @@ it("SEC-T5-ITER40-FE-03: prevents non-contraction apostrophe mismatch and cross-
         ["Set-Cookie", "status", "error", "="],
         "Error: Runtime Error: [redacted]",
       ],
+      // Wave 62 / Iter 63: Verifier 5 #1 — Multi-challenge custom auth scheme with {...} group
+      [
+        "Runtime Error: WWW-Authenticate: Digest realm=host, MyScheme{error}",
+        ["WWW-Authenticate", "Digest", "realm", "host", "MyScheme", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "WWW-Authenticate": Digest realm=host, MyScheme{error}',
+        ["WWW-Authenticate", "Digest", "realm", "host", "MyScheme", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: WWW-Authenticate: Digest realm=host, MyScheme:{error}",
+        ["WWW-Authenticate", "Digest", "realm", "host", "MyScheme", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 62 / Iter 63: Verifier 5 #2 — Bearer/Basic multi-param continuations & bare Bearer realm = local
+      [
+        "Runtime Error: Authorization: Bearer realm = local, scope = valid",
+        ["Authorization", "Bearer", "realm", "local", "scope", "valid", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": Bearer realm = local, scope = valid',
+        ["Authorization", "Bearer", "realm", "local", "scope", "valid", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Bearer realm=local, error = expired",
+        ["Authorization", "Bearer", "realm", "local", "error", "expired", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Basic realm = local, mode = valid",
+        ["Authorization", "Basic", "realm", "local", "mode", "valid", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Bearer realm = local",
+        ["Bearer", "realm", "local", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 62 / Iter 63: Verifier 5 #3 — Extended Expires= date formats & >64-char TZ labels
+      [
+        "Runtime Error: Set-Cookie: a=1; Expires=Wednesday, 01-Jan-2099 00:00:00 GMT+0000 (Coordinated Universal Time), status = valid",
+        ["Set-Cookie", "Expires", "GMT", "Coordinated", "status", "valid", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Set-Cookie: a=1; Expires=Wednesday, 01-Jan-2099 00:00:00 GMT+0000 (Coordinated Universal Time); status = valid",
+        ["Set-Cookie", "Expires", "GMT", "Coordinated", "status", "valid", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Set-Cookie: a=1; Expires=Thu, 01 Jan 2099 00:00:00 +0000 (America/New_York), status = valid",
+        ["Set-Cookie", "Expires", "America", "status", "valid", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Set-Cookie: a=1; Expires=Thu, 01 Jan 2099 00:00:00 GMT+00:00 (UTC+00:00), status = valid",
+        ["Set-Cookie", "Expires", "GMT", "UTC", "status", "valid", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Set-Cookie: a=1; Expires=2099-01-01 00:00:00 UTC, status = valid",
+        ["Set-Cookie", "Expires", "UTC", "status", "valid", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Set-Cookie: a=1; Expires=Thu, 01 January 2099 00:00:00 GMT, status = valid",
+        ["Set-Cookie", "Expires", "January", "GMT", "status", "valid", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 62 / Iter 63: Verifier 5 #4 — Repeated/compound separators & => / := in KV/auth params
+      [
+        "Runtime Error: token::: error",
+        ["token", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "token"::: error',
+        ["token", "error"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: token :=: error",
+        ["token", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: token ==> error",
+        ["token", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Digest realm=> local",
+        ["Authorization", "Digest", "realm", "local", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Digest realm := local",
+        ["Authorization", "Digest", "realm", "local", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Set-Cookie: a=1; status => error",
+        ["Set-Cookie", "status", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Set-Cookie: a=1; status := error",
+        ["Set-Cookie", "status", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: MyScheme=> error",
+        ["Authorization", "MyScheme", "error", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Wave 62 / Iter 63: Verifier 5 #5 — Stage 2A comma-folded compound quoted cookie name without '='
+      [
+        'Runtime Error: "Set-Cookie": a=1, "my"status; mode = local',
+        ["Set-Cookie", "status", "mode", "local", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Set-Cookie": a=1, "my"status, mode = local',
+        ["Set-Cookie", "status", "mode", "local", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Cookie": a=1, "my"status; mode = local',
+        ["Cookie", "status", "mode", "local", "="],
+        "Error: Runtime Error: [redacted]",
+      ],
+      // Benign preservation checks for Iter 63 fixes
+      [
+        "Runtime Error: Authorization: Basic YWRtaW46c2VjcmV= rejected",
+        ["Authorization", "Basic", "YWRtaW46c2VjcmV"],
+        "Error: Runtime Error: [redacted] rejected",
+      ],
+      [
+        'Runtime Error: {"Set-Cookie": a=1, "error": "timeout"}',
+        ["Set-Cookie", "a=1"],
+        "Error: Runtime Error: [redacted], [redacted]: [redacted]",
+      ],
     ];
     for (const [msg, forbidden, expectedExact] of cases) {
       const err = new Error(msg);

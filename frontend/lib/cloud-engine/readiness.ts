@@ -212,7 +212,7 @@ const AUTHENTICATE_KEY_STEMS = new Set<string>(["authenticate"]);
 const AUTH_HEADER_KEY_STEMS = new Set<string>(["authorization", "authenticate"]);
 const MULTI_PARAM_AUTH_KEY_STEMS = new Set<string>(["authorization", "authenticate", "digest", "oauth", "hmac", "aws4-hmac-sha256"]);
 const MULTI_PARAM_AUTH_SCHEMES = new Set<string>(["digest", "oauth", "hmac", "aws4-hmac-sha256"]);
-const HTTP_DATE_VALUE_RE = /^(?:[A-Za-z]{3,9},?\s+)?(?:\d{1,2}[\s-][A-Za-z]{3}[\s-]\d{2,4}|[A-Za-z]{3}\s+\d{1,2}(?:\s+\d{2,4})?)\s+\d{1,2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:\s+(?:[A-Za-z]{1,5}(?:[+-]\d{2}:?\d{2})?|[+-]\d{2}:?\d{2}|\d{4}))?(?:\s+\([A-Za-z0-9 _+-]{1,32}\))?(?=$|[\s;,])/;
+const HTTP_DATE_VALUE_RE = /^(?:\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:?\d{2})?|(?:[A-Za-z]{3,9},?\s+)?(?:\d{1,2}[\s-][A-Za-z]{3,9}[\s-]\d{2,4}|[A-Za-z]{3,9}\s+\d{1,2}(?:\s+\d{2,4})?)\s+\d{1,2}:\d{2}:\d{2}(?:\.\d{1,9})?)(?:\s+(?:[A-Za-z]{1,5}(?:[+-]\d{2}:?\d{2})?|[+-]\d{2}:?\d{2}|\d{4}))?(?:\s+\([A-Za-z0-9 _+/:-]{1,64}\))?(?=$|[\s;,])/;
 
 const WORD_CHAR_RE = /[\p{L}\p{N}_]/u;
 
@@ -341,21 +341,40 @@ function scanAuthSchemeTokenEnd(line: string, p: number): number {
   return sEnd;
 }
 
-function advancePastAuthSchemeSep(line: string, sEnd: number): number {
-  let p = sEnd;
+function advancePastSepRun(line: string, pos: number): number {
+  let p = pos;
   const len = line.length;
   while (p < len) {
     const ch = line[p];
-    if (ch === "=") {
+    if (ch === "=" || (ch === ":" && !line.startsWith("://", p))) {
       p += 1;
       if (line[p] === ">") p += 1;
-    } else if (ch === ":" && !line.startsWith("://", p)) {
-      p += 1;
     } else {
       break;
     }
   }
   return p;
+}
+
+function advancePastAuthSchemeSep(line: string, sEnd: number): number {
+  return advancePastSepRun(line, sEnd);
+}
+
+function isNonBase64KvParamAfterKey(line: string, k: number): boolean {
+  let eqPos = k;
+  while (eqPos < line.length && isInlineWs(line[eqPos])) eqPos += 1;
+  const afterSep = advancePastSepRun(line, eqPos);
+  if (afterSep === eqPos) return false;
+  const sepSlice = line.slice(eqPos, afterSep);
+  if (!sepSlice.includes("=")) return false;
+  if (
+    eqPos === k
+    && /^=+$/.test(sepSlice)
+    && (afterSep >= line.length || /[\s,;)\]}]/.test(line[afterSep]!))
+  ) {
+    return false;
+  }
+  return true;
 }
 
 function isCustomAuthScheme(
@@ -368,9 +387,11 @@ function isCustomAuthScheme(
   if (!rawScheme || !isAsciiAlpha(rawScheme[0])) return false;
   if (!hasKeyStemSegment(keyName, AUTH_HEADER_KEY_STEMS, allowSpaceInKey)) return false;
   const delim = line[schemeEnd];
-  const isColonSep = delim === ":" && !line.startsWith("://", schemeEnd);
-  if (!isInlineWs(delim) && !isColonSep && delim !== "(" && delim !== "[" && delim !== "{") return false;
-  let next = isColonSep ? advancePastAuthSchemeSep(line, schemeEnd) : schemeEnd;
+  const afterSep = advancePastSepRun(line, schemeEnd);
+  const sepSlice = afterSep > schemeEnd ? line.slice(schemeEnd, afterSep) : "";
+  const hasSchemeSep = sepSlice.includes(":") || sepSlice.includes(">");
+  if (!isInlineWs(delim) && !hasSchemeSep && delim !== "(" && delim !== "[" && delim !== "{") return false;
+  let next = hasSchemeSep ? afterSep : schemeEnd;
   while (next < line.length && isInlineWs(line[next])) next += 1;
   if (next >= line.length) return false;
   const nextCh = line[next]!;
@@ -1225,17 +1246,11 @@ function consumeJsonSecretValueAfterQuote(
   const len = line1.length;
   let p = pos;
   while (p < len && isInlineWs(line1[p])) p += 1;
-  if (line1[p] !== ":" && line1[p] !== "=") return pos;
+  const afterSep = advancePastSepRun(line1, p);
+  if (afterSep === p) return pos;
   const decodedKey = unescapeJsonKey(keyCandidate);
   if (!decodedKey || !hasKeyStemSegment(decodedKey, SECRET_STEMS, true)) return pos;
-  const sep = line1[p];
-  p += 1;
-  if (
-    (sep === ":" && (line1[p] === "=" || line1[p] === ":"))
-    || (sep === "=" && (line1[p] === "=" || line1[p] === ">"))
-  ) {
-    p += 1;
-  }
+  p = afterSep;
   while (p < len && isInlineWs(line1[p])) p += 1;
   if (
     p >= len
@@ -1285,10 +1300,12 @@ function consumeJsonSecretValueAfterQuote(
     if (valEnd === vStart) valEnd = valStart + 1;
   } else if (matchedScheme !== "") {
     const { end: k, keyLower } = scanParamKeyEnd(line1, valStart, true, escapeState);
-    const kvEnd = k > valStart && isInlineWs(line1[k])
+    const kvEnd = k > valStart && isNonBase64KvParamAfterKey(line1, k)
       ? tryFinishKeyValueParamEnd(line1, k, keyLower, false, true, escapeState)
       : -1;
-    valEnd = kvEnd !== -1 ? kvEnd : scanJsonValueEnd(line1, valStart, escapeState);
+    valEnd = kvEnd !== -1
+      ? scanContinuationParamsEnd(line1, kvEnd, false, true, true, escapeState)
+      : scanJsonValueEnd(line1, valStart, escapeState);
   } else {
     valEnd = scanJsonValueEnd(line1, valStart, escapeState);
   }
@@ -1992,6 +2009,7 @@ function scanParamKeyEnd(
         || ch === "("
         || ch === "["
         || ch === "{"
+        || (ch === ":" && !line.startsWith("://", k) && line.slice(k, advancePastSepRun(line, k)).includes("="))
         || (allowQuoted && (ch === '"' || ch === "'" || ch === "`"))
       ) {
         break;
@@ -2023,24 +2041,27 @@ function tryFinishKeyValueParamEnd(
   const len = line.length;
   let eqPos = k;
   while (eqPos < len && isInlineWs(line[eqPos])) eqPos += 1;
-  if (line[eqPos] !== "=") return -1;
-  if (rejectDoubleEq && line[eqPos + 1] === "=") {
+  const afterSep = advancePastSepRun(line, eqPos);
+  if (afterSep === eqPos) return -1;
+  const sepSlice = line.slice(eqPos, afterSep);
+  if (!sepSlice.includes("=")) return -1;
+  if (rejectDoubleEq && sepSlice.startsWith("==")) {
     return -1;
   }
-  let vStart = eqPos + 1;
+  let vStart = afterSep;
   while (vStart < len && (isInlineWs(line[vStart]) || line[vStart] === "=")) vStart += 1;
   if (rejectDoubleEq && vStart >= len) {
     return -1;
   }
   if (isCookie && keyLower === "expires") {
-    const expSlice = line.slice(vStart, vStart + 64);
+    const expSlice = line.slice(vStart, vStart + 128);
     const dateMatch = HTTP_DATE_VALUE_RE.exec(expSlice);
     if (dateMatch) return vStart + dateMatch[0].length;
     const semiRel = expSlice.indexOf(";");
     if (semiRel !== -1 && !expSlice.slice(0, semiRel).includes("=")) {
       return vStart + semiRel;
     }
-    const truncatedDateMatch = /^(?:[A-Za-z]{3,9},?\s+)?(?:\d{1,2}[\s-][A-Za-z]{3}[\s-]\d{2,4}|[A-Za-z]{3}\s+\d{1,2}(?:\s+\d{2,4})?)(?:\s+\d{1,2})?(?=$|[\s;:])/.exec(expSlice);
+    const truncatedDateMatch = /^(?:\d{4}-\d{2}-\d{2}|(?:[A-Za-z]{3,9},?\s+)?(?:\d{1,2}[\s-][A-Za-z]{3,9}[\s-]\d{2,4}|[A-Za-z]{3,9}\s+\d{1,2}(?:\s+\d{2,4})?))(?:\s+\d{1,2})?(?=$|[\s;:])/.exec(expSlice);
     if (truncatedDateMatch) return vStart + truncatedDateMatch[0].length;
   }
   let vEnd = scanSingleSecretValueEnd(line, vStart, true, true, allowQuoted, escapeState);
@@ -2095,13 +2116,15 @@ function scanContinuationParamsEnd(
         const { end: keyEnd } = scanParamKeyEnd(line, next, allowQuoted, escapeState);
         let afterKey = keyEnd;
         while (afterKey < len && isInlineWs(line[afterKey])) afterKey += 1;
-        if (line[afterKey] !== "=") break;
+        const afterKeySep = advancePastSepRun(line, afterKey);
+        const isKvSep = afterKeySep > afterKey && line.slice(afterKey, afterKeySep).includes("=");
+        if (!isKvSep && line[afterKey] !== ";" && line[afterKey] !== ",") break;
       }
       if (line[next] === ";" || line[next] === ",") {
         end = next;
         continue;
       }
-      if (line[next] === "=") {
+      if (line[next] === "=" || line[next] === ":") {
         const kvNext = tryFinishKeyValueParamEnd(line, next, "", true, allowQuoted, escapeState);
         if (kvNext !== -1) {
           end = kvNext;
@@ -2153,7 +2176,7 @@ function scanContinuationParamsEnd(
         end = next;
         continue;
       }
-      if (line[next] === "=") {
+      if (line[next] === "=" || line[next] === ":") {
         const kvNext = tryFinishKeyValueParamEnd(line, next, "", false, allowQuoted, escapeState);
         if (kvNext !== -1) {
           end = kvNext;
@@ -2213,7 +2236,7 @@ function scanContinuationParamsEnd(
             } else if (
               keySegments >= 2
               && afterSchemeSep < itemEnd
-              && (line[afterSchemeSep] === "(" || line[afterSchemeSep] === "[")
+              && (line[afterSchemeSep] === "(" || line[afterSchemeSep] === "[" || line[afterSchemeSep] === "{")
             ) {
               end = consumeChainedUrlEquals(line, next, itemEnd, false, allowQuoted, escapeState);
               continue;
@@ -2237,11 +2260,11 @@ function scanSecretHeaderOrValueEnd(
   escapeState?: QuoteEscapeState,
 ): number {
   const cookieMode = isCookieKey(keyName, allowQuoted);
-  const authParamMode = isMultiParamAuthHeader(keyName, authScheme, allowQuoted);
+  let authParamMode = isMultiParamAuthHeader(keyName, authScheme, allowQuoted);
   const allowUrl = cookieMode || authParamMode;
   let end: number;
   if (cookieMode || authParamMode) {
-    const kvEnd = line[p] === "="
+    const kvEnd = line[p] === "=" || line[p] === ":"
       ? tryFinishKeyValueParamEnd(line, p, "", cookieMode, allowQuoted, escapeState)
       : tryScanKeyValueParamEnd(line, p, cookieMode, allowQuoted, escapeState);
     if (kvEnd !== -1) {
@@ -2257,11 +2280,12 @@ function scanSecretHeaderOrValueEnd(
     if (end === vStart) end = p + 1;
   } else if (authScheme !== "") {
     const { end: k, keyLower } = scanParamKeyEnd(line, p, allowQuoted, escapeState);
-    const kvEnd = k > p && isInlineWs(line[k])
+    const kvEnd = k > p && isNonBase64KvParamAfterKey(line, k)
       ? tryFinishKeyValueParamEnd(line, k, keyLower, false, allowQuoted, escapeState)
       : -1;
     if (kvEnd !== -1) {
       end = kvEnd;
+      authParamMode = true;
     } else {
       end = scanSingleSecretValueEnd(line, p, allowRedacted, false, allowQuoted, escapeState);
     }
@@ -2579,27 +2603,12 @@ function emitAllowlistedTokens(line: string): string {
     const secretSep = findSecretKeySep(rawTok);
     if (secretSep !== null) {
       const { sepIdx, keyPart } = secretSep;
-      const sepCh = rawTok[sepIdx];
-      let valOffset = sepIdx + 1;
-      let rawPostSep = rawTok.slice(valOffset);
-      let consumedSecondSepInLine = false;
-      if (rawPostSep.length > 0) {
-        const nextCh = rawPostSep[0];
-        if (
-          (sepCh === ":" && (nextCh === "=" || nextCh === ":"))
-          || (sepCh === "=" && (nextCh === "=" || nextCh === ">"))
-        ) {
-          valOffset += 1;
-          rawPostSep = rawTok.slice(valOffset);
-        }
-      } else if (
-        (sepCh === ":" && (line[i] === ":" || line[i] === "="))
-        || (sepCh === "=" && (line[i] === "=" || line[i] === ">"))
-      ) {
-        consumedSecondSepInLine = true;
-      }
+      const sepLinePos = tokStart + sepIdx;
+      const afterSepInLine = advancePastSepRun(line, sepLinePos);
+      const isEmptySep = afterSepInLine >= i;
+      const valOffset = isEmptySep ? rawTok.length : afterSepInLine - tokStart;
+      const rawPostSep = isEmptySep ? "" : rawTok.slice(valOffset);
       const postSepLower = rawPostSep.toLowerCase();
-      const isEmptySep = rawPostSep === "";
       let inlineAuthScheme = "";
       let inlineAuthHasSep = false;
       if (!isEmptySep) {
@@ -2611,7 +2620,7 @@ function emitAllowlistedTokens(line: string): string {
             const c = rawPostSep[trimEnd - 1];
             if (c === "=" || c === ":") {
               trimEnd -= 1;
-            } else if (c === ">" && trimEnd >= 2 && rawPostSep[trimEnd - 2] === "=") {
+            } else if (c === ">" && trimEnd >= 2 && (rawPostSep[trimEnd - 2] === "=" || rawPostSep[trimEnd - 2] === ":")) {
               trimEnd -= 2;
             } else {
               break;
@@ -2628,7 +2637,7 @@ function emitAllowlistedTokens(line: string): string {
       }
       const isCustomInlineScheme = !isEmptySep && !inlineAuthScheme && isCustomAuthScheme(keyPart, rawPostSep, line, i, false);
       if (isEmptySep || inlineAuthScheme !== "" || isCustomInlineScheme) {
-        let p = consumedSecondSepInLine ? i + 1 : i;
+        let p = isEmptySep ? Math.max(i, afterSepInLine) : i;
         if (inlineAuthScheme !== "" || isCustomInlineScheme) {
           const afterInlineSep = advancePastAuthSchemeSep(line, p);
           if (afterInlineSep > p) {
@@ -2711,7 +2720,8 @@ function emitAllowlistedTokens(line: string): string {
     const rawLower = rawTok.toLowerCase();
     let afterWs = i;
     while (afterWs < len && isInlineWs(line[afterWs])) afterWs += 1;
-    const hasExplicitSep = line[afterWs] === ":" || line[afterWs] === "=";
+    const afterExplicitSep = advancePastSepRun(line, afterWs);
+    const hasExplicitSep = afterExplicitSep > afterWs;
     const isSqlKeyPhrase = rawLower === "key" && !hasExplicitSep && SAFE_KEY_PREFIX_WORDS.has(prevTokLower);
     const isBenignBareVocabStem = !hasExplicitSep && (rawLower === "session" || rawLower === "sessions" || rawLower === "keys");
     const isBareAuthScheme = (
@@ -2729,17 +2739,10 @@ function emitAllowlistedTokens(line: string): string {
     if ((isSecretKeyStem(rawTok) && !isSqlKeyPhrase && !isBenignBareVocabStem) || isBareAuthScheme) {
       let p = afterWs;
       if (hasExplicitSep) {
-        const sepCh = line[p];
-        p += 1;
-        if (
-          (sepCh === ":" && (line[p] === "=" || line[p] === ":"))
-          || (sepCh === "=" && (line[p] === "=" || line[p] === ">"))
-        ) {
-          p += 1;
-        }
+        p = afterExplicitSep;
         while (p < len && isInlineWs(line[p])) p += 1;
       }
-      let matchedScheme = isBareAuthScheme || MULTI_PARAM_AUTH_SCHEMES.has(rawLower) ? rawLower : "";
+      let matchedScheme = isBareAuthScheme || AUTH_SCHEMES.has(rawLower) ? rawLower : "";
       if (!isBareAuthScheme && p < len && !line.startsWith("[redacted]", p) && !line.startsWith("[url]", p)) {
         const sEnd = scanAuthSchemeTokenEnd(line, p);
         const rawScheme = line.slice(p, sEnd);
