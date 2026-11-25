@@ -6025,6 +6025,18 @@ def test_sec_t5_iter40_scrub_ip_text_ipv6_trailing_colon_port_and_short_hex() ->
     assert scrub_ip_text("2001:db8:1:2:3:4:5:6:7") == "2001:db8:1:2:3:4:5:6:7"
     assert scrub_ip_text("2001::1:2:3:4:5:6:7") == "2001::1:2:3:4:5:6:7"
 
+    # 5. ITER41: 8-group IPv6 + :port: trailing colon, 7-group trailing '::', IPv4-embedded IPv6, timestamp/key prefixes:
+    assert scrub_ip_text("dial tcp 2001:db8:1:2:3:4:5:6:443: i/o timeout") == "dial tcp 2001:db8:1:::443: i/o timeout"
+    assert (
+        scrub_ip_text("connect 2001:db8:1:2:3:4:5:6:8080: connection refused")
+        == "connect 2001:db8:1:::8080: connection refused"
+    )
+    assert scrub_ip_text("2001:db8:1:2:3:4:5:6:8080:/api") == "2001:db8:1:::8080:/api"
+    assert scrub_ip_text("2001:db8:85a3:1234:5678:9abc:def0::") == "2001:db8:85a3::"
+    assert scrub_ip_text("2001:db8:85a3:1234:5678:8a2e:203.0.113.42") == "2001:db8:85a3::"
+    assert scrub_ip_text("16:42:00:2001:0db8:85a3:0000:0000:8a2e:0370:733a") == "16:42:00:2001:db8:85a3::"
+    assert scrub_ip_text("c1:2001:0db8:85a3:0000:0000:8a2e:0370:733a") == "c1:2001:db8:85a3::"
+
 
 @pytest.mark.security_regression
 def test_sec_t5_iter40_live_chdb_paren_free_replace() -> None:

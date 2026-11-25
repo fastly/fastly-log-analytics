@@ -17836,3 +17836,187 @@ fn iter40_legacy_day_rejects_unsupported_block_version_all_three_sites() {
         assert!(!p.adapter.records().contains_key(ingest::WATERMARK_KEY));
     }
 }
+
+#[test]
+fn iter41_day_max_gen_bound_and_manifest_zero_gen_rejected() {
+    use fastly_log_analytics::admin::dr::{CloudDrState, SCHEMA_VERSION};
+    use fastly_log_analytics::ingest::catalog::{Day, Head, Reference, VERSION};
+    use std::collections::BTreeMap;
+
+    let hour: i64 = 1_760_000_400 - (1_760_000_400 % 3600);
+
+    // Case 1: Poisoned Day with max_gen > 9_007_199_254_740_991 must not abort recovery of a valid Day.
+    {
+        let p = Platform::new();
+
+        let good_day_key = "processed/_catalog/day-good.json";
+        let bad_day_key = "processed/_catalog/day-poisoned.json";
+        let good_day = Day {
+            version: VERSION,
+            service_id: Some("fixtureService".into()),
+            hours: BTreeMap::from([(
+                hour,
+                Reference {
+                    key: "processed/_catalog/blk-good.json".into(),
+                    generation: 5,
+                },
+            )]),
+            ..Day::default()
+        };
+        let bad_day = Day {
+            version: VERSION,
+            service_id: Some("fixtureService".into()),
+            hours: BTreeMap::from([(
+                hour,
+                Reference {
+                    key: "processed/_catalog/blk-bad.json".into(),
+                    generation: 9_007_199_254_740_992,
+                },
+            )]),
+            ..Day::default()
+        };
+        p.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            good_day_key,
+            serde_json::to_vec(&good_day).unwrap(),
+        );
+        p.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            bad_day_key,
+            serde_json::to_vec(&bad_day).unwrap(),
+        );
+
+        let res = p.json(
+            "POST",
+            "/api/admin/provision/recover",
+            json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            }),
+        );
+        assert_eq!(res["ok"], true);
+        assert_eq!(
+            res["catalog_generation"], 5,
+            "iter41: poisoned Day max_gen > MAX_SAFE_INT must be skipped so valid Day gen=5 recovers! res={res}"
+        );
+    }
+
+    // Case 2: Zero-generation Manifest in scan loop must not wipe valid Days or fabricate generation=1.
+    {
+        let p = Platform::new();
+
+        let m0_key = format!(
+            "processed/_catalog/manifest-s-fixtureService-rev-{:020}-zero.json",
+            u64::MAX
+        );
+        let m0 = json!({
+            "version": VERSION,
+            "service_id": "fixtureService",
+            "generation": 0u64,
+            "batch": "ingest",
+            "schema": "v2",
+            "committed_at": "2027-01-15T01:00:00Z",
+            "previous": null,
+            "files": [], "summaries": [], "sources": [], "replaces": [],
+            "bytes": 0, "rows": 0, "parents": {}
+        });
+        let good_day = Day {
+            version: VERSION,
+            service_id: Some("fixtureService".into()),
+            hours: BTreeMap::from([(
+                hour,
+                Reference {
+                    key: "processed/_catalog/blk-good.json".into(),
+                    generation: 5,
+                },
+            )]),
+            ..Day::default()
+        };
+        p.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            &m0_key,
+            serde_json::to_vec(&m0).unwrap(),
+        );
+        p.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            "processed/_catalog/day-good.json",
+            serde_json::to_vec(&good_day).unwrap(),
+        );
+
+        let res = p.json(
+            "POST",
+            "/api/admin/provision/recover",
+            json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            }),
+        );
+        assert_eq!(res["ok"], true);
+        assert_eq!(
+            res["catalog_generation"], 5,
+            "iter41: generation=0 Manifest must be ignored so valid Day gen=5 recovers! res={res}"
+        );
+    }
+
+    // Case 3: dr_state.catalog_head with generation=0 and manifest=Some(...) must be rejected with 400.
+    {
+        let p = Platform::new();
+        let m0_key = "processed/_catalog/m0.json";
+        let m0 = json!({
+            "version": VERSION,
+            "service_id": "fixtureService",
+            "generation": 0u64,
+            "batch": "ingest",
+            "schema": "v2",
+            "committed_at": "2027-01-15T01:00:00Z",
+            "previous": null,
+            "files": [], "summaries": [], "sources": [], "replaces": [],
+            "bytes": 0, "rows": 0, "parents": {}
+        });
+        let dr_state = CloudDrState {
+            schema_version: SCHEMA_VERSION,
+            updated_at: 1_800_000_000,
+            service_id: "fixtureService".into(),
+            service: json!({"log_period": 60}),
+            views: vec![],
+            catalog_head: Some(Head {
+                version: VERSION,
+                generation: 0,
+                manifest: Some(m0_key.into()),
+                ..Head::default()
+            }),
+            floor_key: None,
+            rum_stats: None,
+        };
+        p.adapter
+            .seed_object_bytes("fos-fixture-logs", m0_key, serde_json::to_vec(&m0).unwrap());
+        p.adapter.seed_object_bytes(
+            "fos-fixture-logs",
+            "meta/cloud_dr_state.json",
+            serde_json::to_vec(&dr_state).unwrap(),
+        );
+        let resp = p.call(
+            "POST",
+            "/api/admin/provision/recover",
+            json!({
+                "token": "fixture-token",
+                "service_id": "fixtureService",
+                "fos_bucket": "fos-fixture-logs",
+                "fos_region": "us-east-1"
+            }),
+        );
+        assert_eq!(
+            resp.status,
+            400,
+            "iter41: generation=0 head with manifest must return 400, got {}: {}",
+            resp.status,
+            String::from_utf8_lossy(&resp.body)
+        );
+        let body: Value = serde_json::from_slice(&resp.body).unwrap();
+        assert_eq!(body["error"], "invalid_dr_catalog_head");
+    }
+}

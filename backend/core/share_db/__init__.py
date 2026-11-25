@@ -445,10 +445,13 @@ _UA_PROD_VER_RE = re.compile(
 _EMBEDDED_IPV4_RE = re.compile(r"(?<!\d)(?<!\d\.)(?:\d{1,3}\.){3}\d{1,3}(?![\d]|\.\d)")
 _EMBEDDED_IPV6_RE = re.compile(
     r"(?<![A-Za-z0-9])(?:"
-    r"[A-Fa-f0-9]{1,4}(?::[A-Fa-f0-9]{1,4}){2,7}"
-    r"|(?:[A-Fa-f0-9]{1,4}:){1,6}:(?:[A-Fa-f0-9]{1,4}(?::[A-Fa-f0-9]{1,4}){0,5})?"
+    r"(?:[A-Fa-f0-9]{1,4}:){6}(?:\d{1,3}\.){3}\d{1,3}"
+    r"|(?:[A-Fa-f0-9]{1,4}:){1,5}:(?:[A-Fa-f0-9]{1,4}:){0,4}(?:\d{1,3}\.){3}\d{1,3}"
+    r"|::(?:[A-Fa-f0-9]{1,4}:){0,5}(?:\d{1,3}\.){3}\d{1,3}"
+    r"|[A-Fa-f0-9]{1,4}(?::[A-Fa-f0-9]{1,4}){2,7}"
+    r"|(?:[A-Fa-f0-9]{1,4}:){1,7}:(?:[A-Fa-f0-9]{1,4}(?::[A-Fa-f0-9]{1,4}){0,5})?"
     r"|::(?:[A-Fa-f0-9]{1,4}(?::[A-Fa-f0-9]{1,4}){0,6})"
-    r")(?![A-Fa-f0-9]|:(?!(?:[1-9]\d{1,4})(?![A-Fa-f0-9:]))[A-Fa-f0-9:])"
+    r")(?![A-Fa-f0-9]|:(?!(?:[1-9]\d{1,4})(?![A-Fa-f0-9]|:[A-Fa-f0-9:]))[A-Fa-f0-9:])"
 )
 _SAVED_VIEW_STRUCTURAL_KEYS = frozenset(
     {
@@ -934,6 +937,8 @@ def scrub_ip_text(val: str) -> str:
             elif (
                 1 <= len(prefix_tok) <= 4
                 and not prefix_tok.isalpha()
+                and not (len(prefix_tok) <= 2 and prefix_tok[0].isalpha())
+                and not (j > 0 and out[j - 1] == ":" and len(prefix_tok) == 2 and prefix_tok.isdigit())
                 and all(ch in "0123456789abcdefABCDEF" for ch in prefix_tok)
             ):
                 return cand
@@ -943,9 +948,11 @@ def scrub_ip_text(val: str) -> str:
             return cand
         return mask_ip(cand)
 
-    out = _EMBEDDED_IPV4_RE.sub(_sub_v4, val) if "." in val else val
+    out = val
     if ":" in out:
         out = _EMBEDDED_IPV6_RE.sub(_sub_v6, out)
+    if "." in out:
+        out = _EMBEDDED_IPV4_RE.sub(_sub_v4, out)
     return out
 
 

@@ -425,6 +425,9 @@ fn validate_dr_catalog_head(
 ) -> Result<(), Error> {
     let catalog_prefix = format!("{scope}processed/_catalog/");
     let processed_prefix = format!("{scope}processed/");
+    if head.generation == 0 && (head.manifest.is_some() || !head.days.is_empty()) {
+        return Err(Error::new(400, "invalid_dr_catalog_head"));
+    }
     if head.manifest.as_deref().is_some_and(|key| {
         !safe_dr_object_key(key, &catalog_prefix)
             || is_foreign_svc_manifest_key(key, expected_service_id)
@@ -1035,6 +1038,7 @@ fn scan_catalog_head(
         };
         if let Ok(manifest) = serde_json::from_slice::<crate::ingest::catalog::Manifest>(&bytes) {
             if manifest.version != crate::ingest::catalog::VERSION
+                || manifest.generation == 0
                 || manifest.generation > 9_007_199_254_740_991
             {
                 if is_expected {
@@ -1183,7 +1187,11 @@ fn scan_catalog_head(
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect();
-            if block_keys.is_empty() || min_gen == 0 || max_gen == 0 {
+            if block_keys.is_empty()
+                || min_gen == 0
+                || max_gen == 0
+                || max_gen > 9_007_199_254_740_991
+            {
                 continue;
             }
             if let Some(day_ts) = day
@@ -1323,7 +1331,11 @@ fn scan_catalog_head(
                         .collect::<BTreeSet<_>>()
                         .into_iter()
                         .collect();
-                    if block_keys.is_empty() || min_gen == 0 || max_gen == 0 {
+                    if block_keys.is_empty()
+                        || min_gen == 0
+                        || max_gen == 0
+                        || max_gen > 9_007_199_254_740_991
+                    {
                         continue;
                     }
                     if let Some(day_ts) = day
@@ -1371,6 +1383,7 @@ fn scan_catalog_head(
                             return Err(Error::new(400, "invalid_dr_catalog_head"));
                         };
                         if m.version != crate::ingest::catalog::VERSION
+                            || m.generation == 0
                             || m.generation > 9_007_199_254_740_991
                             || m.committed_at.chars().any(char::is_control)
                             || m.service_id != service.service_id

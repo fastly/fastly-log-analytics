@@ -1281,6 +1281,13 @@ function scanQuotesAndUrlsPass(
             i += 2;
             continue;
           }
+          if (!isEscapeSingle) {
+            const cLen = matchSafeContractionLen(line1, i);
+            if (cLen > 0) {
+              i += cLen;
+              continue;
+            }
+          }
           if (ch === "'") {
             if (isEscapeSingle && i + 1 < limit && line1[i + 1] === "'") {
               i += 2;
