@@ -96,6 +96,22 @@ def _base_cte(
     return f"/* insight:batch_{name} */ WITH base AS ({raw})", "fact"
 
 
+def _window_from(*, filter_clause: str = "", row_filter: str = "") -> str:
+    """Window-only FROM/PREWHERE clause so IN-subquery pre-filters prune baseline partitions."""
+    fact_scope = " AND ".join(visible_fact_clauses("request"))
+    extra: list[str] = []
+    if filter_clause:
+        extra.append(f"({filter_clause})")
+    if row_filter:
+        extra.append(f"({row_filter})")
+    where = f" WHERE {' AND '.join(extra)}" if extra else ""
+    return (
+        f"FROM request_facts PREWHERE {fact_scope} "
+        "AND event_timestamp >= {window_start:DateTime64(3)} "
+        f"AND event_timestamp < {{window_end:DateTime64(3)}}{where}"
+    )
+
+
 def _share_spike_filter(
     rows: list[tuple[Any, int, int]],
     w_total: int,
@@ -579,9 +595,8 @@ def _extract_url_cache(
 # ── Batch 5: window-only GROUP BY url (4 detections) ─────────────────────────
 
 _IMG_COND = (
-    "status = 200 AND (url ILIKE '%.jpg%' OR url ILIKE '%.jpeg%' OR url ILIKE '%.png%' OR url ILIKE '%.gif%') "
-    "AND url NOT ILIKE '%auto=webp%' AND url NOT ILIKE '%format=auto%' "
-    "AND url NOT ILIKE '%format=webp%' AND url NOT ILIKE '%format=avif%'"
+    "status = 200 AND multiSearchAnyCaseInsensitive(url, ['.jpg', '.jpeg', '.png', '.gif']) "
+    "AND NOT multiSearchAnyCaseInsensitive(url, ['auto=webp', 'format=auto', 'format=webp', 'format=avif'])"
 )
 _TTL_COND = "ttl > 0 AND hits IS NOT NULL AND age IS NOT NULL"
 
@@ -599,7 +614,13 @@ def _build_window_url(
     if "cache_ttl_mismatch" in active:
         proj.extend([("ttl", COLUMNS["ttl"]), ("hits", COLUMNS["hits"]), ("age", COLUMNS["age"])])
     if "image_optimization_opportunities" in active:
-        proj.extend([("status", COLUMNS["status"]), ("resp_bytes", COLUMNS["resp_bytes"]), ("ua", COLUMNS["ua"])])
+        proj.extend(
+            [
+                ("_is_img", f"({_IMG_COND})"),
+                ("resp_bytes", COLUMNS["resp_bytes"]),
+                ("ua", COLUMNS["ua"]),
+            ]
+        )
     if "origin_retries" in active:
         proj.append(("oretries", COLUMNS["oretries"]))
 
@@ -630,10 +651,10 @@ def _build_window_url(
     if "image_optimization_opportunities" in active:
         sel.extend(
             [
-                f"countIf({_IMG_COND}) AS img_cnt",
-                f"sumIf(resp_bytes, {_IMG_COND}) AS img_bytes",
-                f"round(avgIf(resp_bytes, {_IMG_COND}) / 1024, 1) AS img_avg_kb",
-                f"(countIf({_IMG_COND} AND (ua ILIKE '%Mobi%' OR ua ILIKE '%Android%' OR ua ILIKE '%iPhone%')) * 1.0 / nullIf(countIf({_IMG_COND}), 0)) AS img_mob",
+                "countIf(_is_img) AS img_cnt",
+                "sumIf(resp_bytes, _is_img) AS img_bytes",
+                "round(avgIf(resp_bytes, _is_img) / 1024, 1) AS img_avg_kb",
+                "(countIf(_is_img AND multiSearchAnyCaseInsensitive(ua, ['mobi', 'android', 'iphone'])) * 1.0 / nullIf(countIf(_is_img), 0)) AS img_mob",
             ]
         )
         having.append("(img_bytes > 1024 * 512)")
@@ -712,10 +733,26 @@ def _build_latency_dim(
         proj.extend([("server_region", COLUMNS["server_region"]), ("ottfb", COLUMNS["ottfb"])])
         sets.append("(server_region)")
     if "city_latency_regressions" in active:
-        proj.extend([("city", COLUMNS["city"]), ("region", COLUMNS["region"]), ("country", COLUMNS["country"])])
+        city_col = COLUMNS["city"]
+        city_win_from = _window_from(
+            filter_clause=filter_clause, row_filter=f"{city_col} != '' AND custom_fields['elapsed'] != ''"
+        )
+        win_cities = f"SELECT {city_col} {city_win_from} GROUP BY {city_col} HAVING count() >= 10"
+        proj.extend(
+            [
+                ("city", f"if({city_col} != '' AND {city_col} IN ({win_cities}), {city_col}, '')"),
+                ("region_raw", COLUMNS["region"]),
+                ("country_raw", COLUMNS["country"]),
+            ]
+        )
         sets.append("(city, region, country)")
 
-    cte, source = _base_cte("latency_dim", proj, row_filter="elapsed IS NOT NULL", filter_clause=filter_clause)
+    cte, source = _base_cte(
+        "latency_dim",
+        proj,
+        row_filter="custom_fields['elapsed'] != '' AND elapsed IS NOT NULL",
+        filter_clause=filter_clause,
+    )
     g_pop = "grouping(pop)" if "pop_latency_regression" in active else "toUInt8(1)"
     g_reg = "grouping(server_region)" if "region_latency" in active else "toUInt8(1)"
     g_city = "grouping(city)" if "city_latency_regressions" in active else "toUInt8(1)"
@@ -741,7 +778,9 @@ def _build_latency_dim(
     pop_col = "pop" if "pop_latency_regression" in active else "'' AS pop"
     reg_col = "server_region" if "region_latency" in active else "'' AS server_region"
     city_cols = (
-        "city, region, country" if "city_latency_regressions" in active else "'' AS city, '' AS region, '' AS country"
+        "city, if(city != '', region_raw, '') AS region, if(city != '', country_raw, '') AS country"
+        if "city_latency_regressions" in active
+        else "'' AS city, '' AS region, '' AS country"
     )
     sql = (
         f"{cte} SELECT {g_pop} AS g_pop, {g_reg} AS g_reg, {g_city} AS g_city, "
@@ -789,7 +828,7 @@ def _extract_latency_dim(
 # ── Batch 7: baseline+window GROUP BY url performance (2 detections) ─────────
 
 _COMP_ROW = "status = 200 AND resp_bytes >= 1024 AND url != '' AND match(url, {compress_regex:String})"
-_UNCOMP = "NOT match(lower(resp_header_content_encoding), 'gzip|br|zstd|deflate')"
+_UNCOMP = "NOT multiSearchAnyCaseInsensitive(resp_header_content_encoding, ['gzip', 'br', 'zstd', 'deflate'])"
 
 
 def _build_url_perf(
@@ -807,6 +846,12 @@ def _build_url_perf(
         ("resp_header_content_encoding", COLUMNS["resp_header_content_encoding"]),
     ]
     cte, source = _base_cte("url_perf", proj, filter_clause=filter_clause)
+    url_win_from = _window_from(filter_clause=filter_clause, row_filter="url != ''")
+    win_urls = (
+        f"SELECT url {url_win_from} "
+        "GROUP BY url HAVING countIf(custom_fields['elapsed'] != '') >= 5 "
+        f"OR countIf(status = 200 AND {COLUMNS['resp_bytes']} >= 1024 AND match(url, {{compress_regex:String}})) >= 10"
+    )
     sql = (
         f"{cte} SELECT url, "
         f"{_P95}(elapsed, is_w AND elapsed IS NOT NULL) / 1000.0 AS l_w_p95, "
@@ -818,8 +863,7 @@ def _build_url_perf(
         f"countIf(is_w AND {_COMP_ROW}) AS c_w_total, "
         f"countIf(is_b AND {_COMP_ROW}) AS c_b_total "
         "FROM base "
-        f"WHERE url != '' AND url IN (SELECT url FROM base WHERE is_w AND url != '' GROUP BY url "
-        f"HAVING countIf(elapsed IS NOT NULL) >= 5 OR countIf({_COMP_ROW}) >= 10) "
+        f"WHERE url != '' AND url IN ({win_urls}) "
         "GROUP BY url HAVING "
         "(l_w_total >= 5 AND l_b_total >= 20 AND l_w_p95 >= l_b_p95 * 2.0 AND l_w_p95 - l_b_p95 >= 200) "
         "OR (c_w_total >= 10 AND c_b_total >= 50 AND c_b_rate <= 0.20 AND c_w_rate >= 0.50 AND c_w_rate >= c_b_rate + 0.30)"
@@ -874,6 +918,15 @@ def _build_ip_outlier(
     cte, source = _base_cte(
         "ip_outlier", proj, row_filter="req_header_bytes > 0 OR conn_requests > 0", filter_clause=filter_clause
     )
+    ip_out_win_from = _window_from(
+        filter_clause=filter_clause,
+        row_filter="client_ip != '' AND (custom_fields['req_header_bytes'] != '' OR custom_fields['conn_requests'] != '')",
+    )
+    win_ips = (
+        f"SELECT client_ip {ip_out_win_from} "
+        f"GROUP BY client_ip HAVING countIf({COLUMNS['req_header_bytes']} > 0) >= 3 "
+        f"OR countIf({COLUMNS['conn_requests']} > 0) >= 5"
+    )
     sql = (
         f"{cte} SELECT ip, "
         "maxIf(req_header_bytes, is_w AND req_header_bytes > 0) AS max_bytes, "
@@ -886,9 +939,7 @@ def _build_ip_outlier(
         "countIf(is_w AND conn_requests > 0) AS ca_w_total, "
         "quantileTDigestIf(0.95)(conn_requests, is_b AND conn_requests > 0) AS ca_b_p95, "
         "countIf(is_b AND conn_requests > 0) AS ca_b_total "
-        "FROM base WHERE ip IN ("
-        "SELECT ip FROM base WHERE is_w GROUP BY ip HAVING countIf(req_header_bytes > 0) >= 3 OR countIf(conn_requests > 0) >= 5"
-        ") GROUP BY ip HAVING "
+        f"FROM base WHERE ip IN ({win_ips}) GROUP BY ip HAVING "
         "(rs_w_total >= 3 AND rs_b_total > 0 AND max_bytes > rs_b_p95 * 3) "
         "OR (ca_w_total >= 5 AND ca_b_total > 0 AND max_reqs >= 50 AND max_reqs > ca_b_p95 * 3)"
     )
@@ -977,9 +1028,12 @@ def _build_ip_abuse(
                 "uniqCombinedIf(cookie_session, is_b AND cookie_session != '') AS sh_b_sessions",
             ]
         )
-        pre_having.append("uniqCombinedIf(cookie_session, cookie_session != '') >= 20")
+        pre_having.append(f"uniqCombinedIf({COLUMNS['cookie_session']}, {COLUMNS['cookie_session']} != '') >= 20")
         having.append("(sh_w_sessions >= 20 AND sh_w_sessions > sh_b_sessions * 2 + 10)")
     if "orphaned_deep_crawl" in active:
+        raw_deep_url = (
+            f"url LIKE '/%/%/%' AND url NOT LIKE '%.%' AND ({COLUMNS['referer']} = '' OR {COLUMNS['referer']} = '-')"
+        )
         sel.extend(
             [
                 f"countIf(is_w AND {_DEEP_URL}) AS od_w_reqs",
@@ -987,14 +1041,12 @@ def _build_ip_abuse(
                 f"countIf(is_b AND {_DEEP_URL}) AS od_b_reqs",
             ]
         )
-        pre_having.append(f"countIf({_DEEP_URL}) >= 50")
+        pre_having.append(f"countIf({raw_deep_url}) >= 50")
         having.append("(od_w_reqs >= 50 AND od_w_distinct >= 10)")
 
-    sql = (
-        f"{cte} SELECT {', '.join(sel)} FROM base "
-        f"WHERE ip IN (SELECT ip FROM base WHERE is_w GROUP BY ip HAVING {' OR '.join(pre_having)}) "
-        f"GROUP BY ip HAVING {' OR '.join(having)}"
-    )
+    ip_abuse_win_from = _window_from(filter_clause=filter_clause, row_filter="client_ip != ''")
+    win_ips = f"SELECT client_ip {ip_abuse_win_from} GROUP BY client_ip HAVING {' OR '.join(pre_having)}"
+    sql = f"{cte} SELECT {', '.join(sel)} FROM base WHERE ip IN ({win_ips}) GROUP BY ip HAVING {' OR '.join(having)}"
     return sql, source
 
 
@@ -1129,9 +1181,24 @@ def _build_network_asn(
     has_asn = bool(active & {"network_asn_health", "asn_metro_performance"})
     has_metro = bool(active & {"asn_metro_performance", "metro_delivery_degradation"})
     if has_asn:
-        proj.append(("asn_str", "custom_fields['asn']"))
+        asn_win_from = _window_from(filter_clause=filter_clause, row_filter="custom_fields['asn'] != ''")
+        win_asns = f"SELECT custom_fields['asn'] {asn_win_from} GROUP BY custom_fields['asn'] HAVING count() >= 20"
+        proj.append(
+            (
+                "asn_str",
+                f"if(custom_fields['asn'] != '' AND custom_fields['asn'] IN ({win_asns}), custom_fields['asn'], '')",
+            )
+        )
     if has_metro:
-        proj.append(("metro", COLUMNS["metro"]))
+        metro_col = COLUMNS["metro"]
+        metro_win_from = _window_from(filter_clause=filter_clause, row_filter=f"{metro_col} != ''")
+        win_metros = f"SELECT {metro_col} {metro_win_from} GROUP BY {metro_col} HAVING count() >= 20"
+        proj.append(
+            (
+                "metro",
+                f"if({metro_col} != '' AND {metro_col} IN ({win_metros}), {metro_col}, '')",
+            )
+        )
     if "network_asn_health" in active:
         proj.extend([("ploss", COLUMNS["ploss"]), ("rtt_var", COLUMNS["rtt_var"]), ("retrans", COLUMNS["retrans"])])
         sets.append("(asn_str)")
@@ -1339,7 +1406,22 @@ def _build_fingerprint_spread(
         )
         having.append(f"(g_fp = 0 AND {fp} != '' AND res_w_ips >= 30 AND res_w_asns >= 5)")
 
-    sql = f"{cte} SELECT {', '.join(sel)} FROM base {group_by} HAVING {' OR '.join(having)}"
+    win_preds: list[str] = []
+    if has_fp:
+        fp_col = COLUMNS[fp]
+        fp_win_from = _window_from(filter_clause=filter_clause, row_filter=f"{fp_col} != '' AND client_ip != ''")
+        win_fps = f"SELECT {fp_col} {fp_win_from} GROUP BY {fp_col} HAVING uniqCombined(client_ip) >= 4"
+        win_preds.append(f"({fp} != '' AND {fp} IN ({win_fps}))")
+    if has_cipher:
+        cipher_col = COLUMNS["tls_ciphers_sha"]
+        cipher_win_from = _window_from(
+            filter_clause=filter_clause, row_filter=f"{cipher_col} != '' AND client_ip != ''"
+        )
+        win_ciphers = f"SELECT {cipher_col} {cipher_win_from} GROUP BY {cipher_col} HAVING uniqCombined(client_ip) >= 4"
+        win_preds.append(f"(tls_ciphers_sha != '' AND tls_ciphers_sha IN ({win_ciphers}))")
+    pre_where = f" WHERE {' OR '.join(win_preds)}" if win_preds else ""
+
+    sql = f"{cte} SELECT {', '.join(sel)} FROM base{pre_where} {group_by} HAVING {' OR '.join(having)}"
     return sql, source
 
 

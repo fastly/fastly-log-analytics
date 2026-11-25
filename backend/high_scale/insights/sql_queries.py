@@ -337,8 +337,10 @@ _BOT_STEM = f"if(replaceRegexpOne(raw_tok, {_BOT_STEM_SUFFIX}, '') != '', replac
 # crawler_traffic is non-empty exactly when a bot stem has 50+ window requests; deciding that
 # from window rows alone avoids re-running crawler_traffic's full-range scan for the guard.
 _CRAWLER_IN_WINDOW = (
-    f"(SELECT count() FROM (SELECT {_BOT_STEM} AS bot_stem FROM (SELECT extract(lower(ua), {_CRAWLER_TOKEN}) AS raw_tok "
-    "FROM base WHERE is_w) WHERE raw_tok != '' AND bot_stem != '' GROUP BY bot_stem HAVING count() >= 50)) > 0"
+    f"(SELECT count() FROM (SELECT {_BOT_STEM} AS bot_stem FROM ("
+    f"SELECT extract(lower(ua), {_CRAWLER_TOKEN}) AS raw_tok, cnt FROM ("
+    "SELECT ua, count() AS cnt FROM base WHERE is_w GROUP BY ua"
+    ")) WHERE raw_tok != '' AND bot_stem != '' GROUP BY bot_stem HAVING sum(cnt) >= 50)) > 0"
 )
 
 
@@ -681,14 +683,14 @@ DETECTIONS: dict[str, Detection] = {
     ),
     "shield_path_degradation": Detection(
         ("rid", "prid", "pop", "ottfb", "edge"),
-        """ , edge_logs AS (SELECT rid, pop, ottfb, is_w, is_b FROM base WHERE lower(edge) IN ('1', 'true') AND rid != ''),
-    shield_logs AS (SELECT prid, pop, ottfb FROM base WHERE lower(edge) IN ('0', 'false') AND prid != ''),
+        """ , edge_logs AS (SELECT rid, pop, ottfb, is_w, is_b FROM base WHERE edge IN ('1', 'true', 'True', 'TRUE') AND rid != ''),
+    shield_logs AS (SELECT prid, pop, ottfb FROM base WHERE edge IN ('0', 'false', 'False', 'FALSE') AND prid != ''),
     joined AS (SELECT e.pop AS edge_pop, if(ifNull(s.prid, '') = '', 'Direct to Origin', s.pop) AS shield_pop,
                (e.ottfb - ifNull(s.ottfb, 0)) / 1000.0 AS transit_ms, e.is_w AS is_w, e.is_b AS is_b
         FROM edge_logs e LEFT JOIN shield_logs s ON s.prid = e.rid)
     SELECT edge_pop, shield_pop, quantileTDigestIf(0.50)(transit_ms, is_w) AS w_p50, quantileTDigestIf(0.50)(transit_ms, is_b) AS b_p50, countIf(is_w) AS w_cnt
     FROM joined GROUP BY edge_pop, shield_pop HAVING w_cnt >= 5 AND w_p50 > b_p50 * 1.5 ORDER BY (w_p50 / nullIf(b_p50, 0)) DESC LIMIT 20 """,
-        row_filter="ottfb IS NOT NULL",
+        row_filter="ottfb IS NOT NULL AND (rid != '' OR prid != '')",
     ),
     "repeated_patterns": Detection(
         ("sec", "ip", "ua"),
@@ -698,13 +700,14 @@ DETECTIONS: dict[str, Detection] = {
     ),
     "stale_browser_version": Detection(
         ("ip", "ua", "chrome_version"),
-        """ , win AS (SELECT chrome_version, countIf(is_w) AS w_reqs, uniqExactIf(ip, is_w) AS w_ips, countIf(is_b) AS b_reqs FROM base WHERE chrome_version IN (SELECT chrome_version FROM base WHERE is_w GROUP BY chrome_version HAVING count() >= 500) GROUP BY chrome_version HAVING w_reqs >= 500)
+        """ , win AS (SELECT chrome_version, countIf(is_w) AS w_reqs, uniqCombinedIf(ip, is_w) AS w_ips, countIf(is_b) AS b_reqs FROM base GROUP BY chrome_version HAVING w_reqs >= 500)
     SELECT concat('Chrome ', chrome_version) AS label, w_reqs, w_ips,
         w_reqs * 1.0 / greatest(b_reqs / greatest({baseline_hours:Float64}, 1.0) * {window_hours:Float64}, 1.0) AS surge_ratio
     FROM win WHERE w_reqs > b_reqs / greatest({baseline_hours:Float64}, 1.0) * {window_hours:Float64} * 2.5 ORDER BY surge_ratio DESC LIMIT 10 """,
         row_filter=(
-            "positionCaseInsensitive(ua, 'chrome') > 0 AND positionCaseInsensitive(ua, 'bot') = 0 "
-            "AND positionCaseInsensitive(ua, 'crawler') = 0 AND positionCaseInsensitive(ua, 'spider') = 0 AND chrome_version != '' AND toInt32OrZero(chrome_version) < 131"
+            "positionCaseInsensitive(ua, 'chrome') > 0 "
+            "AND NOT multiSearchAnyCaseInsensitive(ua, ['bot', 'crawler', 'spider']) "
+            "AND chrome_version != '' AND toInt32OrZero(chrome_version) < 131"
         ),
     ),
     "orphaned_deep_crawl": Detection(
@@ -729,30 +732,36 @@ DETECTIONS: dict[str, Detection] = {
     ),
     "crawler_disparity": Detection(
         ("ua", "referer", "ip", "resp_bytes"),
-        f""" , ua_groups AS (SELECT lower(ua) AS l_ua, countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt,
+        f""" , ua_groups AS (SELECT ua, countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt,
             sumIf(coalesce(resp_bytes, 0), is_w) AS w_b, sumIf(coalesce(resp_bytes, 0), is_b) AS b_b,
-            greatest(sum(sumIf(coalesce(resp_bytes, 0), is_w)) OVER (), 1) AS site_resp_total FROM base WHERE is_w OR lower(ua) IN (SELECT lower(ua) FROM base WHERE is_w GROUP BY lower(ua)) GROUP BY l_ua),
+            greatest(sum(sumIf(coalesce(resp_bytes, 0), is_w)) OVER (), 1) AS site_resp_total FROM base GROUP BY ua),
     ua_tagged AS (SELECT w_cnt, b_cnt, w_b, b_b, site_resp_total,
-            extract(l_ua, {_CRAWLER_TOKEN}) AS raw_tok,
-            extract(l_ua, 'https?://(?:www\\.)?([^/.:;\\s)]+)') AS ua_dom FROM ua_groups),
+            extract(lower(ua), {_CRAWLER_TOKEN}) AS raw_tok,
+            extract(lower(ua), 'https?://(?:www\\.)?([^/.:;\\s)]+)') AS ua_dom FROM ua_groups),
     ua_classified AS (SELECT w_cnt, b_cnt, w_b, b_b, site_resp_total, raw_tok, ua_dom,
             {_BOT_STEM} AS bot_stem
             FROM ua_tagged WHERE raw_tok != ''),
-    crawler_traffic AS (SELECT bot_stem, min(raw_tok) AS raw_tok, max(ua_dom) AS ua_dom, sum(w_cnt) AS w_crawls, sum(b_cnt) AS b_crawls,
+    crawler_traffic AS (SELECT bot_stem, replaceRegexpAll(bot_stem, '[aeiou]', '') AS bot_cons,
+               min(raw_tok) AS raw_tok, max(ua_dom) AS ua_dom, sum(w_cnt) AS w_crawls, sum(b_cnt) AS b_crawls,
                sum(w_b) AS w_bytes, sum(b_b) AS b_bytes, any(site_resp_total) AS site_resp_total FROM ua_classified WHERE bot_stem != '' GROUP BY bot_stem HAVING w_crawls >= 50),
-    human_refs AS (SELECT ip, max(is_w) AS is_w, max(is_b) AS is_b,
-            if(extract(lower(ua), '([a-z0-9]+)-(?:user|externalfetcher)') != '',
-               extract(lower(ua), '([a-z0-9]+)-(?:user|externalfetcher)'),
-               extract(lower(referer), 'https?://(?:www\\.)?([^/.:;\\s]+)')) AS ref_stem
-        FROM base
-        WHERE {_CRAWLER_IN_WINDOW} AND ip != '' AND (referer != '' OR positionCaseInsensitive(ua, '-user') > 0 OR positionCaseInsensitive(ua, '-externalfetcher') > 0)
-          AND extract(lower(ua), {_CRAWLER_TOKEN}) = ''
-        GROUP BY ip, ref_stem HAVING ref_stem != ''
-        UNION ALL SELECT '' AS ip, 0 AS is_w, 0 AS is_b, '' AS ref_stem),
+    human_refs AS (SELECT ref_stem, replaceRegexpAll(ref_stem, '[aeiou]', '') AS ref_cons,
+            is_w, is_b, uniqCombinedState(ip) AS ip_state
+        FROM (SELECT ip, is_w, is_b,
+            ifNull(nullIf(if(positionCaseInsensitive(ua, '-user') > 0 OR positionCaseInsensitive(ua, '-externalfetcher') > 0,
+                lower(extract(ua, '(?i)([a-z0-9]+)-(?:user|externalfetcher)')), ''), ''),
+                lower(extract(referer, '(?i)https?://(?:www\\.)?([^/.:;\\s]+)'))) AS ref_stem
+            FROM base
+            WHERE {_CRAWLER_IN_WINDOW} AND ip != ''
+              AND ((referer != '' AND referer != '-') OR positionCaseInsensitive(ua, '-user') > 0 OR positionCaseInsensitive(ua, '-externalfetcher') > 0)
+              AND NOT multiSearchAnyCaseInsensitive(ua, ['bot', 'crawler', 'spider', 'slurp', 'archiver', 'scraper', 'externalagent', 'extended', 'other', 'preview', 'headless', 'python-', 'go-http-client', 'curl', 'wget', 'scrapy', 'aiohttp', 'httpx', 'okhttp', 'axios']))
+        WHERE ref_stem != ''
+        GROUP BY ref_stem, is_w, is_b
+        UNION ALL SELECT '' AS ref_stem, '' AS ref_cons, toUInt8(0) AS is_w, toUInt8(0) AS is_b,
+            uniqCombinedState(ip) AS ip_state FROM (SELECT CAST('' AS String) AS ip WHERE 0)),
     combined AS (SELECT c.bot_stem AS bot_stem, any(c.raw_tok) AS raw_tok, any(c.w_crawls) AS w_crawls, any(c.b_crawls) AS b_crawls,
             any(c.w_bytes) AS w_bytes, any(c.b_bytes) AS b_bytes, any(c.site_resp_total) AS site_resp_total,
-            uniqExactIf(h.ip, toBool(h.is_w) AND h.ref_stem != '' AND (c.bot_stem = h.ref_stem OR (length(replaceRegexpAll(c.bot_stem, '[aeiou]', '')) >= 3 AND replaceRegexpAll(c.bot_stem, '[aeiou]', '') = replaceRegexpAll(h.ref_stem, '[aeiou]', '')) OR (length(c.bot_stem) >= 3 AND length(h.ref_stem) >= 3 AND (position(h.ref_stem, c.bot_stem) > 0 OR position(c.bot_stem, h.ref_stem) > 0)) OR (c.ua_dom != '' AND c.ua_dom = h.ref_stem))) AS w_referrals,
-            uniqExactIf(h.ip, toBool(h.is_b) AND h.ref_stem != '' AND (c.bot_stem = h.ref_stem OR (length(replaceRegexpAll(c.bot_stem, '[aeiou]', '')) >= 3 AND replaceRegexpAll(c.bot_stem, '[aeiou]', '') = replaceRegexpAll(h.ref_stem, '[aeiou]', '')) OR (length(c.bot_stem) >= 3 AND length(h.ref_stem) >= 3 AND (position(h.ref_stem, c.bot_stem) > 0 OR position(c.bot_stem, h.ref_stem) > 0)) OR (c.ua_dom != '' AND c.ua_dom = h.ref_stem))) AS b_referrals
+            uniqCombinedMergeIf(h.ip_state, toBool(h.is_w) AND h.ref_stem != '' AND (c.bot_stem = h.ref_stem OR (length(c.bot_cons) >= 3 AND c.bot_cons = h.ref_cons) OR (length(c.bot_stem) >= 3 AND length(h.ref_stem) >= 3 AND (position(h.ref_stem, c.bot_stem) > 0 OR position(c.bot_stem, h.ref_stem) > 0)) OR (c.ua_dom != '' AND c.ua_dom = h.ref_stem))) AS w_referrals,
+            uniqCombinedMergeIf(h.ip_state, toBool(h.is_b) AND h.ref_stem != '' AND (c.bot_stem = h.ref_stem OR (length(c.bot_cons) >= 3 AND c.bot_cons = h.ref_cons) OR (length(c.bot_stem) >= 3 AND length(h.ref_stem) >= 3 AND (position(h.ref_stem, c.bot_stem) > 0 OR position(c.bot_stem, h.ref_stem) > 0)) OR (c.ua_dom != '' AND c.ua_dom = h.ref_stem))) AS b_referrals
         FROM crawler_traffic c CROSS JOIN human_refs h GROUP BY c.bot_stem)
     SELECT c.raw_tok AS label, c.w_crawls, c.w_referrals, c.w_bytes,
         c.w_crawls * 1.0 / greatest(c.w_referrals, 1) AS crawls_per_referral,
@@ -778,15 +787,24 @@ def botnet_grouping(fingerprint_column: str) -> Detection:
 def _base_sql(detection: Detection, insight_id: str) -> str:
     projection = ", ".join(f"{COLUMNS[column]} AS {column}" for column in detection.columns)
     lower = "{window_start:DateTime64(3)}" if detection.window_only else "{baseline_start:DateTime64(3)}"
-    row_filter = f" AND ({detection.row_filter})" if detection.row_filter else ""
-    prewhere = f" PREWHERE {detection.prewhere}" if detection.prewhere else ""
     scope = " AND ".join(visible_fact_clauses("request"))
+    if detection.prewhere:
+        row_filter = f" AND ({detection.row_filter})" if detection.row_filter else ""
+        from_clause = (
+            f"FROM request_facts PREWHERE {detection.prewhere} WHERE {scope} AND event_timestamp >= {lower} "
+            f"AND event_timestamp < {{window_end:DateTime64(3)}}{row_filter}"
+        )
+    else:
+        where_clause = f" WHERE ({detection.row_filter})" if detection.row_filter else ""
+        from_clause = (
+            f"FROM request_facts PREWHERE {scope} AND event_timestamp >= {lower} "
+            f"AND event_timestamp < {{window_end:DateTime64(3)}}{where_clause}"
+        )
     return (
         f"/* insight:{insight_id} */ WITH base AS (SELECT {projection}, "
         "event_timestamp < {window_start:DateTime64(3)} AS is_b, "
         "event_timestamp >= {window_start:DateTime64(3)} AS is_w "
-        f"FROM request_facts{prewhere} WHERE {scope} AND event_timestamp >= {lower} "
-        f"AND event_timestamp < {{window_end:DateTime64(3)}}{row_filter}) {detection.sql}"
+        f"{from_clause}) {detection.sql}"
     )
 
 

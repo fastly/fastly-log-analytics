@@ -218,7 +218,8 @@ def _top_ips_header(service: HighScaleService, scope: _Scope, mask_ips: bool) ->
         "top_ips_header",
         "SELECT client_ip AS ip, max(h) AS max_header FROM "
         "(SELECT client_ip, toUInt64OrNull(custom_fields['req_header_bytes']) AS h FROM request_facts "
-        "WHERE __WHERE__ AND client_ip != '') WHERE h IS NOT NULL GROUP BY ip ORDER BY max_header DESC LIMIT 10",
+        "WHERE __WHERE__ AND client_ip != '' AND custom_fields['req_header_bytes'] != '') "
+        "WHERE h IS NOT NULL GROUP BY ip ORDER BY max_header DESC LIMIT 10",
     )
     return [shape_security_top_ip_header_row(r["ip"], r["max_header"], mask_ips=mask_ips) for r in rows]
 
@@ -429,19 +430,40 @@ def _bot_efficiency(service: HighScaleService, scope: _Scope) -> list[dict[str, 
     where_kw = "PREWHERE" if is_real_ch else "WHERE"
     uniq_fn = "uniqCombined64" if is_real_ch else "uniqExact"
 
-    ref_clause = (
-        "FROM request_facts PREWHERE __WHERE__ AND client_ip != '' AND ("
-        "(custom_fields['referer'] != '' AND custom_fields['referer'] != '-') "
-        "OR positionCaseInsensitive(custom_fields['ua'], '-user') > 0 "
-        "OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0"
-        ") WHERE "
-        if is_real_ch
-        else "FROM request_facts WHERE __WHERE__ AND client_ip != '' AND ("
-        "(custom_fields['referer'] != '' AND custom_fields['referer'] != '-') "
-        "OR positionCaseInsensitive(custom_fields['ua'], '-user') > 0 "
-        "OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0"
-        ") AND "
-    )
+    if is_real_ch:
+        ref_extracted_sql = (
+            "SELECT client_ip AS ip, "
+            "ifNull("
+            "nullIf("
+            "if(positionCaseInsensitive(custom_fields['ua'], '-user') > 0 "
+            "OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0, "
+            "lower(extract(custom_fields['ua'], '(?i)([a-z0-9]+)-(?:user|externalfetcher)')), "
+            "''), ''), "
+            "lower(extract(custom_fields['referer'], '(?i)https?://(?:www\\\\.)?([^/.:;\\\\s]+)'))) AS ref_stem "
+            "FROM request_facts PREWHERE __WHERE__ "
+            "WHERE client_ip != '' AND ("
+            "(custom_fields['referer'] != '' AND custom_fields['referer'] != '-') "
+            "OR positionCaseInsensitive(custom_fields['ua'], '-user') > 0 "
+            "OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0"
+            ") AND NOT multiSearchAnyCaseInsensitive(custom_fields['ua'], "
+            "['bot', 'crawler', 'spider', 'slurp', 'archiver', 'scraper', 'externalagent', 'extended', 'headless'])"
+        )
+    else:
+        ref_extracted_sql = (
+            "SELECT client_ip AS ip, "
+            "ifNull("
+            "nullIf("
+            "if(positionCaseInsensitive(custom_fields['ua'], '-user') > 0 "
+            "OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0, "
+            "extract(lower(custom_fields['ua']), '([a-z0-9]+)-(?:user|externalfetcher)'), "
+            "''), ''), "
+            "extract(lower(custom_fields['referer']), 'https?://(?:www\\\\.)?([^/.:;\\\\s]+)')) AS ref_stem "
+            "FROM request_facts WHERE __WHERE__ AND client_ip != '' AND ("
+            "(custom_fields['referer'] != '' AND custom_fields['referer'] != '-') "
+            "OR positionCaseInsensitive(custom_fields['ua'], '-user') > 0 "
+            "OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0"
+            ") AND NOT match(lower(custom_fields['ua']), '(bot|crawler|spider|slurp|archiver|scraper|externalagent|extended|headless)')"
+        )
     bot_eff_sql = f"""
     WITH ua_all AS (
         SELECT custom_fields['ua'] AS key, count() AS cnt,
@@ -455,16 +477,7 @@ def _bot_efficiency(service: HighScaleService, scope: _Scope) -> list[dict[str, 
         FROM ua_all WHERE key != '' ORDER BY resp_bytes DESC, cnt DESC LIMIT 2000
     ),
     ref_extracted AS (
-        SELECT client_ip AS ip,
-               ifNull(
-                   nullIf(
-                       if(positionCaseInsensitive(custom_fields['ua'], '-user') > 0
-                          OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0,
-                          extract(lower(custom_fields['ua']), '([a-z0-9]+)-(?:user|externalfetcher)'),
-                          ''),
-                       ''),
-                   extract(lower(custom_fields['referer']), 'https?://(?:www\\.)?([^/.:;\\s]+)')) AS ref_stem
-        {ref_clause}NOT match(lower(custom_fields['ua']), '(bot|crawler|spider|slurp|archiver|scraper|externalagent|extended|headless)')
+        {ref_extracted_sql}
     ),
     ref_agg AS (
         SELECT 'ref' AS kind, ref_stem AS key, {uniq_fn}(ip) AS cnt,
@@ -512,52 +525,35 @@ def _unpack_summap(val: Any) -> list[tuple[Any, int]]:
 _COMBINED_OVERVIEW_KEYS = (
     "fingerprint_coverage",
     "req_size_dist",
-    "top_ips_header",
     "ipv6_adoption",
     "proxy_dist",
     "conn_reuse_dist",
 )
 
 
-def _sec_combined_overview(
-    service: HighScaleService, scope: _Scope, sec_base_key: str | None, mask_ips: bool = False
-) -> dict[str, Any]:
+def _sec_combined_overview(service: HighScaleService, scope: _Scope, sec_base_key: str | None) -> dict[str, Any]:
     h_case = _bucket_case("h", _REQ_HEADER_BUCKETS, _REQ_HEADER_LAST)
     c_case = _bucket_case("c", _CONN_REUSE_BUCKETS, _CONN_REUSE_LAST)
-    base_sql = (
-        "SELECT bucket_ts, "
-        "sum(c_rows) AS total_rows, "
-        "sum(c_tls) AS tls_populated, "
-        "sum(c_ipv6) AS ipv6_rows, "
-        "sumMap(h_map) AS h_map, "
-        "sumMap(c_map) AS c_map, "
-        "sumMap(p_map) AS p_map, "
-        "groupArraySortedIf(15)(tuple(-toInt64(ip_max_h), client_ip), ip_max_h IS NOT NULL AND client_ip != '') AS top_hdr_ips "
-        "FROM (SELECT toUnixTimestamp(toStartOfHour(event_timestamp)) AS bucket_ts, client_ip, "
-        "count() AS c_rows, "
-        "countIf(custom_fields['tls_ciphers_sha'] != '') AS c_tls, "
-        f"countIf({_IS_IPV6}) AS c_ipv6, "
+    overview_sql = (
+        "SELECT toUnixTimestamp(toStartOfHour(event_timestamp)) AS bucket_ts, "
+        "count() AS total_rows, "
+        "countIf(custom_fields['tls_ciphers_sha'] != '') AS tls_populated, "
+        f"countIf({_IS_IPV6}) AS ipv6_rows, "
         "sumMap(if(h IS NOT NULL, [h_b], []), if(h IS NOT NULL, [toUInt64(1)], [])) AS h_map, "
         "sumMap(if(c IS NOT NULL AND c > 0, [c_b], []), if(c IS NOT NULL AND c > 0, [toUInt64(1)], [])) AS c_map, "
-        "sumMap(if(p_t != '', [p_t], []), if(p_t != '', [toUInt64(1)], [])) AS p_map, "
-        "max(h) AS ip_max_h "
-        "FROM (SELECT event_timestamp, client_ip, custom_fields['tls_ciphers_sha'], custom_fields['is_ipv6'], "
+        "sumMap(if(p_t != '', [p_t], []), if(p_t != '', [toUInt64(1)], [])) AS p_map "
+        "FROM (SELECT event_timestamp, custom_fields['tls_ciphers_sha'], custom_fields['is_ipv6'], "
         "custom_fields['p_type'] AS p_t, toUInt64OrNull(custom_fields['req_header_bytes']) AS h, "
         f"{h_case} AS h_b, toUInt64OrNull(custom_fields['conn_requests']) AS c, {c_case} AS c_b "
+        "FROM request_facts PREWHERE __WHERE__) GROUP BY bucket_ts ORDER BY bucket_ts"
     )
-    rows = _run(
-        service,
-        scope,
-        "overview_5in1",
-        f"{base_sql}FROM request_facts PREWHERE __WHERE__) GROUP BY bucket_ts, client_ip) GROUP BY bucket_ts ORDER BY bucket_ts",
-    )
+    rows = _run(service, scope, "overview_5in1", overview_sql)
     total_rows = 0
     tls_pop = 0
     ipv6_list: list[dict[str, Any]] = []
     h_counts: dict[str, int] = defaultdict(int)
     c_counts: dict[str, int] = defaultdict(int)
     p_counts: dict[str, int] = defaultdict(int)
-    ip_max_hdr: dict[str, int] = {}
     for r in rows:
         tr = int(r.get("total_rows") or 0)
         total_rows += tr
@@ -573,20 +569,11 @@ def _sec_combined_overview(
         for k, v in _unpack_summap(r.get("p_map")):
             if k:
                 p_counts[_normalize_proxy_type(k)] += v
-        for item in r.get("top_hdr_ips") or []:
-            seq = list(item.values()) if isinstance(item, Mapping) else item
-            if len(seq) >= 2 and seq[1]:
-                ip_s = str(seq[1])
-                h_val = abs(int(seq[0]))
-                if h_val > ip_max_hdr.get(ip_s, -1):
-                    ip_max_hdr[ip_s] = h_val
     h_order = [*(lbl for _, lbl in _REQ_HEADER_BUCKETS), _REQ_HEADER_LAST]
     c_order = [*(lbl for _, lbl in _CONN_REUSE_BUCKETS), _CONN_REUSE_LAST]
-    top_ips_raw = sorted(ip_max_hdr.items(), key=lambda kv: kv[1], reverse=True)[:10]
     bundle = {
         "fingerprint_coverage": {"tls_ciphers_sha": (tls_pop / total_rows) if total_rows > 0 else 0.0},
         "req_size_dist": [{"bucket": b, "count": h_counts[b]} for b in h_order if h_counts.get(b, 0) > 0],
-        "top_ips_header": [shape_security_top_ip_header_row(ip, max_h, mask_ips=mask_ips) for ip, max_h in top_ips_raw],
         "conn_reuse_dist": [{"bucket": b, "count": c_counts[b]} for b in c_order if c_counts.get(b, 0) > 0],
         "ipv6_adoption": ipv6_list,
         "proxy_dist": [
@@ -714,7 +701,7 @@ def security_aggregates(
             (
                 "_combined_overview",
                 use_combined_overview,
-                lambda: _sec_combined_overview(service, scope, sec_base_key, mask_ips),
+                lambda: _sec_combined_overview(service, scope, sec_base_key),
             ),
             (
                 "fingerprint_coverage",
@@ -728,7 +715,7 @@ def security_aggregates(
             ),
             (
                 "top_ips_header",
-                want("top_ips_header") and not use_combined_overview,
+                want("top_ips_header"),
                 lambda: _top_ips_header(service, scope, mask_ips),
             ),
             (
@@ -783,7 +770,7 @@ def security_aggregates(
             tasks,
             source=source_for,
             activity=lambda k: "overhead" if k == "ngwaf_configured" else "compute",
-            max_workers=8,
+            max_workers=3,
             thread_name_prefix="hs-sec",
         ).items():
             if k == "_top_bots":
@@ -976,7 +963,7 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
             "uniqCombined64If(ip, is_imp) AS distance_mismatches_count, "
             "countIf(is_tunnel) AS q_tunnel, "
             "countIf(NOT is_tunnel AND tcp_rtt > 0 AND rtt_min IS NOT NULL AND rtt_min / tcp_rtt < 0.7) AS q_wifi, "
-            "count() AS q_total, "
+            "(SELECT count() FROM request_facts PREWHERE __WHERE__) AS q_total, "
             "sumMap(if(is_tunnel, [ifNull(asn, -1)], []), if(is_tunnel, [toUInt64(1)], [])) AS isp_map, "
             "groupArraySortedIf(100)("
             "tuple("
@@ -999,13 +986,13 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
             "FROM ("
             "SELECT client_ip, custom_fields['pop'], country, custom_fields['city'], "
             "toFloat64OrNull(custom_fields['rtt_min']) AS rtt_min, "
-            "toFloat64OrNull(custom_fields['tcp_rtt']) AS tcp_rtt, "
+            "if(custom_fields['tcp_rtt'] != '', toFloat64OrNull(custom_fields['tcp_rtt']), NULL) AS tcp_rtt, "
             f"if({need_geo}, toFloat64OrNull(custom_fields['lat']), NULL) AS lat, "
             f"if({need_geo}, toFloat64OrNull(custom_fields['lon']), NULL) AS lon, "
             f"if({need_geo}, toInt64OrNull(custom_fields['asn']), NULL) AS asn, "
             f"if({need_geo}, {_POP_LAT_FAST}, NULL) AS pop_lat, "
             f"if({need_geo}, {_POP_LON_FAST}, NULL) AS pop_lon "
-            "FROM request_facts PREWHERE __WHERE__"
+            "FROM request_facts PREWHERE __WHERE__ AND custom_fields['rtt_min'] != ''"
             ")))"
         )
         comb_rows = _run(service, scope, "proxies_combined", proxies_sql)

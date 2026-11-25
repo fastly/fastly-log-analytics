@@ -137,7 +137,8 @@ def test_insights_batches_use_prewhere_uniq_combined_and_single_pass_quantiles()
         {"latency_regression", "payload_compression_regression"}, present=present, rollup_span=None, filter_clause=""
     )
     assert "FROM request_facts PREWHERE " in url_sql
-    assert "WHERE url != '' AND url IN (SELECT url FROM base WHERE is_w" in url_sql
+    assert "WHERE url != '' AND url IN (SELECT url FROM request_facts PREWHERE " in url_sql
+    assert "event_timestamp >= {window_start:DateTime64(3)}" in url_sql
 
     abuse_sql, _ = _build_ip_abuse(
         {"content_discovery", "credential_enumeration", "session_harvesting", "orphaned_deep_crawl"},

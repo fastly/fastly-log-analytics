@@ -2523,8 +2523,16 @@ def test_every_detection_runs_and_query_is_visible_scoped_and_parameterized() ->
             or qkey in {"repeated_patterns_fp", "impossible_distance"}
         )
         lower = "{window_start:DateTime64(3)}" if window_only else "{baseline_start:DateTime64(3)}"
-        # One raw-column-bounded fact scan per query keeps partition and primary-key pruning available.
-        assert sql.count("FROM request_facts") == 1, (insight_id, qkey)
+        # Every raw fact scan is visible-scoped and time-bounded (base scan + optional window-only IN pre-filters).
+        fact_scans = sql.split("FROM request_facts")[1:]
+        assert fact_scans, (insight_id, qkey)
+        for scan in fact_scans:
+            assert "service_id={service_id:String}" in scan, (insight_id, qkey)
+            assert "publication_state='visible'" in scan, (insight_id, qkey)
+            assert "event_timestamp >= {" in scan and "event_timestamp < {window_end:DateTime64(3)}" in scan, (
+                insight_id,
+                qkey,
+            )
         assert f"event_timestamp >= {lower}" in sql, (insight_id, qkey)
         assert (
             params["service_id"] == "svc" and params["baseline_start"] < params["window_start"] < params["window_end"]
@@ -2554,7 +2562,8 @@ def test_crawler_disparity_guard_reads_only_window_rows() -> None:
     sql, _ = client.queries()["crawler_disparity"]
     # Each reference to the full-range crawler_traffic CTE is another full baseline scan.
     assert sql.count("FROM crawler_traffic") == 1
-    assert "FROM base WHERE is_w) WHERE raw_tok != '' AND bot_stem != '' GROUP BY bot_stem HAVING count() >= 50" in sql
+    assert "SELECT ua, count() AS cnt FROM base WHERE is_w GROUP BY ua" in sql
+    assert "HAVING sum(cnt) >= 50" in sql
 
 
 class _RollupInsightsClient(_InsightsClient):

@@ -231,13 +231,13 @@ def _evaluate(
             "min(event_timestamp) AS earliest, "
             "countIf(event_timestamp >= {window_start:DateTime64(3)}) AS window_total, "
             "count() AS row_count, sum(cityHash64(batch_id)) AS batch_checksum "
-            f"FROM request_facts WHERE {scope} AND {in_range} GROUP BY hour)"
+            f"FROM request_facts PREWHERE {scope} AND {in_range} GROUP BY hour)"
         )
     else:
         history_sql = (
             "/* insight:history */ SELECT min(event_timestamp) AS earliest, "
             "countIf(event_timestamp >= {window_start:DateTime64(3)}) AS window_total "
-            f"FROM request_facts WHERE {scope} AND {in_range}"
+            f"FROM request_facts PREWHERE {scope} AND {in_range}"
         )
     coverage_start, coverage_end = baseline_hours_span(baseline_start, window_start)
     coverage_params = {**params, "coverage_start": coverage_start, "coverage_end": coverage_end}
@@ -251,7 +251,7 @@ def _evaluate(
 
     sample_sql = (
         "/* insight:fields */ SELECT groupUniqArrayArray(mapKeys(custom_fields)) AS fields FROM ("
-        f"SELECT custom_fields FROM request_facts WHERE {scope} AND {in_range} "
+        f"SELECT custom_fields FROM request_facts PREWHERE {scope} AND {in_range} "
         f"ORDER BY event_timestamp DESC LIMIT {_FIELD_SAMPLE_ROWS})"
     )
     # Pending cards need only history and fields; the coverage read finishes behind them.
