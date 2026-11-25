@@ -1959,7 +1959,13 @@ function scanContinuationParamsEnd(
         while (ws < len && isInlineWs(line[ws])) ws += 1;
         const itemSlice = line.slice(next, itemEnd);
         const hasUrl = itemSlice.includes("[url]") || (allowQuoted && itemSlice.includes("://"));
-        if (line[ws] === "," || hasUrl) {
+        const startsQuotedOrSentinel = line[next] === '"' || line[next] === "'" || line[next] === "`"
+          || line.startsWith("[redacted]", next);
+        const hasGluedSentinelOrQuote = !startsQuotedOrSentinel && (
+          itemSlice.includes("[redacted]")
+          || (allowQuoted && /['"`]/.test(itemSlice))
+        );
+        if (line[ws] === "," || hasUrl || hasGluedSentinelOrQuote) {
           end = consumeChainedUrlEquals(line, next, itemEnd, false, allowQuoted, escapeState);
           continue;
         }
