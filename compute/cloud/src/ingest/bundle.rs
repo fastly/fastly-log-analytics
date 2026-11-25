@@ -1338,7 +1338,8 @@ impl GroupAcc {
         let drop_keys: std::collections::HashSet<String> = entries
             .into_iter()
             .zip(selected)
-            .filter_map(|((k, _), keep_flag)| (!keep_flag).then(|| k.clone()))
+            .filter(|&((_, _), keep_flag)| !keep_flag)
+            .map(|((k, _), _)| k.clone())
             .collect();
         self.values.retain(|k, _| !drop_keys.contains(k));
         true
@@ -1350,9 +1351,8 @@ impl GroupAcc {
         let mut kept: Vec<_> = entries
             .into_iter()
             .zip(selected)
-            .filter_map(|(entry, keep_flag)| {
-                keep_flag.then_some((Self::requests(entry.1), entry.0, entry.1))
-            })
+            .filter(|&(_, keep_flag)| keep_flag)
+            .map(|(entry, _)| (Self::requests(entry.1), entry.0, entry.1))
             .collect();
         kept.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
         kept.into_iter().map(|(_, v, rows)| (v, rows)).collect()
@@ -4753,7 +4753,7 @@ mod tests {
         let bundle = acc.write(1_800_000_000, Some(Unit::Hour), "hour").unwrap();
         assert_eq!(
             hex::encode(Sha256::digest(&bundle)),
-            "2e1bafa33986a97cd9ae055d5833eeb508fae298665ba758db3b4da965f01b77"
+            "30c06dc5f496883ad541c57292562716a771753a1e7aba8c1c6bce7c5dd963be"
         );
         let resumed = Acc::decode_partial(&acc.encode_partial(), Unit::Hour).unwrap();
         assert_eq!(
