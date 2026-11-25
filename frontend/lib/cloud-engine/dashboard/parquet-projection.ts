@@ -1,6 +1,7 @@
 import { parquetMetadata, type FileMetaData, type SchemaElement } from "hyparquet";
 import { ByteWriter } from "hyparquet-writer";
 import { writeMetadata } from "hyparquet-writer/src/metadata.js";
+import { MAX_REGISTERED_BYTES } from "./budget";
 
 /** One tail read usually covers the whole footer. */
 export const FOOTER_PROBE_BYTES = 64 * 1024;
@@ -53,6 +54,34 @@ export function readsWholeFirst(file: { size: number; end: string }, nowMs = Dat
   if (file.size <= wholeReadLimits.anyUpToBytes) return true;
   return file.size <= wholeReadLimits.closedHourUpToBytes
     && Date.parse(file.end) <= Math.floor(nowMs / HOUR_MS) * HOUR_MS;
+}
+
+export const WHOLE_FALLBACK_RANGE_RATIO = 0.85;
+export const WHOLE_FALLBACK_MANY_RANGES_MIN = 8;
+export const WHOLE_FALLBACK_MANY_RANGES_RATIO = 0.50;
+export const WHOLE_FALLBACK_HIGH_FANOUT_MIN = 16;
+export const WHOLE_FALLBACK_HIGH_FANOUT_RATIO = 0.30;
+export const WHOLE_FALLBACK_HIGH_FANOUT_MAX_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Whether a post-footer projection plan should fall back to a single shared whole-file fetch
+ * instead of issuing many HTTP 206 range requests on a multi-row-group file.
+ */
+export function shouldFallbackToWhole(
+  plan: { ranges: readonly { start: number; end: number }[] },
+  fileSize: number,
+  plannedRangeBytes: number,
+  maxFileBytes = MAX_REGISTERED_BYTES,
+): boolean {
+  if (plan.ranges.length === 0 || fileSize <= 0 || fileSize > maxFileBytes) return false;
+  if (plannedRangeBytes >= fileSize * WHOLE_FALLBACK_RANGE_RATIO) return true;
+  if (plan.ranges.length >= WHOLE_FALLBACK_MANY_RANGES_MIN
+    && plannedRangeBytes >= fileSize * WHOLE_FALLBACK_MANY_RANGES_RATIO) {
+    return true;
+  }
+  return plan.ranges.length >= WHOLE_FALLBACK_HIGH_FANOUT_MIN
+    && (plannedRangeBytes >= fileSize * WHOLE_FALLBACK_HIGH_FANOUT_RATIO
+      || fileSize <= WHOLE_FALLBACK_HIGH_FANOUT_MAX_BYTES);
 }
 
 /** The footer of a Parquet file held whole. */

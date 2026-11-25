@@ -9,8 +9,8 @@ import {
 } from "./dashboard/sources";
 import {
   assembleProjectedParquet, fetchProjectedRanges, filterRowGroupFilter, planParquetProjection, readParquetFooter,
-  readsWholeFirst, readWholeParquetFooter, timestampRowGroupFilter, type ParquetFooter, type ParquetProjection,
-  type RowGroupFilterPredicate,
+  readsWholeFirst, readWholeParquetFooter, shouldFallbackToWhole, timestampRowGroupFilter, type ParquetFooter,
+  type ParquetProjection, type RowGroupFilterPredicate,
 } from "./dashboard/parquet-projection";
 import { wholeFileIdentity } from "./dashboard/projected-read";
 import { beginCloudLoading } from "./loading-progress";
@@ -26,22 +26,6 @@ const MAX_RANGE_BYTES = MAX_REGISTERED_BYTES;
 const PREFETCH_CONCURRENCY = 6;
 // Projected ranges are mostly a few KiB, so their round trips, not bandwidth, bound a cold load.
 const RANGE_CONCURRENCY = 16;
-// Fall back to a whole-file fetch when coalesced column ranges would already transfer 85%+ of
-// the file, or when a multi-row-group file would issue 8+ HTTP 206 requests for 60%+ of the file.
-const WHOLE_FALLBACK_RANGE_RATIO = 0.85;
-const WHOLE_FALLBACK_MANY_RANGES_MIN = 8;
-const WHOLE_FALLBACK_MANY_RANGES_RATIO = 0.60;
-
-function shouldFallbackToWhole(
-  plan: ParquetProjection,
-  fileSize: number,
-  plannedRangeBytes: number,
-): boolean {
-  if (plan.ranges.length === 0 || fileSize <= 0 || fileSize > MAX_RANGE_BYTES) return false;
-  if (plannedRangeBytes >= fileSize * WHOLE_FALLBACK_RANGE_RATIO) return true;
-  return plan.ranges.length >= WHOLE_FALLBACK_MANY_RANGES_MIN
-    && plannedRangeBytes >= fileSize * WHOLE_FALLBACK_MANY_RANGES_RATIO;
-}
 const source = browserSource("");
 const requestReads = new WeakMap<Request, DuckDBReadContext>();
 const activeRangeDownloads = new Set<AbortController>();

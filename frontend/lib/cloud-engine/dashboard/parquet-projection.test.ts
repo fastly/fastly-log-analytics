@@ -5,8 +5,8 @@ import { parquetWriteBuffer } from "hyparquet-writer";
 import { createNodeBackend } from "./duckdb";
 import {
   assembleProjectedParquet, fetchProjectedRanges, filterRowGroupFilter, FOOTER_PROBE_BYTES, MAX_RANGES_PER_FILE,
-  parquetQuerySchema, planParquetProjection, readParquetFooter, RANGE_MERGE_GAP, RANGE_REQUEST_COST_BYTES,
-  TARGET_RANGES_PER_FILE,
+  parquetQuerySchema, planParquetProjection, readParquetFooter, readsWholeFirst, RANGE_MERGE_GAP,
+  RANGE_REQUEST_COST_BYTES, shouldFallbackToWhole, TARGET_RANGES_PER_FILE,
 } from "./parquet-projection";
 import { projectedReader } from "./projected-read";
 
@@ -574,5 +574,83 @@ describe("query schemas from footers", () => {
     expect(seenModes).toEqual([
       { identity: JSON.stringify(["fixture-session:svc-a", "request", entry.key, "\"etag-shared\"", bytes.byteLength, ""]) },
     ]);
+  });
+
+  it("shouldFallbackToWhole caps high HTTP 206 fan-out while preserving narrow range reads", () => {
+    const planWith = (rangeCount: number) => ({
+      ranges: Array.from({ length: rangeCount }, (_, i) => ({ start: i * 100, end: i * 100 + 50 })),
+    });
+    const fileSize = 4 * 1024 * 1024;
+    expect(shouldFallbackToWhole(planWith(0), fileSize, 0)).toBe(false);
+    expect(shouldFallbackToWhole(planWith(1), fileSize, Math.ceil(fileSize * 0.85))).toBe(true);
+    expect(shouldFallbackToWhole(planWith(8), fileSize, Math.ceil(fileSize * 0.50))).toBe(true);
+    expect(shouldFallbackToWhole(planWith(8), fileSize, Math.floor(fileSize * 0.45))).toBe(false);
+    // High fan-out (>= 16 ranges) on medium compacts (<= 8 MiB) or >= 30% byte share falls back to whole.
+    expect(shouldFallbackToWhole(planWith(16), fileSize, Math.floor(fileSize * 0.25))).toBe(true);
+    expect(shouldFallbackToWhole(planWith(16), 20 * 1024 * 1024, Math.ceil(20 * 1024 * 1024 * 0.30))).toBe(true);
+    expect(shouldFallbackToWhole(planWith(16), 20 * 1024 * 1024, Math.floor(20 * 1024 * 1024 * 0.20))).toBe(false);
+    // Narrow open-hour projection (e.g. 13 ranges, 37% bytes) stays ranged.
+    expect(shouldFallbackToWhole(planWith(13), 1_650_000, Math.floor(1_650_000 * 0.37))).toBe(false);
+  });
+
+  it("falls back to shared whole-file fetch in projectedReader on high-fan-out multi-row-group compacts", async () => {
+    // Reproduces /security bundle + threat-intel concurrently projecting the same residual catalog1 file:
+    // both projections should fall back to fetchFile with canonical wholeFileIdentity and share 1 download.
+    const rgRows = 500;
+    const rowGroups = 20;
+    const totalRows = rgRows * rowGroups;
+    const bytes = parquetWriteBuffer({
+      codec: "UNCOMPRESSED",
+      rowGroupSize: rgRows,
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: totalRows }, (_, i) => new Date(1700000000000 + i * 1000)) },
+        { name: "ua", type: "STRING", data: Array.from({ length: totalRows }, () => noise(260)) },
+        { name: "url", type: "STRING", data: Array.from({ length: totalRows }, () => noise(260)) },
+        { name: "ja4", type: "STRING", data: Array.from({ length: totalRows }, (_, i) => `t13d${i % 19}`) },
+        { name: "status", type: "INT32", data: Array.from({ length: totalRows }, (_, i) => (i % 10 === 0 ? 503 : 200)) },
+      ],
+    });
+    const entry = {
+      key: "processed/request/year=2026/month=11/day=24/hour=07/catalog1/compact.parquet",
+      start: new Date(1700000000000).toISOString(),
+      end: new Date(Date.now() + 60_000).toISOString(),
+      size: bytes.byteLength,
+      rows: totalRows,
+      etag: "\"etag-sec\"",
+    };
+    expect(readsWholeFirst(entry)).toBe(false);
+
+    const wholeCache = new Map<string, ArrayBuffer>();
+    let networkWholeFetches = 0;
+    let dataRangeCalls = 0;
+    const source = {
+      cacheScope: "fixture-session:svc-sec",
+      fetchRange: async (_file: unknown, start: number, end: number) => {
+        if (end < bytes.byteLength) dataRangeCalls++;
+        return bytes.slice(start, end);
+      },
+      fetchFile: async (_key: string, _sig?: AbortSignal, mode?: { identity?: string }) => {
+        const id = mode?.identity ?? "";
+        const hit = wholeCache.get(id);
+        if (hit) return { bytes: hit.slice(0), cached: true };
+        networkWholeFetches++;
+        wholeCache.set(id, bytes.slice(0));
+        return { bytes: bytes.slice(0), cached: false };
+      },
+    };
+
+    const bundleRead = projectedReader(source, ["timestamp", "ua", "status"]);
+    const threatRead = projectedReader(source, ["timestamp", "ja4", "status"]);
+
+    const bundleProj = await (await bundleRead(entry)).read();
+    const threatProj = await (await threatRead(entry)).read();
+
+    expect(networkWholeFetches).toBe(1);
+    expect(dataRangeCalls).toBe(0);
+    expect(threatProj.cached).toBe(true);
+    expect(await query({ "b.parquet": bundleProj.bytes }, "SELECT count(*)::INT AS n FROM 'b.parquet'"))
+      .toEqual([{ n: totalRows }]);
+    expect(await query({ "t.parquet": threatProj.bytes }, "SELECT count(*)::INT AS n FROM 't.parquet'"))
+      .toEqual([{ n: totalRows }]);
   });
 });

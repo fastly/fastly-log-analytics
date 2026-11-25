@@ -948,6 +948,21 @@ describe('useSyncStatus, useLastSync & useHeaderBadgeStream', () => {
     expect(analystRes.current.data).toBeNull()
   })
 
+  it('useLastSync skips /api/cron-runs in Cloud mode because /api/sync-status already provides last_sync_at', async () => {
+    const { client } = await import('@/lib/api')
+    const getSpy = vi.spyOn(client, 'GET')
+    setCloudModeRuntime(true)
+    try {
+      const { result } = renderHook(() => useLastSync(), { wrapper: syncWrapper({ staleLastSyncSeed: true }) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 30)) })
+      expect(getSpy).not.toHaveBeenCalled()
+      expect(result.current.data).toBeNull()
+    } finally {
+      getSpy.mockRestore()
+      setCloudModeRuntime(false)
+    }
+  })
+
   it.each([
     { latest_log_at: null, local_rows: null, request: null, rum: null },
     { latest_log_at: null, local_rows: 0, request: { latest_log_at: null, total_rows: 0 }, rum: { latest_log_at: null, total_rows: 0 } },

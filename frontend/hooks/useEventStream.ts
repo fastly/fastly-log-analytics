@@ -270,6 +270,9 @@ export function useLastSync() {
   const isAnalyst = useIsAnalyst()
   const bootstrapPending = useBootstrapPending()
   const ready = useSeededReady(activeServiceId, LAST_SYNC_SEED_KEYS)
+  // Cloud's /api/sync-status already returns last_sync_at and never reports running cron jobs;
+  // skipping /api/cron-runs avoids fetching ops:cron_runs on every cold Cloud page load.
+  const cloudMode = IS_CLOUD_MODE || isCloudMode()
 
   return useQuery({
     queryKey: queryKeys.lastSync(activeServiceId),
@@ -287,7 +290,7 @@ export function useLastSync() {
         duration_s: e?.duration_s ?? null,
       } satisfies LastSyncInfo
     },
-    enabled: !!activeServiceId && !bootstrapPending && !isAnalyst && ready,
+    enabled: !cloudMode && !!activeServiceId && !bootstrapPending && !isAnalyst && ready,
     staleTime: 5 * 60_000,
     refetchInterval: 5 * 60_000,
     refetchIntervalInBackground: false,

@@ -1318,4 +1318,70 @@ describe("Cloud first-page analytical range loading", () => {
     expect(await read.executeSql("SELECT count(*)::INT AS n FROM requests")).toEqual([{ n: totalRows }]);
     read.release?.();
   });
+
+  it("shares a single whole-file fetch across two-pass projections on high-fan-out multi-row-group compacts", async () => {
+    // Reproduces /sessions Pass 1 (ranking columns) + Pass 2 (enrich ua/url) on an open-hour catalog1
+    // compact with 16+ row groups: instead of 16+ HTTP 206s per pass, both passes share 1 fetchFile download.
+    const rgRows = 500;
+    const rowGroups = 20;
+    const totalRows = rgRows * rowGroups;
+    let seed = 19;
+    const randStr = (len: number) => Array.from({ length: len }, () => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return String.fromCharCode(33 + (seed % 90));
+    }).join("");
+    const bytes = parquetWriteBuffer({
+      codec: "UNCOMPRESSED",
+      rowGroupSize: rgRows,
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: totalRows }, (_, i) => new Date(Date.parse(from) + i * 100)) },
+        { name: "ip", type: "STRING", data: Array.from({ length: totalRows }, (_, i) => `198.51.100.${i % 250}`) },
+        { name: "ua", type: "STRING", data: Array.from({ length: totalRows }, () => randStr(260)) },
+        { name: "url", type: "STRING", data: Array.from({ length: totalRows }, () => `/${randStr(260)}`) },
+        { name: "status", type: "INT32", data: Array.from({ length: totalRows }, () => 200) },
+      ],
+    });
+    const openEnd = new Date(Date.now() + 60_000).toISOString();
+    const entry = {
+      ...file,
+      key: "processed/request/year=2026/month=11/day=25/hour=07/catalog1/sessions-compact.parquet",
+      end: openEnd,
+      size: bytes.byteLength,
+      etag: "\"etag-sess\"",
+    };
+    const pass1Plan = planParquetProjection(await readWholeParquetFooter(bytes), new Set(["timestamp", "ip", "status"]));
+    expect(pass1Plan.ranges.length).toBeGreaterThanOrEqual(20);
+    vi.mocked(fetchManifest).mockResolvedValue({ files: [entry], complete: true });
+
+    const wholeCache = new Map<string, ArrayBuffer>();
+    let networkWholeFetches = 0;
+    let dataRangeCalls = 0;
+    source.fetchRange.mockImplementation(async (_f: ManifestFile, start: number, end: number) => {
+      if (end < bytes.byteLength) dataRangeCalls++;
+      return bytes.slice(start, end);
+    });
+    source.fetchFile.mockImplementation(async (_key: string, _sig?: AbortSignal, mode?: { identity?: string }) => {
+      const id = mode?.identity ?? "";
+      const hit = wholeCache.get(id);
+      if (hit) return { bytes: hit.slice(0), cached: true };
+      networkWholeFetches++;
+      wholeCache.set(id, bytes.slice(0));
+      return { bytes: bytes.slice(0), cached: false };
+    });
+
+    const pass1 = await ensureCloudRange(from, to, signal, ["request"], {
+      projection: { columns: ["timestamp", "ip", "status"] },
+    });
+    expect(await pass1.executeSql("SELECT count(*)::INT AS n FROM requests")).toEqual([{ n: totalRows }]);
+    pass1.release?.();
+
+    const pass2 = await ensureCloudRange(from, to, signal, ["request"], {
+      projection: { columns: ["timestamp", "ip", "ua", "url"] },
+    });
+    expect(await pass2.executeSql("SELECT count(*)::INT AS n FROM requests")).toEqual([{ n: totalRows }]);
+    pass2.release?.();
+
+    expect(networkWholeFetches).toBe(1);
+    expect(dataRangeCalls).toBe(0);
+  });
 });

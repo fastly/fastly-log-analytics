@@ -4,8 +4,8 @@ import type { DashboardFilter } from "./filters";
 import type { ManifestFile } from "./manifest";
 import {
   assembleProjectedParquet, fetchProjectedRanges, parquetQuerySchema, planParquetProjection, projectedSchema,
-  readParquetFooter, readsWholeFirst, readWholeParquetFooter, timestampRowGroupFilter, type ParquetFooter,
-  type ParquetProjection, type ParquetQuerySchema,
+  readParquetFooter, readsWholeFirst, readWholeParquetFooter, shouldFallbackToWhole, timestampRowGroupFilter,
+  type ParquetFooter, type ParquetProjection, type ParquetQuerySchema,
 } from "./parquet-projection";
 import type { BrowserFileSource } from "./sources";
 import type { CustomField } from "./summaries";
@@ -149,6 +149,30 @@ export function projectedReader(
       return {
         bytes: windowed.byteLength,
         read: async () => ({ bytes: await windowed.bytes(), cached: true, downloaded: 0, schema: schemaOf(projection) }),
+      };
+    }
+    const plannedRangeBytes = projection.ranges.reduce((sum, r) => sum + (r.end - r.start), 0);
+    if (fetchFile && projection.ranges.length > 1 && shouldFallbackToWhole(projection, file.size, plannedRangeBytes)) {
+      return {
+        bytes: file.size,
+        read: async () => {
+          signal?.throwIfAborted();
+          const whole = await fetchFile(file.key, signal, { identity: wholeFileIdentity(source.cacheScope, file) });
+          if (whole.bytes.byteLength !== file.size) {
+            throw new Error(`Whole-file read of ${file.key} returned ${whole.bytes.byteLength} bytes, not ${file.size}`);
+          }
+          const bytes = assembleProjectedParquet(
+            projection,
+            await fetchProjectedRanges(projection, async (start, end) => whole.bytes.slice(start, end)),
+          );
+          void source.writeDerivedFile?.(file.key, key, bytes, JSON.stringify(projection.presentColumns));
+          return {
+            bytes,
+            cached: whole.cached,
+            downloaded: downloaded + (whole.cached ? 0 : whole.bytes.byteLength),
+            schema: schemaOf(projection),
+          };
+        },
       };
     }
     return {
