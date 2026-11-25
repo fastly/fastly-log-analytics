@@ -422,13 +422,38 @@ fn list_for_role_hides_views_with_pii_in_page_query_string() {
                 Some("/logs?status=200&client_%C4%25B0p=198.51.100.7"),
             ),
             make_view("pii-fragment", Some("/logs?oip=1.2.3.4#top")),
+            make_view(
+                "safe-json-filters",
+                Some("/logs?filters=%7B%22status%22%3A%7B%22mode%22%3A%22include%22%2C%22values%22%3A%5B%22200%22%5D%7D%7D"),
+            ),
+            make_view(
+                "pii-json-filters-param",
+                Some("/logs?filters=%7B%22client_ip%22%3A%7B%22mode%22%3A%22include%22%2C%22values%22%3A%5B%22198.51.100.7%22%5D%7D%7D"),
+            ),
+            make_view("pii-query-value-col", Some("/logs?col=client_ip&val=198.51.100.7")),
+            make_view(
+                "pii-query-value-sql",
+                Some("/query?sql=SELECT+client_ip+FROM+logs"),
+            ),
+            make_view(
+                "pii-semicolon-sep",
+                Some("/logs?status=200;client_ip=198.51.100.7"),
+            ),
+            make_view(
+                "pii-fragment-kv",
+                Some("/logs?status=200#client_ip=198.51.100.7"),
+            ),
+            make_view("pii-fragment-only", Some("/logs#client_ip=198.51.100.7")),
         ],
     };
 
     let analyst = views::list_for_role(&store, "svc1", Role::AnalystNoPii, 50).expect("list");
     let analyst_ids: Vec<&str> = analyst.iter().map(|v| v.id.as_str()).collect();
-    assert_eq!(analyst_ids, vec!["safe-none", "safe-path", "safe-query"]);
+    assert_eq!(
+        analyst_ids,
+        vec!["safe-none", "safe-path", "safe-query", "safe-json-filters"]
+    );
 
     let admin = views::list_for_role(&store, "svc1", Role::Admin, 50).expect("list");
-    assert_eq!(admin.len(), 6);
+    assert_eq!(admin.len(), 13);
 }

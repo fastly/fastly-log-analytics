@@ -4440,21 +4440,70 @@ pub fn filters_reference_pii(filters_json: &str) -> bool {
     value_references_pii(&parsed, FilterSlot::General, false, 0)
 }
 
+fn page_value_references_pii(raw_val: &str) -> bool {
+    let plus_decoded = raw_val.replace('+', " ");
+    let decoded = decode_pii_url_twice(&plus_decoded);
+    let trimmed = trim_sql_ws(&decoded);
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        return filters_reference_pii(trimmed);
+    }
+    is_pii_identifier(trimmed) || is_pii_key_exact(trimmed) || sql_or_filter_references_pii(trimmed)
+}
+
+fn page_segment_references_pii(segment: &str) -> bool {
+    let segment = segment.trim_start_matches('?');
+    segment.split(['&', ';']).any(|pair| {
+        if pair.is_empty() {
+            return false;
+        }
+        if let Some((key, val)) = pair.split_once('=') {
+            if !key.is_empty() && (is_pii_identifier(key) || is_pii_key_exact(key)) {
+                return true;
+            }
+            if page_value_references_pii(val) {
+                return true;
+            }
+        } else {
+            let plus_decoded = pair.replace('+', " ");
+            let decoded = decode_pii_url_twice(&plus_decoded);
+            if let Some((key, val)) = decoded.split_once('=') {
+                if !key.is_empty() && (is_pii_identifier(key) || is_pii_key_exact(key)) {
+                    return true;
+                }
+                if page_value_references_pii(val) {
+                    return true;
+                }
+            }
+            if page_value_references_pii(pair) {
+                return true;
+            }
+        }
+        false
+    })
+}
+
 fn page_references_pii(page: Option<&str>) -> bool {
     let Some(page) = page else {
         return false;
     };
-    let Some((_, query)) = page.split_once('?') else {
-        return false;
+    let (before_frag, frag) = match page.split_once('#') {
+        Some((b, f)) => (b, Some(f)),
+        None => (page, None),
     };
-    let query = query.split('#').next().unwrap_or(query);
-    query.split('&').any(|pair| {
-        if pair.is_empty() {
-            return false;
+    if let Some((_, query)) = before_frag.split_once('?') {
+        if page_segment_references_pii(query) {
+            return true;
         }
-        let key = pair.split('=').next().unwrap_or(pair);
-        !key.is_empty() && (is_pii_identifier(key) || is_pii_key_exact(key))
-    })
+    }
+    if let Some(fragment) = frag {
+        if page_segment_references_pii(fragment) {
+            return true;
+        }
+    }
+    false
 }
 
 pub fn list_for_role<S: ViewStore>(
