@@ -4440,6 +4440,18 @@ pub fn filters_reference_pii(filters_json: &str) -> bool {
     value_references_pii(&parsed, FilterSlot::General, false, 0)
 }
 
+fn page_key_references_pii(key: &str) -> bool {
+    if key.is_empty() {
+        return false;
+    }
+    if is_pii_identifier(key) || is_pii_key_exact(key) {
+        return true;
+    }
+    let decoded = decode_pii_url_twice(&key.replace('+', " "));
+    let trimmed = trim_sql_ws(&decoded);
+    !trimmed.is_empty() && is_extra_column_ident(trimmed)
+}
+
 fn page_value_references_pii(raw_val: &str) -> bool {
     let plus_decoded = raw_val.replace('+', " ");
     let decoded = decode_pii_url_twice(&plus_decoded);
@@ -4450,34 +4462,31 @@ fn page_value_references_pii(raw_val: &str) -> bool {
     if trimmed.starts_with('{') || trimmed.starts_with('[') {
         return filters_reference_pii(trimmed);
     }
-    is_pii_identifier(trimmed) || is_pii_key_exact(trimmed) || sql_or_filter_references_pii(trimmed)
+    is_pii_identifier(trimmed)
+        || is_pii_key_exact(trimmed)
+        || is_extra_column_ident(trimmed)
+        || sql_or_filter_references_pii(trimmed)
 }
 
 fn page_segment_references_pii(segment: &str) -> bool {
-    let segment = segment.trim_start_matches('?');
-    segment.split(['&', ';']).any(|pair| {
+    segment.split(['&', ';', '#']).any(|raw_pair| {
+        let pair = raw_pair.trim_start_matches('?');
         if pair.is_empty() {
             return false;
         }
         if let Some((key, val)) = pair.split_once('=') {
-            if !key.is_empty() && (is_pii_identifier(key) || is_pii_key_exact(key)) {
-                return true;
-            }
-            if page_value_references_pii(val) {
+            if page_key_references_pii(key) || page_value_references_pii(val) {
                 return true;
             }
         } else {
             let plus_decoded = pair.replace('+', " ");
             let decoded = decode_pii_url_twice(&plus_decoded);
             if let Some((key, val)) = decoded.split_once('=') {
-                if !key.is_empty() && (is_pii_identifier(key) || is_pii_key_exact(key)) {
-                    return true;
-                }
-                if page_value_references_pii(val) {
+                if page_key_references_pii(key) || page_value_references_pii(val) {
                     return true;
                 }
             }
-            if page_value_references_pii(pair) {
+            if page_key_references_pii(pair) || page_value_references_pii(pair) {
                 return true;
             }
         }
