@@ -1838,7 +1838,7 @@ function tryScanKeyValueParamEnd(
     return -1;
   }
   let vStart = eqPos + 1;
-  while (vStart < len && isInlineWs(line[vStart])) vStart += 1;
+  while (vStart < len && (isInlineWs(line[vStart]) || line[vStart] === "=")) vStart += 1;
   if (!isCookie && vStart >= len) {
     return -1;
   }
@@ -1853,7 +1853,7 @@ function tryScanKeyValueParamEnd(
   }
   let vEnd = scanSingleSecretValueEnd(line, vStart, true, true, isCookie, allowQuoted, escapeState);
   vEnd = consumeChainedUrlEquals(line, vStart, vEnd, isCookie, allowQuoted, escapeState);
-  return vEnd > vStart ? vEnd : eqPos + 1;
+  return vEnd > vStart ? vEnd : vStart;
 }
 
 function scanContinuationParamsEnd(
@@ -1965,9 +1965,12 @@ function scanSecretHeaderOrValueEnd(
   let end: number;
   if (cookieMode || authParamMode) {
     const kvEnd = tryScanKeyValueParamEnd(line, p, cookieMode, allowQuoted, escapeState);
-    end = kvEnd !== -1
-      ? kvEnd
-      : scanSingleSecretValueEnd(line, p, allowRedacted, allowUrl, cookieMode && !allowQuoted, allowQuoted, escapeState);
+    if (kvEnd !== -1) {
+      end = kvEnd;
+    } else {
+      end = scanSingleSecretValueEnd(line, p, allowRedacted, allowUrl, cookieMode && !allowQuoted, allowQuoted, escapeState);
+      end = consumeChainedUrlEquals(line, p, end, cookieMode, allowQuoted, escapeState);
+    }
   } else {
     end = scanSingleSecretValueEnd(line, p, allowRedacted, false, false, allowQuoted, escapeState);
   }
