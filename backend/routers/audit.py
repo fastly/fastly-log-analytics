@@ -16,7 +16,12 @@ from backend.models.common import (
 )
 from backend.utils.router_utils import query_errors
 
-router = APIRouter(prefix="/api", tags=["audit"], responses=DEFAULT_ERROR_RESPONSES)
+router = APIRouter(
+    prefix="/api",
+    tags=["audit"],
+    responses=DEFAULT_ERROR_RESPONSES,
+    dependencies=[Depends(require_admin)],
+)
 audit_router = router
 
 FEATURE_REQUIRED_FIELDS: dict[str, list[str]] = {

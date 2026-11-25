@@ -62,6 +62,48 @@ class _BoundedStreamReader:
         limit = remaining + 1 if size is None or size < 0 else min(size, remaining + 1)
         return self._account(self._stream.readline(limit))
 
+    def read1(self, size: int = -1) -> bytes:
+        if size is None or size < 0:
+            size = _DECOMPRESS_CHUNK_BYTES
+        if size == 0:
+            return b""
+        remaining = self._max_bytes - self._bytes_read
+        capped = min(size, remaining + 1)
+        read1_fn = getattr(self._stream, "read1", None)
+        data = read1_fn(capped) if callable(read1_fn) else self._stream.read(capped)
+        return self._account(data)
+
+    def readlines(self, hint: int = -1) -> list[bytes]:
+        lines: list[bytes] = []
+        total = 0
+        while True:
+            line = self.readline()
+            if not line:
+                break
+            lines.append(line)
+            total += len(line)
+            if hint is not None and hint > 0 and total >= hint:
+                break
+        return lines
+
+    def readinto(self, buffer: Any) -> int:
+        mv = memoryview(buffer).cast("B")
+        if len(mv) == 0:
+            return 0
+        data = self.read(len(mv))
+        n = len(data)
+        mv[:n] = data
+        return n
+
+    def readinto1(self, buffer: Any) -> int:
+        mv = memoryview(buffer).cast("B")
+        if len(mv) == 0:
+            return 0
+        data = self.read1(len(mv))
+        n = len(data)
+        mv[:n] = data
+        return n
+
     def __iter__(self) -> _BoundedStreamReader:
         return self
 

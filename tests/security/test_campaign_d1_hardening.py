@@ -19,6 +19,7 @@ import gzip
 import shutil
 import subprocess
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -192,12 +193,12 @@ def test_router01_historical_job_manager_per_owner_cap_and_memory_eviction() -> 
     # 2) Aggregate retained output memory budget evicts oldest completed payloads.
     mem_mgr = HistoricalJobManager(
         max_workers=1,
-        max_output_bytes=200,
-        max_total_output_bytes=250,
+        max_output_bytes=500,
+        max_total_output_bytes=800,
         terminal_grace_ttl=timedelta(minutes=5),
     )
     try:
-        row_payload = {"v": "x" * 100}  # ~108 bytes serialized
+        row_payload = {"v": "x" * 100}  # ~108 bytes serialized + 256B row overhead = ~364 bytes
         j1 = mem_mgr.submit(_cold_plan(), lambda: [row_payload])
         _wait_for_state(mem_mgr, j1, HistoricalJobState.COMPLETED)
         j2 = mem_mgr.submit(_cold_plan(), lambda: [row_payload])
@@ -211,7 +212,7 @@ def test_router01_historical_job_manager_per_owner_cap_and_memory_eviction() -> 
         assert snap1 is not None and snap2 is not None and snap3 is not None
         assert snap1.output_bytes == 0 and snap1.rows == ()
         assert snap3.output_bytes > 0 and len(snap3.rows) == 1
-        assert snap1.output_bytes + snap2.output_bytes + snap3.output_bytes <= 250
+        assert snap1.output_bytes + snap2.output_bytes + snap3.output_bytes <= 800
     finally:
         mem_mgr.shutdown()
 
@@ -393,3 +394,96 @@ def test_k8s02_k8s03_helm_charts_render_hardened_security_context() -> None:
     for dep in deployments:
         pod_sc = dep["spec"]["template"]["spec"]["securityContext"]
         assert pod_sc.get("seccompProfile", {}).get("type") == "RuntimeDefault", dep["metadata"]["name"]
+
+
+# ── Wave 1 Verifier Follow-Ups ───────────────────────────────────────────────
+
+
+def test_w1_bounded_stream_reader_enforces_limit_across_textiowrapper_and_buffered_methods(tmp_path: Path) -> None:
+    """TextIOWrapper (read1), readlines, readinto, and readinto1 must enforce the decompressed cap."""
+    import io
+
+    from backend.core.ingest.parser import _open_compressed_log
+
+    gz_path = tmp_path / "bomb_buffered.log.gz"
+    gz_path.write_bytes(gzip.compress(b"A" * 50_000))
+
+    with pytest.raises(ValueError, match="maximum allowed size"):
+        with _open_compressed_log(str(gz_path), max_decompressed_bytes=4096) as fh:
+            io.TextIOWrapper(fh, encoding="utf-8").readline()
+
+    with pytest.raises(ValueError, match="maximum allowed size"):
+        with _open_compressed_log(str(gz_path), max_decompressed_bytes=4096) as fh:
+            fh.read1(50_000)
+
+    with pytest.raises(ValueError, match="maximum allowed size"):
+        with _open_compressed_log(str(gz_path), max_decompressed_bytes=4096) as fh:
+            fh.readlines()
+
+    with pytest.raises(ValueError, match="maximum allowed size"):
+        with _open_compressed_log(str(gz_path), max_decompressed_bytes=4096) as fh:
+            fh.readinto(bytearray(50_000))
+
+
+def test_w1_historical_jobs_evicts_terminal_slots_and_accounts_row_overhead() -> None:
+    """Completed jobs must not block new submissions at max_jobs, and tiny rows must account for dict overhead."""
+    from backend.high_scale.archive.jobs import HistoricalJobLimitError, HistoricalJobManager, HistoricalJobState
+
+    manager = HistoricalJobManager(
+        max_workers=2,
+        max_jobs=3,
+        max_active_per_owner=2,
+        max_output_bytes=4096,
+        max_total_output_bytes=8192,
+    )
+    try:
+        plan = _cold_plan(max_rows=50)
+        # Fill all 3 slots with completed jobs from analyst:a; 4th job from admin must evict oldest terminal job.
+        for _ in range(4):
+            jid = manager.submit(plan, lambda: [{"x": 1}], owner_key="analyst:a")
+            for _ in range(100):
+                job = manager.get(jid)
+                if job and job.state is HistoricalJobState.COMPLETED:
+                    break
+                time.sleep(0.01)
+            assert job is not None and job.state is HistoricalJobState.COMPLETED
+
+        admin_jid = manager.submit(plan, lambda: [{"x": 2}], owner_key="admin")
+        for _ in range(100):
+            admin_job = manager.get(admin_jid)
+            if admin_job and admin_job.state is HistoricalJobState.COMPLETED:
+                break
+            time.sleep(0.01)
+        assert admin_job is not None and admin_job.state is HistoricalJobState.COMPLETED
+
+        # Row overhead floor: 20 empty dicts `{}` must exceed 20 * 256 = 5120 > max_output_bytes=4096 -> FAILED
+        tiny_jid = manager.submit(plan, lambda: [{} for _ in range(20)], owner_key="analyst:b")
+        for _ in range(100):
+            tiny_job = manager.get(tiny_jid)
+            if tiny_job and tiny_job.state is HistoricalJobState.FAILED:
+                break
+            time.sleep(0.01)
+        assert tiny_job is not None and tiny_job.state is HistoricalJobState.FAILED
+        assert "byte limit" in (tiny_job.error or "")
+
+        # When all slots are genuinely ACTIVE, reject with HistoricalJobLimitError (HTTP 429) not plain RuntimeError.
+        gate = threading.Event()
+        try:
+            manager.submit(plan, lambda: (gate.wait(2.0), iter(()))[1], owner_key="owner:1")
+            manager.submit(plan, lambda: (gate.wait(2.0), iter(()))[1], owner_key="owner:1")
+            manager.submit(plan, lambda: (gate.wait(2.0), iter(()))[1], owner_key="owner:2")
+            with pytest.raises(HistoricalJobLimitError) as exc_info:
+                manager.submit(plan, lambda: [{"x": 3}], owner_key="owner:3")
+            assert exc_info.value.status_code == 429
+        finally:
+            gate.set()
+    finally:
+        manager.shutdown(wait=True)
+
+
+def test_w1_log_field_audit_enforces_route_level_require_admin() -> None:
+    """GET /api/services/{service_id}/log-field-audit must enforce route-level Depends(require_admin)."""
+    assert _router_has_require_admin(audit_mod.router)
+    client = _make_analyst_app(audit_mod.router)
+    resp = client.get("/api/services/svc-d1/log-field-audit")
+    assert resp.status_code == 403

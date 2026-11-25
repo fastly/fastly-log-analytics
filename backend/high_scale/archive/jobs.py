@@ -158,7 +158,16 @@ class HistoricalJobManager:
             if not self._ensure_output_budget_locked(additional_bytes=0):
                 raise HistoricalJobLimitError("historical job retained output memory budget is full")
             if len(self._jobs) >= self._max_jobs:
-                raise RuntimeError("historical job capacity is full")
+                evictable = sorted(
+                    (rec for rec in self._jobs.values() if rec.state in _TERMINAL_STATES),
+                    key=lambda rec: (rec.terminal_at or rec.created_at, rec.created_at),
+                )
+                for victim in evictable:
+                    del self._jobs[victim.job_id]
+                    if len(self._jobs) < self._max_jobs:
+                        break
+            if len(self._jobs) >= self._max_jobs:
+                raise HistoricalJobLimitError("historical job capacity is full")
             job_id = uuid4().hex
             record = _JobRecord(job_id, plan, observed, observed + self._ttl, owner_key=owner_key)
             self._jobs[job_id] = record
@@ -219,9 +228,12 @@ class HistoricalJobManager:
                     if self._stop_reason_locked(record):
                         return
                     row = dict(item)
-                    row_bytes = len(
+                    serialized_len = len(
                         json.dumps(row, default=str, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
                     )
+                    # Account for Python dict/object overhead (~256B per row) so tiny rows
+                    # like `{}` cannot bypass the aggregate memory budget.
+                    row_bytes = serialized_len + 256
                     if record.output_bytes + row_bytes > self._max_output_bytes:
                         record.rows, record.output_bytes = [], 0
                         self._finish_locked(
