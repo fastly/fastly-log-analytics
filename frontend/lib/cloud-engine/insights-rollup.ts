@@ -1,5 +1,6 @@
 import type { DashboardFilter } from "./dashboard/filters";
 import { Histogram } from "./dashboard/histogram";
+import { fetchManifestWithSummaries } from "./dashboard/manifest";
 import { emptyAgg, queryRollup, rollupGroup, type Rollup, type RollupAgg, type RollupResult } from "./dashboard/rollup-query";
 import {
   CLOUD_INSIGHT_DETECTORS,
@@ -461,16 +462,30 @@ export async function insightsFromRollup(
 ) {
   if (filters.length || Array.isArray(body.detectors)) return null;
   const { end, windowStart, start, windowHours, baselineHours } = resolveInsightWindow(body);
-  const fetchPair = (fromStart: number, fromWindow: number, toEnd: number) =>
-    Promise.all([
+  const fetchPair = async (fromStart: number, fromWindow: number, toEnd: number) => {
+    // Pre-fetch one superset manifest covering [fromStart, toEnd] so both queryRollup calls
+    // (and any raw fallback) slice from memory with zero extra /api/files requests, and
+    // CacheStorage persists the full 8-day range rather than letting the shorter 24h window
+    // overwrite the 7d baseline.
+    const [superset] = await Promise.all([
+      fetchManifestWithSummaries(
+        source.fetchJson,
+        new Date(Math.floor(fromStart / 1000) * 1000).toISOString(),
+        new Date(Math.ceil(toEnd / 1000) * 1000).toISOString(),
+        signal,
+      ),
+      loadAsnNames(),
+    ]);
+    if (!superset.raw.complete || !superset.summaries.complete) return [null, null] as const;
+    return Promise.all([
       queryRollup(source, {
         fromMs: fromWindow, toMs: toEnd, signal, spec: spec ?? undefined, residual: INSIGHTS_RESIDUAL,
       }),
       queryRollup(source, {
         fromMs: fromStart, toMs: fromWindow, signal, spec: spec ?? undefined, residual: INSIGHTS_RESIDUAL,
       }),
-      loadAsnNames(),
     ]);
+  };
 
   const earliestLogMs = body.earliest_log_at ? Date.parse(body.earliest_log_at) : Number.NaN;
   const alignedEnd = Math.floor(end / HOUR_MS) * HOUR_MS;

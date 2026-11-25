@@ -94,7 +94,7 @@ function fakeCacheStorage() {
 const EXPECTED: Record<string, [cold: number, revisit: number, reload: number]> = {
   "/dashboard": [1, 1, 1],
   // Availability reads the log field settings, so it lists no files.
-  "/insights": [3, 3, 3],
+  "/insights": [1, 1, 1],
   "/network": [1, 1, 1],
   "/security": [1, 1, 1],
   "/origin": [1, 1, 1],

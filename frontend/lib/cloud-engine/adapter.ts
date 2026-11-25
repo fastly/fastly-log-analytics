@@ -1190,7 +1190,16 @@ async function prepareCloudScan(
     : /^\/api\/performance(?:\/aggregates)?$/.test(url.pathname) ? performanceScanColumns(params.filters)
     : url.pathname === "/api/sessions" ? sessionsListColumns(params.filters, params.sort_by)
     : /^\/api\/security\/(?:aggregates|bundle|top-bots|proxies(?:\/export)?)$/.test(url.pathname)
-      ? securityScanColumns(params.filters)
+      ? securityScanColumns(
+          params.filters,
+          url.pathname === "/api/security/top-bots"
+            ? ["top_bots"]
+            : url.pathname.startsWith("/api/security/proxies")
+              ? ["proxies"]
+              : Array.isArray(params.sections)
+                ? params.sections.filter((s): s is string => typeof s === "string")
+                : undefined,
+        )
     : url.pathname === "/api/security/threat-intel" ? threatIntelScanColumns(params.filters)
     : url.pathname === "/api/cmcd/aggregates" ? cmcdScanColumns(params.filters)
     : /^\/api\/services\/[^/]+\/scoring\/(.+)$/.test(url.pathname)

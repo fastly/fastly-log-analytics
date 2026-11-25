@@ -290,6 +290,29 @@ describe("readSummaryProjection", () => {
         .map((i) => columns.get("ip_sketch")![i]);
     expect(overviewSketches(pruned.columns, pruned.rows)).toEqual(overviewSketches(whole.columns, whole.rows));
   });
+
+  it("coalesces adjacent data ranges across multiple column-set plans in one file", async () => {
+    anySize();
+    const spec = defineSummarySpec({
+      groups: ["overview", "time_series", "field_totals", "all_fields"],
+      columns: ["count", "requests", "ip_sketch"],
+      only: {
+        ip_sketch: ["overview"],
+        count: ["all_fields", "field_totals"],
+        requests: ["overview", "time_series"],
+      },
+    });
+    const source = fakeSource(layoutBytes);
+    const read = await readSummaryProjection(source, manifestFile(layoutBytes), spec);
+    expect(read.whole).toBe(false);
+    // Multiple distinct column-set plans are assembled, but their adjacent data ranges
+    // are pooled and fetched in fewer HTTP 206 requests than the number of plans.
+    expect(read.parts.length).toBeGreaterThanOrEqual(2);
+    expect(dataRanges(source.net, layoutBytes).length).toBeLessThan(read.parts.length);
+    const want = await groupRows([layoutBytes], spec, ["bundle", "bucket", "field", "value", "truncated", "count", "requests"]);
+    expect(await groupRows(read.parts, spec, ["bundle", "bucket", "field", "value", "truncated", "count", "requests"]))
+      .toEqual(want);
+  });
 });
 
 describe("summaryLayout", () => {

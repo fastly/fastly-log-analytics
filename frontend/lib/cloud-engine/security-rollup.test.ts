@@ -826,4 +826,35 @@ describe("securityFromRollup on projected summaries", () => {
     expect(rangeReads).toBe(0);
     expect(derivedWrites).toBe(0);
   });
+
+  it("rolls up unsummarized residual raw files alongside summaries with full parity", async () => {
+    // Drop the summary for the last raw window so active/fresh traffic sits in a raw residual file.
+    const partialSummaries = RUST_WINDOWS.slice(0, -1);
+    const partialSource = fixtureSource(
+      [fixturePage(RUST_RAW)],
+      RUST.buffers,
+      { json: [], files: [] },
+      [fixturePage(partialSummaries)],
+    );
+    const got = await securityFromRollup(PATH, body({ sections: SECTIONS }), partialSource);
+    const raw = await rawAnswer(RUST.buffers, RUST_RAW, SECTIONS);
+    expectParity(got as SecurityAggregatesResponse | null, raw);
+    expect(partialSource.log.files).toContain(RUST_RAW[RUST_RAW.length - 1].key);
+    expect(partialSource.log.files).toContain(partialSummaries[0].key);
+  });
+
+  it("answers threat-intel from summaries plus unsummarized residual raw files with parity", async () => {
+    const partialSummaries = SV_LISTS[0][1].slice(0, -1);
+    const partialSource = fixtureSource(
+      [fixturePage(SV_RAW)],
+      SV.buffers,
+      { json: [], files: [] },
+      [fixturePage(partialSummaries)],
+    );
+    const got = await securityFromRollup("/api/security/threat-intel", body(), partialSource);
+    expect(got).not.toBeNull();
+    const full = await securityFromRollup("/api/security/threat-intel", body(),
+      fixtureSource([fixturePage(SV_RAW)], SV.buffers, { json: [], files: [] }, [fixturePage(SV_LISTS[0][1])]));
+    expect(got).toMatchObject({ data: (full as { data: unknown }).data });
+  });
 });

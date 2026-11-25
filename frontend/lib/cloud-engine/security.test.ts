@@ -23,6 +23,8 @@ import {
   formatProxiesExportPayload,
   handleSecurityRequest,
   maskIpValue,
+  SECURITY_SCAN_COLUMNS,
+  securityScanColumns,
   setSecurityEngineClient,
   shapeSecurityProxiesFromRawRows,
   shapeSecurityThreatIntelRows,
@@ -566,5 +568,13 @@ describe("security cloud-engine module (F20)", () => {
     const csvText = await exportRes!.text();
     expect(csvText).toContain("ip,comment");
     expect(csvText).toContain("198.51.100.77");
+  });
+
+  it("narrows securityScanColumns to only columns needed by requested sections and filters", () => {
+    expect(securityScanColumns(undefined, ["top_bots"])).toEqual(["timestamp", "ts_ms", "ua"]);
+    expect(securityScanColumns({ country: "US" }, ["proxy_dist"])).toEqual([
+      "timestamp", "ts_ms", "p_type", "country",
+    ]);
+    expect(securityScanColumns(undefined)).toEqual([...SECURITY_SCAN_COLUMNS]);
   });
 });

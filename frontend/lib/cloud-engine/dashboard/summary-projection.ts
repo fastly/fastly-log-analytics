@@ -5,7 +5,7 @@ import { currentStoreMetaEpoch } from "./file-store";
 import type { ManifestFile } from "./manifest";
 import { readColumns, type DecodedColumns } from "./parquet";
 import {
-  assembleProjectedParquet, fetchProjectedRanges, planParquetProjection, readParquetFooter, type ParquetFooter,
+  assembleProjectedParquet, fetchCoalescedProjectedRanges, planParquetProjection, readParquetFooter, type ParquetFooter,
 } from "./parquet-projection";
 import type { DerivedFile } from "./sources";
 
@@ -223,8 +223,8 @@ export async function readSummaryProjection(
     void footerWrite;
     return whole();
   }
-  const parts = await Promise.all(plan.plans.map(async (projection) =>
-    assembleProjectedParquet(projection, await fetchProjectedRanges(projection, read))));
+  const grouped = await fetchCoalescedProjectedRanges(plan.plans, read);
+  const parts = plan.plans.map((projection, index) => assembleProjectedParquet(projection, grouped[index]));
   assertProjectionActive();
   const joined = new Uint8Array(parts.reduce((sum, part) => sum + part.byteLength, 0));
   let offset = 0;

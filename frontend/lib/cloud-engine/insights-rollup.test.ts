@@ -872,4 +872,33 @@ describe("INSIGHTS_SUMMARY_SPEC column scoping and multi-hour window alignment",
       vi.useRealTimers();
     }
   });
+
+  it("lists baseline and current window in a single superset /api/files request", async () => {
+    const ALIGNED_END = Date.UTC(2030, 0, 2, 17, 0, 0);
+    const MID_HOUR_NOW = ALIGNED_END + 32 * 60_000;
+    const { src, calls } = makeHourlyFixture(ALIGNED_END);
+    vi.useFakeTimers({ toFake: ["Date"], now: MID_HOUR_NOW });
+    try {
+      const result = await insightsFromRollup(
+        withSettings({
+          ...body,
+          clamp_end: new Date(MID_HOUR_NOW).toISOString(),
+          window_size_hrs: 6,
+          baseline_hours: 6,
+          earliest_log_at: new Date(ALIGNED_END - 24 * HOUR).toISOString(),
+        }),
+        [],
+        src,
+        signal,
+      );
+      expect(result).not.toBeNull();
+      const fileCalls = calls.json.filter((u) => u.startsWith("/api/files"));
+      expect(fileCalls).toHaveLength(1);
+      const params = new URL(fileCalls[0], "http://localhost").searchParams;
+      expect(params.get("from")).toBe(new Date(ALIGNED_END - 12 * HOUR).toISOString());
+      expect(params.get("to")).toBe(new Date(ALIGNED_END).toISOString());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

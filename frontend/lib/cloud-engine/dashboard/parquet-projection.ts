@@ -185,7 +185,7 @@ export function planParquetProjection(
  * The cheapest coalescing of the chunks (sorted by start) by bytes plus request cost,
  * subject to at most [`MAX_RANGES_PER_FILE`] ranges.
  */
-function coalesceRanges(chunks: readonly Chunk[]): { start: number; end: number }[] {
+function coalesceRanges(chunks: readonly { start: number; length: number }[]): { start: number; end: number }[] {
   if (chunks.length === 0) return [];
   // Merging any gap <= max(RANGE_MERGE_GAP, RANGE_REQUEST_COST_BYTES) strictly lowers or
   // preserves `bytes + ranges * RANGE_REQUEST_COST_BYTES` without pulling in large gaps.
@@ -218,18 +218,53 @@ function coalesceRanges(chunks: readonly Chunk[]): { start: number; end: number 
   return ranges;
 }
 
-/** The planned ranges' bytes, fetching only what the footer read didn't already cover. */
-export async function fetchProjectedRanges(plan: ParquetProjection, fetchRange: FetchRange): Promise<ArrayBuffer[]> {
-  const tail = plan.footer.tail;
-  return Promise.all(plan.ranges.map(async ({ start, end }) => {
-    if (!tail || end <= tail.start) return fetchRange(start, end);
-    if (start >= tail.start) return tail.bytes.slice(start - tail.start, end - tail.start);
-    const head = new Uint8Array(await fetchRange(start, tail.start));
+function fetchRangeWithTail(
+  tail: ParquetFooter["tail"],
+  start: number,
+  end: number,
+  fetchRange: FetchRange,
+): Promise<ArrayBuffer> {
+  if (!tail || end <= tail.start) return fetchRange(start, end);
+  if (start >= tail.start) return Promise.resolve(tail.bytes.slice(start - tail.start, end - tail.start));
+  return fetchRange(start, tail.start).then((headBuf) => {
+    const head = new Uint8Array(headBuf);
     const out = new Uint8Array(end - start);
     out.set(head);
     out.set(new Uint8Array(tail.bytes, 0, end - tail.start), head.byteLength);
     return out.buffer;
-  }));
+  });
+}
+
+/** The planned ranges' bytes, fetching only what the footer read didn't already cover. */
+export async function fetchProjectedRanges(plan: ParquetProjection, fetchRange: FetchRange): Promise<ArrayBuffer[]> {
+  return Promise.all(plan.ranges.map(({ start, end }) => fetchRangeWithTail(plan.footer.tail, start, end, fetchRange)));
+}
+
+/**
+ * Fetches ranges for multiple projections of the same Parquet file in one coalesced pass,
+ * pooling adjacent ranges across plans so each file issues minimal HTTP 206 requests.
+ */
+export async function fetchCoalescedProjectedRanges(
+  plans: readonly ParquetProjection[],
+  fetchRange: FetchRange,
+): Promise<ArrayBuffer[][]> {
+  if (plans.length === 0) return [];
+  if (plans.length === 1) return [await fetchProjectedRanges(plans[0], fetchRange)];
+  const spans = plans
+    .flatMap((plan) => plan.ranges.map((r) => ({ start: r.start, length: r.end - r.start })))
+    .sort((a, b) => a.start - b.start || a.length - b.length);
+  const unified = coalesceRanges(spans);
+  const tail = plans[0].footer.tail;
+  const fetched = await Promise.all(
+    unified.map(({ start, end }) => fetchRangeWithTail(tail, start, end, fetchRange)),
+  );
+  return plans.map((plan) =>
+    plan.ranges.map((r) => {
+      const idx = unified.findIndex((u) => u.start <= r.start && r.end <= u.end);
+      const u = unified[idx];
+      return fetched[idx].slice(r.start - u.start, r.end - u.start);
+    }),
+  );
 }
 
 /** The schema of the file `assembleProjectedParquet` builds from this plan. */

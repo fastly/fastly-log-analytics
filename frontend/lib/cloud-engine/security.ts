@@ -926,11 +926,31 @@ export const SECURITY_SCAN_COLUMNS = [
   "country", "city", "referer", "resp_bytes",
 ] as const;
 
+const SECURITY_SECTION_COLUMNS: Record<SecuritySectionName, readonly string[]> = {
+  tls_fingerprints: ["ip", "client_ip", "tls_ciphers_sha"],
+  fingerprint_coverage: ["tls_ciphers_sha"],
+  req_size_dist: ["req_header_bytes"],
+  conn_reuse_dist: ["conn_requests"],
+  ipv6_adoption: ["is_ipv6"],
+  proxy_dist: ["p_type"],
+  verified_bots_ts: ["waf_sig"],
+  ngwaf_verified_bots: [],
+  ngwaf_verified_bots_ts: [],
+  top_ips_header: ["ip", "client_ip", "req_header_bytes"],
+  wellknown_bots: ["ip", "client_ip", "ua"],
+  bot_efficiency: ["ip", "client_ip", "ua", "referer", "resp_bytes"],
+  top_bots: ["ua"],
+  proxies: ["ip", "client_ip", "asn", "rtt_min", "tcpi_min_rtt", "tcp_rtt", "tcpi_rtt", "lat", "lon", "pop", "country", "city"],
+};
+
 /** The columns a projected /api/security/aggregates load needs, or null when the filters can't name theirs. */
-export function securityScanColumns(filters: unknown): string[] | null {
-  if (filters == null || filters === "") return [...SECURITY_SCAN_COLUMNS];
+export function securityScanColumns(filters: unknown, sections?: readonly string[] | null): string[] | null {
+  const base = sections && sections.length > 0
+    ? ["timestamp", "ts_ms", ...[...expandSecuritySections(sections)].flatMap((s) => SECURITY_SECTION_COLUMNS[s] ?? [])]
+    : [...SECURITY_SCAN_COLUMNS];
+  if (filters == null || filters === "") return [...new Set(base)];
   if (typeof filters !== "object" || Array.isArray(filters)) return null;
-  return [...new Set([...SECURITY_SCAN_COLUMNS, ...Object.keys(filters)
+  return [...new Set([...base, ...Object.keys(filters)
     .filter((key) => key !== "filter_mode").map((key) => key.replace(/_\d+$/, ""))])];
 }
 

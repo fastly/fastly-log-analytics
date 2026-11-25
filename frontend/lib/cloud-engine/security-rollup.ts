@@ -23,6 +23,7 @@ import {
 import { summarizeBotEfficiencyRows, summarizeWellKnownBotRows } from "./bots/summarize";
 import { hasFilterValues, SECURITY_ROLLUP_SECTIONS } from "./rollup-sections";
 import { loadAsnNames } from "./asn-names";
+import { readSecurityResidual, SECURITY_RESIDUAL_MAX_BYTES } from "./security-residual";
 import {
   expandSecuritySections,
   maskIpValue,
@@ -161,7 +162,7 @@ export const SECURITY_THREAT_INTEL_SUMMARY_SPEC = defineSummarySpec({
 });
 
 /** The security rows of one v3 window summary or bundle. */
-type SecuritySummary = {
+export type SecuritySummary = {
   /** `overview` requests: rows with a timestamp. */
   requests: number;
   /** `time_series` minute buckets (ms) holding at least one request. */
@@ -432,32 +433,40 @@ export async function querySecurityRollup(
     controller.signal.throwIfAborted();
     if (callEpoch !== securityRollupEpoch) throw securityRollupAbortError();
     if (!raw.complete || !summaries.complete) return null;
+    const assertActive = () => {
+      signal?.throwIfAborted();
+      controller.signal.throwIfAborted();
+      if (callEpoch !== securityRollupEpoch) throw securityRollupAbortError();
+    };
     const missing = new Set<string>();
     for (;;) {
       const usable = summaries.files.filter((file) => !(hourly && isDayBundle(file.key)) && !missing.has(file.key));
-      const plan = planRollup(raw.files, usable, fromMs, toMs);
-      if (!plan) return null;
+      const plan = planRollup(raw.files, usable, fromMs, toMs, { residualBytes: SECURITY_RESIDUAL_MAX_BYTES });
+      if (!plan || plan.files.length === 0) return null;
       let parts: (SecuritySummary | null)[];
+      let residualParts: { key: string; summary: SecuritySummary }[];
       try {
-        parts = await Promise.all(
-          plan.files.map((use) => decodeCached(source, use.file, spec, controller.signal, callEpoch)),
-        );
+        [parts, residualParts] = await Promise.all([
+          Promise.all(
+            plan.files.map((use) => decodeCached(source, use.file, spec, controller.signal, callEpoch)),
+          ),
+          readSecurityResidual(source, plan.residual ?? [], fromMs, toMs, spec, controller.signal, assertActive),
+        ]);
       } catch (error) {
-        signal?.throwIfAborted();
-        controller.signal.throwIfAborted();
-        if (callEpoch !== securityRollupEpoch) throw securityRollupAbortError();
+        assertActive();
         if (!(error instanceof MissingCloudFileError) || missing.has(error.key)
           || !plan.files.some((use) => use.file.key === error.key)) throw error;
         console.warn(`flp: summary ${error.key} is listed but missing; planning without it`);
         missing.add(error.key);
         continue;
       }
-      signal?.throwIfAborted();
-      controller.signal.throwIfAborted();
-      if (callEpoch !== securityRollupEpoch) throw securityRollupAbortError();
+      assertActive();
       if (parts.some((part) => part === null)) return null;
       return {
-        files: plan.files.map((use, i) => ({ key: use.file.key, summary: parts[i]! })),
+        files: [
+          ...plan.files.map((use, i) => ({ key: use.file.key, summary: parts[i]! })),
+          ...residualParts,
+        ],
         dataFromMs: plan.dataFromMs,
         dataThroughMs: plan.dataThroughMs,
       };
