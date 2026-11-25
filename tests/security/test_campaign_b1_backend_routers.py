@@ -145,20 +145,23 @@ def test_share_claim_enforces_ip_whitelist_and_never_logs_raw_token_prefix(
         con=con,
     )
 
-    # Non-whitelisted IP must be rejected with 403 and must not receive invite PII
-    blocked_token = share_db.create_claim_token(invite["id"], ttl_hours=1, con=con)
+    # Non-whitelisted IP must be rejected with 403, must not receive invite PII,
+    # AND must NOT burn the single-use claim token so a subsequent whitelisted claim succeeds.
+    single_use_token = share_db.create_claim_token(invite["id"], ttl_hours=1, con=con)
     with TestClient(app, client=("198.51.100.77", 50000)) as client:
-        r_blocked = client.post(f"/api/share/claim/{blocked_token}")
+        r_blocked = client.post(f"/api/share/claim/{single_use_token}")
     assert r_blocked.status_code == 403
     assert r_blocked.json()["detail"]["error"] == "ip_not_whitelisted"
     assert "scoped@example.com" not in r_blocked.text
 
-    # Whitelisted IP succeeds
-    allowed_token = share_db.create_claim_token(invite["id"], ttl_hours=1, con=con)
+    # Whitelisted IP succeeds using the SAME token (proving rejected IP did not burn it)
     with TestClient(app, client=("10.10.1.5", 50000)) as client:
-        r_ok = client.post(f"/api/share/claim/{allowed_token}")
+        r_ok = client.post(f"/api/share/claim/{single_use_token}")
+        r_replay = client.post(f"/api/share/claim/{single_use_token}")
     assert r_ok.status_code == 200
     assert r_ok.json()["email"] == "scoped@example.com"
+    assert r_replay.status_code == 404
+    assert r_replay.json()["detail"]["error"] == "invalid_or_used"
 
     # Invalid token attempt also must not leak raw token[:6] into audit logs
     bogus_token = "claim-invalid-" + "0" * 12
@@ -168,10 +171,14 @@ def test_share_claim_enforces_ip_whitelist_and_never_logs_raw_token_prefix(
 
     audit_rows = share_db.get_share_audit_logs(limit=50, con=con)
     all_details = "\n".join(r["details"] for r in audit_rows)
-    for tok in (blocked_token, allowed_token, bogus_token):
+    for tok in (single_use_token, bogus_token):
         assert tok[:6] not in all_details, f"Raw token prefix leaked in audit logs: {tok[:6]}"
         expected_tag = hashlib.sha256(tok.encode("utf-8")).hexdigest()[:8]
         assert expected_tag in all_details
+    assert any(
+        r["event_type"] == "CLAIM_FAIL" and "IP not in whitelist" in r["details"] and "token_hash=" in r["details"]
+        for r in audit_rows
+    )
 
 
 def test_share_login_normalizes_ip_whitelist_rejection_to_401_no_oracle(
@@ -255,6 +262,9 @@ def test_mock_idp_router_enforces_enabled_gate_and_rejects_production(
         "http://127.0.0.1@evil.example.com/callback",
         "/callback\r\nSet-Cookie: evil=1",
         "https://127.0.0.1.evil.com/callback",
+        "http://127.0.0.1:18004/callback#fragment",
+        "http://127.0.0.1:18004/callback#",
+        "/api/share/oauth/callback#fragment",
     ],
 )
 def test_mock_idp_authorize_rejects_open_redirects(monkeypatch: pytest.MonkeyPatch, bad_redirect: str) -> None:
@@ -272,6 +282,26 @@ def test_mock_idp_authorize_rejects_open_redirects(monkeypatch: pytest.MonkeyPat
             follow_redirects=False,
         )
     assert r.status_code == 400, f"{bad_redirect!r} -> {r.status_code} {r.headers.get('location')}"
+    assert r.json()["detail"]["error"] == "invalid_redirect_uri"
+
+
+def test_mock_idp_authorize_ignores_untrusted_host_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OAUTH_MOCK_IDP", "1")
+    monkeypatch.delenv("FLA_PRODUCTION", raising=False)
+    monkeypatch.delenv("OAUTH_REDIRECT_BASE", raising=False)
+    tunnel.reset_for_tests()
+
+    app = FastAPI()
+    app.include_router(tunnel_routes_mod.mock_idp_router)
+
+    with TestClient(app) as client:
+        r = client.get(
+            "/mock-idp/authorize",
+            params={"redirect_uri": "http://evil.example.com/steal", "state": "st-host", "nonce": "n-host"},
+            headers={"Host": "evil.example.com"},
+            follow_redirects=False,
+        )
+    assert r.status_code == 400
     assert r.json()["detail"]["error"] == "invalid_redirect_uri"
 
 
@@ -382,3 +412,146 @@ def test_alerts_router_delegates_webhook_validation_to_webhook_url_module(
     assert seen == ["https://hooks.example.com/test"]
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail == {"error": "invalid_webhook_url", "message": "spy_rejected"}
+
+
+# ── 6. Iteration 2 hardening: OAuth callback Secure, ISATAP, non-canonical IPv4, IDNA, port/CRLF, IPv6 Host ──
+
+
+def test_oauth_callback_sets_secure_cookies_with_x_forwarded_proto_https(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.remote_access import conftest as H
+
+    con = _make_memory_share_db()
+    monkeypatch.setattr(share_db, "get_global_share_con", lambda: con)
+    tunnel.reset_for_tests()
+    H.configure_registry(monkeypatch, tmp_path)
+    oidc.set_test_transport(H.make_transport())
+
+    mgr = tunnel.get_tunnel_manager()
+    mgr.start_sharing(public_endpoint="https://share.example.com")
+    monkeypatch.setattr(mgr, "public_url", lambda: "http://internal-backend:8000")
+    share_db.create_remote_invite(
+        name="OAuth Analyst",
+        email="alice@example.com",
+        passcode=None,
+        expires_at_utc=None,
+        ip_whitelist=None,
+        service_ids=["svc-a"],
+        auth_method="oauth",
+        oauth_provider="google",
+        con=con,
+    )
+
+    app = FastAPI()
+    app.include_router(invites_mod.share_oauth_router)
+
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        r_init = client.get(
+            "/api/share/oauth/authorize",
+            params={"provider": "google"},
+            headers={"X-Forwarded-Proto": "https"},
+            follow_redirects=False,
+        )
+        assert r_init.status_code == 302
+        qs = parse_qs(urlsplit(r_init.headers["location"]).query)
+        state = qs["state"][0]
+        nonce = qs["nonce"][0]
+        flow_cookie_val = r_init.cookies.get("oauth_flow_state")
+        assert flow_cookie_val
+        id_token = H.mint_id_token(email="alice@example.com", sub="sub-alice-01", nonce=nonce)
+        oidc.set_test_transport(H.make_transport(token_body=H.token_response(id_token)))
+
+        r_cb = client.get(
+            "/api/share/oauth/callback",
+            params={"code": "mock-code-01", "state": state},
+            headers={"X-Forwarded-Proto": "https", "Cookie": f"oauth_flow_state={flow_cookie_val}"},
+            follow_redirects=False,
+        )
+    assert r_cb.status_code == 302
+    assert r_cb.headers["location"] == "/dashboard"
+    set_cookies = r_cb.headers.get_list("set-cookie")
+    session_cookie = next(c for c in set_cookies if c.startswith(f"{sessions_mod.COOKIE_NAME}="))
+    flow_cookie = next(c for c in set_cookies if c.startswith("oauth_flow_state="))
+    assert "secure" in session_cookie.lower()
+    assert "httponly" in session_cookie.lower()
+    assert "secure" in flow_cookie.lower()
+
+
+@pytest.mark.parametrize(
+    "isatap_host",
+    [
+        "2606:4700:4700::5efe:127.0.0.1",
+        "2606:4700:4700::200:5efe:169.254.169.254",
+        "2606:4700:4700::100:5efe:10.0.0.1",
+        "2606:4700:4700::300:5efe:100.64.0.1",
+    ],
+)
+def test_webhook_url_blocks_global_prefix_isatap_ipv6(isatap_host: str) -> None:
+    url = f"http://[{isatap_host}]/hook"
+    assert webhook_url.restricted_webhook_host(isatap_host) is True
+    with pytest.raises(ValueError):
+        webhook_url.validate_webhook_url_syntax(url)
+    with pytest.raises(ValueError, match="restricted_webhook_host"):
+        webhook_url.validate_webhook_destination(url)
+
+
+@pytest.mark.parametrize(
+    "bad_host",
+    [
+        "0177.0.0.1",
+        "0251.0376.0251.0376",
+        "2130706433",
+        "0",
+        "0x7f000001",
+        "0x7f.0.0.1",
+        "127.1",
+        "127.0.1",
+        "169.254.43518",
+        "ⓛⓞⓒⓐⓛⓗⓞⓢⓣ",
+        "ｌｏｃａｌｈｏｓｔ",
+        "foo。localhost",
+        "localhost。",
+        "１２７.０.０.１",
+    ],
+)
+def test_webhook_url_blocks_non_canonical_ipv4_and_unicode_confusables(bad_host: str) -> None:
+    url = f"http://{bad_host}/hook"
+    assert webhook_url.restricted_webhook_host(bad_host) is True, bad_host
+    with pytest.raises(ValueError):
+        webhook_url.validate_webhook_url_syntax(url)
+    with pytest.raises(ValueError):
+        webhook_url.validate_webhook_destination(url)
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "https://hooks.example.com:99999/hook",
+        "https://hooks.example.com:0/hook",
+        "https://hooks.example.com\\@127.0.0.1/hook",
+        "https://hooks.example.com/hook\r\nX-Injected: 1",
+        "https://hooks.example.com/hook\x00",
+    ],
+)
+def test_webhook_url_rejects_bad_ports_backslashes_and_control_chars(bad_url: str) -> None:
+    with pytest.raises(ValueError):
+        webhook_url.validate_webhook_url_syntax(bad_url)
+    with pytest.raises(ValueError):
+        webhook_url.validate_webhook_destination(bad_url)
+
+
+def test_webhook_destination_brackets_ipv6_host_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    import socket
+
+    def _fake_getaddrinfo(host: str, port: int, type: int = 0):  # noqa: A002
+        return [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2606:4700:4700::1111", port, 0, 0))]
+
+    monkeypatch.setattr(webhook_url.socket, "getaddrinfo", _fake_getaddrinfo)
+    dest_with_port = webhook_url.validate_webhook_destination("https://[2606:4700:4700::1111]:8443/hook")
+    assert dest_with_port.host == "[2606:4700:4700::1111]:8443"
+    assert dest_with_port.url == "https://[2606:4700:4700::1111]:8443/hook"
+
+    dest_no_port = webhook_url.validate_webhook_destination("https://[2606:4700:4700::1111]/hook")
+    assert dest_no_port.host == "[2606:4700:4700::1111]"
+    assert dest_no_port.url == "https://[2606:4700:4700::1111]/hook"

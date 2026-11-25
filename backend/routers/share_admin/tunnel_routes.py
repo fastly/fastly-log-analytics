@@ -288,13 +288,12 @@ def jwks():
     return {"keys": [_signing_key().as_dict(private=False)]}
 
 
-def _allowed_mock_idp_origins(request: Request) -> set[tuple[str, str]]:
+def _allowed_mock_idp_origins() -> set[tuple[str, str]]:
     origins: set[tuple[str, str]] = set()
     candidates = [
         os.getenv("OAUTH_REDIRECT_BASE", "").strip(),
         _issuer(),
         get_tunnel_manager().state.public_endpoint or "",
-        str(request.base_url),
     ]
     for raw in candidates:
         if not raw:
@@ -308,11 +307,12 @@ def _allowed_mock_idp_origins(request: Request) -> set[tuple[str, str]]:
     return origins
 
 
-def _validate_mock_idp_redirect_uri(redirect_uri: str, request: Request) -> str:
+def _validate_mock_idp_redirect_uri(redirect_uri: str) -> str:
     if (
         not redirect_uri
         or not isinstance(redirect_uri, str)
         or "\\" in redirect_uri
+        or "#" in redirect_uri
         or any(ord(c) < 0x20 or ord(c) == 0x7F for c in redirect_uri)
         or any(c.isspace() for c in redirect_uri)
     ):
@@ -334,7 +334,7 @@ def _validate_mock_idp_redirect_uri(redirect_uri: str, request: Request) -> str:
         raise HTTPException(status_code=400, detail={"error": "invalid_redirect_uri"})
     host = parsed.hostname.lower().rstrip(".")
     origin = (parsed.scheme.lower(), parsed.netloc.lower())
-    if host not in _MOCK_IDP_LOOPBACK_HOSTS and origin not in _allowed_mock_idp_origins(request):
+    if host not in _MOCK_IDP_LOOPBACK_HOSTS and origin not in _allowed_mock_idp_origins():
         raise HTTPException(status_code=400, detail={"error": "invalid_redirect_uri"})
     return redirect_uri
 
@@ -343,7 +343,7 @@ def _validate_mock_idp_redirect_uri(redirect_uri: str, request: Request) -> str:
 def authorize(request: Request, redirect_uri: str, state: str, nonce: str):
     """Auto-approve: bounce straight back to redirect_uri with an authorization
     code that carries the (test-controlled) identity + the request nonce."""
-    safe_redirect = _validate_mock_idp_redirect_uri(redirect_uri, request)
+    safe_redirect = _validate_mock_idp_redirect_uri(redirect_uri)
     email = request.cookies.get("mock_idp_email") or os.getenv("OAUTH_MOCK_IDP_EMAIL", "e2e-analyst@example.com")
     email_verified = (request.cookies.get("mock_idp_email_verified") or "true").lower() != "false"
     code = _b64url({"email": email, "nonce": nonce, "sub": f"mock-sub-{email}", "ev": email_verified})

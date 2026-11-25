@@ -591,12 +591,19 @@ def oauth_callback(
     # On the TOS path, /api/share/acknowledge re-issues the full cookie from a
     # same-site context, so the session cookie only relies on Lax for the
     # single IdP-return hop.
+    cookie_secure = _flow_state_cookie_is_secure(request, mgr.public_url())
     set_analyst_session_cookies(
         resp,
         session.session_id,
         tos_pending=tos_pending,
-        secure=analyst_cookie_is_secure(request, mgr.public_url()),
+        secure=cookie_secure,
         samesite="lax",
     )
-    resp.delete_cookie(flow_state.COOKIE_NAME, path=flow_state.COOKIE_PATH)
+    resp.delete_cookie(
+        flow_state.COOKIE_NAME,
+        path=flow_state.COOKIE_PATH,
+        secure=cookie_secure,
+        httponly=True,
+        samesite="lax",
+    )
     return resp

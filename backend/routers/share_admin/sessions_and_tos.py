@@ -340,7 +340,17 @@ def share_claim(token: str, request: Request):
         _audit(None, "CLAIM_FAIL", None, "sharing disabled", ip=ip)
         raise HTTPException(status_code=403, detail={"error": "sharing_disabled"})
     tok_tag = _token_hash(token)
-    row = share_db.claim_token(token, ip)
+    try:
+        row = share_db.claim_token(token, ip, check_ip_whitelist=True)
+    except share_db.ClaimTokenIpNotWhitelistedError as exc:
+        _audit(
+            None,
+            "CLAIM_FAIL",
+            exc.invite.get("email"),
+            f"token_hash={tok_tag} IP not in whitelist",
+            ip=ip,
+        )
+        raise HTTPException(status_code=403, detail={"error": "ip_not_whitelisted"}) from exc
     if row is None:
         _audit(None, "CLAIM_FAIL", None, f"token_hash={tok_tag} invalid/expired/claimed", ip=ip)
         raise HTTPException(status_code=404, detail={"error": "invalid_or_used"})

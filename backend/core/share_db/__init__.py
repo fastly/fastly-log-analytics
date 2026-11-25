@@ -1436,10 +1436,40 @@ def create_claim_token(invite_id: str, *, ttl_hours: int = 24, con: Any = None) 
     return token
 
 
-def claim_token(token: str, ip: str, *, con: Any = None) -> dict | None:
+class ClaimTokenIpNotWhitelistedError(PermissionError):
+    """Raised when a claim token's invite has an IP whitelist that rejects the caller IP."""
+
+    def __init__(self, invite: dict[str, Any]) -> None:
+        super().__init__("IP not in invite whitelist")
+        self.invite = invite
+
+
+def claim_token(
+    token: str,
+    ip: str,
+    *,
+    check_ip_whitelist: bool = False,
+    con: Any = None,
+) -> dict | None:
     con = con or get_global_share_con()
     now = iso_z_now()
     with con:
+        if check_ip_whitelist:
+            pending = con.execute(
+                """SELECT t.invite_id, i.email, i.ip_whitelist, i.revoked
+                     FROM remote_invite_claim_tokens t
+                     LEFT JOIN remote_invites i ON i.id = t.invite_id
+                    WHERE t.token = ? AND t.claimed_at IS NULL AND t.expires_at >= ?""",
+                (token, now),
+            ).fetchone()
+            if pending is None:
+                return None
+            if (
+                pending["email"] is not None
+                and not pending["revoked"]
+                and not ip_in_whitelist(ip, pending["ip_whitelist"])
+            ):
+                raise ClaimTokenIpNotWhitelistedError(dict(pending))
         cur = con.execute(
             """UPDATE remote_invite_claim_tokens
                SET claimed_at = ?, claimed_from_ip = ?
