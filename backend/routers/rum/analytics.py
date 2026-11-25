@@ -19,6 +19,7 @@ from backend.models.analytics import (
     RumAnalyticsResponse,
     RumBeaconHealthResponse,
     RumLiveEventItem,
+    RumRequestLogResponse,
 )
 from backend.repositories.utils.response_cache import bucket_time_to_minute, digest_cache_key
 from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
@@ -265,3 +266,36 @@ async def rum_live_events(
     if hs_events:
         _live_events_cache[hs_live_key] = hs_events
     return _scrub_rum_live_events(hs_events) if mask_ips_for(ctx.analyst_session) else hs_events
+
+
+@rum_analytics_router.get("/{service_id}/rum/request-log", response_model=RumRequestLogResponse)
+async def rum_request_log(
+    req_id: str = Query(..., min_length=1, max_length=128),
+    timestamp: str | None = Query(default=None),
+    ctx: RequestContext = Depends(build_request_context),
+) -> dict[str, Any]:
+    """Fetch the edge request log row matching a RUM event or resource timing `req_id`."""
+    from backend.utils.auth import mask_ips_for
+
+    clean_rid = req_id.strip()
+    if not clean_rid or len(clean_rid) > 128 or any(ch.isspace() or ord(ch) < 32 for ch in clean_rid):
+        raise HTTPException(
+            status_code=400, detail=make_error("invalid_req_id", "req_id must be a non-empty request ID token")
+        )
+    high_scale_service = ctx.high_scale
+    if high_scale_service is None:
+        return {"found": False, "req_id": clean_rid, "request": None}
+
+    from backend.high_scale.rum import rum_request_log as hs_rum_request_log
+
+    try:
+        res = await asyncio.to_thread(hs_rum_request_log, high_scale_service, clean_rid, timestamp)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=make_error("invalid_req_id", "Invalid request ID")) from exc
+
+    if res.get("found") and isinstance(res.get("request"), dict) and mask_ips_for(ctx.analyst_session):
+        masked = _scrub_rum_live_events([res["request"]])[0]
+        if "client_ip" in masked:
+            masked["client_ip"] = "[redacted]"
+        res = {**res, "request": masked}
+    return res

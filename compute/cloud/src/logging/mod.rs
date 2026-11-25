@@ -1220,7 +1220,7 @@ pub fn desired_snippets(state: &Value) -> Result<Value, String> {
                     "vcl_deliver" => {
                         parts.push(format!(
                             "# Section 5: RUM (vcl_deliver)\n{}",
-                            rum::request_timing_vcl()
+                            rum::request_timing_vcl_with_origins(&rum.timing_allow_origins)?
                         ));
                     }
                     _ => {}

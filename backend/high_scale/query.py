@@ -473,9 +473,9 @@ def _expand_faro_rum_events(log_data: dict[str, Any], domain: str) -> list[dict[
     rows: list[dict[str, Any]] = []
     for metric in selected_items:
         is_exc = _is_faro_exception_metric(metric)
-        browser_val = metric.get("browser") or log_data.get("browser") or "Chrome"
-        os_val = metric.get("os") or log_data.get("os") or "macOS"
-        device_val = metric.get("device") or log_data.get("device") or "Desktop"
+        browser_val = metric.get("browser") or log_data.get("browser") or "Unknown"
+        os_val = metric.get("os") or log_data.get("os") or "Unknown"
+        device_val = metric.get("device") or log_data.get("device") or "Unknown"
         cid_val = metric.get("cid") or log_data.get("rum_cid") or log_data.get("cid") or ""
         pathname_val = metric.get("pathname") or log_data.get("rum_pathname") or "/"
         base_fields: dict[str, Any] = {

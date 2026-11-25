@@ -832,3 +832,88 @@ fn attach_mode_scoring_present_missing_fields_edge_fields_and_scoring_status() {
     );
     assert_eq!(sc_status_after["scoring_fields_enabled"], false);
 }
+
+#[test]
+fn rum_enable_claims_rid_and_populates_timing_allow_origin_then_disable_releases_rid() {
+    let platform = Platform::new();
+    platform.drain(platform.provision()["job"].clone());
+    platform.adapter.seed_resource(
+        "fixtureService",
+        "domain",
+        json!({"name": "WWW.Example.com"}),
+    );
+    platform.adapter.seed_resource(
+        "fixtureService",
+        "domain",
+        json!({"name": "*.wild.example.com"}),
+    );
+
+    let initial = platform.service();
+    assert!(!initial["service"]["active_log_field_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|id| id == "rid"));
+
+    // Enabling RUM on a managed service claims `rid` and populates timing_allow_origins from service domains.
+    let enable = platform.json(
+        "POST",
+        "/api/admin/services/fixtureService/reconcile",
+        json!({
+            "generation": initial["generation"],
+            "dry_run": false,
+            "rum": {"enabled": true, "capture_vitals": true},
+        }),
+    );
+    let enabled_job = platform.drain(enable["job"].clone());
+    assert_eq!(enabled_job["status"], "complete", "{enabled_job}");
+
+    let after_enable = platform.service();
+    assert_eq!(
+        after_enable["service"]["feature_enabled_fields"]["rum"],
+        json!(["rid"])
+    );
+    assert!(after_enable["service"]["active_log_field_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|id| id == "rid"));
+    assert_eq!(
+        after_enable["service"]["rum"]["timing_allow_origins"],
+        json!(["https://www.example.com"])
+    );
+
+    let deliver = platform
+        .adapter
+        .resources("fixtureService", "snippet")
+        .into_iter()
+        .find(|s| s["name"] == "Fastly Log Analytics - vcl_deliver")
+        .expect("vcl_deliver snippet present");
+    let deliver_vcl = deliver["content"].as_str().unwrap();
+    assert!(deliver_vcl.contains("Timing-Allow-Origin = \"https://www.example.com\";"));
+    assert!(deliver_vcl.contains("Server-Timing = \"rid;desc=\" + req.http.x-req-id;"));
+
+    // Disabling RUM releases `rid` when RUM claimed it and no other feature still needs it.
+    let disable = platform.json(
+        "POST",
+        "/api/admin/services/fixtureService/reconcile",
+        json!({
+            "generation": after_enable["generation"],
+            "dry_run": false,
+            "rum": {"enabled": false},
+        }),
+    );
+    let disabled_job = platform.drain(disable["job"].clone());
+    assert_eq!(disabled_job["status"], "complete", "{disabled_job}");
+
+    let after_disable = platform.service();
+    assert!(after_disable["service"]
+        .get("feature_enabled_fields")
+        .and_then(|v| v.get("rum"))
+        .is_none());
+    assert!(!after_disable["service"]["active_log_field_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|id| id == "rid"));
+}

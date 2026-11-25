@@ -246,14 +246,219 @@ def test_page_level_queries_exclude_resource_timings_and_avg_load_is_real_page_l
     rum_beacons_by_date(service_for(client), *window)
     rum_live_events(service_for(client), *window, 10)
     vitals_queries = [sql for sql, _ in client.calls if "FROM rum_vitals_facts" in sql]
-    assert len(vitals_queries) == 7
-    assert all("metric_name != 'ttlb'" in sql for sql in vitals_queries)
+    assert len(vitals_queries) == 9
+    page_queries = [sql for sql in vitals_queries if "metric_name != 'ttlb'" in sql]
+    resource_queries = [
+        sql for sql in vitals_queries if "rum_analytics_slowest_" in sql and "metric_name = 'ttlb'" in sql
+    ]
+    live_queries = [sql for sql in vitals_queries if "rum_live_events" in sql]
+    assert len(page_queries) == 6
+    assert len(resource_queries) == 2
+    assert len(live_queries) == 1
+    assert "metric_name != 'ttlb'" not in live_queries[0]
 
     pages_sql = next(sql for sql, _ in client.calls if "rum_analytics_pages" in sql)
     assert "avgOrNullIf(metric_value, metric_name = 'page_load') AS avg_load" in pages_sql
     assert "'ttfb'" not in pages_sql and "'duration'" not in pages_sql
     # A page with no load timing reports none; it is not shown as a zero-second load.
     assert [(p["path"], p["avg_load_time"]) for p in result["worst_pages"]] == [("/timed", 1.5), ("/untimed", None)]
+
+
+def test_slowest_urls_and_networks_weight_sample_rate_and_join_edge_latency() -> None:
+    class ResourceClient(ChartClient):
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            if "rum_analytics_counts" in sql:
+                self.calls.append((sql, params or {}))
+                return [{"beacons": 10, "pageviews": 10, "interactions": 0, "errors": 0, "sampled": 1}]
+            if "rum_analytics_slowest_urls" in sql:
+                self.calls.append((sql, params or {}))
+                return [
+                    {
+                        "url": "/api/slow",
+                        "requests": 20,
+                        "avg_ms": 810.0,
+                        "p50_ms": 750.0,
+                        "p95_ms": 1400.0,
+                        "p99_ms": 1800.0,
+                        "matched_requests": 10,
+                        "edge_avg_ms": 400.0,
+                        "edge_p50_ms": 380.0,
+                        "edge_p95_ms": 700.0,
+                        "edge_p99_ms": 950.0,
+                    }
+                ]
+            if "rum_analytics_slowest_networks" in sql:
+                self.calls.append((sql, params or {}))
+                return [
+                    {
+                        "asn_key": "15169",
+                        "requests": 20,
+                        "avg_ms": 810.0,
+                        "p50_ms": 750.0,
+                        "p95_ms": 1400.0,
+                        "p99_ms": 1800.0,
+                        "matched_requests": 10,
+                        "edge_avg_ms": 400.0,
+                        "edge_p50_ms": 380.0,
+                        "edge_p95_ms": 700.0,
+                        "edge_p99_ms": 950.0,
+                    }
+                ]
+            return super().execute(sql, params)
+
+    client = ResourceClient()
+    with patch("backend.repositories.utils.response_shaping.asn.resolve_asn_names_map", return_value={15169: "GOOGLE"}):
+        res = rum_analytics(service_for(client), "2026-09-01T00:00:00Z", "2026-09-01T02:00:00Z")
+
+    assert res["estimated"] is True
+    assert res["beacon_count"] == 10 and res["pageview_count"] == 10
+    assert res["slowest_urls"] == [
+        {
+            "url": "/api/slow",
+            "requests": 20,
+            "avg": 810.0,
+            "p50": 750.0,
+            "p95": 1400.0,
+            "p99": 1800.0,
+            "matched_requests": 10,
+            "edge_avg": 400.0,
+            "edge_p50": 380.0,
+            "edge_p95": 700.0,
+            "edge_p99": 950.0,
+        }
+    ]
+    assert res["slowest_networks"] == [
+        {
+            "asn": "AS15169",
+            "label": "GOOGLE (15169)",
+            "requests": 20,
+            "avg": 810.0,
+            "p50": 750.0,
+            "p95": 1400.0,
+            "p99": 1800.0,
+            "matched_requests": 10,
+            "edge_avg": 400.0,
+            "edge_p50": 380.0,
+            "edge_p95": 700.0,
+            "edge_p99": 950.0,
+        }
+    ]
+
+
+def test_compact_beacon_extracts_browser_os_device_and_unknown_default() -> None:
+    from backend.core.rum_ingest import _parse_rum_line
+
+    with_env = _parse_rum_line(
+        {
+            "service_id": _SVC,
+            "method": "GET",
+            "timestamp": "2026-09-01T00:00:00Z",
+            "url": "/rum-beacon?v=1&p=%2Fhome&m=LCP:1200:good&b=Edge&o=Windows&d=Desktop",
+        },
+        _SVC,
+    )
+    without_env = _parse_rum_line(
+        {
+            "service_id": _SVC,
+            "method": "GET",
+            "timestamp": "2026-09-01T00:00:01Z",
+            "url": "/rum-beacon?v=1&p=%2Fhome&m=LCP:1200:good",
+        },
+        _SVC,
+    )
+    assert with_env is not None and without_env is not None
+    v1, _ = with_env
+    v0, _ = without_env
+    assert (v1[0]["browser"], v1[0]["os"], v1[0]["device"]) == ("Edge", "Windows", "Desktop")
+    assert (v0[0]["browser"], v0[0]["os"], v0[0]["device"]) == ("Unknown", "Unknown", "Unknown")
+
+
+def test_rum_live_events_returns_resource_events_with_req_id() -> None:
+    class LiveResourceClient:
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            if "rum_live_events" in sql:
+                return [
+                    {
+                        "timestamp": datetime(2026, 9, 1, 0, 5, 0, tzinfo=UTC),
+                        "type": "resource",
+                        "pathname": "/product/1",
+                        "metric_name": "ttlb",
+                        "metric_value": 642.4,
+                        "metric_rating": "poor",
+                        "req_id": "rid-abc-123",
+                        "resource_url": "/api/price",
+                        "browser": "Chrome",
+                        "os": "macOS",
+                        "device": "Desktop",
+                        "cid": "cid1",
+                        "error_message": "",
+                        "city": "Austin",
+                        "region": "TX",
+                        "country": "US",
+                        "pop": "DFW",
+                        "tls": "1.3",
+                        "ttfb": 22.0,
+                    }
+                ]
+            return []
+
+    events = rum_live_events(service_for(LiveResourceClient()), "2026-09-01T00:00:00Z", "2026-09-01T01:00:00Z", 10)
+    assert len(events) == 1
+    assert events[0]["type"] == "resource"
+    assert events[0]["req_id"] == "rid-abc-123"
+    assert events[0]["resource_url"] == "/api/price"
+    assert events[0]["metric_name"] == "ttlb"
+    assert events[0]["desc"] == "Resource TTLB: 642ms"
+
+
+@pytest.mark.security_regression
+def test_sec_rum_request_log_masks_ips_for_analyst_and_preserves_for_admin() -> None:
+    class ReqClient:
+        def execute(self, sql: str, params: dict | None = None) -> list[dict]:
+            assert params is not None and params["req_id"] == "rid-sec-1"
+            return [
+                {
+                    "timestamp": "2026-09-01T00:05:00Z",
+                    "req_id": "rid-sec-1",
+                    "method": "GET",
+                    "url": "https://shop.example.com/users/203.0.113.45/profile",
+                    "status": 200,
+                    "pop": "DFW",
+                    "client_ip": "203.0.113.45",
+                    "asn": "15169",
+                    "total_elapsed_ms": 145.2,
+                }
+            ]
+
+    hs = service_for(ReqClient())
+
+    def _app(session: Any) -> FastAPI:
+        sub = FastAPI()
+        sub.include_router(rum_router.router)
+        sub.dependency_overrides[build_request_context] = override_request_context(
+            source={"name": _SVC, "service_id": _SVC, "_high_scale_service": hs},
+            session=session,
+        )
+        return sub
+
+    admin_client = TestClient(_app(None))
+    bad = admin_client.get(f"/api/services/{_SVC}/rum/request-log", params={"req_id": "bad rid\n"})
+    assert bad.status_code == 400
+
+    with patch("backend.core.request_context.RequestContext.high_scale", new_callable=PropertyMock, return_value=hs):
+        r_admin = admin_client.get(f"/api/services/{_SVC}/rum/request-log", params={"req_id": "rid-sec-1"})
+        assert r_admin.status_code == 200, r_admin.text
+        assert r_admin.json()["found"] is True
+        assert r_admin.json()["request"]["client_ip"] == "203.0.113.45"
+        assert "203.0.113.45" in r_admin.text
+
+        analyst_sess = SimpleNamespace(session_id="s1", pii_policy={"mask_ips": True})
+        analyst_client = TestClient(_app(analyst_sess))
+        r_analyst = analyst_client.get(f"/api/services/{_SVC}/rum/request-log", params={"req_id": "rid-sec-1"})
+        assert r_analyst.status_code == 200, r_analyst.text
+        assert r_analyst.json()["request"]["client_ip"] == "[redacted]"
+        assert "203.0.113.45" not in r_analyst.text
+        assert "203.0.113.xxx" in r_analyst.json()["request"]["url"]
 
 
 def test_parse_rum_filters_accepts_objects_and_rejects_everything_else() -> None:
@@ -1443,9 +1648,9 @@ def test_parse_rum_line_extracts_faro_body(double_encoded):
                 "metric_name": "pageview",
                 "metric_value": 1.0,
                 "pathname": "/blog/post-1",
-                "device": "Desktop",
-                "browser": "Chrome",
-                "os": "macOS",
+                "device": "Unknown",
+                "browser": "Unknown",
+                "os": "Unknown",
             },
         ),
         (

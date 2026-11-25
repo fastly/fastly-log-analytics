@@ -6369,6 +6369,211 @@
         }
       }
     },
+    "/api/services/{service_id}/rum/request-log": {
+      "get": {
+        "tags": [
+          "rum"
+        ],
+        "summary": "Rum Request Log",
+        "description": "Fetch the edge request log row matching a RUM event or resource timing `req_id`.",
+        "operationId": "rum_request_log_api_services__service_id__rum_request_log_get",
+        "parameters": [
+          {
+            "name": "req_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "title": "Req Id"
+            }
+          },
+          {
+            "name": "timestamp",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Timestamp"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RumRequestLogResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/js/rum.js": {
       "get": {
         "tags": [
@@ -77752,6 +77957,34 @@
             ],
             "title": "Worst Pages"
           },
+          "slowest_urls": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/RumSlowestUrlItem"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slowest Urls"
+          },
+          "slowest_networks": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/RumSlowestNetworkItem"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slowest Networks"
+          },
           "errors": {
             "anyOf": [
               {
@@ -78222,6 +78455,53 @@
             "type": "string",
             "title": "Os"
           },
+          "req_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Req Id"
+          },
+          "resource_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resource Url"
+          },
+          "metric_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metric Name"
+          },
+          "metric_value": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metric Value"
+          },
           "raw_log": {
             "additionalProperties": true,
             "type": "object",
@@ -78240,6 +78520,37 @@
           "os"
         ],
         "title": "RumLiveEventItem"
+      },
+      "RumRequestLogResponse": {
+        "properties": {
+          "found": {
+            "type": "boolean",
+            "title": "Found"
+          },
+          "req_id": {
+            "type": "string",
+            "title": "Req Id"
+          },
+          "request": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "found",
+          "req_id"
+        ],
+        "title": "RumRequestLogResponse"
       },
       "RumSettingsPartial": {
         "properties": {
@@ -78390,6 +78701,267 @@
           "ok"
         ],
         "title": "RumSettingsUpdateResponse"
+      },
+      "RumSlowestNetworkItem": {
+        "properties": {
+          "asn": {
+            "type": "string",
+            "title": "Asn"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "requests": {
+            "type": "integer",
+            "title": "Requests"
+          },
+          "avg": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "Avg"
+          },
+          "p50": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "P50"
+          },
+          "p95": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "P95"
+          },
+          "p99": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "P99"
+          },
+          "matched_requests": {
+            "type": "integer",
+            "title": "Matched Requests",
+            "default": 0
+          },
+          "edge_avg": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edge Avg"
+          },
+          "edge_p50": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edge P50"
+          },
+          "edge_p95": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edge P95"
+          },
+          "edge_p99": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edge P99"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "asn",
+          "label",
+          "requests",
+          "avg",
+          "p50",
+          "p95",
+          "p99"
+        ],
+        "title": "RumSlowestNetworkItem"
+      },
+      "RumSlowestUrlItem": {
+        "properties": {
+          "url": {
+            "type": "string",
+            "title": "Url"
+          },
+          "requests": {
+            "type": "integer",
+            "title": "Requests"
+          },
+          "avg": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "Avg"
+          },
+          "p50": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "P50"
+          },
+          "p95": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "P95"
+          },
+          "p99": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "P99"
+          },
+          "matched_requests": {
+            "type": "integer",
+            "title": "Matched Requests",
+            "default": 0
+          },
+          "edge_avg": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edge Avg"
+          },
+          "edge_p50": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edge P50"
+          },
+          "edge_p95": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edge P95"
+          },
+          "edge_p99": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edge P99"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "url",
+          "requests",
+          "avg",
+          "p50",
+          "p95",
+          "p99"
+        ],
+        "title": "RumSlowestUrlItem"
       },
       "RumStatusResponse": {
         "properties": {

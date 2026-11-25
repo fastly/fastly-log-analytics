@@ -171,10 +171,13 @@ const RUM_CASE_INSENSITIVE_FIELDS = new Set(["device_type", "browser_name", "os_
 export function buildRumWhere(
   params: RumQueryParams,
   table: "client_vitals" | "client_errors" = "client_vitals",
+  options?: { includeTtlb?: boolean },
 ): string {
   const clauses: string[] = [rangeServiceSql(params)];
   // A resource timing (`ttlb`) measures one request, not a page view: page-level readers skip it.
-  if (table === "client_vitals") clauses.push("metric_name IS DISTINCT FROM 'ttlb'");
+  if (table === "client_vitals" && !options?.includeTtlb) {
+    clauses.push("metric_name IS DISTINCT FROM 'ttlb'");
+  }
   if (params.device_type) {
     clauses.push(`LOWER(CAST(device_type AS VARCHAR)) = ${duckSqlString(String(params.device_type).toLowerCase())}`);
   }
@@ -222,6 +225,8 @@ export function buildRumWhere(
   return clauses.join(" AND ");
 }
 
+const RUM_ROW_WEIGHT = "CASE WHEN coalesce(sample_rate, 1.0) > 0 AND coalesce(sample_rate, 1.0) < 1.0 THEN 1.0 / sample_rate ELSE 1.0 END";
+
 export async function queryRumAnalytics(params: RumQueryParams = {}) {
   if (params.rollupSource && rumRollupEligible(params)) {
     const rolled = await queryRumFromRollup(params.rollupSource, params);
@@ -234,10 +239,12 @@ export async function queryRumAnalytics(params: RumQueryParams = {}) {
   const countRows = await engine.executeSql<{
     vitals_cnt: number;
     sessions_cnt: number;
+    sampled: boolean;
   }>(
     `SELECT
-      COUNT(*)::BIGINT AS vitals_cnt,
-      COUNT(DISTINCT NULLIF(session_id, ''))::BIGINT AS sessions_cnt
+      coalesce(round(sum(${RUM_ROW_WEIGHT})), 0)::BIGINT AS vitals_cnt,
+      COUNT(DISTINCT NULLIF(session_id, ''))::BIGINT AS sessions_cnt,
+      coalesce(bool_or(coalesce(sample_rate, 1.0) > 0 AND coalesce(sample_rate, 1.0) < 1.0), FALSE) AS sampled
     FROM client_vitals
     WHERE ${where}`,
     [],
@@ -247,11 +254,13 @@ export async function queryRumAnalytics(params: RumQueryParams = {}) {
     errors_cnt: number;
     affected_sessions: number;
     unique_msgs: number;
+    sampled: boolean;
   }>(
     `SELECT
-      COUNT(*)::BIGINT AS errors_cnt,
+      coalesce(round(sum(${RUM_ROW_WEIGHT})), 0)::BIGINT AS errors_cnt,
       COUNT(DISTINCT NULLIF(session_id, ''))::BIGINT AS affected_sessions,
-      COUNT(DISTINCT COALESCE(NULLIF(error_message, ''), NULLIF(message, '')))::BIGINT AS unique_msgs
+      COUNT(DISTINCT COALESCE(NULLIF(error_message, ''), NULLIF(message, '')))::BIGINT AS unique_msgs,
+      coalesce(bool_or(coalesce(sample_rate, 1.0) > 0 AND coalesce(sample_rate, 1.0) < 1.0), FALSE) AS sampled
     FROM client_errors
     WHERE ${errorWhere}`,
     [],
@@ -288,11 +297,11 @@ export async function queryRumAnalytics(params: RumQueryParams = {}) {
   }>(
     `SELECT
       UPPER(COALESCE(metric_name, '')) AS metric,
-      COUNT(*)::BIGINT AS cnt,
+      coalesce(round(sum(${RUM_ROW_WEIGHT})), 0)::BIGINT AS cnt,
       QUANTILE_CONT(metric_value, 0.5)::DOUBLE AS p50,
       QUANTILE_CONT(metric_value, 0.75)::DOUBLE AS p75,
       QUANTILE_CONT(metric_value, 0.95)::DOUBLE AS p95,
-      (COUNT(*) FILTER (WHERE
+      coalesce(round(sum(${RUM_ROW_WEIGHT}) FILTER (WHERE
         CASE UPPER(COALESCE(metric_name, ''))
           WHEN 'LCP' THEN metric_value <= 2500
           WHEN 'CLS' THEN metric_value <= 0.1
@@ -301,8 +310,8 @@ export async function queryRumAnalytics(params: RumQueryParams = {}) {
           WHEN 'TTFB' THEN metric_value <= 800
           ELSE metric_value <= 2500
         END
-      ))::BIGINT AS good_cnt,
-      (COUNT(*) FILTER (WHERE
+      )), 0)::BIGINT AS good_cnt,
+      coalesce(round(sum(${RUM_ROW_WEIGHT}) FILTER (WHERE
         CASE UPPER(COALESCE(metric_name, ''))
           WHEN 'LCP' THEN metric_value > 4000
           WHEN 'CLS' THEN metric_value > 0.25
@@ -311,7 +320,7 @@ export async function queryRumAnalytics(params: RumQueryParams = {}) {
           WHEN 'TTFB' THEN metric_value > 1800
           ELSE metric_value > 4000
         END
-      ))::BIGINT AS poor_cnt
+      )), 0)::BIGINT AS poor_cnt
     FROM client_vitals
     WHERE ${where}
     GROUP BY 1`,
@@ -351,7 +360,7 @@ export async function queryRumAnalytics(params: RumQueryParams = {}) {
   const worstPageRows = await engine.executeSql<Record<string, unknown>>(
     `SELECT
       COALESCE(page_url, url, path, '/') AS page_url,
-      COUNT(*)::BIGINT AS sample_count,
+      coalesce(round(sum(${RUM_ROW_WEIGHT})), 0)::BIGINT AS sample_count,
       QUANTILE_CONT(metric_value, 0.75) FILTER (WHERE UPPER(metric_name) = 'LCP')::DOUBLE AS lcp_p75,
       QUANTILE_CONT(metric_value, 0.75) FILTER (WHERE UPPER(metric_name) = 'CLS')::DOUBLE AS cls_p75,
       QUANTILE_CONT(metric_value, 0.75) FILTER (WHERE UPPER(metric_name) = 'INP')::DOUBLE AS inp_p75
@@ -375,22 +384,22 @@ export async function queryRumAnalytics(params: RumQueryParams = {}) {
 
   const [browserRows, osRows, deviceRows, connRows] = await Promise.all([
     engine.executeSql<{ name: string; count: number }>(
-      `SELECT COALESCE(browser_name, 'Unknown') AS name, COUNT(*)::BIGINT AS count FROM client_vitals WHERE ${where} GROUP BY 1 ORDER BY count DESC LIMIT 20`,
+      `SELECT COALESCE(browser_name, 'Unknown') AS name, coalesce(round(sum(${RUM_ROW_WEIGHT})), 0)::BIGINT AS count FROM client_vitals WHERE ${where} GROUP BY 1 ORDER BY count DESC LIMIT 20`,
       [],
       params.signal,
     ),
     engine.executeSql<{ name: string; count: number }>(
-      `SELECT COALESCE(os_name, 'Unknown') AS name, COUNT(*)::BIGINT AS count FROM client_vitals WHERE ${where} GROUP BY 1 ORDER BY count DESC LIMIT 20`,
+      `SELECT COALESCE(os_name, 'Unknown') AS name, coalesce(round(sum(${RUM_ROW_WEIGHT})), 0)::BIGINT AS count FROM client_vitals WHERE ${where} GROUP BY 1 ORDER BY count DESC LIMIT 20`,
       [],
       params.signal,
     ),
     engine.executeSql<{ name: string; count: number }>(
-      `SELECT COALESCE(device_type, 'Unknown') AS name, COUNT(*)::BIGINT AS count FROM client_vitals WHERE ${where} GROUP BY 1 ORDER BY count DESC LIMIT 20`,
+      `SELECT COALESCE(device_type, 'Unknown') AS name, coalesce(round(sum(${RUM_ROW_WEIGHT})), 0)::BIGINT AS count FROM client_vitals WHERE ${where} GROUP BY 1 ORDER BY count DESC LIMIT 20`,
       [],
       params.signal,
     ),
     engine.executeSql<{ name: string; count: number }>(
-      `SELECT COALESCE(connection_type, 'Unknown') AS name, COUNT(*)::BIGINT AS count FROM client_vitals WHERE ${where} GROUP BY 1 ORDER BY count DESC LIMIT 20`,
+      `SELECT COALESCE(connection_type, 'Unknown') AS name, coalesce(round(sum(${RUM_ROW_WEIGHT})), 0)::BIGINT AS count FROM client_vitals WHERE ${where} GROUP BY 1 ORDER BY count DESC LIMIT 20`,
       [],
       params.signal,
     ),
@@ -407,7 +416,7 @@ export async function queryRumAnalytics(params: RumQueryParams = {}) {
     `SELECT
       COALESCE(NULLIF(error_message, ''), NULLIF(message, ''), 'Unknown Error') AS message,
       COALESCE(filename, source, '') AS source,
-      COUNT(*)::BIGINT AS count,
+      coalesce(round(sum(${RUM_ROW_WEIGHT})), 0)::BIGINT AS count,
       MIN(lineno)::BIGINT AS lineno,
       MIN(colno)::BIGINT AS colno,
       COUNT(DISTINCT NULLIF(session_id, ''))::BIGINT AS affected_sessions,
@@ -428,6 +437,7 @@ export async function queryRumAnalytics(params: RumQueryParams = {}) {
 
   return {
     no_data: false,
+    estimated: Boolean(countRows[0]?.sampled || errorCountRows[0]?.sampled),
     summary: {
       total_pageviews: Math.max(uniqueSessions, metrics.LCP.count),
       unique_sessions: Number(countRows[0]?.sessions_cnt ?? 0),
@@ -473,11 +483,11 @@ export async function queryRumLiveEvents(params: RumQueryParams = {}) {
 
   const vitals = await engine.executeSql<Record<string, unknown>>(
     `SELECT
-      'vital' AS event_type,
+      CASE WHEN metric_name = 'ttlb' THEN 'resource' ELSE 'vital' END AS event_type,
       ts_ms,
       metric_name,
       metric_value,
-      COALESCE(page_url, url, path, '/') AS page_url,
+      COALESCE(CASE WHEN metric_name = 'ttlb' THEN NULLIF(resource_url, '') END, page_url, url, path, '/') AS page_url,
       browser_name,
       os_name,
       device_type,
@@ -487,9 +497,11 @@ export async function queryRumLiveEvents(params: RumQueryParams = {}) {
       pop,
       tls,
       ttfb,
-      session_id
+      session_id,
+      COALESCE(NULLIF(req_id, ''), NULLIF(request_event_id, '')) AS req_id,
+      resource_url
     FROM client_vitals
-    WHERE ts_ms > ${sinceMs} AND ${buildRumWhere(params)}
+    WHERE ts_ms > ${sinceMs} AND ${buildRumWhere(params, "client_vitals", { includeTtlb: true })}
     ORDER BY ts_ms DESC
     LIMIT ${limit}`,
     [],
@@ -511,7 +523,9 @@ export async function queryRumLiveEvents(params: RumQueryParams = {}) {
       pop,
       tls,
       ttfb,
-      session_id
+      session_id,
+      COALESCE(NULLIF(req_id, ''), NULLIF(request_event_id, '')) AS req_id,
+      '' AS resource_url
     FROM client_errors
     WHERE ts_ms > ${sinceMs} AND ${buildRumWhere(params, "client_errors")}
     ORDER BY ts_ms DESC
@@ -623,6 +637,9 @@ export async function handleRumRequest(
   }
   if (path.includes("rum/live-events")) {
     return queryRumLiveEvents(params);
+  }
+  if (path.includes("rum/request-log")) {
+    return { found: false, req_id: "", request: null };
   }
   if (path.includes("rum/beacon-health")) {
     return queryRumBeaconHealth(params);

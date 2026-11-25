@@ -228,6 +228,31 @@ def rum_analytics(
     return _compute()
 
 
+def _shape_rum_resource_latency_fields(row: Mapping[str, Any]) -> dict[str, Any]:
+    def _opt_ms(key: str) -> float | None:
+        val = row.get(key)
+        if val is None:
+            return None
+        try:
+            num = float(val)
+        except (TypeError, ValueError):
+            return None
+        return round(num, 2) if num == num else None
+
+    return {
+        "requests": int(row.get("requests") or 0),
+        "avg": _opt_ms("avg_ms") or 0.0,
+        "p50": _opt_ms("p50_ms") or 0.0,
+        "p95": _opt_ms("p95_ms") or 0.0,
+        "p99": _opt_ms("p99_ms") or 0.0,
+        "matched_requests": int(row.get("matched_requests") or 0),
+        "edge_avg": _opt_ms("edge_avg_ms"),
+        "edge_p50": _opt_ms("edge_p50_ms"),
+        "edge_p95": _opt_ms("edge_p95_ms"),
+        "edge_p99": _opt_ms("edge_p99_ms"),
+    }
+
+
 def _rum_analytics_compute(
     service: HighScaleService,
     start: datetime,
@@ -248,6 +273,27 @@ def _rum_analytics_compute(
         )
 
     where_vitals, where_errors = f"{scope('rum_vitals')} AND {_PAGE_VITALS}", scope("rum_errors")
+    where_ttlb = f"{scope('rum_vitals')} AND metric_name = 'ttlb'"
+    req_edge_scope = " AND ".join(visible_fact_clauses("request"))
+    req_edge_cte = (
+        f"req_edge AS (SELECT _cf_rid AS rid, any(toFloat64OrNull(nullIf(_cf_elapsed, ''))) / 1000.0 AS edge_ms, "
+        f"any(_cf_asn) AS req_asn FROM request_facts WHERE {req_edge_scope} "
+        "AND event_timestamp >= ({start:DateTime64(3, 'UTC')} - INTERVAL 10 MINUTE) "
+        "AND event_timestamp < ({end:DateTime64(3, 'UTC')} + INTERVAL 10 MINUTE) "
+        "AND _cf_rid != '' GROUP BY _cf_rid)"
+    )
+    ttlb_agg_select = (
+        "toUInt64(round(sum(v.w))) AS requests, "
+        "avg(v.metric_value) AS avg_ms, "
+        "quantileExactInclusive(0.5)(v.metric_value) AS p50_ms, "
+        "quantileExactInclusive(0.95)(v.metric_value) AS p95_ms, "
+        "quantileExactInclusive(0.99)(v.metric_value) AS p99_ms, "
+        "toUInt64(round(sumIf(v.w, r.edge_ms IS NOT NULL))) AS matched_requests, "
+        "avgOrNullIf(r.edge_ms, r.edge_ms IS NOT NULL) AS edge_avg_ms, "
+        "quantileExactInclusiveOrNullIf(0.5)(r.edge_ms, r.edge_ms IS NOT NULL) AS edge_p50_ms, "
+        "quantileExactInclusiveOrNullIf(0.95)(r.edge_ms, r.edge_ms IS NOT NULL) AS edge_p95_ms, "
+        "quantileExactInclusiveOrNullIf(0.99)(r.edge_ms, r.edge_ms IS NOT NULL) AS edge_p99_ms"
+    )
     identity = _BEACON_IDENTITY
     events = (
         f"WITH events AS ("
@@ -334,11 +380,39 @@ def _rum_analytics_compute(
         f"FROM rum_error_facts WHERE {where_errors} GROUP BY error_message, error_file, error_line, error_col "
         f"ORDER BY count DESC, error_message, error_file, error_line, error_col LIMIT 3"
     )
+    slowest_urls_sql = (
+        f"/* rum_analytics_slowest_urls */ WITH ttlb_rows AS ("
+        f"SELECT req_id, resource_url, metric_value, {_ROW_WEIGHT} AS w "
+        f"FROM rum_vitals_facts WHERE {where_ttlb} AND resource_url != ''), {req_edge_cte} "
+        f"SELECT v.resource_url AS url, {ttlb_agg_select} "
+        f"FROM ttlb_rows AS v LEFT JOIN req_edge AS r ON v.req_id != '' AND r.rid = v.req_id "
+        f"GROUP BY v.resource_url ORDER BY p99_ms DESC, p95_ms DESC, requests DESC LIMIT 20"
+    )
+    slowest_networks_sql = (
+        f"/* rum_analytics_slowest_networks */ WITH ttlb_rows AS ("
+        f"SELECT req_id, asn, metric_value, {_ROW_WEIGHT} AS w "
+        f"FROM rum_vitals_facts WHERE {where_ttlb}), {req_edge_cte} "
+        f"SELECT replaceRegexpOne(coalesce(nullIf(v.asn, ''), r.req_asn), '^AS', '') AS asn_key, {ttlb_agg_select} "
+        f"FROM ttlb_rows AS v LEFT JOIN req_edge AS r ON v.req_id != '' AND r.rid = v.req_id "
+        f"WHERE asn_key != '' AND asn_key != '0' "
+        f"GROUP BY asn_key ORDER BY p99_ms DESC, p95_ms DESC, requests DESC LIMIT 20"
+    )
 
-    queries = (counts_sql, vitals_sql, environments_sql, trends_sql, pages_sql, exceptions_sql)
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    queries = (
+        counts_sql,
+        vitals_sql,
+        environments_sql,
+        trends_sql,
+        pages_sql,
+        exceptions_sql,
+        slowest_urls_sql,
+        slowest_networks_sql,
+    )
+    with ThreadPoolExecutor(max_workers=8) as pool:
         futs = [pool.submit(contextvars.copy_context().run, service.client.execute, q, params) for q in queries]
-        count_rows, rows, environment_rows, trend_rows, page_rows, error_rows = (f.result() for f in futs)
+        count_rows, rows, environment_rows, trend_rows, page_rows, error_rows, slowest_url_rows, slowest_net_rows = (
+            f.result() for f in futs
+        )
     counts = count_rows[0]
     no_data = False
     if not counts["beacons"]:
@@ -439,6 +513,31 @@ def _rum_analytics_compute(
         }
         for row in page_rows
     ]
+    slowest_urls = [
+        {"url": _decode_pct(row["url"]), **_shape_rum_resource_latency_fields(row)}
+        for row in slowest_url_rows
+        if row.get("url")
+    ]
+    from backend.repositories.utils.response_shaping.asn import (
+        format_asn_display_label,
+        parse_asn_int,
+        resolve_asn_names_map,
+    )
+
+    raw_asns = [row.get("asn_key") for row in slowest_net_rows if row.get("asn_key")]
+    try:
+        asn_names = resolve_asn_names_map(service.service_id, raw_asns) if raw_asns else {}
+    except Exception:
+        asn_names = {}
+    slowest_networks = []
+    for row in slowest_net_rows:
+        raw_key = str(row.get("asn_key") or "").strip()
+        if not raw_key:
+            continue
+        asn_int = parse_asn_int(raw_key)
+        asn_str = f"AS{asn_int}" if asn_int is not None else raw_key
+        label = format_asn_display_label(asn_int, asn_names) if asn_int is not None else asn_str
+        slowest_networks.append({"asn": asn_str, "label": label, **_shape_rum_resource_latency_fields(row)})
     result = {
         "is_mock": False,
         "no_data": no_data,
@@ -450,6 +549,8 @@ def _rum_analytics_compute(
         "error_count": int(counts["errors"]),
         "vitals": vitals,
         "worst_pages": worst_pages,
+        "slowest_urls": slowest_urls,
+        "slowest_networks": slowest_networks,
         "errors": [
             {
                 "message": _decode_pct(row["error_message"]),
@@ -560,14 +661,20 @@ def _rum_live_events_compute(
 
     query = (
         f"/* rum_live_events */ SELECT * FROM ("
-        f"SELECT * FROM (SELECT event_timestamp AS timestamp, 'pageview' AS type, pathname, metric_name, "
-        f"metric_value, metric_rating, browser, os, device, client_id AS cid, toString(request_event_id) AS req_id, "
+        f"SELECT * FROM (SELECT event_timestamp AS timestamp, "
+        f"if(metric_name = 'ttlb', 'resource', 'pageview') AS type, "
+        f"if(metric_name = 'ttlb' AND resource_url != '', resource_url, pathname) AS pathname, "
+        f"metric_name, metric_value, metric_rating, browser, os, device, client_id AS cid, "
+        f"coalesce(nullIf(req_id, ''), coalesce(toString(request_event_id), '')) AS req_id, "
+        f"resource_url, "
         f"'' AS error_message, city, region, country, pop, tls, ttfb FROM rum_vitals_facts "
-        f"WHERE {scope('rum_vitals')} AND {_PAGE_VITALS} "
+        f"WHERE {scope('rum_vitals')} "
         f"ORDER BY event_timestamp DESC LIMIT {{limit:UInt32}}) UNION ALL "
         f"SELECT * FROM (SELECT event_timestamp AS timestamp, 'error' AS type, pathname, '' AS metric_name, "
         f"CAST(NULL AS Nullable(Float64)) AS metric_value, '' AS metric_rating, browser, os, device, "
-        f"client_id AS cid, toString(request_event_id) AS req_id, error_message, city, region, country, pop, tls, ttfb "
+        f"client_id AS cid, coalesce(nullIf(req_id, ''), coalesce(toString(request_event_id), '')) AS req_id, "
+        f"'' AS resource_url, "
+        f"error_message, city, region, country, pop, tls, ttfb "
         f"FROM rum_error_facts WHERE {scope('rum_errors')} ORDER BY event_timestamp DESC LIMIT {{limit:UInt32}})"
         f")\n    ORDER BY timestamp DESC LIMIT {{limit:UInt32}}"
     )
@@ -606,6 +713,8 @@ def _rum_live_events_compute(
             ttfb_ms = _ttfb_ms(mval)
         if ttfb_ms is None and d.get("cid") and str(d.get("cid")) in cid_ttfb:
             ttfb_ms = cid_ttfb[str(d.get("cid"))]
+        res_url = _decode_pct(d.get("resource_url") or "")
+        req_id = str(d.get("req_id") or "")
         meta = {
             "browser": {"name": browser},
             "os": {"name": os_name},
@@ -614,7 +723,8 @@ def _rum_live_events_compute(
         }
         context = {
             "cid": d.get("cid"),
-            "req_id": d.get("req_id"),
+            "req_id": req_id,
+            "resource_url": res_url,
             "city": city_c or "Unknown",
             "region": region_c or "Unknown",
             "country": country_c or "Unknown",
@@ -628,6 +738,15 @@ def _rum_live_events_compute(
                 "meta": meta,
                 "measurements": [],
                 "exceptions": [{"type": "Error", "value": desc}],
+                **context,
+            }
+        elif etype == "resource":
+            ms_label = f"{round(float(mval))}ms" if mval is not None else "—"
+            desc = f"Resource TTLB: {ms_label}"
+            raw_log = {
+                "meta": meta,
+                "measurements": [{"type": "resource-timing", "values": {"ttlb": mval}, "url": res_url or path}],
+                "exceptions": [],
                 **context,
             }
         else:
@@ -649,10 +768,61 @@ def _rum_live_events_compute(
                 "desc": desc,
                 "browser": browser,
                 "os": os_name,
+                "req_id": req_id or None,
+                "resource_url": res_url or None,
+                "metric_name": mname or None,
+                "metric_value": float(mval) if mval is not None else None,
                 "raw_log": raw_log,
             }
         )
     return events
+
+
+def rum_request_log(
+    service: HighScaleService,
+    req_id: str,
+    timestamp: str | None = None,
+) -> dict[str, Any]:
+    """Look up the matching edge request log row by ``_cf_rid`` for a RUM event."""
+    clean_rid = req_id.strip()
+    if not clean_rid or len(clean_rid) > 128 or any(ch.isspace() or ord(ch) < 32 for ch in clean_rid):
+        raise ValueError("Invalid request ID")
+
+    params: dict[str, Any] = {"service_id": service.service_id, "req_id": clean_rid}
+    clauses = [*visible_fact_clauses("request"), "_cf_rid = {req_id:String}"]
+    if timestamp:
+        start_dt, end_dt = parse_time_window(timestamp, timestamp, utc=True, now=datetime.now(UTC))
+        params["start"] = start_dt - timedelta(hours=2)
+        params["end"] = end_dt + timedelta(hours=2)
+    else:
+        now = datetime.now(UTC)
+        params["start"] = now - timedelta(days=7)
+        params["end"] = now + timedelta(hours=1)
+    clauses.append("event_timestamp >= {start:DateTime64(3, 'UTC')}")
+    clauses.append("event_timestamp < {end:DateTime64(3, 'UTC')}")
+
+    sql = (
+        "/* rum_request_log */ SELECT "
+        "event_timestamp AS timestamp, _cf_rid AS rid, _cf_method AS method, url, _cf_host AS host, "
+        "toInt64OrNull(nullIf(_cf_status, '')) AS status, _cf_cache AS cache, _cf_pop AS pop, "
+        "country, _cf_city AS city, _cf_region AS region, _cf_asn AS asn, "
+        "toFloat64OrNull(nullIf(_cf_elapsed, '')) / 1000.0 AS elapsed_ms, "
+        "toFloat64OrNull(nullIf(_cf_ttfb, '')) * 1000.0 AS ttfb_ms, "
+        "toInt64OrNull(nullIf(_cf_resp_bytes, '')) AS resp_bytes, "
+        "client_ip, _cf_ua AS ua, _cf_proto AS proto, _cf_tls AS tls "
+        f"FROM request_facts WHERE {' AND '.join(clauses)} "
+        "ORDER BY event_timestamp DESC LIMIT 1"
+    )
+    rows = service.client.execute(sql, params)
+    if not rows:
+        return {"found": False, "req_id": clean_rid, "request": None}
+    row = dict(rows[0])
+    row["timestamp"] = _iso(row.get("timestamp"))
+    if row.get("elapsed_ms") is not None:
+        row["elapsed_ms"] = round(float(row["elapsed_ms"]), 2)
+    if row.get("ttfb_ms") is not None:
+        row["ttfb_ms"] = round(float(row["ttfb_ms"]), 2)
+    return {"found": True, "req_id": clean_rid, "request": row}
 
 
 rum_events = rum_live_events

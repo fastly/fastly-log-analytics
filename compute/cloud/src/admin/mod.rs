@@ -815,14 +815,61 @@ fn validate_fields(
         .map_err(|_| Error::new(400, "invalid_log_format"))?;
     Ok(())
 }
+fn reconcile_feature_fields(service: &mut Service, previous: Option<&Service>) {
+    if service.capture == Capture::Attached {
+        return;
+    }
+    let was_rum_enabled = previous.is_some_and(|p| p.rum.enabled);
+    if service.rum.enabled && !was_rum_enabled {
+        let enabled = crate::catalog::resolve_enabled_fields(&service.log_fields);
+        if !enabled.contains("rid") {
+            let obj = service
+                .log_fields
+                .as_object_mut()
+                .expect("log_fields object");
+            let overrides = obj.entry("field_overrides").or_insert_with(|| json!({}));
+            if let Some(map) = overrides.as_object_mut() {
+                map.insert("rid".to_owned(), Value::Bool(true));
+                let owned = service
+                    .feature_enabled_fields
+                    .entry("rum".to_owned())
+                    .or_default();
+                if !owned.iter().any(|f| f == "rid") {
+                    owned.push("rid".to_owned());
+                }
+            }
+        }
+    } else if !service.rum.enabled {
+        if let Some(owned) = service.feature_enabled_fields.remove("rum") {
+            if let Some(map) = service
+                .log_fields
+                .as_object_mut()
+                .and_then(|o| o.get_mut("field_overrides"))
+                .and_then(Value::as_object_mut)
+            {
+                for field in owned {
+                    if map.get(&field) == Some(&Value::Bool(true)) {
+                        map.remove(&field);
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn reconcile_system_fields(service: &mut Service, previous: Option<&Service>) -> Result<(), Error> {
+    if !service.log_fields.is_object() {
+        service.log_fields = json!({});
+    }
     crate::logging::cmcd::reconcile_fields(
         &mut service.log_fields,
         &service.cmcd,
         previous.map(|s| &s.log_fields),
         false,
     )
-    .map_err(|_| Error::new(400, "system_field_locked"))
+    .map_err(|_| Error::new(400, "system_field_locked"))?;
+    reconcile_feature_fields(service, previous);
+    Ok(())
 }
 fn validate_service(
     service: &Service,
@@ -1634,6 +1681,7 @@ fn provision(
         deployed_snapshot: None,
         previous_deployed_snapshot: None,
         previous_activated_version: None,
+        feature_enabled_fields: std::collections::BTreeMap::new(),
     };
     reconcile_system_fields(&mut service, previous.as_ref())?;
     validate_service(

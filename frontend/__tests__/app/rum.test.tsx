@@ -524,6 +524,102 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
       expect(screen.queryByText('TLS Unknown')).not.toBeInTheDocument()
       expect(screen.queryByText('Unknown on Unknown')).not.toBeInTheDocument()
     })
+
+    it('renders Slowest URLs & Networks cards and Matching Edge Request Log inside Beacon Details', async () => {
+      const user = userEvent.setup()
+      useServiceStore.setState({
+        activeServiceId: SVC,
+        services: [{ id: SVC, name: 'Test Service' }],
+        isInitialized: true,
+      })
+      mockRumEndpoints({
+        analyticsOverrides: {
+          estimated: true,
+          slowest_urls: [
+            {
+              url: '/api/slow-checkout',
+              requests: 40,
+              avg: 820,
+              p50: 700,
+              p95: 1450,
+              p99: 1900,
+              matched_requests: 20,
+              edge_avg: 310,
+              edge_p50: 280,
+              edge_p95: 600,
+              edge_p99: 800,
+            },
+          ],
+          slowest_networks: [
+            {
+              asn: 'AS15169',
+              label: 'AS15169 (GOOGLE)',
+              requests: 40,
+              avg: 820,
+              p50: 700,
+              p95: 1450,
+              p99: 1900,
+              matched_requests: 20,
+              edge_avg: 310,
+              edge_p50: 280,
+              edge_p95: 600,
+              edge_p99: 800,
+            },
+          ],
+        },
+      })
+      server.use(
+        http.get('/api/services/:service_id/rum/live-events', () =>
+          HttpResponse.json([
+            {
+              time: '2026-10-29T12:02:00Z',
+              type: 'resource',
+              path: '/checkout',
+              desc: 'Resource TTLB (/api/slow-checkout): 1450ms',
+              browser: 'Chrome',
+              os: 'macOS',
+              req_id: 'rid-ui-1',
+              resource_url: '/api/slow-checkout',
+              raw_log: {
+                city: 'Austin',
+                region: 'TX',
+                country: 'US',
+                pop: 'DFW',
+                tls: '1.3',
+                ttfb: 25,
+              },
+            },
+          ]),
+        ),
+        http.get('/api/services/:service_id/rum/request-log', ({ request }) => {
+          const rid = new URL(request.url).searchParams.get('req_id')
+          return HttpResponse.json({
+            found: true,
+            req_id: rid,
+            request: {
+              timestamp: '2026-10-29T12:01:59Z',
+              method: 'GET',
+              url: '/api/slow-checkout',
+              status: 200,
+              pop: 'DFW',
+              elapsed_ms: 310,
+              asn: '15169',
+            },
+          })
+        }),
+      )
+
+      renderClient()
+
+      expect(await screen.findByText('Slowest URLs (Client TTLB vs Edge)')).toBeInTheDocument()
+      expect(screen.getByText('Slowest Networks (Client TTLB vs Edge)')).toBeInTheDocument()
+      expect(screen.getByText('/api/slow-checkout')).toBeInTheDocument()
+      expect(screen.getByText('AS15169 (GOOGLE)')).toBeInTheDocument()
+
+      await user.click(screen.getByText('Resource TTLB (/api/slow-checkout): 1450ms'))
+      expect(await screen.findByText('Matching Edge Request Log')).toBeInTheDocument()
+      expect(await screen.findByText(/310ms/)).toBeInTheDocument()
+    })
   })
 
   describe('RumClient — range wire', () => {

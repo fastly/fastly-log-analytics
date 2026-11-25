@@ -1067,6 +1067,24 @@ class TestReconcileSnippetReaping:
             result = reconcile_vcl_state("srv_test", "token", dry_run=True)
             assert result.changes_applied.get("snippets_removed", 0) == 1
 
+    def test_reconcile_refuses_to_strip_live_session_scorer_without_explicit_scoring_config(self):
+        live_scorer = [Backend("session_scorer", "scorer.example.com", 443)]
+        with (
+            _reconcile_env(backends=live_scorer) as m,
+            _mock_cfg_file(rum_enabled=True, fos_prefix="raw"),
+        ):
+            with pytest.raises(RuntimeError, match="Refusing to reconcile"):
+                reconcile_vcl_state("srv_test", "token", dry_run=False)
+            assert not m["clone"].called and not m["apply"].called
+
+        with (
+            _reconcile_env(backends=live_scorer) as m2,
+            _mock_cfg_file(rum_enabled=True, fos_prefix="raw", scoring={"enabled": False}),
+        ):
+            reconcile_vcl_state("srv_test", "token", dry_run=False)
+            diff = m2["apply"].call_args.args[3]
+            assert diff.backends_to_remove == ["session_scorer"]
+
 
 class TestValidationFailureHandling:
     def test_reconcile_validates_before_activating(self):

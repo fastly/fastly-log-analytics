@@ -157,6 +157,21 @@ def reconcile_vcl_state(
                 e for e in _fetch_logging_endpoints(service_id, token) if _is_managed_endpoint(e.name, desired_state)
             ]
             current_backends = [b for b in _fetch_backends(service_id, token) if b.name in MANAGED_BACKEND_NAMES]
+            # Never silently strip an active session_scorer backend when the stored service
+            # config has no scoring state at all (e.g., another install owns scoring or config drifted).
+            if any(b.name == "session_scorer" for b in current_backends) and not desired_state.scoring.enabled:
+                from backend import config as svcconfig
+
+                raw_cfg = svcconfig.load_config(service_id) or {}
+                has_explicit_scoring = (
+                    isinstance(raw_cfg.get("scoring"), dict) or raw_cfg.get("scoring_enabled") is False
+                )
+                if not has_explicit_scoring:
+                    raise RuntimeError(
+                        f"Refusing to reconcile {service_id}: live Fastly service has active 'session_scorer' "
+                        "backend/VCL, but stored service config has no 'scoring' configuration. "
+                        "Sync or explicitly configure 'scoring' before reconciling so session scoring is not stripped."
+                    )
             current_dictionaries = [
                 d for d in _fetch_dictionaries(service_id, token) if d.name in MANAGED_DICTIONARY_NAMES
             ]

@@ -913,6 +913,8 @@ function arrowTableToRows<T = Record<string, unknown>>(
 
 export const RUM_VITALS_COLUMNS: Readonly<Record<string, DuckDBColumnType>> = {
   request_event_id: "VARCHAR",
+  req_id: "VARCHAR",
+  resource_url: "VARCHAR",
   client_id: "VARCHAR",
   metric_name: "VARCHAR",
   metric_value: "DOUBLE",
@@ -944,6 +946,8 @@ export const RUM_VITALS_COLUMNS: Readonly<Record<string, DuckDBColumnType>> = {
 
 export const RUM_ERRORS_COLUMNS: Readonly<Record<string, DuckDBColumnType>> = {
   request_event_id: "VARCHAR",
+  req_id: "VARCHAR",
+  resource_url: "VARCHAR",
   client_id: "VARCHAR",
   message: "VARCHAR",
   error_message: "VARCHAR",
@@ -966,6 +970,7 @@ export const RUM_ERRORS_COLUMNS: Readonly<Record<string, DuckDBColumnType>> = {
   pop: "VARCHAR",
   tls: "VARCHAR",
   ttfb: "DOUBLE",
+  asn: "BIGINT",
   session_id: "VARCHAR",
   service_id: "VARCHAR",
   sample_rate: "DOUBLE",

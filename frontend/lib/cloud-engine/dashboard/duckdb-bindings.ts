@@ -476,10 +476,19 @@ export class ParquetBindingStore {
           request_event_id: "req_id", client_id: "cid", session_id: "cid",
           rating: "metric_rating", page_url: "pathname", path: "pathname",
           browser_name: "browser", os_name: "os", device_type: "device",
-          filename: "error_file", lineno: "error_line", colno: "error_col",
+          message: "error_message", filename: "error_file", lineno: "error_line", colno: "error_col",
         };
         const source = shape?.types.has(name) ? name : aliases[name];
-        const cast = source && shape?.types.has(source) ? `CAST(${quoteDuckIdent(source)} AS ${type})` : `NULL::${type}`;
+        let cast: string;
+        if (!source || !shape?.types.has(source)) {
+          cast = `NULL::${type}`;
+        } else if (shape.table !== "requests" && name === "asn" && type === "BIGINT") {
+          cast = `TRY_CAST(NULLIF(regexp_replace(CAST(${quoteDuckIdent(source)} AS VARCHAR), '^AS', '', 'i'), '') AS BIGINT)`;
+        } else if (shape.table !== "requests") {
+          cast = `TRY_CAST(${quoteDuckIdent(source)} AS ${type})`;
+        } else {
+          cast = `CAST(${quoteDuckIdent(source)} AS ${type})`;
+        }
         return `${type === "DOUBLE" ? `CASE WHEN isnan(${cast}) THEN NULL ELSE ${cast} END` : cast} AS ${column}`;
       }),
     ];

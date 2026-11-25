@@ -1,17 +1,24 @@
 'use client'
 
-import React, { useState } from 'react'
+import React, { useMemo, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import type { ColumnDef } from '@/lib/table'
-import { Activity, Monitor, ShieldAlert, Terminal } from 'lucide-react'
+import { Activity, Globe, Monitor, Server, ShieldAlert, Terminal } from 'lucide-react'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { DataTable, DataTableReadonly, PopLabel } from '@/components/DataTable'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { adminJsonResult } from '@/lib/api'
+import { formatCount } from '@/lib/format'
 import { formatDate } from '@/lib/utils'
 import type { StripIndex, components } from '@/types/api'
 
 export type RumWorstPage = components['schemas']['RumWorstPage']
 export type RumJsError = components['schemas']['RumJsError']
+export type RumSlowestUrlItem = components['schemas']['RumSlowestUrlItem']
+export type RumSlowestNetworkItem = components['schemas']['RumSlowestNetworkItem']
+export type RumRequestLogResponse = components['schemas']['RumRequestLogResponse']
 
 export interface RumRawLog {
   city?: string
@@ -20,6 +27,8 @@ export interface RumRawLog {
   pop?: string
   tls?: string
   ttfb?: number | string | null
+  req_id?: string | null
+  resource_url?: string | null
   faro_payload?: unknown
   meta?: unknown
   measurements?: unknown
@@ -30,6 +39,10 @@ export interface RumRawLog {
 export type RumLiveEvent = Omit<StripIndex<components['schemas']['RumLiveEventItem']>, 'browser' | 'os' | 'raw_log'> & {
   browser: components['schemas']['RumLiveEventItem']['browser'] | { name?: string }
   os: components['schemas']['RumLiveEventItem']['os'] | { name?: string }
+  req_id?: string | null
+  resource_url?: string | null
+  metric_name?: string | null
+  metric_value?: number | null
   raw_log?: RumRawLog
 }
 
@@ -90,6 +103,142 @@ const liveCol = (
   cell: ({ row }) => cell(row.original),
 })
 
+export type RumSortMetric = 'p99' | 'p95' | 'p50' | 'avg'
+
+const fmtMs = (val: number | null | undefined) => (val != null && Number.isFinite(val) ? `${val.toFixed(1)}ms` : '—')
+
+const makeResourceColumns = <T extends RumSlowestUrlItem | RumSlowestNetworkItem>(
+  labelHeader: string,
+  getLabel: (row: T) => string,
+): ColumnDef<T>[] => [
+  {
+    id: 'name',
+    header: labelHeader,
+    accessorFn: getLabel,
+    cell: ({ row }) => (
+      <span className="font-mono text-xs block max-w-[240px] truncate" title={getLabel(row.original)}>
+        {getLabel(row.original)}
+      </span>
+    ),
+  },
+  {
+    id: 'requests',
+    header: 'Reqs',
+    accessorKey: 'requests',
+    cell: ({ row }) => <span className="font-mono text-xs tabular-nums">{formatCount(row.original.requests)}</span>,
+  },
+  {
+    id: 'avg',
+    header: 'Client Avg',
+    accessorKey: 'avg',
+    cell: ({ row }) => <span className="font-mono text-xs tabular-nums">{fmtMs(row.original.avg)}</span>,
+  },
+  {
+    id: 'p50',
+    header: 'P50',
+    accessorKey: 'p50',
+    cell: ({ row }) => <span className="font-mono text-xs tabular-nums">{fmtMs(row.original.p50)}</span>,
+  },
+  {
+    id: 'p95',
+    header: 'P95',
+    accessorKey: 'p95',
+    cell: ({ row }) => <span className="font-mono text-xs tabular-nums">{fmtMs(row.original.p95)}</span>,
+  },
+  {
+    id: 'p99',
+    header: 'P99',
+    accessorKey: 'p99',
+    cell: ({ row }) => <span className="font-mono text-xs tabular-nums font-semibold">{fmtMs(row.original.p99)}</span>,
+  },
+  {
+    id: 'edge_avg',
+    header: 'Edge Avg',
+    accessorKey: 'edge_avg',
+    cell: ({ row }) => <span className="font-mono text-xs tabular-nums text-muted-foreground">{fmtMs(row.original.edge_avg)}</span>,
+  },
+  {
+    id: 'edge_p95',
+    header: 'Edge P95',
+    accessorKey: 'edge_p95',
+    cell: ({ row }) => <span className="font-mono text-xs tabular-nums text-muted-foreground">{fmtMs(row.original.edge_p95)}</span>,
+  },
+]
+
+const CLIENT_URL_COLUMNS = makeResourceColumns<RumSlowestUrlItem>('URL', (r) => r.url)
+const CLIENT_NETWORK_COLUMNS = makeResourceColumns<RumSlowestNetworkItem>('Network', (r) => r.label || r.asn)
+
+export function RumClientResourceTablesSection({
+  slowestUrls = [],
+  slowestNetworks = [],
+}: {
+  slowestUrls?: RumSlowestUrlItem[]
+  slowestNetworks?: RumSlowestNetworkItem[]
+}) {
+  const [sortMetric, setSortMetric] = useState<RumSortMetric>('p99')
+
+  const sortedUrls = useMemo(
+    () => [...slowestUrls].sort((a, b) => Number(b[sortMetric] ?? 0) - Number(a[sortMetric] ?? 0) || b.requests - a.requests),
+    [slowestUrls, sortMetric],
+  )
+  const sortedNetworks = useMemo(
+    () => [...slowestNetworks].sort((a, b) => Number(b[sortMetric] ?? 0) - Number(a[sortMetric] ?? 0) || b.requests - a.requests),
+    [slowestNetworks, sortMetric],
+  )
+
+  const sortSelector = (
+    <Select value={sortMetric} onValueChange={(val) => setSortMetric(val as RumSortMetric)}>
+      <SelectTrigger className="h-7 w-[110px] text-xs" aria-label="Sort client latency">
+        <SelectValue placeholder="Sort by" />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value="p99">Sort: P99</SelectItem>
+        <SelectItem value="p95">Sort: P95</SelectItem>
+        <SelectItem value="p50">Sort: P50</SelectItem>
+        <SelectItem value="avg">Sort: Avg</SelectItem>
+      </SelectContent>
+    </Select>
+  )
+
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+      <AnalyticsCard
+        title="Slowest URLs (Client TTLB vs Edge)"
+        icon={<Server className="h-4 w-4" />}
+        headerAction={sortSelector}
+        isEmpty={sortedUrls.length === 0}
+        contentClassName="p-0"
+      >
+        <DataTableReadonly
+          columns={CLIENT_URL_COLUMNS}
+          data={sortedUrls}
+          hideToolbar
+          showPagination={false}
+          tableCaption="Slowest URLs by client TTLB"
+          emptyMessage="No client resource timing data in this window"
+        />
+      </AnalyticsCard>
+
+      <AnalyticsCard
+        title="Slowest Networks (Client TTLB vs Edge)"
+        icon={<Globe className="h-4 w-4" />}
+        headerAction={sortSelector}
+        isEmpty={sortedNetworks.length === 0}
+        contentClassName="p-0"
+      >
+        <DataTableReadonly
+          columns={CLIENT_NETWORK_COLUMNS}
+          data={sortedNetworks}
+          hideToolbar
+          showPagination={false}
+          tableCaption="Slowest networks by client TTLB"
+          emptyMessage="No client network timing data in this window"
+        />
+      </AnalyticsCard>
+    </div>
+  )
+}
+
 export function RumWorstPagesAndErrorsSection({
   worstPages,
   errors,
@@ -135,12 +284,35 @@ export function RumLiveActivitySection({
   liveEvents,
   isLiveEventsLoading,
   timezone,
+  serviceId,
 }: {
   liveEvents: RumLiveEvent[] | undefined
   isLiveEventsLoading: boolean
   timezone: string
+  serviceId?: string | null
 }) {
   const [selectedEvent, setSelectedEvent] = useState<RumLiveEvent | null>(null)
+  const selectedReqId = selectedEvent
+    ? String(selectedEvent.req_id || selectedEvent.raw_log?.req_id || '').trim()
+    : ''
+
+  const { data: matchedLog, isLoading: isMatchedLogLoading } = useQuery<RumRequestLogResponse | null>({
+    queryKey: ['rum-request-log', serviceId, selectedReqId, selectedEvent?.time],
+    queryFn: async ({ signal }) => {
+      if (!serviceId || !selectedReqId) return null
+      const params = new URLSearchParams({ req_id: selectedReqId })
+      if (selectedEvent?.time) params.set('timestamp', selectedEvent.time)
+      const res = await adminJsonResult<'/api/services/{service_id}/rum/request-log', RumRequestLogResponse>(
+        '/api/services/{service_id}/rum/request-log',
+        `/api/services/${encodeURIComponent(serviceId)}/rum/request-log?${params.toString()}`,
+        { signal },
+      )
+      if (!res.ok) return null
+      return res.data ?? null
+    },
+    enabled: !!serviceId && !!selectedReqId && selectedEvent !== null,
+    retry: false,
+  })
 
   const columns = React.useMemo<ColumnDef<RumLiveEvent>[]>(() => [
     liveCol('type', 'Status', (r) => {
@@ -280,6 +452,53 @@ export function RumLiveActivitySection({
                     <pre>{JSON.stringify(edgeMetadata || rawLog || {}, null, 2)}</pre>
                   </div>
                 </div>
+
+                {selectedReqId && (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground font-semibold block">Matching Edge Request Log</span>
+                      <span className="font-mono text-[11px] text-muted-foreground">req_id: {selectedReqId}</span>
+                    </div>
+                    {isMatchedLogLoading ? (
+                      <div className="bg-muted/20 border border-border rounded-lg p-3 text-muted-foreground">
+                        Looking up edge request log line…
+                      </div>
+                    ) : matchedLog?.found && matchedLog.request ? (
+                      <div className="bg-muted/20 border border-border rounded-lg p-3 space-y-2">
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-[11px]">
+                          <div>
+                            <span className="text-muted-foreground block">Method &amp; Status</span>
+                            <span className="font-mono font-semibold">
+                              {String(matchedLog.request.method ?? '—')} · {String(matchedLog.request.status ?? '—')}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground block">Edge Elapsed / Client TTLB</span>
+                            <span className="font-mono font-semibold">
+                              {matchedLog.request.elapsed_ms != null ? `${matchedLog.request.elapsed_ms}ms` : '—'}
+                              {selectedEvent.metric_value != null && selectedEvent.metric_name === 'ttlb'
+                                ? ` / ${Math.round(selectedEvent.metric_value)}ms`
+                                : ''}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground block">Cache / POP</span>
+                            <span className="font-mono">
+                              {String(matchedLog.request.cache ?? '—')} · {String(matchedLog.request.pop ?? '—')}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="bg-background/60 border border-border rounded p-2 overflow-auto max-h-[180px] font-mono text-[11px]">
+                          <pre>{JSON.stringify(matchedLog.request, null, 2)}</pre>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="bg-muted/20 border border-border rounded-lg p-3 text-muted-foreground">
+                        No matching edge request log line found for this request ID in the retention window.
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )
           })()}

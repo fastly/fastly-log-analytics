@@ -303,6 +303,7 @@ fn bootstrap_service(owner_id: String, input: &RecoverInput, now: u64) -> Servic
         deployed_snapshot: None,
         previous_deployed_snapshot: None,
         previous_activated_version: None,
+        feature_enabled_fields: Default::default(),
     }
 }
 
@@ -2919,6 +2920,7 @@ mod tests {
             deployed_snapshot: None,
             previous_deployed_snapshot: None,
             previous_activated_version: None,
+            feature_enabled_fields: Default::default(),
         }
     }
 

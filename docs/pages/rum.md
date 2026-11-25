@@ -10,12 +10,15 @@ Source: [`frontend/app/rum/`](../../frontend/app/rum/) (`page.tsx` re-exports `_
 - **Vitals**: LCP, CLS, INP and FID p75 cards with a good / needs-improvement / poor distribution bar, a Web Vitals trend, a JS Error Rate trend.
 - **Environments** (browser, OS, device donuts) and **Beacons Over Time** (pageviews, interactions, errors).
 - **Worst Performing Pages** and **JavaScript Runtime Exceptions** tables.
-- **Live Activity Monitor**: newest events with a detail dialog showing extracted client fields and the raw payload.
+- **Slowest URLs (Client TTLB vs Edge)** and **Slowest Networks (Client TTLB vs Edge)** tables (client-side resource TTLB percentiles `avg`, `p50`, `p95`, `p99` paired with matching edge elapsed times via `req_id`, sortable by `P99`, `P95`, `P50`, or `Avg`).
+- **Live Activity Monitor**: newest page, resource timing (`ttlb`), and error events with a detail dialog showing extracted client fields, raw payload, and—when a `req_id` is present—the **Matching Edge Request Log** line fetched on demand (`GET .../rum/request-log`).
 
 Standard filters apply; supported filter columns are `browser`, `os`, `device`, `country`, `pathname`, `city`, `region`, `pop`, `tls`. An unsupported column or malformed JSON is a `400 rum_filters_unsupported`; a filter is never silently dropped.
 
+Beacons sampled below 100% (`sample_rate`, `error_sample_rate`, `resource_sample_rate`) store their active sampling rate per row so counts in analytics, live breakdowns, and Slowest URLs/Networks are inverse-probability weighted (`1 / sample_rate`) and flagged `estimated: true` when sampled rows are present (percentiles remain unweighted over observed timings).
+
 Cloud accepts fields present in its RUM tables, including `browser_name`,
-`metric_name`, `metric_value` and `error_type`, plus the `browser`, `os`, `device`
+`metric_name`, `metric_value`, `error_type`, `req_id`, `resource_url`, and `asn` (stored as text in Parquet and safely coerced via `TRY_CAST` in DuckDB), plus the `browser`, `os`, `device`
 and `pathname` aliases. Request-only custom fields are unsupported even after
 visiting request analytics. A field absent from one RUM dataset has NULL semantics:
 an include filter excludes those rows; an exclude filter keeps them.
@@ -35,8 +38,9 @@ stale range reads fail rather than returning success against a replacement datas
 
 Routes under `/api/services/{service_id}/rum/...` in [`backend/routers/rum/`](../../backend/routers/rum/): `analytics.py`, `provisioning.py`, `beacon_ingest.py`. Models in [`backend/models/analytics/rum.py`](../../backend/models/analytics/rum.py).
 
-- `GET .../rum/analytics` (`start_time`, `end_time`, `range_token`, `anchor`, `filters` as a JSON object `{column: {mode, values}}`): `RumAnalyticsResponse` with `no_data`, `beacon_count`, `pageview_count`, `interaction_count`, `error_count`, `vitals` (`lcp`, `cls`, `inp`, `fid`), `worst_pages`, `errors`, `trends` (aligned `timestamps`, `lcp`, `cls`, `error_rate`, `pageviews`, `interactions`, `errors`) and `environments`.
-- `GET .../rum/live-events`: newest events (`time`, `type`, `path`, `desc`, `browser`, `os`, `raw_log`).
+- `GET .../rum/analytics` (`start_time`, `end_time`, `range_token`, `anchor`, `filters` as a JSON object `{column: {mode, values}}`): `RumAnalyticsResponse` with `no_data`, `estimated`, `beacon_count`, `pageview_count`, `interaction_count`, `error_count`, `vitals` (`lcp`, `cls`, `inp`, `fid`, `fcp`, `ttfb`), `worst_pages`, `slowest_urls`, `slowest_networks`, `errors`, `trends` (aligned `timestamps`, `lcp`, `cls`, `fcp`, `ttfb`, `error_rate`, `pageviews`, `interactions`, `errors`) and `environments`.
+- `GET .../rum/live-events`: newest events (`time`, `type`, `path`, `desc`, `browser`, `os`, `req_id`, `resource_url`, `metric_name`, `metric_value`, `raw_log`).
+- `GET .../rum/request-log` (`req_id`, optional `timestamp`): looks up the matching edge request log line for a RUM resource timing or beacon `req_id` (`found`, `req_id`, `request`), enforcing analyst IP masking / PII redaction.
 - `GET .../rum/beacon-health`: setup validation (beacons arriving).
 - `GET .../rum/status`, `GET .../rum/versions`, `POST .../rum/enable`, `.../disable`, `.../upgrade`, `.../settings` (admin provisioning; see [admin/rum.md](admin/rum.md)).
 - Asset routes `/js/rum.js` and `/js/faro-sdk.js` (and the beacon ingest route) in `beacon_ingest.py`.

@@ -416,6 +416,27 @@ def generate_rum_tracker_js(service_id: str = "", beacon_endpoint: str = "/rum-b
     }}, hidden ? 0 : FLUSH_DELAY_MS);
   }}
 
+  function detectEnv() {{
+    var ua = (typeof navigator !== 'undefined' && navigator.userAgent) || '';
+    var ual = ua.toLowerCase();
+    var uad = (typeof navigator !== 'undefined' && navigator.userAgentData) || null;
+    function has(s) {{ return ua.indexOf(s) !== -1; }}
+    function hasL(s) {{ return ual.indexOf(s) !== -1; }}
+    var b = '';
+    if (has('Edg/')) b = 'Edge';
+    else if (has('Firefox/')) b = 'Firefox';
+    else if (has('Chrome/') && !has('Edg/')) b = 'Chrome';
+    else if (has('Safari/') && !has('Chrome/')) b = 'Safari';
+    var o = '';
+    if (has('iPhone') || has('iPad') || has('iPod')) o = 'iOS';
+    else if (has('Android')) o = 'Android';
+    else if (has('Mac OS X') || has('Macintosh') || (uad && uad.platform === 'macOS')) o = 'macOS';
+    else if (has('Windows') || (uad && uad.platform === 'Windows')) o = 'Windows';
+    else if (has('Linux') || (uad && uad.platform === 'Linux')) o = 'Linux';
+    var d = (hasL('ipad') || hasL('tablet')) ? 'Tablet' : ((uad && uad.mobile) || hasL('mobi') || hasL('android') || hasL('iphone') ? 'Mobile' : (ua || uad ? 'Desktop' : ''));
+    return {{ b: b, o: o, d: d }};
+  }}
+
   function beaconUrls() {{
     var cid = '';
     var cookieMatch = document.cookie.match(/(?:^|; )rum_cid=([^;]+)/);
@@ -426,9 +447,13 @@ def generate_rum_tracker_js(service_id: str = "", beacon_endpoint: str = "/rum-b
         cid = cookieMatch[1];
       }}
     }}
+    var env = detectEnv();
     var head = BEACON_ENDPOINT + '?' + (cid ? 'cid=' + enc(cid) + '&' : '') +
       'p=' + enc(batch.path) + '&sr=' + SAMPLE_RATE + '&esr=' + ERROR_SAMPLE_RATE +
-      (RESOURCES_SAMPLED ? '&rsr=' + RESOURCE_SAMPLE_RATE : '');
+      (RESOURCES_SAMPLED ? '&rsr=' + RESOURCE_SAMPLE_RATE : '') +
+      (env.b ? '&b=' + enc(env.b) : '') +
+      (env.o ? '&o=' + enc(env.o) : '') +
+      (env.d ? '&d=' + enc(env.d) : '');
     var urls = [];
     var url = head;
     var openList = '';

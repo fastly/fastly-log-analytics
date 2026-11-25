@@ -7,7 +7,8 @@ import { Hll } from "./dashboard/hll";
 import { fetchLanes } from "./fetch-lanes";
 import { queryRumWireFromRollup, type RumRollupSource } from "./rum-rollup";
 import { DuckDBAnalyticalEngine, getDuckDBEngine } from "./dashboard/test-fixtures";
-import { cloudRumAnalytics } from "./rum-wire";
+import { redactQueryRowsForPii } from "./query";
+import { cloudRumAnalytics, cloudRumLiveEvents, cloudRumRequestLog } from "./rum-wire";
 import {
   classifyCwvRating,
   emptyRumAnalytics,
@@ -834,5 +835,72 @@ describe("Feature F23 — RUM & Web Vitals cloud-engine", () => {
     expect(params.get("view")).toBe("summary");
     expect(params.get("from")).toBe("2027-01-15T08:00:00.000Z");
     expect(params.get("to")).toBe("2027-01-15T09:00:01.000Z");
+  });
+
+  it("joins client ttlb resource timings to requests, coerces Utf8 asn strings, and masks request-log PII", async () => {
+    const engine = new DuckDBAnalyticalEngine();
+    try {
+      const vitalsBytes = parquetWriteBuffer({
+        columnData: [
+          { name: "timestamp", type: "TIMESTAMP", data: [new Date(1700000005000), new Date(1700000010000), new Date(1700000020000)] },
+          { name: "metric_name", type: "STRING", data: ["LCP", "ttlb", "ttlb"] },
+          { name: "metric_value", type: "DOUBLE", data: [2100, 1200, 800] },
+          { name: "metric_rating", type: "STRING", data: ["good", "poor", "needs_improvement"] },
+          { name: "pathname", type: "STRING", data: ["/checkout", "/checkout", "/checkout"] },
+          { name: "resource_url", type: "STRING", data: ["", "/api/pay", "/api/pay"] },
+          { name: "req_id", type: "STRING", data: ["rid-page-1", "rid-join-1", "rid-join-2"] },
+          { name: "asn", type: "STRING", data: ["15169", "AS15169", ""] },
+          { name: "sample_rate", type: "DOUBLE", data: [0.5, 0.5, 0.5] },
+          { name: "browser", type: "STRING", data: ["Chrome", "Chrome", "Firefox"] },
+          { name: "os", type: "STRING", data: ["macOS", "macOS", "Linux"] },
+          { name: "device", type: "STRING", data: ["Desktop", "Desktop", "Desktop"] },
+          { name: "cid", type: "STRING", data: ["c1", "c1", "c2"] },
+          { name: "geo_country_code", type: "STRING", data: ["US", "US", "US"] },
+          { name: "geo_city", type: "STRING", data: ["Austin", "Austin", "Austin"] },
+          { name: "geo_region", type: "STRING", data: ["TX", "TX", "TX"] },
+          { name: "server_pop", type: "STRING", data: ["DFW", "DFW", "DFW"] },
+          { name: "tls_version", type: "STRING", data: ["TLSv1.3", "TLSv1.3", "TLSv1.3"] },
+        ],
+        codec: "SNAPPY",
+      });
+      await engine.syncRumFiles(
+        [{ scopedKey: "r:1", key: "r1.parquet", bytes: vitalsBytes }],
+        [],
+      );
+      await engine.executeSql(`INSERT INTO requests
+        (scoped_key, ts_ms, rid, method, url, status, pop, ip, asn, elapsed)
+        VALUES ('req-ttlb', 1700000010000, 'rid-join-1', 'GET', 'https://shop.test/users/203.0.113.9/pay', 200, 'DFW', '203.0.113.9', 15169, 320500)`);
+
+      const analytics = await cloudRumAnalytics({ engine });
+      expect(analytics.estimated).toBe(true);
+      expect(analytics.slowest_urls).toHaveLength(1);
+      expect(analytics.slowest_urls?.[0]).toMatchObject({
+        url: "/api/pay",
+        requests: 4,
+        matched_requests: 2,
+        edge_avg: 320.5,
+      });
+      expect(analytics.slowest_networks?.[0]).toMatchObject({
+        asn: "AS15169",
+        requests: 2,
+        matched_requests: 2,
+      });
+
+      const live = await cloudRumLiveEvents({ engine });
+      const resourceEvent = live.find((e) => e.type === "resource" && e.req_id === "rid-join-1");
+      expect(resourceEvent).toBeDefined();
+      expect(resourceEvent?.req_id).toBe("rid-join-1");
+      expect(resourceEvent?.resource_url).toBe("/api/pay");
+
+      const unmasked = await cloudRumRequestLog({ engine, req_id: "rid-join-1" });
+      expect(unmasked.found).toBe(true);
+      expect(unmasked.request?.client_ip).toBe("203.0.113.9");
+
+      const maskedRow = redactQueryRowsForPii([unmasked.request!], true)[0];
+      expect(maskedRow.client_ip).toBe("0.0.0.0");
+      expect(JSON.stringify(maskedRow)).not.toContain("203.0.113.9");
+    } finally {
+      await engine.reset();
+    }
   });
 });

@@ -7,8 +7,8 @@ Source: [`frontend/app/admin/rum/page.tsx`](../../../frontend/app/admin/rum/page
 ## UI
 
 - Status card: enabled state and enable time, a VCL drift warning with a re-apply action when the deployed VCL no longer matches the expected one, refresh.
-- Enable RUM and Disable RUM dialogs that stream provisioning progress.
-- Settings dialog: capture toggles `capture_vitals`, `capture_performance`, `capture_errors`, `capture_events`, and a custom VCL condition.
+- Enable RUM and Disable RUM dialogs that stream provisioning progress. Enabling RUM in either edition automatically claims the `rid` request-log field (if not already enabled) so per-request Client TTLB measurements can be joined back to edge request logs; disabling RUM releases `rid` only if RUM claimed it and no other enabled feature requires it. Reconcile also scopes `Timing-Allow-Origin` to the Fastly service's own hostnames (capped at 20 `https://` origins) and emits `Server-Timing: rid;desc=<x-req-id>` in `vcl_deliver`.
+- Settings dialog: capture toggles `capture_vitals`, `capture_performance`, `capture_errors`, `capture_events`, `capture_resources` (default `true`), sampling rates `sample_rate`, `error_sample_rate`, and `resource_sample_rate` (default `0.1`, i.e. 10%), and a custom VCL condition.
 - Faro SDK version card (current, latest, update available) with an upgrade action.
 
 ### Cloud runtime

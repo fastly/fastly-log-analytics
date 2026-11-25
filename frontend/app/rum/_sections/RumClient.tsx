@@ -38,12 +38,15 @@ import {
 } from './RumVitalsSection'
 import {
   envName,
+  RumClientResourceTablesSection,
   RumLiveActivitySection,
   RumWorstPagesAndErrorsSection,
   WORST_PAGE_COLUMNS,
   type RumJsError,
   type RumLiveEvent,
   type RumRawLog,
+  type RumSlowestNetworkItem,
+  type RumSlowestUrlItem,
   type RumWorstPage,
 } from './RumTablesSection'
 
@@ -55,6 +58,7 @@ export {
   RumInstallationDialog,
   RumVitalsTopSection,
   RumEnvironmentAndBeaconsSection,
+  RumClientResourceTablesSection,
   RumWorstPagesAndErrorsSection,
   RumLiveActivitySection,
   WORST_PAGE_COLUMNS,
@@ -71,6 +75,8 @@ export {
   type RumCwvDistribution,
   type CwvColors,
   type RumWorstPage,
+  type RumSlowestUrlItem,
+  type RumSlowestNetworkItem,
   type RumJsError,
   type RumRawLog,
   type RumLiveEvent,
@@ -202,6 +208,11 @@ export function RumClient({
         errors={analytics.errors}
       />
 
+      <RumClientResourceTablesSection
+        slowestUrls={analytics.slowest_urls ?? []}
+        slowestNetworks={analytics.slowest_networks ?? []}
+      />
+
       <RumEnvironmentAndBeaconsSection
         analytics={analytics}
         startTime={startTime}
@@ -217,6 +228,7 @@ export function RumClient({
         liveEvents={liveEvents}
         isLiveEventsLoading={isLiveEventsLoading}
         timezone={timezone}
+        serviceId={serviceId}
       />}
     </div>
   )

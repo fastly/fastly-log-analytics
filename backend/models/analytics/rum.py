@@ -101,6 +101,41 @@ class RumEnvironments(WireSafeModel):
     devices: dict[str, int]
 
 
+class RumSlowestUrlItem(WireSafeModel):
+    url: str
+    requests: int
+    avg: RumNumber
+    p50: RumNumber
+    p95: RumNumber
+    p99: RumNumber
+    matched_requests: int = 0
+    edge_avg: RumNumber | None = None
+    edge_p50: RumNumber | None = None
+    edge_p95: RumNumber | None = None
+    edge_p99: RumNumber | None = None
+
+
+class RumSlowestNetworkItem(WireSafeModel):
+    asn: str
+    label: str
+    requests: int
+    avg: RumNumber
+    p50: RumNumber
+    p95: RumNumber
+    p99: RumNumber
+    matched_requests: int = 0
+    edge_avg: RumNumber | None = None
+    edge_p50: RumNumber | None = None
+    edge_p95: RumNumber | None = None
+    edge_p99: RumNumber | None = None
+
+
+class RumRequestLogResponse(WireSafeModel):
+    found: bool
+    req_id: str
+    request: dict[str, Any] | None = None
+
+
 class RumAnalyticsResponse(WireSafeModel):
     is_mock: bool | None = None
     no_data: bool | None = None
@@ -113,6 +148,8 @@ class RumAnalyticsResponse(WireSafeModel):
     error: str | None = None
     vitals: RumVitals | None = None
     worst_pages: list[RumWorstPage] | None = None
+    slowest_urls: list[RumSlowestUrlItem] | None = None
+    slowest_networks: list[RumSlowestNetworkItem] | None = None
     errors: list[RumJsError] | None = None
     trends: RumTrends | None = None
     environments: RumEnvironments | None = None
@@ -125,4 +162,8 @@ class RumLiveEventItem(WireSafeModel):
     desc: str
     browser: str
     os: str
+    req_id: str | None = None
+    resource_url: str | None = None
+    metric_name: str | None = None
+    metric_value: RumNumber | None = None
     raw_log: dict[str, Any] = {}

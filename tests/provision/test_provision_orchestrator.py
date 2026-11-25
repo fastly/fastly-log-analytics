@@ -1967,6 +1967,48 @@ def test_enable_and_disable_rum_wire_claim_and_release_feature_fields(mock_fos, 
     assert "rid" not in disabled_cfg.get("active_log_field_ids", [])
 
 
+def test_enable_and_disable_rum_preserve_pre_enabled_rid_and_rollback_on_failure(mock_fos, mock_fetch_bundle):
+    service_id = "svc_rum_pre_rid"
+    svcconfig.save_config(
+        service_id,
+        {
+            "service_id": service_id,
+            "rum_enabled": False,
+            "last_activated_version": 1,
+            "log_fields": {"groups": ["A"], "field_overrides": {"rid": True}},
+            **_FOS_CFG,
+        },
+    )
+    mock_fetch_bundle(SAMPLE_BUNDLE)
+    mock_fos(lambda req: httpx.Response(200, headers={"ETag": '"etag"'}))
+
+    # Failure during reconcile must not leave rum_enabled=True or claim rid ownership.
+    with patch("backend.provision.rum_orchestrator.reconcile_vcl_state", side_effect=RuntimeError("boom")):
+        with pytest.raises(RuntimeError, match="boom"):
+            enable_rum(service_id, "tok", faro_version="2.8.5")
+    rolled_back = _read_svc_cfg(service_id)
+    assert rolled_back["rum_enabled"] is False
+    assert rolled_back.get("feature_enabled_fields", {}).get("rum", []) == []
+
+    # When rid was already enabled before RUM, disable_rum must keep rid active.
+    with patch(
+        "backend.provision.rum_orchestrator.reconcile_vcl_state",
+        return_value=MagicMock(activated_version=2, draft_version=None, changes_applied={}),
+    ):
+        enable_rum(service_id, "tok", faro_version="2.8.5")
+    with (
+        patch("backend.provision.rum_assets.delete_rum_tracker_js"),
+        patch(
+            "backend.provision.rum_orchestrator.reconcile_vcl_state",
+            return_value=MagicMock(activated_version=3, draft_version=None, changes_applied={}),
+        ),
+    ):
+        disable_rum(service_id, "tok")
+    after_disable = _read_svc_cfg(service_id)
+    assert after_disable["log_fields"]["field_overrides"].get("rid") is True
+    assert "rid" in after_disable.get("active_log_field_ids", [])
+
+
 def test_enable_and_disable_rum_early_return_and_missing_config():
     with (
         patch(

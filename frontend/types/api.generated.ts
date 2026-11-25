@@ -572,6 +572,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/services/{service_id}/rum/request-log": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Rum Request Log
+         * @description Fetch the edge request log row matching a RUM event or resource timing `req_id`.
+         */
+        get: operations["rum_request_log_api_services__service_id__rum_request_log_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/js/rum.js": {
         parameters: {
             query?: never;
@@ -15774,6 +15794,10 @@ export interface components {
             vitals?: components["schemas"]["RumVitals"] | null;
             /** Worst Pages */
             worst_pages?: components["schemas"]["RumWorstPage"][] | null;
+            /** Slowest Urls */
+            slowest_urls?: components["schemas"]["RumSlowestUrlItem"][] | null;
+            /** Slowest Networks */
+            slowest_networks?: components["schemas"]["RumSlowestNetworkItem"][] | null;
             /** Errors */
             errors?: components["schemas"]["RumJsError"][] | null;
             trends?: components["schemas"]["RumTrends"] | null;
@@ -15943,6 +15967,14 @@ export interface components {
             browser: string;
             /** Os */
             os: string;
+            /** Req Id */
+            req_id?: string | null;
+            /** Resource Url */
+            resource_url?: string | null;
+            /** Metric Name */
+            metric_name?: string | null;
+            /** Metric Value */
+            metric_value?: number | null;
             /**
              * Raw Log
              * @default {}
@@ -15950,6 +15982,19 @@ export interface components {
             raw_log: {
                 [key: string]: unknown;
             };
+        } & {
+            [key: string]: unknown;
+        };
+        /** RumRequestLogResponse */
+        RumRequestLogResponse: {
+            /** Found */
+            found: boolean;
+            /** Req Id */
+            req_id: string;
+            /** Request */
+            request?: {
+                [key: string]: unknown;
+            } | null;
         } & {
             [key: string]: unknown;
         };
@@ -16031,6 +16076,68 @@ export interface components {
             message?: string | null;
             /** Skipped */
             skipped?: boolean | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** RumSlowestNetworkItem */
+        RumSlowestNetworkItem: {
+            /** Asn */
+            asn: string;
+            /** Label */
+            label: string;
+            /** Requests */
+            requests: number;
+            /** Avg */
+            avg: number;
+            /** P50 */
+            p50: number;
+            /** P95 */
+            p95: number;
+            /** P99 */
+            p99: number;
+            /**
+             * Matched Requests
+             * @default 0
+             */
+            matched_requests: number;
+            /** Edge Avg */
+            edge_avg?: number | null;
+            /** Edge P50 */
+            edge_p50?: number | null;
+            /** Edge P95 */
+            edge_p95?: number | null;
+            /** Edge P99 */
+            edge_p99?: number | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** RumSlowestUrlItem */
+        RumSlowestUrlItem: {
+            /** Url */
+            url: string;
+            /** Requests */
+            requests: number;
+            /** Avg */
+            avg: number;
+            /** P50 */
+            p50: number;
+            /** P95 */
+            p95: number;
+            /** P99 */
+            p99: number;
+            /**
+             * Matched Requests
+             * @default 0
+             */
+            matched_requests: number;
+            /** Edge Avg */
+            edge_avg?: number | null;
+            /** Edge P50 */
+            edge_p50?: number | null;
+            /** Edge P95 */
+            edge_p95?: number | null;
+            /** Edge P99 */
+            edge_p99?: number | null;
         } & {
             [key: string]: unknown;
         };
@@ -23310,6 +23417,115 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RumLiveEventItem"][];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    rum_request_log_api_services__service_id__rum_request_log_get: {
+        parameters: {
+            query: {
+                req_id: string;
+                timestamp?: string | null;
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RumRequestLogResponse"];
                 };
             };
             /** @description Bad request */

@@ -1,5 +1,7 @@
-import { getDuckDBEngine } from "./dashboard/duckdb";
+import { loadAsnNames } from "./asn-names";
+import { getDuckDBEngine, duckSqlString } from "./dashboard/duckdb";
 import { parseEpochMs, roundTo } from "./engine-utils";
+import { formatAsnLabel } from "./performance";
 import { buildRumWhere, queryRumAnalytics, queryRumLiveEvents, type RumQueryParams } from "./rum";
 import { queryRumWireFromRollup, type RumRollupSource } from "./rum-rollup";
 
@@ -44,6 +46,156 @@ export async function cloudRumUsage(params: RumQueryParams, classARate: number) 
     average_beacons_per_day: days > 0 ? total / days : 0,
     note: "Estimated from processed RUM beacon identities, not raw delivery receipts. One FOS Class A operation is estimated per beacon; these operations are included in total FOS usage.",
   };
+}
+
+export interface RumResourceLatencyItem {
+  requests: number;
+  avg: number;
+  p50: number;
+  p95: number;
+  p99: number;
+  matched_requests: number;
+  edge_avg: number | null;
+  edge_p50: number | null;
+  edge_p95: number | null;
+  edge_p99: number | null;
+}
+
+export interface RumSlowestUrlRow extends RumResourceLatencyItem {
+  url: string;
+}
+
+export interface RumSlowestNetworkRow extends RumResourceLatencyItem {
+  asn: string;
+  label: string;
+}
+
+function shapeResourceLatency(row: Record<string, unknown>): RumResourceLatencyItem {
+  const opt = (key: string) => {
+    const raw = row[key];
+    if (raw == null) return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? roundTo(n, 2) : null;
+  };
+  return {
+    requests: Number(row.requests ?? 0),
+    avg: opt("avg_ms") ?? 0,
+    p50: opt("p50_ms") ?? 0,
+    p95: opt("p95_ms") ?? 0,
+    p99: opt("p99_ms") ?? 0,
+    matched_requests: Number(row.matched_requests ?? 0),
+    edge_avg: opt("edge_avg_ms"),
+    edge_p50: opt("edge_p50_ms"),
+    edge_p95: opt("edge_p95_ms"),
+    edge_p99: opt("edge_p99_ms"),
+  };
+}
+
+export async function queryRumResourceTimings(params: RumQueryParams): Promise<{
+  slowest_urls: RumSlowestUrlRow[];
+  slowest_networks: RumSlowestNetworkRow[];
+}> {
+  const engine = params.engine ?? getDuckDBEngine().readContext();
+  const ttlbWhere = `${buildRumWhere(params, "client_vitals", { includeTtlb: true })} AND metric_name = 'ttlb'`;
+  const reqServiceClause = params.service_id
+    ? `(service_id = ${duckSqlString(String(params.service_id))} OR service_id IS NULL)`
+    : "1=1";
+  const reqWindowClauses = [reqServiceClause, "rid IS NOT NULL", "rid != ''"];
+  const startMs = parseEpochMs(params.start_time);
+  const endMs = parseEpochMs(params.end_time);
+  if (startMs != null) reqWindowClauses.push(`ts_ms >= ${Math.floor(startMs) - 600_000}`);
+  if (endMs != null) reqWindowClauses.push(`ts_ms < ${Math.ceil(endMs) + 600_000}`);
+
+  const runTtlbQueries = async (withReqJoin: boolean) => {
+    const reqCte = withReqJoin
+      ? `req_edge AS (
+          SELECT rid, AVG(TRY_CAST(elapsed AS DOUBLE) / 1000.0) AS edge_ms, ANY_VALUE(asn) AS req_asn
+          FROM requests
+          WHERE ${reqWindowClauses.join(" AND ")}
+          GROUP BY rid
+        )`
+      : `req_edge AS (SELECT NULL::VARCHAR AS rid, NULL::DOUBLE AS edge_ms, NULL::BIGINT AS req_asn WHERE FALSE)`;
+    const aggCols = `
+      coalesce(round(sum(v.w)), 0)::BIGINT AS requests,
+      avg(v.metric_value)::DOUBLE AS avg_ms,
+      quantile_cont(v.metric_value, 0.5)::DOUBLE AS p50_ms,
+      quantile_cont(v.metric_value, 0.95)::DOUBLE AS p95_ms,
+      quantile_cont(v.metric_value, 0.99)::DOUBLE AS p99_ms,
+      coalesce(round(sum(v.w) FILTER (WHERE r.edge_ms IS NOT NULL)), 0)::BIGINT AS matched_requests,
+      (avg(r.edge_ms) FILTER (WHERE r.edge_ms IS NOT NULL))::DOUBLE AS edge_avg_ms,
+      (quantile_cont(r.edge_ms, 0.5) FILTER (WHERE r.edge_ms IS NOT NULL))::DOUBLE AS edge_p50_ms,
+      (quantile_cont(r.edge_ms, 0.95) FILTER (WHERE r.edge_ms IS NOT NULL))::DOUBLE AS edge_p95_ms,
+      (quantile_cont(r.edge_ms, 0.99) FILTER (WHERE r.edge_ms IS NOT NULL))::DOUBLE AS edge_p99_ms
+    `;
+    const urlSql = `WITH ttlb_rows AS (
+      SELECT coalesce(nullif(req_id, ''), request_event_id) AS rid, resource_url, metric_value, ${ROW_WEIGHT} AS w
+      FROM client_vitals
+      WHERE ${ttlbWhere} AND resource_url IS NOT NULL AND resource_url != ''
+    ), ${reqCte}
+    SELECT v.resource_url AS url, ${aggCols}
+    FROM ttlb_rows v LEFT JOIN req_edge r ON v.rid IS NOT NULL AND v.rid != '' AND r.rid = v.rid
+    GROUP BY 1
+    ORDER BY p99_ms DESC NULLS LAST, p95_ms DESC NULLS LAST, requests DESC
+    LIMIT 20`;
+    const netSql = `WITH ttlb_rows AS (
+      SELECT coalesce(nullif(req_id, ''), request_event_id) AS rid, asn, metric_value, ${ROW_WEIGHT} AS w
+      FROM client_vitals
+      WHERE ${ttlbWhere}
+    ), ${reqCte}, joined AS (
+      SELECT coalesce(v.asn, r.req_asn) AS asn_val, v.metric_value, v.w, r.edge_ms
+      FROM ttlb_rows v LEFT JOIN req_edge r ON v.rid IS NOT NULL AND v.rid != '' AND r.rid = v.rid
+    )
+    SELECT asn_val AS asn_key,
+      coalesce(round(sum(w)), 0)::BIGINT AS requests,
+      avg(metric_value)::DOUBLE AS avg_ms,
+      quantile_cont(metric_value, 0.5)::DOUBLE AS p50_ms,
+      quantile_cont(metric_value, 0.95)::DOUBLE AS p95_ms,
+      quantile_cont(metric_value, 0.99)::DOUBLE AS p99_ms,
+      coalesce(round(sum(w) FILTER (WHERE edge_ms IS NOT NULL)), 0)::BIGINT AS matched_requests,
+      (avg(edge_ms) FILTER (WHERE edge_ms IS NOT NULL))::DOUBLE AS edge_avg_ms,
+      (quantile_cont(edge_ms, 0.5) FILTER (WHERE edge_ms IS NOT NULL))::DOUBLE AS edge_p50_ms,
+      (quantile_cont(edge_ms, 0.95) FILTER (WHERE edge_ms IS NOT NULL))::DOUBLE AS edge_p95_ms,
+      (quantile_cont(edge_ms, 0.99) FILTER (WHERE edge_ms IS NOT NULL))::DOUBLE AS edge_p99_ms
+    FROM joined
+    WHERE asn_val IS NOT NULL AND asn_val > 0
+    GROUP BY 1
+    ORDER BY p99_ms DESC NULLS LAST, p95_ms DESC NULLS LAST, requests DESC
+    LIMIT 20`;
+    return Promise.all([
+      engine.executeSql<Record<string, unknown>>(urlSql, [], params.signal),
+      engine.executeSql<Record<string, unknown>>(netSql, [], params.signal),
+    ]);
+  };
+
+  let urlRows: Record<string, unknown>[] = [];
+  let netRows: Record<string, unknown>[] = [];
+  try {
+    [urlRows, netRows] = await runTtlbQueries(true);
+  } catch (err) {
+    if (params.signal?.aborted) throw err;
+    [urlRows, netRows] = await runTtlbQueries(false);
+  }
+
+  await loadAsnNames().catch(() => {});
+  const slowest_urls: RumSlowestUrlRow[] = urlRows
+    .filter((r) => typeof r.url === "string" && r.url.length > 0)
+    .map((row) => ({
+      url: decodePct(String(row.url)),
+      ...shapeResourceLatency(row),
+    }));
+  const slowest_networks: RumSlowestNetworkRow[] = netRows
+    .map((row) => {
+      const asnNum = row.asn_key != null ? String(Math.trunc(Number(row.asn_key))) : "";
+      if (!asnNum || asnNum === "0") return null;
+      return {
+        asn: `AS${asnNum}`,
+        label: formatAsnLabel(asnNum),
+        ...shapeResourceLatency(row),
+      };
+    })
+    .filter((row): row is RumSlowestNetworkRow => row !== null);
+
+  return { slowest_urls, slowest_networks };
 }
 
 export async function cloudRumAnalytics(
@@ -136,6 +288,8 @@ export async function cloudRumAnalytics(
     pw.errors * 100.0 / nullif(pw.views + pw.errors, 0) AS error_rate
   FROM page_w pw LEFT JOIN page_stats ps USING (page_url)
   ORDER BY error_rate DESC NULLS LAST, ps.avg_load_time DESC NULLS LAST, pw.page_url LIMIT 5`, [], params.signal);
+
+  const { slowest_urls, slowest_networks } = await queryRumResourceTimings({ ...params, engine });
 
   const environments = await engine.executeSql<Record<string, unknown>>(`${events}, env_beacons AS (
     SELECT kind, coalesce(nullif(name, ''), 'Unknown') AS name, beacon_id, max(w) AS w
@@ -291,6 +445,8 @@ export async function cloudRumAnalytics(
       cls_p75: row.cls_p75 == null ? null : roundTo(Number(row.cls_p75), 3),
       error_rate: row.error_rate == null ? 0 : roundTo(Number(row.error_rate), 2),
     })),
+    slowest_urls,
+    slowest_networks,
     errors: errorRows.map((row) => ({
       message: String(row.message ?? ""),
       file: String(row.file ?? ""),
@@ -317,13 +473,80 @@ export async function cloudRumAnalytics(
 
 export async function cloudRumLiveEvents(params: RumQueryParams) {
   const data = await queryRumLiveEvents(params);
-  return data.events.map((row) => ({
-    time: new Date(Number(row.ts_ms)).toISOString(),
-    type: String(row.event_type),
-    path: String(row.page_url ?? "/"),
-    desc: row.event_type === "error" ? String(row.message ?? "") : `${row.metric_name}: ${row.metric_value}`,
-    browser: String(row.browser_name ?? ""),
-    os: String(row.os_name ?? ""),
-    raw_log: row,
-  }));
+  return data.events.map((row) => {
+    const etype = String(row.event_type);
+    const reqId = typeof row.req_id === "string" && row.req_id ? row.req_id : null;
+    const resourceUrl = typeof row.resource_url === "string" && row.resource_url ? decodePct(row.resource_url) : null;
+    const metricName = typeof row.metric_name === "string" && row.metric_name ? row.metric_name : null;
+    const metricValue = row.metric_value != null && Number.isFinite(Number(row.metric_value)) ? Number(row.metric_value) : null;
+    const desc = etype === "error"
+      ? String(row.message ?? "")
+      : etype === "resource"
+        ? `Resource TTLB: ${metricValue != null ? `${Math.round(metricValue)}ms` : "—"}`
+        : `${row.metric_name}: ${row.metric_value}`;
+    return {
+      time: new Date(Number(row.ts_ms)).toISOString(),
+      type: etype,
+      path: decodePct(String(row.page_url ?? "/")),
+      desc,
+      browser: String(row.browser_name ?? ""),
+      os: String(row.os_name ?? ""),
+      req_id: reqId,
+      resource_url: resourceUrl,
+      metric_name: metricName,
+      metric_value: metricValue,
+      raw_log: row,
+    };
+  });
+}
+
+export async function cloudRumRequestLog(
+  params: RumQueryParams & { req_id?: string; timestamp?: string },
+) {
+  const reqId = String(params.req_id ?? "").trim();
+  if (!reqId || reqId.length > 128 || /\s/.test(reqId)) {
+    return { found: false, req_id: reqId, request: null };
+  }
+  const engine = params.engine ?? getDuckDBEngine().readContext();
+  const clauses = [`rid = ${duckSqlString(reqId)}`];
+  if (params.service_id && params.service_id !== "default") {
+    clauses.push(`(service_id = ${duckSqlString(String(params.service_id))} OR service_id IS NULL)`);
+  }
+  const anchorMs = parseEpochMs(params.timestamp);
+  if (anchorMs != null) {
+    clauses.push(`ts_ms >= ${Math.floor(anchorMs) - 7_200_000} AND ts_ms < ${Math.ceil(anchorMs) + 7_200_000}`);
+  }
+  const rows = await engine.executeSql<Record<string, unknown>>(
+    `SELECT
+      ts_ms,
+      rid,
+      method,
+      url,
+      host,
+      status,
+      cache,
+      pop,
+      country,
+      city,
+      region,
+      asn,
+      round(TRY_CAST(elapsed AS DOUBLE) / 1000.0, 2) AS elapsed_ms,
+      round(TRY_CAST(ttfb AS DOUBLE) * 1000.0, 2) AS ttfb_ms,
+      resp_bytes,
+      ip AS client_ip,
+      ua,
+      proto,
+      tls
+    FROM requests
+    WHERE ${clauses.join(" AND ")}
+    ORDER BY ts_ms DESC
+    LIMIT 1`,
+    [],
+    params.signal,
+  );
+  if (!rows.length) return { found: false, req_id: reqId, request: null };
+  const row = { ...rows[0] };
+  row.timestamp = row.ts_ms != null ? new Date(Number(row.ts_ms)).toISOString() : null;
+  delete row.ts_ms;
+  return { found: true, req_id: reqId, request: row };
 }

@@ -538,7 +538,33 @@ fn discover(
         return Err(Error::new(503, "backend_budget"));
     }
     let version = active_version(context, &service.service_id, token)?;
-    let mut target = desired(context, service)?;
+    let attached = service.capture == Capture::Attached;
+    let mut effective_service = service.clone();
+    let mut origins_changed = false;
+    if !attached && service.rum.enabled && job.kind != "teardown" && context.remaining_calls() >= 10
+    {
+        match context.api_status(
+            "GET",
+            &format!("/service/{}/version/{version}/domain", service.service_id),
+            token,
+            None,
+        ) {
+            Ok((200, val)) => {
+                if let Ok(domains) = list(&val) {
+                    let origins = crate::logging::rum::service_timing_origins(domains);
+                    if !origins.is_empty() && origins != effective_service.rum.timing_allow_origins
+                    {
+                        effective_service.rum.timing_allow_origins = origins;
+                        origins_changed = true;
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(err) if err.code == "backend_budget" => return Err(err),
+            Err(_) => {}
+        }
+    }
+    let mut target = desired(context, &effective_service)?;
     let desired_fos_endpoints = target.get("logging/fos").cloned().unwrap_or_default();
     if job.kind == "teardown" {
         if job.options.remove_logging {
@@ -573,7 +599,6 @@ fn discover(
         )?;
         current.insert(resource.to_owned(), list(&value)?.clone());
     }
-    let attached = service.capture == Capture::Attached;
     // Attach mode never reads or writes the other install's RUM/scoring backends and dictionaries.
     let rum_involved = !attached
         && (service.rum.enabled
@@ -957,7 +982,8 @@ fn discover(
             missing_endpoints.push(rum_ep.to_owned());
         }
     }
-    if job.kind != "teardown" && !job.dry_run && !missing_endpoints.is_empty() {
+    if job.kind != "teardown" && !job.dry_run && (!missing_endpoints.is_empty() || origins_changed)
+    {
         if context.remaining_calls() < 5 {
             return Err(Error::new(503, "backend_budget"));
         }
@@ -972,6 +998,9 @@ fn discover(
             if !claimed.owned_endpoint_names.contains(&ep) {
                 claimed.owned_endpoint_names.push(ep);
             }
+        }
+        if origins_changed {
+            claimed.rum.timing_allow_origins = effective_service.rum.timing_allow_origins.clone();
         }
         save_job_service(
             context,

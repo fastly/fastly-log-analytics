@@ -242,11 +242,15 @@ fn rum_beacons_split_into_vitals_and_errors_like_v3() {
     );
     assert_eq!(
         strings(vitals, "browser"),
-        [Some("Chrome".into()), Some("Firefox".into())]
+        [Some("Unknown".into()), Some("Firefox".into())]
+    );
+    assert_eq!(
+        strings(vitals, "os"),
+        [Some("Unknown".into()), Some("Android".into())]
     );
     assert_eq!(
         strings(vitals, "device"),
-        [Some("Desktop".into()), Some("Mobile".into())]
+        [Some("Unknown".into()), Some("Mobile".into())]
     );
     assert_eq!(strings(vitals, "cid")[0].as_deref(), Some("c1"));
     assert_eq!(strings(vitals, "req_id")[0].as_deref(), Some("r1"));
@@ -268,6 +272,31 @@ fn rum_beacons_split_into_vitals_and_errors_like_v3() {
         strings(errors, "pathname"),
         [Some("/r".into()), Some("/p/x".into())],
         "a beacon without rum_pathname falls back to its referer's path"
+    );
+}
+
+#[test]
+fn compact_beacon_extracts_browser_os_device_and_defaults_missing_to_unknown() {
+    let compact = gz(&[
+        rum_batch(
+            BASE + 8,
+            "cid=c1&p=%2Fshop&m=LCP:1500:good&b=Safari&o=iOS&d=Mobile",
+        ),
+        rum_batch(BASE + 9, "cid=c2&p=%2Fshop&m=LCP:1600:good"),
+    ]);
+    let compact_rows = ingest::rum::convert_object(&compact, 60, BASE, 1 << 20, SID).unwrap();
+    let compact_vitals = &compact_rows.windows[&BASE];
+    assert_eq!(
+        strings(compact_vitals, "browser"),
+        [Some("Safari".into()), Some("Unknown".into())]
+    );
+    assert_eq!(
+        strings(compact_vitals, "os"),
+        [Some("iOS".into()), Some("Unknown".into())]
+    );
+    assert_eq!(
+        strings(compact_vitals, "device"),
+        [Some("Mobile".into()), Some("Unknown".into())]
     );
 }
 

@@ -73,9 +73,14 @@ def extract_metrics_from_faro_payload(payload: dict, log_data: dict) -> list[dic
     browser_meta = meta.get("browser") or {}
     os_meta = meta.get("os") or {}
     page_meta = payload.get("page") or meta.get("page") or {}
-    browser_name = browser_meta.get("name") or log_data.get("browser") or "Chrome"
-    os_name = os_meta.get("name") or log_data.get("os") or "macOS"
-    device_type = "Mobile" if browser_meta.get("mobile") else "Desktop"
+    browser_name = browser_meta.get("name") or log_data.get("browser") or "Unknown"
+    os_name = os_meta.get("name") or log_data.get("os") or "Unknown"
+    if browser_meta.get("mobile"):
+        device_type = "Mobile"
+    elif browser_meta or log_data.get("device"):
+        device_type = log_data.get("device") or "Desktop"
+    else:
+        device_type = "Unknown"
     url_str = page_meta.get("url") or log_data.get("url") or ""
     pathname = "/"
     if url_str:
@@ -187,10 +192,13 @@ def extract_metrics_from_compact_beacon(log_data: dict) -> list[dict] | None:
 
     pathname = param("p") or "/"
     cid = param("cid")
+    browser = param("b")
+    os_name = param("o")
+    device = param("d")
     sample_rate, error_sample_rate, resource_sample_rate = rate("sr"), rate("esr"), rate("rsr")
 
     def entry(name: str, value: float | None, rating: str, row_rate: float | None) -> dict:
-        return {
+        item: dict[str, Any] = {
             "metric_name": name,
             "metric_value": value,
             "metric_rating": rating,
@@ -198,6 +206,13 @@ def extract_metrics_from_compact_beacon(log_data: dict) -> list[dict] | None:
             "cid": cid,
             "sample_rate": row_rate,
         }
+        if browser:
+            item["browser"] = browser
+        if os_name:
+            item["os"] = os_name
+        if device:
+            item["device"] = device
+        return item
 
     extracted: list[dict] = []
     for key, value in params:
@@ -251,9 +266,9 @@ def extract_metrics_from_query_params(qparams: dict[str, list[str]], log_data: d
     if len(non_empty_metrics) + len(non_empty_errors) <= 1:
         return []
 
-    browser_name = log_data.get("browser") or "Chrome"
-    os_name = log_data.get("os") or "macOS"
-    device_type = log_data.get("device") or "Desktop"
+    browser_name = log_data.get("browser") or "Unknown"
+    os_name = log_data.get("os") or "Unknown"
+    device_type = log_data.get("device") or "Unknown"
     cid = (
         next((c for c in (qparams.get("cid") or []) if c), "")
         or next((c for c in (qparams.get("rum_cid") or []) if c), "")
@@ -438,8 +453,10 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
         return unquote(val) if isinstance(val, str) and "%" in val else val
 
     raw_body = log_data.get("rum_body")
-    extracted_metrics: list[dict] = []
-    if raw_body:
+    extracted_metrics: list[dict] = extract_metrics_from_compact_beacon(log_data) or []
+    if extracted_metrics:
+        pass
+    elif raw_body:
         try:
             payload = orjson.loads(raw_body)
             if isinstance(payload, str):
@@ -465,11 +482,11 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
                 m_path = _decode_vcl(log_data.get("rum_pathname") or url_pathname_fallback)
             common = _common(
                 (m_path or "/").replace("//", "/"),
-                metric.get("browser") or log_data.get("browser") or "Chrome",
-                metric.get("os") or log_data.get("os") or "macOS",
-                metric.get("device") or log_data.get("device") or "Desktop",
+                metric.get("browser") or log_data.get("browser") or "Unknown",
+                metric.get("os") or log_data.get("os") or "Unknown",
+                metric.get("device") or log_data.get("device") or "Unknown",
                 metric.get("cid") or log_data.get("rum_cid") or log_data.get("cid") or url_cid_fallback or "",
-                req_id_val,
+                metric.get("req_id") or req_id_val,
             )
             _append_rum_row(
                 is_error=bool((metric.get("metric_name") == "exception") or metric.get("error_message")),
@@ -519,9 +536,9 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
         pathname_val = (pathname_val or "/").replace("//", "/")
         common = _common(
             pathname_val,
-            log_data.get("browser") or "Chrome",
-            log_data.get("os") or "macOS",
-            log_data.get("device") or "Desktop",
+            log_data.get("browser") or "Unknown",
+            log_data.get("os") or "Unknown",
+            log_data.get("device") or "Unknown",
             cid_val,
             req_id_val,
         )

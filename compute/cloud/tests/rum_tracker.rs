@@ -351,6 +351,51 @@ fn a_sampled_pageview_reports_client_ttlb_only_for_requests_that_reached_the_edg
 }
 
 #[test]
+fn tracker_detects_browser_os_device_from_user_agent_and_omits_empty() {
+    let scenario = "perf('navigation', [res('https://shop.example/home', 'rid1', { requestStart: 5, responseEnd: 180, transferSize: 1000, startTime: 0, loadEventEnd: 1200 })]); runTimers();";
+    let desktop = urls(&run_with(
+        &rum::Config::default(),
+        None,
+        "navigator.userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0';",
+        scenario,
+    ));
+    assert_eq!(desktop.len(), 1);
+    let q_desktop: std::collections::BTreeMap<String, String> =
+        url::form_urlencoded::parse(desktop[0].split_once('?').unwrap().1.as_bytes())
+            .into_owned()
+            .collect();
+    assert_eq!(q_desktop.get("b").map(String::as_str), Some("Edge"));
+    assert_eq!(q_desktop.get("o").map(String::as_str), Some("Windows"));
+    assert_eq!(q_desktop.get("d").map(String::as_str), Some("Desktop"));
+
+    let mobile = urls(&run_with(
+        &rum::Config::default(),
+        None,
+        "navigator.userAgent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Version/17.0 Mobile/15E148 Safari/604.1';",
+        scenario,
+    ));
+    let q_mobile: std::collections::BTreeMap<String, String> =
+        url::form_urlencoded::parse(mobile[0].split_once('?').unwrap().1.as_bytes())
+            .into_owned()
+            .collect();
+    assert_eq!(q_mobile.get("b").map(String::as_str), Some("Safari"));
+    assert_eq!(q_mobile.get("o").map(String::as_str), Some("iOS"));
+    assert_eq!(q_mobile.get("d").map(String::as_str), Some("Mobile"));
+
+    let empty = urls(&run_with(
+        &rum::Config::default(),
+        None,
+        "navigator.userAgent = '';",
+        scenario,
+    ));
+    let q_empty: std::collections::BTreeMap<String, String> =
+        url::form_urlencoded::parse(empty[0].split_once('?').unwrap().1.as_bytes())
+            .into_owned()
+            .collect();
+    assert!(!q_empty.contains_key("b") && !q_empty.contains_key("o") && !q_empty.contains_key("d"));
+}
+
+#[test]
 fn resource_timing_is_skipped_when_unsampled_or_off_and_capped_per_pageview() {
     let config = rum::Config {
         resource_sample_rate: 0.5,

@@ -49,12 +49,18 @@ import {
   getQueryPresets,
   getQuerySchema,
   planCloudQueryScan,
+  redactQueryRowsForPii,
   type CloudQueryScanPlan,
   type QueryRequest,
 } from "./query";
 import { handleRumRequest, UnsupportedRumFilterError, type RumQueryParams } from "./rum";
 import { rumRollupEligible } from "./rum-rollup";
-import { cloudRumAnalytics, cloudRumLiveEvents, cloudRumUsage } from "./rum-wire";
+import {
+  cloudRumAnalytics,
+  cloudRumLiveEvents,
+  cloudRumRequestLog,
+  cloudRumUsage,
+} from "./rum-wire";
 import { cloudLogFieldsCatalog, cloudSchema } from "./log-fields";
 import { parquetColumns, sampleStats } from "./schema";
 import { isNativeCloudRoute } from "./native-routes";
@@ -1327,8 +1333,11 @@ async function prepareCloudScan(
   assertAdapterEpoch(request, entryMetaEpoch);
   const token = typeof params.session_token === "string" ? openSessionToken(params.session_token) : null;
   const dataset = params.dataset;
-  const rum = /\/rum\//.test(url.pathname) || url.pathname === "/api/usage/rum-breakdown" ||
-    dataset === "client_vitals" || dataset === "client_errors";
+  const rumRequestLog = url.pathname.endsWith("/rum/request-log");
+  const rum = !rumRequestLog && (
+    /\/rum\//.test(url.pathname) || url.pathname === "/api/usage/rum-breakdown" ||
+    dataset === "client_vitals" || dataset === "client_errors"
+  );
   const rawServiceId = url.pathname.match(/^\/api\/services\/([^/]+)\//)?.[1] ??
     params.service_id ?? request.headers.get("x-service-id") ?? token?.svc ?? undefined;
   const decodedServiceId = rawServiceId ? decodeUriStrict(String(rawServiceId)) : undefined;
@@ -1340,7 +1349,10 @@ async function prepareCloudScan(
     catalogLoad = loadCloudCatalog(new Request(catalogUrl, request), entryMetaEpoch);
     catalogLoad.catch(() => {});
   }
-  let end = String(params.end_time ?? params.end ?? params.clamp_end ?? token?.e ?? "");
+  const tsAnchorMs = rumRequestLog && typeof params.timestamp === "string" ? Date.parse(params.timestamp) : NaN;
+  let end = Number.isFinite(tsAnchorMs)
+    ? new Date(tsAnchorMs + 7_200_000).toISOString()
+    : String(params.end_time ?? params.end ?? params.clamp_end ?? token?.e ?? "");
   if (!end) {
     const response = await withLoading("range", () =>
       fetchCloudMetadata("/api/log-extents", request.signal));
@@ -1355,8 +1367,10 @@ async function prepareCloudScan(
   const historyHours = url.pathname.startsWith("/api/insights")
     ? Number(params.window_size_hrs ?? 24) + (insightBaseline ? 0 : Number(params.baseline_hours ?? 168))
     : scoring ? Number(params.since_hours ?? (url.pathname.includes("/sessions/") ? Number(params.since_days ?? 30) * 24 : 24)) : 24;
-  const start = String(params.start_time ?? params.start ?? token?.s ??
-    new Date(Date.parse(end) - historyHours * 3_600_000).toISOString());
+  const start = Number.isFinite(tsAnchorMs)
+    ? new Date(tsAnchorMs - 7_200_000).toISOString()
+    : String(params.start_time ?? params.start ?? token?.s ??
+      new Date(Date.parse(end) - historyHours * 3_600_000).toISOString());
   if (!Number.isFinite(Date.parse(start)) || !Number.isFinite(Date.parse(end)) ||
       Date.parse(start) > Date.parse(end) || !token && Date.parse(start) === Date.parse(end)) {
     throw new Error("Invalid Cloud query time range");
@@ -1407,6 +1421,10 @@ async function prepareCloudScan(
           filter_st: typeof params.filter_st === "string" ? params.filter_st : undefined,
           filter_cid: typeof params.filter_cid === "string" ? params.filter_cid : undefined,
         })
+    : rumRequestLog ? [
+        "timestamp", "ts_ms", "rid", "method", "url", "host", "status", "cache",
+        "pop", "country", "city", "region", "asn", "elapsed", "ttfb", "resp_bytes", "ip", "ua", "proto", "tls",
+      ]
     : /^\/api\/services\/[^/]+\/scoring\/(.+)$/.test(url.pathname)
       ? scoringScanColumns(url.pathname.match(/^\/api\/services\/[^/]+\/scoring\/(.+)$/)?.[1]) : null;
   const detectors = Array.isArray(params.detectors) ? params.detectors as string[] : undefined;
@@ -3081,9 +3099,11 @@ async function dispatchCloudRequest(
     rumServiceMatch ||
     pathname === "/api/rum/analytics" ||
     pathname === "/api/rum/live-events" ||
+    pathname === "/api/rum/request-log" ||
     pathname === "/api/rum/beacon-health"
   ) {
     const params = await parseRequestParams();
+    const { maskIps } = resolveMaskIpsAndRole(params);
     const serviceId = rumServiceMatch
       ? decodeUriStrict(rumServiceMatch[1])
       : String(params.service_id ?? "default");
@@ -3092,8 +3112,15 @@ async function dispatchCloudRequest(
       service_id: serviceId,
       signal: request.signal,
       engine: read,
-    } as RumQueryParams;
+    } as RumQueryParams & { req_id?: string; timestamp?: string };
     try {
+      if (pathname.endsWith("/request-log")) {
+        const res = await cloudRumRequestLog(rumParams);
+        if (res.found && res.request && maskIps) {
+          res.request = redactQueryRowsForPii([res.request], true)[0];
+        }
+        return jsonResponse(res, request);
+      }
       const data = pathname.endsWith("/analytics") ? await cloudRumAnalytics(rumParams)
         : pathname.endsWith("/live-events") ? await cloudRumLiveEvents(rumParams)
         : await handleRumRequest(pathname, rumParams);

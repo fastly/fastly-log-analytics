@@ -70,6 +70,9 @@ pub struct Config {
     pub capture_resources: bool,
     /// Share of page views that report resource timing, in [0.01, 1].
     pub resource_sample_rate: f64,
+    /// Page origins allowed to read cross-host `Server-Timing: rid` headers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub timing_allow_origins: Vec<String>,
 }
 
 impl Default for Config {
@@ -88,6 +91,7 @@ impl Default for Config {
             error_sample_rate: 1.0,
             capture_resources: true,
             resource_sample_rate: 0.1,
+            timing_allow_origins: Vec::new(),
         }
     }
 }
@@ -223,7 +227,81 @@ pub fn validate_config(config: &Config) -> Result<(), String> {
     if !SUPPORTED_FARO_VERSIONS.contains(&config.faro_version.as_str()) {
         return Err("rum.faro_version is unsupported".into());
     }
+    validate_timing_allow_origins(&config.timing_allow_origins)?;
     validate_custom_condition(&config.custom_condition)
+}
+
+pub const MAX_TIMING_ALLOW_ORIGINS: usize = 20;
+
+fn valid_hostname(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 253
+        && !host.contains("..")
+        && host
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_alphanumeric())
+        && host
+            .bytes()
+            .last()
+            .is_some_and(|b| b.is_ascii_alphanumeric())
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+}
+
+pub fn valid_timing_allow_origin(origin: &str) -> bool {
+    let Some(rest) = origin.strip_prefix("https://") else {
+        return false;
+    };
+    if origin.contains("..") {
+        return false;
+    }
+    let host = match rest.rsplit_once(':') {
+        Some((h, port))
+            if !port.is_empty() && port.len() <= 5 && port.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            h
+        }
+        Some(_) => return false,
+        None => rest,
+    };
+    valid_hostname(host)
+}
+
+pub fn validate_timing_allow_origins(origins: &[String]) -> Result<Vec<String>, String> {
+    if origins.len() > MAX_TIMING_ALLOW_ORIGINS {
+        return Err("rum timing_allow_origins must contain at most 20 origins".into());
+    }
+    let mut out = Vec::with_capacity(origins.len());
+    let mut seen = std::collections::BTreeSet::new();
+    for origin in origins {
+        if !valid_timing_allow_origin(origin) {
+            return Err(format!(
+                "rum timing_allow_origins entries must be https://host[:port] origins; got {origin:?}"
+            ));
+        }
+        if seen.insert(origin.clone()) {
+            out.push(origin.clone());
+        }
+    }
+    Ok(out)
+}
+
+pub fn service_timing_origins(domains: &[Value]) -> Vec<String> {
+    let mut hosts: Vec<String> = domains
+        .iter()
+        .filter_map(|d| d["name"].as_str().or_else(|| d.as_str()))
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|h| valid_hostname(h))
+        .collect();
+    hosts.sort();
+    hosts.dedup();
+    hosts
+        .into_iter()
+        .take(MAX_TIMING_ALLOW_ORIGINS)
+        .map(|host| format!("https://{host}"))
+        .collect()
 }
 
 pub fn build_rum_log_condition(custom_condition: &str) -> Result<String, String> {
@@ -430,6 +508,21 @@ pub fn request_timing_vcl() -> &'static str {
     super::templates()["rum_deliver_timing"]
         .as_str()
         .expect("rum_deliver_timing template must exist in templates.json")
+}
+
+/// Extends [`request_timing_vcl`] with `Timing-Allow-Origin` for the service's own hostnames.
+pub fn request_timing_vcl_with_origins(origins: &[String]) -> Result<String, String> {
+    let valid = validate_timing_allow_origins(origins)?;
+    let mut out = request_timing_vcl().to_owned();
+    if !valid.is_empty() {
+        out.push_str(&format!(
+            "\n# Without this the browser hides the request ID and transfer size of cross-host files.\n\
+if (fastly.ff.visits_this_service == 0 && req.url.path != \"/rum-beacon\" && !resp.http.Timing-Allow-Origin) {{\n    \
+set resp.http.Timing-Allow-Origin = \"{}\";\n}}",
+            valid.join(", ")
+        ));
+    }
+    Ok(out)
 }
 
 pub fn validate_service_id(service_id: &str) -> Result<(), String> {
@@ -643,6 +736,27 @@ pub fn generate_rum_tracker_js(_service_id: &str, config: &Config) -> String {
     }}, hidden ? 0 : FLUSH_DELAY_MS);
   }}
 
+  function detectEnv() {{
+    var ua = (typeof navigator !== 'undefined' && navigator.userAgent) || '';
+    var ual = ua.toLowerCase();
+    var uad = (typeof navigator !== 'undefined' && navigator.userAgentData) || null;
+    function has(s) {{ return ua.indexOf(s) !== -1; }}
+    function hasL(s) {{ return ual.indexOf(s) !== -1; }}
+    var b = '';
+    if (has('Edg/')) b = 'Edge';
+    else if (has('Firefox/')) b = 'Firefox';
+    else if (has('Chrome/') && !has('Edg/')) b = 'Chrome';
+    else if (has('Safari/') && !has('Chrome/')) b = 'Safari';
+    var o = '';
+    if (has('iPhone') || has('iPad') || has('iPod')) o = 'iOS';
+    else if (has('Android')) o = 'Android';
+    else if (has('Mac OS X') || has('Macintosh') || (uad && uad.platform === 'macOS')) o = 'macOS';
+    else if (has('Windows') || (uad && uad.platform === 'Windows')) o = 'Windows';
+    else if (has('Linux') || (uad && uad.platform === 'Linux')) o = 'Linux';
+    var d = (hasL('ipad') || hasL('tablet')) ? 'Tablet' : ((uad && uad.mobile) || hasL('mobi') || hasL('android') || hasL('iphone') ? 'Mobile' : (ua || uad ? 'Desktop' : ''));
+    return {{ b: b, o: o, d: d }};
+  }}
+
   function beaconUrls() {{
     var cid = '';
     var cookieMatch = document.cookie.match(/(?:^|; )rum_cid=([^;]+)/);
@@ -653,9 +767,13 @@ pub fn generate_rum_tracker_js(_service_id: &str, config: &Config) -> String {
         cid = cookieMatch[1];
       }}
     }}
+    var env = detectEnv();
     var head = BEACON_ENDPOINT + '?' + (cid ? 'cid=' + enc(cid) + '&' : '') +
       'p=' + enc(batch.path) + '&sr=' + SAMPLE_RATE + '&esr=' + ERROR_SAMPLE_RATE +
-      (RESOURCES_SAMPLED ? '&rsr=' + RESOURCE_SAMPLE_RATE : '');
+      (RESOURCES_SAMPLED ? '&rsr=' + RESOURCE_SAMPLE_RATE : '') +
+      (env.b ? '&b=' + enc(env.b) : '') +
+      (env.o ? '&o=' + enc(env.o) : '') +
+      (env.d ? '&d=' + enc(env.d) : '');
     var urls = [];
     var url = head;
     var openList = '';

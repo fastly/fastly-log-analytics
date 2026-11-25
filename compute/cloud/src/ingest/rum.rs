@@ -233,22 +233,18 @@ fn faro_metrics(payload: &Map<String, Value>, line: &Map<String, Value>) -> Vec<
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    let browser_name = truncate_utf8(
-        first(&browser, &["name"])
-            .or_else(|| first(line, &["browser"]))
-            .unwrap_or_else(|| "Chrome".into()),
-        MAX_BEACON_FIELD_BYTES,
-    );
-    let os_name = truncate_utf8(
-        first(&os, &["name"])
-            .or_else(|| first(line, &["os"]))
-            .unwrap_or_else(|| "macOS".into()),
-        MAX_BEACON_FIELD_BYTES,
-    );
+    let browser_name = first(&browser, &["name"])
+        .or_else(|| first(line, &["browser"]))
+        .map(|b| truncate_utf8(b, MAX_BEACON_FIELD_BYTES));
+    let os_name = first(&os, &["name"])
+        .or_else(|| first(line, &["os"]))
+        .map(|o| truncate_utf8(o, MAX_BEACON_FIELD_BYTES));
     let device = if truthy(browser.get("mobile")).is_some() {
-        "Mobile"
+        Some("Mobile".to_owned())
+    } else if !browser.is_empty() {
+        Some("Desktop".to_owned())
     } else {
-        "Desktop"
+        first(line, &["device"]).map(|d| truncate_utf8(d, MAX_BEACON_FIELD_BYTES))
     };
     let url = first(&page, &["url"])
         .or_else(|| first(line, &["url"]))
@@ -271,9 +267,9 @@ fn faro_metrics(payload: &Map<String, Value>, line: &Map<String, Value>) -> Vec<
         rating: Some(truncate_utf8(rating, MAX_BEACON_FIELD_BYTES)),
         pathname: Some(pathname.clone()),
         cid: Some(cid.clone()),
-        browser: Some(browser_name.clone()),
-        os: Some(os_name.clone()),
-        device: Some(device.to_owned()),
+        browser: browser_name.clone(),
+        os: os_name.clone(),
+        device: device.clone(),
         error: None,
         sample_rate: None,
         req_id: None,
@@ -689,6 +685,15 @@ fn batch_metrics(line: &Map<String, Value>) -> Option<Vec<Metric>> {
             .and_then(|rate| rate.parse::<f64>().ok())
             .filter(|rate| *rate > 0.0 && *rate <= 1.0)
     };
+    let browser = param("b")
+        .filter(|v| !v.is_empty())
+        .map(|v| truncate_utf8(v, MAX_BEACON_FIELD_BYTES));
+    let os = param("o")
+        .filter(|v| !v.is_empty())
+        .map(|v| truncate_utf8(v, MAX_BEACON_FIELD_BYTES));
+    let device = param("d")
+        .filter(|v| !v.is_empty())
+        .map(|v| truncate_utf8(v, MAX_BEACON_FIELD_BYTES));
     let (sample_rate, error_sample_rate) = (rate("sr"), rate("esr"));
     let resource_sample_rate = rate("rsr");
     let entry = |name: String, value: Option<Value>, rating: String| Metric {
@@ -697,6 +702,9 @@ fn batch_metrics(line: &Map<String, Value>) -> Option<Vec<Metric>> {
         rating: Some(rating),
         pathname: Some(pathname.clone()),
         cid: Some(cid.clone()),
+        browser: browser.clone(),
+        os: os.clone(),
+        device: device.clone(),
         sample_rate,
         ..Metric::default()
     };
@@ -947,13 +955,13 @@ fn parse_line(bytes: &[u8], service_id: &str) -> Parsed {
         .unwrap_or_else(|| vec![query_metric(&line)]);
     let line_browser = first(&line, &["browser"])
         .map(|v| truncate_utf8(v, MAX_BEACON_FIELD_BYTES))
-        .unwrap_or_else(|| "Chrome".into());
+        .unwrap_or_else(|| "Unknown".into());
     let line_os = first(&line, &["os"])
         .map(|v| truncate_utf8(v, MAX_BEACON_FIELD_BYTES))
-        .unwrap_or_else(|| "macOS".into());
+        .unwrap_or_else(|| "Unknown".into());
     let line_device = first(&line, &["device"])
         .map(|v| truncate_utf8(v, MAX_BEACON_FIELD_BYTES))
-        .unwrap_or_else(|| "Desktop".into());
+        .unwrap_or_else(|| "Unknown".into());
     let line_req_id = first(&line, &["fastly_req_id"])
         .map(|v| truncate_utf8(v, MAX_BEACON_FIELD_BYTES))
         .unwrap_or_default();

@@ -843,6 +843,8 @@ export function rumWireFromSummary(summary: RumSummary, params: RumQueryParams) 
       },
     },
     worst_pages,
+    slowest_urls: [] as Array<Record<string, unknown>>,
+    slowest_networks: [] as Array<Record<string, unknown>>,
     errors,
     trends: {
       timestamps,
