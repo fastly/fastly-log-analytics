@@ -627,7 +627,7 @@ def provision(cfg: dict, _resume_from_state: bool = False):
                 yield {
                     "type": "status",
                     "message": (
-                        f"⚠ Faro Web SDK upload failed (non-fatal): {faro_exc}. "
+                        f"⚠ Faro Web SDK upload failed (non-fatal): {redact_error_text(faro_exc)}. "
                         "The RUM sync cron will restore the bundle automatically."
                     ),
                 }

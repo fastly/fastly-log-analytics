@@ -1126,7 +1126,7 @@ def provision_reconcile(body: ProvisionReconcileRequest):
                 service_id=body.service_id,
                 token=body.token,
                 dry_run=False,
-                status_cb=lambda msg: events.put({"type": "status", "message": msg}),
+                status_cb=lambda msg: events.put({"type": "status", "message": redact_error_text(msg)}),
             )
             events.put(
                 {

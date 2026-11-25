@@ -1026,3 +1026,74 @@ def test_w2_4d_provision_router_defensively_redacts_stream_and_reconcile_result(
     assert "demopass02" not in out_rec
     assert "/etc/rec_res.conf" not in out_rec
     assert "[redacted]" in out_rec and "<path>" in out_rec
+
+
+def test_w3_1_scrub_ip_text_literal_ipv6_and_at_tab_after_percent_delims() -> None:
+    """Literal-colon IPv6 and IPv4 after percent-encoded delimiters (%3D/%5B/%40/%09) must be scrubbed."""
+    from backend.core.share_db import scrub_ip_text
+
+    full_v6 = scrub_ip_text("https://example.com/?q=ip%3D2001:0db8:85a3:1111:2222:8a2e:0370:7334")
+    assert "7334" not in full_v6 and "2222" not in full_v6
+
+    comp_v6 = scrub_ip_text("https://example.com/?h=%5B2001::8a2e:370:7334%5D")
+    assert "7334" not in comp_v6 and "8a2e" not in comp_v6
+
+    four_hextet = scrub_ip_text("https://example.com/?q=ip%3D2001:db8:85a3:9999::7334")
+    assert "9999" not in four_hextet and "7334" not in four_hextet
+
+    at_v4 = scrub_ip_text("https%3A%2F%2Fuser%40203.0.113.42%2F")
+    assert "203.0.113.42" not in at_v4
+
+    tab_v4 = scrub_ip_text("ip%09203.0.113.42")
+    assert "203.0.113.42" not in tab_v4
+
+
+def test_w3_2_reconcile_status_cb_cli_and_fastly_ops_redact_secrets() -> None:
+    """SSE status callbacks in provision_reconcile, run_with_events, and fastly_ops must redact secrets."""
+    from backend.models.common import ProvisionReconcileRequest
+    from backend.provision.cli import run_with_events
+    from backend.provision.declarative import fastly_ops
+
+    secret_err = (
+        "Failed https://admin:demopass31@fos.internal/b Fastly-Key: demofastly31 /srv/fla/s.json AKIA0000000000000031"
+    )
+
+    # 1) provision_reconcile status_cb redaction
+    def _fake_reconcile(**kwargs):
+        kwargs["status_cb"](f"status {secret_err}")
+        return SimpleNamespace(
+            service_id="svc-w3",
+            activated_version=1,
+            changes_applied={},
+            duration_ms=5,
+            error=None,
+        )
+
+    with (
+        patch.object(provision_mod, "_validate_provision_vcl_inputs"),
+        patch("backend.config.load_config", return_value=None),
+        patch("backend.provision.declarative.reconciler.reconcile_vcl_state", side_effect=_fake_reconcile),
+    ):
+        resp = provision_mod.provision_reconcile(ProvisionReconcileRequest(service_id="svc-w3", token="tok-demo"))
+        out = asyncio.run(_collect_sse(resp))
+    for leaked in ("demopass31", "demofastly31", "/srv/fla/s.json", "AKIA0000000000000031"):
+        assert leaked not in out, f"Leaked {leaked} in provision_reconcile status_cb"
+
+    # 2) cli.run_with_events status message redaction
+    def _emit_status(status_cb=None):
+        if status_cb:
+            status_cb(f"cli status {secret_err}")
+        return "ok"
+
+    cli_events = list(run_with_events(_emit_status, raise_on_error=False))
+    cli_serialized = json.dumps(cli_events)
+    for leaked in ("demopass31", "demofastly31", "/srv/fla/s.json", "AKIA0000000000000031"):
+        assert leaked not in cli_serialized, f"Leaked {leaked} in run_with_events status"
+
+    # 3) fastly_ops._upload_rum_tracker_best_effort and endpoint install status_cb redaction
+    seen: list[str] = []
+    with patch.object(fastly_ops, "upload_rum_tracker_js", side_effect=RuntimeError(secret_err)):
+        fastly_ops._upload_rum_tracker_best_effort("svc-w3", "tok-demo", status_cb=seen.append)
+    joined = "\n".join(seen)
+    for leaked in ("demopass31", "demofastly31", "/srv/fla/s.json", "AKIA0000000000000031"):
+        assert leaked not in joined, f"Leaked {leaked} in fastly_ops._upload_rum_tracker_best_effort"

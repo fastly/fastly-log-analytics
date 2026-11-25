@@ -442,18 +442,17 @@ _UA_PROD_VER_RE = re.compile(
     r"/\d+(?:\.\d+){1,3}\b",
     re.IGNORECASE,
 )
-_EMBEDDED_IPV4_RE = re.compile(
-    r"(?:(?<!\d)|(?<=%(?:2[0-9A-Fa-f]|3[AaBbCcDdEeFf]|5[BbCcDd]|7[BbCcDd])))(?<!\d\.)(?:\d{1,3}\.){3}\d{1,3}(?![\d]|\.\d)"
-)
+_PCT_DELIM_LB = r"(?<=%(?:0[9AaDd]|2[0-9A-Fa-f]|3[AaBbCcDdEeFf]|40|5[BbCcDd]|7[BbCcDd]))"
+_EMBEDDED_IPV4_RE = re.compile(rf"(?:(?<!\d)|{_PCT_DELIM_LB})(?<!\d\.)(?:\d{{1,3}}\.){{3}}\d{{1,3}}(?![\d]|\.\d)")
 _PCT_COLON_RE = re.compile(r"%3[Aa]")
 _PCT_IPV6_TOKEN_RE = re.compile(
-    r"(?:(?<![A-Za-z0-9])|(?<=%(?:2[0-9A-Fa-f]|3[AaBbCcDdEeFf]|5[BbCcDd]|7[BbCcDd])))"
+    rf"(?:(?<![A-Za-z0-9])|{_PCT_DELIM_LB})"
     r"(?:[0-9A-Fa-f]{1,4})?"
     r"(?:%3[Aa](?:[0-9A-Fa-f]{0,4}|(?:\d{1,3}\.){3}\d{1,3})){2,7}"
     r"(?![A-Za-z0-9]|\.\d)"
 )
 _EMBEDDED_IPV6_RE = re.compile(
-    r"(?<![A-Za-z0-9])(?:"
+    rf"(?:(?<![A-Za-z0-9])|{_PCT_DELIM_LB})(?:"
     r"(?:"
     r"(?:[A-Fa-f0-9]{1,4}:){6}(?:\d{1,3}\.){3}\d{1,3}"
     r"|(?:[A-Fa-f0-9]{1,4}:){1,5}:(?:[A-Fa-f0-9]{1,4}:){0,4}(?:\d{1,3}\.){3}\d{1,3}"

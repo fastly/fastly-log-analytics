@@ -145,7 +145,7 @@ def run_with_events(func, *args, raise_on_error: bool = True, **kwargs):
         msg = q.get()
         if msg is None:
             break
-        yield {"type": "status", "message": msg}
+        yield {"type": "status", "message": redact_error_text(msg)}
 
     t.join()
     if err:

@@ -33,6 +33,7 @@ from backend.provision.declarative.vcl_builder import (
     build_rum_log_condition,
     desired_backends,
 )
+from backend.utils.telemetry.logging_config import redact_error_text
 
 fastly_integration: Any = sys.modules[__name__]
 logger = logging.getLogger(__name__)
@@ -143,7 +144,7 @@ def _upload_rum_tracker_best_effort(service_id: str, token: str, status_cb: Call
     except Exception as e:
         logger.warning(f"Failed to upload RUM tracker JS: {e}")
         if status_cb:
-            status_cb(f"⚠️  RUM JS upload warning: {e}")
+            status_cb(f"⚠️  RUM JS upload warning: {redact_error_text(e)}")
 
 
 def _update_local_config(service_id: str, mutate: Callable[[dict[str, Any]], None]) -> None:
@@ -761,7 +762,7 @@ def _apply_diff(
         except Exception as e:
             logger.exception(f"Failed to install/update logging endpoint '{endpoint.name}': {e}")
             if status_cb:
-                status_cb(f"❌ Failed to install logging endpoint '{endpoint.name}': {e}")
+                status_cb(f"❌ Failed to install logging endpoint '{endpoint.name}': {redact_error_text(e)}")
 
 
 def _validate_draft(service_id: str, token: str, draft_version: int) -> str:
