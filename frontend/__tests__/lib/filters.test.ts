@@ -418,6 +418,9 @@ describe('makeCronRunsApplier', () => {
         }),
     })
     const unsub = obs.subscribe(() => {})
+    // MIN_SSE_REFETCH_AGE_MS (2_000) skips invalidation right after setQueryData;
+    // advancing 2_100ms stays well inside staleTime (30_000) so obs remains idle until invalidated.
+    vi.advanceTimersByTime(2_100)
 
     applier.apply({ task: 'log_discovery', status: 'running' })
     vi.advanceTimersByTime(100)

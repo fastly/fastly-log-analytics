@@ -1283,6 +1283,13 @@ class TestDebugEndpoints:
     def _isolated_buffer(self, monkeypatch):
         global _is_remote_flag
         _is_remote_flag = False
+        # Warm the lazy TunnelManager singleton before clearing the ring
+        # buffer: on a cold xdist worker (or after reset_tunnel_manager),
+        # RemoteAccessMiddleware initializes TunnelManager(), which issues
+        # three share_settings queries before recent-sqlite runs.
+        from backend.utils.tunnel import get_tunnel_manager
+
+        get_tunnel_manager()
         statement_profiler.clear()
         monkeypatch.setattr(starlette.datastructures.State, "__getattr__", _mock_state_getattr)
         yield
