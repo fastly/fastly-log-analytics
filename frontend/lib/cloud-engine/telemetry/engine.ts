@@ -77,7 +77,56 @@ export type ReadLogsOptions = {
   to: string;
   signal?: AbortSignal;
   onProgress?: (progress: RunProgress) => void;
+  /**
+   * For `storage_inventory`, read newest files first and stop once the newest complete
+   * snapshot (`snap-<epochSec>-...`) and any overlapping files are loaded.
+   */
+  latestCompleteSnapshotOnly?: boolean;
 };
+
+const SNAPSHOT_ID_TS_RE = /^snap-(\d+)(?:-|$)/;
+const SNAPSHOT_CLOCK_SKEW_MS = 5 * 60_000;
+
+function snapshotRequestedAtMs(snapshotId: string): number | null {
+  const m = SNAPSHOT_ID_TS_RE.exec(snapshotId);
+  if (!m) return null;
+  const sec = Number(m[1]);
+  return Number.isFinite(sec) && sec > 0 ? sec * 1000 : null;
+}
+
+function latestCompleteSnapshotCutoff(
+  rows: readonly Record<string, unknown>[],
+  current: { terminalTs: number; cutoffMs: number } | null = null,
+): { terminalTs: number; cutoffMs: number } | null {
+  let best = current;
+  for (const row of rows) {
+    if (row.complete !== true) continue;
+    const snapshotId =
+      typeof row.snapshot_id === "string" ? row.snapshot_id.trim() : "";
+    if (!snapshotId) continue;
+    const requestedAtMs = snapshotRequestedAtMs(snapshotId);
+    if (requestedAtMs === null) continue;
+    const terminalTs = Number(row.timestamp);
+    if (!Number.isFinite(terminalTs)) continue;
+    if (!best || terminalTs > best.terminalTs) {
+      best = {
+        terminalTs,
+        cutoffMs: Math.min(requestedAtMs, terminalTs) - SNAPSHOT_CLOCK_SKEW_MS,
+      };
+    }
+  }
+  return best;
+}
+
+function manifestFileEndMs(
+  file: ManifestFile,
+  parsed: ParsedKey | null,
+): number {
+  const endMs = Date.parse(file.end);
+  if (Number.isFinite(endMs)) return endMs;
+  if (parsed) return parsed.end * 60_000 + 60_000;
+  return Number.POSITIVE_INFINITY;
+}
 
 type LivePage = {
   rows: Record<string, unknown>[];
@@ -229,13 +278,13 @@ export async function readLogs(
   source: OpsSource,
   kind: OpsKind,
   range: LogsRange,
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; latestCompleteSnapshotOnly?: boolean },
 ): Promise<LogsResult>;
 export async function readLogs(
   source: OpsSource,
   kindOrOptions: OpsKind | ReadLogsOptions,
   rangeArg?: LogsRange,
-  optionsArg: { signal?: AbortSignal } = {},
+  optionsArg: { signal?: AbortSignal; latestCompleteSnapshotOnly?: boolean } = {},
 ): Promise<LogsResult> {
   const kind: OpsKind =
     typeof kindOrOptions === "string" ? kindOrOptions : kindOrOptions.kind;
@@ -246,6 +295,10 @@ export async function readLogs(
   const signal =
     typeof kindOrOptions === "string" ? optionsArg.signal : kindOrOptions.signal;
   const onProgress = typeof kindOrOptions === "string" ? undefined : kindOrOptions.onProgress;
+  const latestCompleteSnapshotOnly =
+    typeof kindOrOptions === "string"
+      ? optionsArg.latestCompleteSnapshotOnly === true
+      : kindOrOptions.latestCompleteSnapshotOnly === true;
   const progress: RunProgress = {
     phase: "cache", cached: 0, toFetch: 0, toDecode: 0, done: 0,
     downloadedBytes: 0, cachedBytes: 0,
@@ -368,32 +421,103 @@ export async function readLogs(
     progress.phase = "files";
     onProgress?.({ ...progress });
   };
-  queueProgress(validCompacts.map(({ file }) => file));
-  await mapLimit(
-    validCompacts,
-    async ({ file, parsed }) => {
-      const rows = await load(file);
-      if (rows.length !== parsed.rows) {
-        stats.ignoredCompact++;
-        return;
-      }
-      fileRows.push(...rows);
-      for (const { file: w } of coveredBy(parsed)) covered.add(w.key);
-    },
-    signal,
-  );
+  if (kind === "storage_inventory" && latestCompleteSnapshotOnly) {
+    type Candidate =
+      | { kind: "compact"; file: ManifestFile; parsed: ParsedKey; endMs: number }
+      | { kind: "window"; file: ManifestFile; parsed: ParsedKey; endMs: number }
+      | { kind: "plain"; file: ManifestFile; parsed: null; endMs: number };
 
-  const rest = [...windows.values()].flat().map(({ file }) => file);
-  const toRead = [...plain, ...rest.filter((file) => !covered.has(file.key))];
-  stats.skippedCovered = rest.length - (toRead.length - plain.length);
-  queueProgress(toRead);
-  await mapLimit(
-    toRead,
-    async (file) => {
-      fileRows.push(...(await load(file)));
-    },
-    signal,
-  );
+    const candidates: Candidate[] = [
+      ...validCompacts.map(({ file, parsed }) => ({
+        kind: "compact" as const,
+        file,
+        parsed,
+        endMs: manifestFileEndMs(file, parsed),
+      })),
+      ...[...windows.values()].flat().map(({ file, parsed }) => ({
+        kind: "window" as const,
+        file,
+        parsed,
+        endMs: manifestFileEndMs(file, parsed),
+      })),
+      ...plain.map((file) => ({
+        kind: "plain" as const,
+        file,
+        parsed: null,
+        endMs: manifestFileEndMs(file, null),
+      })),
+    ].sort((a, b) => {
+      if (b.endMs !== a.endMs) return b.endMs - a.endMs;
+      if (a.kind === b.kind) return b.file.key.localeCompare(a.file.key);
+      return a.kind === "compact" ? -1 : b.kind === "compact" ? 1 : 0;
+    });
+
+    let bestCutoff = latestCompleteSnapshotCutoff(live.rows);
+    let cursor = 0;
+    let waveSize = 1;
+
+    while (cursor < candidates.length) {
+      const wave: Candidate[] = [];
+      const limit = bestCutoff ? Number.POSITIVE_INFINITY : waveSize;
+      while (cursor < candidates.length && wave.length < limit) {
+        const next = candidates[cursor++];
+        if (next.kind === "window" && covered.has(next.file.key)) {
+          stats.skippedCovered++;
+          continue;
+        }
+        if (bestCutoff && next.endMs < bestCutoff.cutoffMs) {
+          break;
+        }
+        wave.push(next);
+      }
+      if (wave.length === 0) break;
+      queueProgress(wave.map((item) => item.file));
+      await mapLimit(
+        wave,
+        async (item) => {
+          const rows = await load(item.file);
+          if (item.kind === "compact") {
+            if (rows.length !== item.parsed.rows) {
+              stats.ignoredCompact++;
+              return;
+            }
+            for (const { file: w } of coveredBy(item.parsed)) covered.add(w.key);
+          }
+          fileRows.push(...rows);
+          bestCutoff = latestCompleteSnapshotCutoff(rows, bestCutoff);
+        },
+        signal,
+      );
+      waveSize = 4;
+    }
+  } else {
+    queueProgress(validCompacts.map(({ file }) => file));
+    await mapLimit(
+      validCompacts,
+      async ({ file, parsed }) => {
+        const rows = await load(file);
+        if (rows.length !== parsed.rows) {
+          stats.ignoredCompact++;
+          return;
+        }
+        fileRows.push(...rows);
+        for (const { file: w } of coveredBy(parsed)) covered.add(w.key);
+      },
+      signal,
+    );
+
+    const rest = [...windows.values()].flat().map(({ file }) => file);
+    const toRead = [...plain, ...rest.filter((file) => !covered.has(file.key))];
+    stats.skippedCovered = rest.length - (toRead.length - plain.length);
+    queueProgress(toRead);
+    await mapLimit(
+      toRead,
+      async (file) => {
+        fileRows.push(...(await load(file)));
+      },
+      signal,
+    );
+  }
 
   progress.phase = "aggregate";
   onProgress?.({ ...progress });

@@ -131,7 +131,7 @@ describe("Cloud /usage ops deduplication and memoization", () => {
     const to = FLOOR_NOW;
     const first = await fetchUsageSummary({ from, to });
     const jobsAfterFirst = MockWorker.instances[0].jobs().length;
-    expect(jobsAfterFirst).toBe(4);
+    expect(jobsAfterFirst).toBe(3);
 
     // Sequential call for the same range reuses the memoized summary with zero new reads.
     const second = await fetchUsageSummary({ from, to });
@@ -195,11 +195,10 @@ describe("Cloud /usage ops deduplication and memoization", () => {
       return acc;
     }, {});
 
-    // Each ops dataset is read at most once across the entire wave!
+    // Each active ops dataset is read at most once across the entire wave (retired cron_ticks is skipped).
     expect(byKind).toEqual({
       cron_runs: 1,
       api_telemetry: 1,
-      cron_ticks: 1,
       storage_inventory: 1,
       fos_usage: 1,
       ingest_files: 1,
@@ -214,7 +213,7 @@ describe("Cloud /usage ops deduplication and memoization", () => {
       u.includes("/api/admin/usage/compute-billing"),
     ).length;
     expect(billingCountAfter).toBe(billingCountBefore);
-    expect(MockWorker.instances[0].jobs()).toHaveLength(6);
+    expect(MockWorker.instances[0].jobs()).toHaveLength(5);
   });
 
   it("covers useLastSync 1h cron_runs from 24h fetchUsageSummary without eager 7d prefill", async () => {
@@ -261,7 +260,6 @@ describe("Cloud /usage ops deduplication and memoization", () => {
     expect(byKind).toEqual({
       cron_runs: 1,
       api_telemetry: 1,
-      cron_ticks: 1,
       storage_inventory: 1,
       fos_usage: 1,
       ingest_files: 1,
@@ -271,5 +269,46 @@ describe("Cloud /usage ops deduplication and memoization", () => {
     const cronSpanHours = (Date.parse(cronJob.to) - Date.parse(cronJob.from)) / 3_600_000;
     expect(cronSpanHours).toBeGreaterThanOrEqual(24);
     expect(cronSpanHours).toBeLessThan(25);
+  });
+
+  it("coalesces 31d storageBillingIntervals fos_usage with 24h fetchUsageSummary via real fetchUsageSettings", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({
+          enabled: true,
+          retention_days: 30,
+          min_billed_days: 30,
+          class_a_rate_per_1k: 0.0025,
+          class_b_rate_per_10k: 0.004,
+          cdn_egress_rate_per_gb: 0.12,
+          storage_rate_per_gb_month: 0.02,
+        }),
+      ),
+    );
+
+    const { fetchUsageSettings, fetchUsageKindWithCoverage } = await import("./summary");
+    const dayFrom = FLOOR_NOW - 86_400_000;
+    const deletionFrom = dayFrom - 30 * 86_400_000;
+
+    // Mirror adapter.ts: storageBillingIntervals awaits fetchUsageSettings() (2 awaits),
+    // while fetchUsageSummary starts synchronously right after it.
+    const storageBillingFos = (async () => {
+      await fetchUsageSettings();
+      return fetchUsageKindWithCoverage("fos_usage", {
+        from: deletionFrom,
+        to: FLOOR_NOW,
+      });
+    })();
+    const summary = fetchUsageSummary({ from: dayFrom, to: FLOOR_NOW });
+
+    await Promise.all([storageBillingFos, summary]);
+
+    const fosJobs = MockWorker.instances[0]
+      .jobs()
+      .filter((job) => job.kind === "fos_usage");
+    expect(fosJobs).toHaveLength(1);
+    expect(Date.parse(fosJobs[0].from)).toBe(deletionFrom);
+    expect(Date.parse(fosJobs[0].to)).toBe(FLOOR_NOW);
   });
 });

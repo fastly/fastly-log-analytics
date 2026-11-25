@@ -563,4 +563,40 @@ describe("readLogs request sharing", () => {
       role: "analyst-no-pii",
     });
   });
+
+  it("does not coalesce latestCompleteSnapshotOnly reads with full storage_inventory reads", async () => {
+    const { readLogs } = await load();
+    const p1 = readLogs("storage_inventory", range, {
+      latestCompleteSnapshotOnly: true,
+    });
+    const p2 = readLogs("storage_inventory", range);
+    const w = MockWorker.instances[0];
+    expect(w.jobs()).toHaveLength(2);
+    expect(
+      (w.jobs()[0].options as { latestCompleteSnapshotOnly?: boolean })
+        .latestCompleteSnapshotOnly,
+    ).toBe(true);
+    expect(
+      (w.jobs()[1].options as { latestCompleteSnapshotOnly?: boolean })
+        .latestCompleteSnapshotOnly,
+    ).toBeUndefined();
+    const emptyResult = {
+      rows: [],
+      stats: {
+        listed: 0,
+        read: 0,
+        cached: 0,
+        cdnHits: 0,
+        skippedCovered: 0,
+        ignoredCompact: 0,
+        evicted: 0,
+        liveRows: 0,
+      },
+      liveStatus: null,
+      liveTruncated: false,
+    };
+    w.emit({ id: w.jobs()[0].id, type: "result", result: emptyResult });
+    w.emit({ id: w.jobs()[1].id, type: "result", result: emptyResult });
+    await Promise.all([p1, p2]);
+  });
 });

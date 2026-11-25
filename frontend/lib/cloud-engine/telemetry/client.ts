@@ -323,6 +323,7 @@ function startOpsRead(
   identity: OpsIdentity,
   signal: AbortSignal | undefined,
   onProgress: ((progress: RunProgress) => void) | undefined,
+  latestCompleteSnapshotOnly: boolean | undefined,
 ): Promise<LogsResult> {
   const controller = new AbortController();
   const waiters = new Set<Waiter>();
@@ -344,6 +345,9 @@ function startOpsRead(
         from,
         to,
         signal: controller.signal,
+        ...(latestCompleteSnapshotOnly
+          ? { latestCompleteSnapshotOnly: true }
+          : {}),
         onProgress: (progress) => {
           for (const waiter of waiters) {
             waiter.onProgress?.(progress);
@@ -388,7 +392,14 @@ function startOpsRead(
 // (e.g. 30d storage billing, 7d prefill, 24h summary, 1h last-sync); share one
 // read when an in-flight or recently settled read covers the requested window.
 async function sharedRead(
-  { kind, from, to, signal, onProgress }: ReadLogsOptions,
+  {
+    kind,
+    from,
+    to,
+    signal,
+    onProgress,
+    latestCompleteSnapshotOnly,
+  }: ReadLogsOptions,
   scope: { user?: string; role?: string } = {},
 ): Promise<LogsResult> {
   if (signal?.aborted) throw abortError();
@@ -402,6 +413,7 @@ async function sharedRead(
     dashboardCacheIdentity(),
     getPageLoadId(),
     startEpoch,
+    Boolean(latestCompleteSnapshotOnly),
   ]);
   const fromMs = Date.parse(from);
   const toMs = Date.parse(to);
@@ -429,6 +441,7 @@ async function sharedRead(
         identity,
         signal,
         onProgress,
+        latestCompleteSnapshotOnly,
       );
     }
     return isStrictSubset
@@ -447,6 +460,7 @@ async function sharedRead(
     identity,
     signal,
     onProgress,
+    latestCompleteSnapshotOnly,
   );
 }
 
@@ -454,12 +468,22 @@ export function readLogs(options: ReadLogsOptions): Promise<LogsResult>;
 export function readLogs(
   kind: OpsKind,
   range: LogsRange,
-  options?: { user?: string; role?: string; signal?: AbortSignal },
+  options?: {
+    user?: string;
+    role?: string;
+    signal?: AbortSignal;
+    latestCompleteSnapshotOnly?: boolean;
+  },
 ): Promise<LogsResult>;
 export function readLogs(
   kindOrOptions: OpsKind | ReadLogsOptions,
   range?: LogsRange,
-  options?: { user?: string; role?: string; signal?: AbortSignal },
+  options?: {
+    user?: string;
+    role?: string;
+    signal?: AbortSignal;
+    latestCompleteSnapshotOnly?: boolean;
+  },
 ): Promise<LogsResult> {
   if (typeof kindOrOptions === "string") {
     return sharedRead(
@@ -468,6 +492,7 @@ export function readLogs(
         from: range!.from,
         to: range!.to,
         signal: options?.signal,
+        latestCompleteSnapshotOnly: options?.latestCompleteSnapshotOnly,
       },
       { user: options?.user, role: options?.role },
     );

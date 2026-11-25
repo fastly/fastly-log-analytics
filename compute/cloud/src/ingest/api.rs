@@ -445,12 +445,18 @@ pub fn files<R: Runtime>(runtime: &R, service: &Service, query: &str, started: I
         dataset == "request" && param("summaries") == Some("1") && param("cursor").is_none();
     let store = open(runtime, service, started)?;
     if !compacted(dataset) {
+        let mut combined = Vec::new();
+        let mut remaining_calls = runtime
+            .admin_remaining_calls()
+            .saturating_sub(2)
+            .min(MAX_LIST_CALLS);
         loop {
             let table_root = match table {
                 Some(table) => format!("{root}{table}/"),
                 None => root.clone(),
             };
-            let mut page = hour_files(
+            let room = FILES_PAGE.saturating_sub(combined.len());
+            let (mut page, used) = hour_files(
                 &store,
                 &table_root,
                 (dataset, table),
@@ -458,19 +464,28 @@ pub fn files<R: Runtime>(runtime: &R, service: &Service, query: &str, started: I
                 (day, after.take()),
                 secret.as_bytes(),
                 include_summaries,
+                room,
+                remaining_calls,
             )?;
+            remaining_calls = remaining_calls.saturating_sub(used);
+            if let Some(files) = page["files"].as_array_mut() {
+                combined.append(files);
+            }
             let next_table = table.and_then(|table| {
                 let at = RUM_TABLES.iter().position(|t| *t == table)?;
                 RUM_TABLES.get(at + 1).copied()
             });
             let Some(next) = next_table.filter(|_| page["complete"] == true) else {
+                page["files"] = Value::Array(combined);
                 return Ok(page);
             };
-            // An empty finished table rolls straight into the next one, so no page is empty.
-            if page["files"].as_array().is_some_and(Vec::is_empty) {
+            // Continue into the next table on the same page whenever we still have
+            // room under FILES_PAGE and list budget remaining (or when nothing was collected yet).
+            if combined.is_empty() || (combined.len() < FILES_PAGE && remaining_calls > 0) {
                 (table, day) = (Some(next), 0);
                 continue;
             }
+            page["files"] = Value::Array(combined);
             page["complete"] = false.into();
             page["next_cursor"] = encode_cursor(
                 secret.as_bytes(),
@@ -603,7 +618,9 @@ fn hour_files<R: Runtime>(
     (mut day, mut after): (usize, Option<String>),
     secret: &[u8],
     include_summaries: bool,
-) -> Api {
+    limit: usize,
+    max_calls: u32,
+) -> Result<(Value, u32), Failure> {
     let runtime = store.runtime;
     // A window can start in the hour before `from` and still overlap it.
     let first_day = day_start(from - 3600);
@@ -612,7 +629,7 @@ fn hour_files<R: Runtime>(
     let mut calls = runtime
         .admin_remaining_calls()
         .saturating_sub(2)
-        .min(MAX_LIST_CALLS);
+        .min(max_calls);
     let first_hour = (from - 3600) - (from - 3600).rem_euclid(3600);
     let mut lister = super::listing::Lister::new(
         store,
@@ -667,7 +684,7 @@ fn hour_files<R: Runtime>(
             if hour_mark.is_none_or(|(h, _)| Some(h) != hour) {
                 hour_mark = hour.map(|h| (h, Some(files.len())));
             }
-            if files.len() == FILES_PAGE {
+            if files.len() == limit {
                 full = true;
                 next = Some(match hour_mark {
                     Some((h, Some(mark))) if mark > 0 => {
@@ -707,7 +724,7 @@ fn hour_files<R: Runtime>(
                 }
             }
         }
-        full |= files.len() == FILES_PAGE;
+        full |= files.len() == limit;
         match next {
             Some(next) => after = Some(next),
             None => day += 1,
@@ -742,7 +759,7 @@ fn hour_files<R: Runtime>(
             page["summary_semantics"] = summary_semantics();
         }
     }
-    Ok(page)
+    Ok((page, used))
 }
 
 fn inline_summary_files<R: Runtime>(

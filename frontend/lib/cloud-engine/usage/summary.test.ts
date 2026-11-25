@@ -901,7 +901,6 @@ describe("fetchUsageInput", () => {
     expect(read.mock.calls.map(([kind]) => kind).sort()).toEqual([
       "api_telemetry",
       "cron_runs",
-      "cron_ticks",
       "fos_usage",
     ]);
     const [, range, options] = read.mock.calls[0];
@@ -987,15 +986,34 @@ describe("fetchUsageInput", () => {
       1,
       identity,
       reader({
-        cron_ticks: [
-          { timestamp: now - 1000, ticks_count: null, vcpu_ms: 5 },
-          { timestamp: now - 3 * 86_400_000, ticks_count: 9, vcpu_ms: 9 },
+        api_telemetry: [
+          {
+            timestamp: now - 1000,
+            source: "compute_api",
+            path: "/api/files",
+            vcpu_ms: 5,
+            files_fetched: null,
+          },
+          {
+            timestamp: now - 3 * 86_400_000,
+            source: "compute_api",
+            path: "/api/files",
+            vcpu_ms: 9,
+            files_fetched: 1,
+          },
         ],
       }),
     );
-    expect(input.rows.cron_ticks).toEqual([
-      { timestamp: now - 1000, ticks_count: 0, vcpu_ms: 5 },
+    expect(input.rows.api_telemetry).toEqual([
+      {
+        timestamp: now - 1000,
+        source: "compute_api",
+        path: "/api/files",
+        vcpu_ms: 5,
+        files_fetched: undefined,
+      },
     ]);
+    expect(input.rows.cron_ticks).toEqual([]);
   });
 
   it.each([

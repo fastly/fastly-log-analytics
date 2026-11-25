@@ -570,6 +570,41 @@ fn rum_file_listing_pages_through_both_rum_tables() {
 }
 
 #[test]
+fn rum_file_listing_combines_both_tables_in_one_page_when_under_limit() {
+    let fake = Fake::new(BASE);
+    let hour = BASE - BASE.rem_euclid(3600);
+    let mut expected = std::collections::BTreeSet::new();
+    for (table, count) in [("client_errors", 3), ("client_vitals", 4)] {
+        for i in 0..count {
+            let key = ingest::processed_key(
+                &format!("processed/rum/{table}/"),
+                hour,
+                hour + 60,
+                &format!("source{i:04}"),
+                1,
+            );
+            fake.bucket.borrow_mut().insert(key.clone(), vec![1, 2, 3]);
+            expected.insert(key);
+        }
+    }
+    let query = format!(
+        "from={}&to={}&dataset=rum",
+        iso_url(hour),
+        iso_url(hour + 3600)
+    );
+    let page = files_page(&fake, &query).unwrap();
+    assert_eq!(page["complete"], true, "both RUM tables should fit in one page");
+    assert!(page["next_cursor"].is_null());
+    let listed: std::collections::BTreeSet<String> = page["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["key"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(listed, expected);
+}
+
+#[test]
 fn storage_tree_can_list_the_ops_and_rum_roots() {
     let fake = Fake::new(BASE);
     put_processed(&fake, "processed/ops/cron_ticks/", BASE, "1-2-a-n1");

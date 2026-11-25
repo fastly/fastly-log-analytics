@@ -102,7 +102,7 @@ export async function fetchCloudStorageInventory(
         from: new Date(now - lookbackDays * DAY_MS).toISOString(),
         to: new Date(now).toISOString(),
       },
-      { ...identity, signal },
+      { ...identity, signal, latestCompleteSnapshotOnly: true },
     );
     assertOpsEpoch(startOpsEpoch, signal);
     if (dashboardCacheIdentity() !== scope) {
@@ -1748,7 +1748,12 @@ type UsageReadKind = UsageKind | "ingest_files" | "storage_inventory";
 export type UsageLogReader = (
   kind: UsageReadKind,
   range: LogsRange,
-  options: { user: string; role: string; signal?: AbortSignal },
+  options: {
+    user: string;
+    role: string;
+    signal?: AbortSignal;
+    latestCompleteSnapshotOnly?: boolean;
+  },
 ) => Promise<{
   rows: Record<string, unknown>[];
   liveTruncated?: boolean;
@@ -1912,14 +1917,23 @@ export async function fetchUsageInput(
           to: new Date(Math.ceil(wallNow / 60_000) * 60_000).toISOString(),
         }
       : range;
-  const settingsPromise = readUsageLogging(signal);
+  const ACTIVE_USAGE_KINDS = [
+    "fos_usage",
+    "api_telemetry",
+    "cron_runs",
+  ] as const;
+  const settingsPromise = fetchUsageSettings(signal);
+  // Yield one extra microtask after fetchUsageSettings resolves so a concurrent
+  // storageBillingIntervals call (which awaits fetchUsageSettings before reading 30d
+  // fos_usage) registers its wider fos_usage read first and this 24h read slices from it.
+  const afterStorageBilling = settingsPromise.then(async () => {
+    await Promise.resolve();
+  });
   const [settings, ...results] = await Promise.all([
     settingsPromise,
-    ...USAGE_KINDS.map((kind) =>
-      // Defer fos_usage until settings resolves so a concurrent storageBillingIntervals
-      // call registers the wider 30-day fos_usage read first and this read slices from it.
+    ...ACTIVE_USAGE_KINDS.map((kind) =>
       kind === "fos_usage"
-        ? settingsPromise.then(() =>
+        ? afterStorageBilling.then(() =>
             read(kind, range, { ...resolvedIdentity, signal }),
           )
         : read(kind, kind === "cron_runs" ? cronRunsRange : range, {
@@ -1929,23 +1943,29 @@ export async function fetchUsageInput(
     ),
   ]);
   assertOpsEpoch(startOpsEpoch, signal);
-  const raw = Object.fromEntries(
-    USAGE_KINDS.map((kind, index) => [
-      kind,
-      results[index].rows.filter((row) => {
-        const at = Number(row.timestamp ?? row.started_at);
-        return !Number.isFinite(at) || (at >= from && at <= now);
-      }),
-    ]),
-  ) as Record<UsageKind, Record<string, unknown>[]>;
+  const raw = {
+    fos_usage: results[0].rows.filter((row) => {
+      const at = Number(row.timestamp ?? row.started_at);
+      return !Number.isFinite(at) || (at >= from && at <= now);
+    }),
+    api_telemetry: results[1].rows.filter((row) => {
+      const at = Number(row.timestamp ?? row.started_at);
+      return !Number.isFinite(at) || (at >= from && at <= now);
+    }),
+    cron_runs: results[2].rows.filter((row) => {
+      const at = Number(row.timestamp ?? row.started_at);
+      return !Number.isFinite(at) || (at >= from && at <= now);
+    }),
+    // cron_ticks is retired in compute/cloud; idle ticks are folded into cron_runs.
+    cron_ticks: [],
+  } as Record<UsageKind, Record<string, unknown>[]>;
   return {
     now,
     days,
-    settings: parseSettings(settings),
+    settings,
     rows: parseRows(raw),
     telemetryCoverage: {
-      fos_usage:
-        parseSettings(settings).enabled && results[0].liveTruncated === false,
+      fos_usage: settings.enabled && results[0].liveTruncated === false,
     },
     counters: { kv_ops: null, cache_replaces: null, purges: null },
   };

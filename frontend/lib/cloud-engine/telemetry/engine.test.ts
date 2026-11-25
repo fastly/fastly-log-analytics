@@ -13,7 +13,13 @@ const windowKey = (hour: number, start: number, n: number, txn = "ab12") =>
 const compactKey = (a: number, b: number, c: number, n: number) =>
   `${DIR}compact=${a}-${b}-c${c}-n${n}.parquet`;
 
-type Row = { timestamp: number; event_id: string; op?: string };
+type Row = {
+  timestamp: number;
+  event_id: string;
+  op?: string;
+  snapshot_id?: string;
+  complete?: boolean;
+};
 const row = (offsetMin: number, id: string): Row => ({
   timestamp: DAY_MS + 10 * 3_600_000 + offsetMin * 60_000,
   event_id: id,
@@ -58,7 +64,9 @@ function source(opts: {
     async fetchJson(url) {
       log.json.push(url);
       const params = new URL(url, "http://x").searchParams;
-      const index = params.get("cursor") ? Number(params.get("cursor")) : 0;
+      const cursor = params.get("cursor");
+      const parsedCursor = cursor !== null ? Number(cursor) : 0;
+      const index = Number.isFinite(parsedCursor) ? parsedCursor : 0;
       if (url.startsWith("/api/logs/")) return opts.live![index];
       return { ...opts.manifest![index], complete: true };
     },
@@ -412,5 +420,132 @@ describe("tagged compact files (Rust parity)", () => {
     });
     await readLogs(src, "fos_usage", range);
     expect(log.evicted).toEqual([gone]);
+  });
+
+  it("stops downloading older storage_inventory snapshots once the latest complete snapshot is covered", async () => {
+    const baseMs = Date.parse("2026-10-30T00:00:00.000Z");
+    const snap1StartSec = Math.floor((baseMs + 2 * 3_600_000) / 1000);
+    const snap2StartSec = Math.floor((baseMs + 8 * 3_600_000) / 1000);
+    const snap3StartSec = Math.floor((baseMs + 14 * 3_600_000) / 1000);
+    const invKey = (hour: number, min: number) =>
+      `processed/ops/storage_inventory/year=2026/month=10/day=30/hour=${String(hour).padStart(2, "0")}/window=${Math.floor((baseMs + hour * 3_600_000 + min * 60_000) / 60_000)}-${Math.floor((baseMs + hour * 3_600_000 + (min + 4) * 60_000) / 60_000)}-ab12-n2.parquet`;
+    const k1 = invKey(2, 0);
+    const k2 = invKey(8, 0);
+    const k3a = invKey(14, 0);
+    const k3b = invKey(14, 5);
+    const invEntry = (key: string, startMs: number, endMs: number) => ({
+      key,
+      start: new Date(startMs).toISOString(),
+      end: new Date(endMs).toISOString(),
+      size: 100,
+      rows: 2,
+    });
+    const invRange = {
+      from: "2026-10-30T00:00:00.000Z",
+      to: "2026-10-30T23:59:59.000Z",
+    };
+    const inventoryParquet = (
+      rows: {
+        timestamp: number;
+        event_id: string;
+        snapshot_id: string;
+        complete: boolean;
+      }[],
+    ) =>
+      parquetWriteBuffer({
+        columnData: [
+          {
+            name: "timestamp",
+            type: "TIMESTAMP",
+            data: rows.map((r) => new Date(r.timestamp)),
+          },
+          { name: "event_id", type: "STRING", data: rows.map((r) => r.event_id) },
+          { name: "snapshot_id", type: "STRING", data: rows.map((r) => r.snapshot_id) },
+          { name: "complete", type: "BOOLEAN", data: rows.map((r) => r.complete) },
+        ],
+        codec: "SNAPPY",
+      });
+    const { src, log } = source({
+      live: noLive,
+      manifest: [
+        {
+          files: [
+            invEntry(k1, baseMs + 2 * 3_600_000, baseMs + 2 * 3_600_000 + 240_000),
+            invEntry(k2, baseMs + 8 * 3_600_000, baseMs + 8 * 3_600_000 + 240_000),
+            invEntry(k3a, baseMs + 14 * 3_600_000, baseMs + 14 * 3_600_000 + 240_000),
+            invEntry(k3b, baseMs + 14 * 3_600_000 + 300_000, baseMs + 14 * 3_600_000 + 540_000),
+          ],
+          next_cursor: null,
+        },
+      ],
+      files: {
+        [k1]: inventoryParquet([
+          { event_id: "s1-obj", timestamp: snap1StartSec * 1000, snapshot_id: `snap-${snap1StartSec}-aaaa`, complete: false },
+          { event_id: "s1-done", timestamp: snap1StartSec * 1000 + 1000, snapshot_id: `snap-${snap1StartSec}-aaaa`, complete: true },
+        ]),
+        [k2]: inventoryParquet([
+          { event_id: "s2-obj", timestamp: snap2StartSec * 1000, snapshot_id: `snap-${snap2StartSec}-bbbb`, complete: false },
+          { event_id: "s2-done", timestamp: snap2StartSec * 1000 + 1000, snapshot_id: `snap-${snap2StartSec}-bbbb`, complete: true },
+        ]),
+        [k3a]: inventoryParquet([
+          { event_id: "s3-obj1", timestamp: snap3StartSec * 1000, snapshot_id: `snap-${snap3StartSec}-cccc`, complete: false },
+        ]),
+        [k3b]: inventoryParquet([
+          { event_id: "s3-obj2", timestamp: snap3StartSec * 1000 + 300_000, snapshot_id: `snap-${snap3StartSec}-cccc`, complete: false },
+          { event_id: "s3-done", timestamp: snap3StartSec * 1000 + 301_000, snapshot_id: `snap-${snap3StartSec}-cccc`, complete: true },
+        ]),
+      },
+    });
+
+    const result = await readLogs(src, {
+      kind: "storage_inventory",
+      ...invRange,
+      latestCompleteSnapshotOnly: true,
+    });
+    // Must read k3b (newest) and k3a (overlaps snap3's requested_at), and skip k1 and k2!
+    expect([...log.files].sort()).toEqual([k3a, k3b].sort());
+    expect(result.rows.map((r) => r.event_id).sort()).toEqual(["s3-done", "s3-obj1", "s3-obj2"]);
+  });
+
+  it("skips all storage_inventory parquet files when live already contains the latest complete snapshot", async () => {
+    const baseMs = Date.parse("2026-10-30T00:00:00.000Z");
+    const snap1StartSec = Math.floor((baseMs + 2 * 3_600_000) / 1000);
+    const snapLiveStartSec = Math.floor((baseMs + 14 * 3_600_000) / 1000);
+    const k1 = `processed/ops/storage_inventory/year=2026/month=10/day=30/hour=02/window=${Math.floor(snap1StartSec / 60)}-${Math.floor(snap1StartSec / 60) + 4}-ab12-n2.parquet`;
+    const { src, log } = source({
+      live: [
+        {
+          rows: [
+            { event_id: "live-obj", timestamp: snapLiveStartSec * 1000, snapshot_id: `snap-${snapLiveStartSec}-live`, complete: false },
+            { event_id: "live-done", timestamp: snapLiveStartSec * 1000 + 1000, snapshot_id: `snap-${snapLiveStartSec}-live`, complete: true },
+          ],
+          next_cursor: null,
+        },
+      ],
+      manifest: [
+        {
+          files: [
+            {
+              key: k1,
+              start: new Date(baseMs + 2 * 3_600_000).toISOString(),
+              end: new Date(baseMs + 2 * 3_600_000 + 240_000).toISOString(),
+              size: 100,
+              rows: 2,
+            },
+          ],
+          next_cursor: null,
+        },
+      ],
+      files: {},
+    });
+
+    const result = await readLogs(src, {
+      kind: "storage_inventory",
+      from: "2026-10-30T00:00:00.000Z",
+      to: "2026-10-30T23:59:59.000Z",
+      latestCompleteSnapshotOnly: true,
+    });
+    expect(log.files).toEqual([]);
+    expect(result.rows.map((r) => r.event_id).sort()).toEqual(["live-done", "live-obj"]);
   });
 });
