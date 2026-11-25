@@ -129,6 +129,7 @@ export async function queryValueSummary(params: ValueQueryParams = {}): Promise<
   const needP99 = want("performance");
   const needShield = want("caching") || want("io");
   const needWaf = want("overview") || want("security");
+  const needWafDetail = want("security");
   const needBots = want("bots");
   const needNet = want("network");
   const needIo = want("io");
@@ -153,8 +154,11 @@ export async function queryValueSummary(params: ValueQueryParams = {}): Promise<
       `COALESCE(NULLIF(waf_action, ''), NULLIF(ngwaf_decision, '')) AS waf_decision`,
       `waf AS waf_flag`,
       `waf_resp AS waf_resp_code`,
-      `NULLIF(waf_sig, '') AS waf_signals`,
-      `CASE WHEN NULLIF(waf_sig, '') IS NOT NULL THEN
+    );
+    if (needWafDetail) {
+      normCols.push(
+        `NULLIF(waf_sig, '') AS waf_signals`,
+        `CASE WHEN NULLIF(waf_sig, '') IS NOT NULL THEN
         len(list_filter(
           regexp_split_to_array(LOWER(TRIM(CAST(waf_sig AS VARCHAR))), '[,[:space:]]+'),
           t -> t != '' AND NOT regexp_matches(
@@ -163,7 +167,8 @@ export async function queryValueSummary(params: ValueQueryParams = {}): Promise<
           )
         )) > 0
       ELSE FALSE END AS has_attack_waf_sig`,
-    );
+      );
+    }
   }
   if (needBots) {
     normCols.push(
@@ -225,15 +230,19 @@ export async function queryValueSummary(params: ValueQueryParams = {}): Promise<
         WHEN waf_decision IS NOT NULL THEN UPPER(waf_decision) IN ('BLOCK', 'BLOCKED', 'DENY')
         ELSE waf_flag IS TRUE AND waf_resp_code = 406
       END) AS blocked`,
-      `COUNT(*) FILTER (WHERE CASE
+    );
+    if (needWafDetail) {
+      aggCols.push(
+        `COUNT(*) FILTER (WHERE CASE
         WHEN waf_decision IS NOT NULL THEN UPPER(waf_decision) IN ('LOG', 'LOGGED')
         ELSE waf_flag IS TRUE AND COALESCE(waf_resp_code, 0) != 406 AND has_attack_waf_sig
       END) AS logged`,
-      `COUNT(*) FILTER (WHERE CASE
+        `COUNT(*) FILTER (WHERE CASE
         WHEN waf_decision IS NOT NULL THEN UPPER(waf_decision) IN ('ALLOW', 'ALLOWED', 'PASS', 'PASSED')
         ELSE waf_flag IS TRUE AND waf_resp_code = 200 AND NOT has_attack_waf_sig
       END) AS passed`,
-    );
+      );
+    }
   }
   if (needBots) {
     aggCols.push(

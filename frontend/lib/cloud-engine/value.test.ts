@@ -239,4 +239,44 @@ describe("Feature F22 — Fastly Value cloud-engine", () => {
       await engine.reset();
     }
   });
+
+  it("scans once and skips waf_sig regexes when requesting summary sections without security", async () => {
+    const engine = new DuckDBAnalyticalEngine();
+    const sqls: string[] = [];
+    const spyEngine = {
+      executeSql: <T extends Record<string, unknown>>(sql: string, params?: unknown[], signal?: AbortSignal) => {
+        sqls.push(sql);
+        return engine.executeSql<T>(sql, params, signal);
+      },
+    } as unknown as DuckDBAnalyticalEngine;
+    try {
+      await engine.executeSql(`
+        INSERT INTO requests (
+          scoped_key, ts_ms, "timestamp", cache, resp_bytes, elapsed, proto, is_ssl, is_ipv6, waf, waf_resp
+        ) VALUES
+          ('sum', 1700000000000, epoch_ms(1700000000000), 'HIT', 200, 10000, 'HTTP/3', TRUE, TRUE, TRUE, 406),
+          ('sum', 1700000001000, epoch_ms(1700000001000), 'HIT', 100, 20000, 'HTTP/2', TRUE, FALSE, FALSE, 200)
+      `);
+      const res = await queryValueSummary({
+        engine: spyEngine,
+        start_time: "2023-11-14T22:00:00Z",
+        end_time: "2023-11-14T23:00:00Z",
+        sections: ["overview", "caching", "network"],
+        filters: { cache: { mode: "include", values: ["HIT"] } },
+      });
+      const dataScans = sqls.filter((sql) => !sql.startsWith("DESCRIBE "));
+      expect(dataScans).toHaveLength(1);
+      expect(dataScans[0]).not.toContain("regexp_matches");
+      expect(dataScans[0]).not.toContain("waf_sig");
+      expect(res.overview).toMatchObject({
+        total_requests: 2,
+        total_bandwidth_bytes: 300,
+        edge_hit_requests: 2,
+        origin_requests: 0,
+        threats_blocked: 1,
+      });
+    } finally {
+      await engine.reset();
+    }
+  });
 });

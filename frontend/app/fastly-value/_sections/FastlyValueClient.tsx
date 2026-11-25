@@ -49,10 +49,12 @@ function FastlyValueBody({ startTime, endTime, activeServiceId, filterPayload }:
     return [activeTab]
   }, [activeTab]) as ValueSection[]
   // Cloud answers VALUE_ROLLUP_SECTIONS from summaries when unfiltered, and overview from
-  // filtered_rollups for a single low-cardinality include filter; split them so they paint
-  // without waiting on a raw scan.
+  // filtered_rollups for a single low-cardinality include filter on an hour-aligned range;
+  // split them only when valueRollupEligible will actually serve the rollup leg.
   const rollupFirst = isCloudMode() && !hasFilterValues(filterPayload)
-  const filteredRollup = isCloudMode() && singleLowCardFilter(filterPayload) !== null
+  const filteredRollup =
+    isCloudMode() &&
+    singleLowCardFilter(filterPayload, undefined, { start_time: startTime, end_time: endTime }) !== null
   const [rollupSections, rawSections] = React.useMemo(() => {
     if (activeTab === 'assets') return [[], sections]
     if (rollupFirst) {

@@ -13,13 +13,17 @@ import AssetsClient from '@/app/assets-shield/_sections/AssetsClient'
 import FastlyValueClient from '@/app/fastly-value/_sections/FastlyValueClient'
 import { useServiceStore, useTimezoneStore } from '@/stores/filterStore'
 
-const layout = vi.hoisted(() => ({ filterPayload: {} as Record<string, unknown> }))
+const layout = vi.hoisted(() => ({
+  filterPayload: {} as Record<string, unknown>,
+  startTime: '2027-01-15T08:00:00Z' as string | null,
+  endTime: '2027-01-15T10:00:00Z' as string | null,
+}))
 
 vi.mock('@/components/ReportLayout', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/components/ReportLayout')>()
   const ReportLayout = (props: { children: (ctx: Record<string, unknown>) => React.ReactNode }) => (
     <div>{props.children({
-      activeServiceId: 'svc-1', startTime: '2027-01-15T08:00:00Z', endTime: '2027-01-15T10:00:00Z',
+      activeServiceId: 'svc-1', startTime: layout.startTime, endTime: layout.endTime,
       filterPayload: layout.filterPayload, timezone: 'UTC', trend: 'off', setTrend: () => {}, intervalButtons: null,
       config: { spanHours: 2, effectiveInterval: '1 hour', validIntervals: new Set(['1 hour']), validTrends: new Set(['off']) },
     })}</div>
@@ -76,6 +80,8 @@ beforeEach(() => {
   useTimezoneStore.setState({ timezone: 'UTC' })
   useServiceStore.setState({ activeServiceId: 'svc-1', isInitialized: true })
   layout.filterPayload = {}
+  layout.startTime = '2027-01-15T08:00:00Z'
+  layout.endTime = '2027-01-15T10:00:00Z'
   window.history.replaceState(null, '', '/')
 })
 
@@ -253,6 +259,29 @@ describe('FastlyValueClient on Cloud', () => {
 
     expect(await screen.findByText('4.3k')).toBeInTheDocument()
     expect(one).toEqual([['overview', 'caching', 'network']])
+    expect(screen.queryByTestId('rollup-data-through-slot')).not.toBeInTheDocument()
+  })
+
+  it('keeps a single raw read for a single low-cardinality filter when the range is not hour-aligned or is auto', async () => {
+    setCloudModeRuntime(true)
+    layout.filterPayload = { cache: { mode: 'include', values: ['HIT'] } }
+    layout.startTime = '2027-01-15T08:15:00Z'
+    layout.endTime = '2027-01-15T10:15:00Z'
+    const unaligned = recordPosts('/api/value/summary', () => ({ overview, network, caching: null }))
+    const { unmount } = renderBootstrapped(<FastlyValueClient />, { withNuqs: true })
+
+    expect(await screen.findByText('4.3k')).toBeInTheDocument()
+    expect(unaligned).toEqual([['overview', 'caching', 'network']])
+    expect(screen.queryByTestId('rollup-data-through-slot')).not.toBeInTheDocument()
+    unmount()
+
+    layout.startTime = null
+    layout.endTime = null
+    const autoRange = recordPosts('/api/value/summary', () => ({ overview, network, caching: null }))
+    renderBootstrapped(<FastlyValueClient />, { withNuqs: true })
+
+    expect(await screen.findByText('4.3k')).toBeInTheDocument()
+    expect(autoRange).toEqual([['overview', 'caching', 'network']])
     expect(screen.queryByTestId('rollup-data-through-slot')).not.toBeInTheDocument()
   })
 
