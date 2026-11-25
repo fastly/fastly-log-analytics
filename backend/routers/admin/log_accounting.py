@@ -94,7 +94,7 @@ def _swr_fetch[T](
 
                         pg_pool.release_thread_connection()
                     except Exception:
-                        pass
+                        logger.debug("[log-accounting] thread connection release failed", exc_info=True)
                     with _swr_guard:
                         _swr_bg_inflight.discard(lock_key)
 
@@ -315,7 +315,7 @@ def compute_log_accounting(source: dict[str, Any], hours: int = 24, by: str = "h
 
                         pg_pool.release_thread_connection()
                     except Exception:
-                        pass
+                        logger.debug("[log-accounting] thread connection release failed", exc_info=True)
 
         return _swr_fetch(_LOCAL_COUNTS_CACHE, cache_key, _load, label="local")
 
@@ -335,7 +335,7 @@ def compute_log_accounting(source: dict[str, Any], hours: int = 24, by: str = "h
 
                         pg_pool.release_thread_connection()
                     except Exception:
-                        pass
+                        logger.debug("[log-accounting] thread connection release failed", exc_info=True)
 
         return _swr_fetch(_LATEST_INGEST_CACHE, cache_key, _load, label="latest_ingest")
 
@@ -524,7 +524,7 @@ def prewarm_log_accounting(service_id: str) -> None:
 
             pg_pool.release_thread_connection()
         except Exception:
-            pass
+            logger.debug("[log-accounting] thread connection release failed", exc_info=True)
 
 
 _CacheRegistry.register("routers.admin.log_accounting._FASTLY_COUNTS_CACHE", _FASTLY_COUNTS_CACHE)

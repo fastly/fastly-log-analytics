@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
+import logging
 import threading
 import time
 from collections.abc import Callable
@@ -236,5 +237,5 @@ def invalidate_service_cache(service_id: str | dict = "") -> int:
         try:
             cleared += int(invalidator(svc) or 0)
         except Exception:
-            pass
+            logging.getLogger(__name__).debug("response_cache: service invalidator failed", exc_info=True)
     return cleared

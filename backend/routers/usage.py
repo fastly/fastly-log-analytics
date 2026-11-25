@@ -766,7 +766,7 @@ def prewarm_usage_storage(service_id: str) -> None:
 
             pg_pool.release_thread_connection()
         except Exception:
-            pass
+            logger.debug("usage_current_storage: thread connection release failed", exc_info=True)
 
 
 @usage_router.get(
@@ -1144,7 +1144,7 @@ def usage_current_storage(
 
                                 pg_pool.release_thread_connection()
                             except Exception:
-                                pass
+                                logger.debug("usage_current_storage: thread connection release failed", exc_info=True)
                             with _rolling_storage_bg_guard:
                                 _rolling_storage_bg_inflight.discard(rolling_key)
 

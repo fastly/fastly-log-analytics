@@ -425,8 +425,10 @@ def test_postgres_control_plane_storage_billing_summary_runs_table_scans_concurr
     import re
 
     for sql in seen_sql:
+        expected_branches = sql.count("UNION ALL") + 1
+        assert expected_branches >= 3
         where_clauses = re.findall(r"\bWHERE\s+(.*?)(?=\s+UNION ALL\b|\)\s*AS\b|$)", sql, flags=re.DOTALL)
-        assert len(where_clauses) == 3
+        assert len(where_clauses) == expected_branches
         for where_clause in where_clauses:
             assert "GREATEST(" not in where_clause
     assert "high_scale_source_objects_discovered_idx" in cp_mod.SCHEMA_DDL

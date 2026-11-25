@@ -2572,6 +2572,15 @@ def test_sec_t5_iter31_sql_dos_array_join_on_star_in_pii_and_numeric_parity() ->
         )
     assert (time.perf_counter() - t0) * 1000.0 < 50.0
 
+    import sys
+
+    _under_cov = (
+        sys.gettrace() is not None
+        or bool(os.environ.get("COV_CORE_SOURCE"))
+        or (hasattr(sys, "monitoring") and sys.monitoring.get_tool(sys.monitoring.COVERAGE_ID) is not None)
+    )
+    _as_budget_ms = 1000.0 if _under_cov else 250.0
+
     as_chain = "SELECT 1" + " AS" * 2000 + " x FROM logs"
     t0 = time.perf_counter()
     try:
@@ -2579,7 +2588,7 @@ def test_sec_t5_iter31_sql_dos_array_join_on_star_in_pii_and_numeric_parity() ->
     except SQLValidationError:
         pass
     val_as_ms = (time.perf_counter() - t0) * 1000.0
-    assert val_as_ms < 250.0, f"validate_user_sql AS-chain took {val_as_ms:.1f}ms"
+    assert val_as_ms < _as_budget_ms, f"validate_user_sql AS-chain took {val_as_ms:.1f}ms"
 
     t0 = time.perf_counter()
     hs_query._rewrite_console_sql(
@@ -2588,7 +2597,7 @@ def test_sec_t5_iter31_sql_dos_array_join_on_star_in_pii_and_numeric_parity() ->
         names={"request_facts": "request_facts"},
     )
     rw_as_ms = (time.perf_counter() - t0) * 1000.0
-    assert rw_as_ms < 250.0, f"_rewrite_console_sql AS-chain took {rw_as_ms:.1f}ms"
+    assert rw_as_ms < _as_budget_ms, f"_rewrite_console_sql AS-chain took {rw_as_ms:.1f}ms"
 
     # 5. Post-processing PII masking in query.py: qualified arrayElement(r.custom_fields, ...), list/tuple parent propagation, int/float scalars:
     assert hs_query._classify_console_pii_key("arrayElement(r.custom_fields, 'authorization')") == "session"
