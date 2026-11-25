@@ -453,7 +453,7 @@ def test_query_exception_mapping_and_path_redaction(
 
 
 def test_redact_paths_rules():
-    for prefix in ("/srv", "/var", "/tmp", "/data", "/home", "/opt", "/usr", "/mnt", "/app"):
+    for prefix in ("/srv", "/var", "/tmp", "/data", "/home", "/opt", "/usr", "/mnt", "/app", "/etc"):
         out = _redact_paths(f"Cannot open file '{prefix}/foo/bar.parquet'")
         assert prefix not in out and "<path>" in out
 
@@ -463,9 +463,10 @@ def test_redact_paths_rules():
     for unredacted in (
         "lookup failed for https://example.com/var/foo on row 12",
         "column /api/foo missing",
-        "ENOENT: /etc/hosts not found",
     ):
         assert _redact_paths(unredacted) == unredacted
+
+    assert _redact_paths("ENOENT: /etc/hosts not found") == "ENOENT: <path> not found"
 
     for msg, leaked in [
         ("Cannot open '/var/lib/clickhouse/foo.db'", "/var/lib/clickhouse/foo.db"),

@@ -312,8 +312,29 @@ def test_get_pop_health_parity_errors_hits_quantiles_and_no_minute_stride(monkey
     end = datetime(2026, 9, 14, 18, 0, tzinfo=UTC)
 
     def responder(sql: str, params: dict[str, Any]):
-        if "FROM network_minute_dimensions" in sql:
-            return [{"pop": "SJC", "exact_requests": 1000, "p50_rtt_us": 20000.0, "p95_ttfb_ms": 999.0}]
+        if "UNION ALL" in sql:
+            return [
+                {
+                    "kind": "rollup",
+                    "pop": "SJC",
+                    "req_count": 1000,
+                    "errors": 5,
+                    "p50_rtt_us": 20000.0,
+                    "p95_ttfb_ms": 85.0,
+                    "cache_hits": 0,
+                    "bandwidth_bytes": 0,
+                },
+                {
+                    "kind": "fact",
+                    "pop": "SJC",
+                    "req_count": 200,
+                    "errors": None,
+                    "p50_rtt_us": None,
+                    "p95_ttfb_ms": None,
+                    "cache_hits": 50,
+                    "bandwidth_bytes": 24691,
+                },
+            ]
         if "FROM request_facts" in sql:
             return [
                 {
@@ -331,12 +352,22 @@ def test_get_pop_health_parity_errors_hits_quantiles_and_no_minute_stride(monkey
     client = _RecordingClient(responder)
     svc = HighScaleService(service_id="svc-pop-parity", client=client, cursor_secret=b"secret", request_watermark=None)
     resp = get_pop_health(svc, start, end)
+    ((combined_sql, _),) = client.matching("UNION ALL")
+    assert "toMinute" not in combined_sql
+    assert "startsWith(custom_fields['cache'], 'HIT')" in combined_sql
+    assert resp.data[0].requests == 1000
+    assert resp.data[0].errors == 5
+    assert resp.data[0].p95_ttfb_ms == 85.0
+
+    # Filtered queries bypass network_minute_dimensions and query request_facts directly.
+    client.calls.clear()
+    _clear_network_caches()
+    resp_filtered = get_pop_health(svc, start, end, filters={"country": {"mode": "include", "values": ["US"]}})
     ((fact_sql, _),) = client.matching("FROM request_facts")
     assert "toMinute" not in fact_sql
     assert ">= 500" in fact_sql and ">= 400" not in fact_sql
-    assert "startsWith(upper(custom_fields['cache']), 'HIT')" in fact_sql
     assert "quantileTDigest(0.5)" in fact_sql and "quantileTDigest(0.95)" in fact_sql
-    assert resp.data[0].p95_ttfb_ms == 85.0
+    assert resp_filtered.data[0].p95_ttfb_ms == 85.0
 
 
 @pytest.mark.no_postgres
@@ -588,4 +619,5 @@ def test_network_health_map_only_uses_fast_prewhere_path(monkeypatch: pytest.Mon
     ((map_sql, _),) = client.matching("AS lat")
     assert "PREWHERE" in map_sql
     assert "quantilesTDigest(0.1, 0.5)(_rtt) AS rtt_quants" in map_sql
-    assert resp.map_buckets[0].cities[0].reqs == 100
+    # 6h span uses _network_sample_stride(21600) == 5 when PYTEST_CURRENT_TEST is unset.
+    assert resp.map_buckets[0].cities[0].reqs == 500

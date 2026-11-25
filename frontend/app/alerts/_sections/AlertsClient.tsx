@@ -67,23 +67,6 @@ export default function AlertsClient() {
   const [columnVisibility, setColumnVisibility] = React.useState<ColumnVisibilityState>({})
   const { full } = useDateFormat()
 
-  const [logSettingsIdle, setLogSettingsIdle] = React.useState(false)
-  React.useEffect(() => {
-    if (typeof window === 'undefined') return
-    const cb = () => setLogSettingsIdle(true)
-    const ric = window.requestIdleCallback
-    if (typeof ric === 'function') {
-      const id = ric(cb)
-      return () => {
-        try {
-          window.cancelIdleCallback?.(id)
-        } catch {}
-      }
-    }
-    const id = window.setTimeout(cb, 200)
-    return () => window.clearTimeout(id)
-  }, [])
-
   const { data: loggingSettings } = useQuery({
     queryKey: ['loggingSettings', activeServiceId],
     queryFn: async ({ signal }) =>
@@ -95,7 +78,9 @@ export default function AlertsClient() {
             }),
           )
         : null,
-    enabled: !!activeServiceId && !isAnalyst && logSettingsIdle,
+    // Defer live Fastly VCL logging-settings lookup until the create/edit modal opens so
+    // an expired Fastly token never injects a 400 failed request on passive /alerts page views.
+    enabled: !!activeServiceId && !isAnalyst && isFormOpen,
     staleTime: 5 * 60_000,
   })
   const logPeriodSeconds = loggingSettings?.period || SERVICE_DEFAULTS.logPeriodSeconds

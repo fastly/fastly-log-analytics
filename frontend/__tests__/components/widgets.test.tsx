@@ -261,7 +261,7 @@ import { CronSettingsModal, LogSyncSection } from '@/components/CronSettingsModa
 import LogsClient, { CronLiveLog, QuickActionsBar, SchemaTab, CRON_EXPLANATIONS, CRON_DISPLAY_NAMES, CRON_GROUPS } from '@/app/logs/_sections/LogsClient'
 import { DataTable, DataTableReadonly, DateTimeCell, FilterValueCell, buildDashboardFilterUrl, makeLatencyColumns, type LatencyRow } from '@/components/DataTable'
 import { BotSourcesPanel } from '@/app/control-room/_sections/ControlRoomClient'
-import { RealtimeChart } from '@/app/control-room/_sections/ControlRoomWidgets'
+import { RealtimeChart, RtDownBanner } from '@/app/control-room/_sections/ControlRoomWidgets'
 import {
   GlobalHealthHelp, AvgRttHelp, WorstAsnHelp, WorstRegionHelp, HeatmapHelp,
   AsnLeaderboardHelp, MetroLeaderboardHelp, ShieldingHelp,
@@ -1871,6 +1871,14 @@ describe('TimeSeriesChart, ScorerSeries, PlotlyChart, TrafficChart, CardGrid, Fi
         mounted.mockRestore()
         container.remove()
       }
+    })
+
+    it('renders RtDownBanner as a non-destructive warning alert', () => {
+      render(<RtDownBanner />)
+      const alert = screen.getByRole('alert')
+      expect(alert).toHaveTextContent('Fastly RT unavailable — showing last-known-good values.')
+      expect(alert.getAttribute('data-variant')).not.toBe('destructive')
+      expect(alert.className).not.toContain('destructive')
     })
 
     it('withholds Plot until IntersectionObserver fires, or renders immediately when IO is unavailable', async () => {

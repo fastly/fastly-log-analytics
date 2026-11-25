@@ -56,7 +56,7 @@ const ShieldingSection = dynamic(
 )
 const NetworkQualitySection = dynamic(
   () => import('./NetworkLeaderboardsAndQuality').then((m) => m.NetworkQualitySection),
-  { ssr: false, loading: () => <Skeleton className="w-full h-[360px] rounded-xl" /> },
+  { ssr: false, loading: () => <Skeleton className="w-full h-[400px] [contain-intrinsic-size:400px] rounded-xl" /> },
 )
 
 export {

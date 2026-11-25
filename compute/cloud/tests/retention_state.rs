@@ -480,7 +480,10 @@ fn stage_reserve_bounds_backend_calls_and_converges_across_ticks() {
             break;
         }
     }
-    assert!(converged, "retention_sweep failed to converge within 20 ticks");
+    assert!(
+        converged,
+        "retention_sweep failed to converge within 20 ticks"
+    );
     assert_eq!(total_deleted, expired);
     assert!(peak_calls <= 20, "peak_calls={peak_calls}");
     assert_eq!(fake.bucket.borrow().keys().collect::<Vec<_>>(), vec![live]);

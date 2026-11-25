@@ -94,9 +94,10 @@ function fakeCacheStorage() {
 const EXPECTED: Record<string, [cold: number, revisit: number, reload: number]> = {
   "/dashboard": [1, 1, 1],
   // /insights spans 8 days (24h + 7d baseline) so it lists view=summary first
-  // (3 pages in fakeNetwork's stub) and only falls back to raw (1 page) for
-  // uncovered ranges (all 8d here since fakeNetwork returns no bundles).
-  "/insights": [4, 4, 4],
+  // (3 pages in fakeNetwork's stub), lists raw without summaries=1 (1 page) for
+  // uncovered ranges, and issues 1 summaries=1 baseline listing when falling
+  // back from empty summary data (since uncovered raw gap listings omit summaries=1).
+  "/insights": [5, 5, 5],
   "/network": [1, 1, 1],
   "/security": [1, 1, 1],
   "/origin": [1, 1, 1],

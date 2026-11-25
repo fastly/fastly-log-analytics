@@ -38,7 +38,7 @@ const UsageChartsGrid = dynamic(
   {
     ssr: false,
     loading: () => (
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 min-h-[744px]">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 min-h-[744px] [contain-intrinsic-size:744px]">
         <Skeleton className="h-[360px] w-full rounded-xl" />
         <Skeleton className="h-[360px] w-full rounded-xl" />
         <Skeleton className="h-[360px] w-full rounded-xl" />

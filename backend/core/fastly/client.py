@@ -918,6 +918,12 @@ def _request(method, path, *, data, headers, expect_empty, max_retries, timeout,
     return _do_call()
 
 
+def is_fastly_auth_error(exc: BaseException) -> bool:
+    """Return True when a Fastly client exception represents HTTP 401/403 auth failure."""
+    msg = str(exc)
+    return "HTTP 401 " in msg or "HTTP 403 " in msg
+
+
 def fastly(method, path, body=None, *, token, expect_empty=False, max_retries=3, timeout=30):
     """Make a Fastly API request and return parsed JSON."""
     if is_mock_mode():

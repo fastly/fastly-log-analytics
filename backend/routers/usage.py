@@ -1582,7 +1582,15 @@ def usage_bandwidth(
                 )
                 _merge(payload)
             except Exception as e:
-                raise_internal(logger, e, code="fastly_stats_service_failed", status=502)
+                from backend.core.fastly.client import is_fastly_auth_error
+
+                if is_fastly_auth_error(e):
+                    logger.warning(
+                        "usage_bandwidth: Fastly stats auth failed for %s; returning empty series",
+                        cdn_svc,
+                    )
+                else:
+                    raise_internal(logger, e, code="fastly_stats_service_failed", status=502)
 
         fmt = "%Y-%m-%dT%H:00" if by == "hour" else "%Y-%m-%dT%H:%M" if by == "minute" else "%Y-%m-%d"
         points = [{"time": datetime.fromtimestamp(ts, tz=UTC).strftime(fmt), **v} for ts, v in sorted(agg.items())]

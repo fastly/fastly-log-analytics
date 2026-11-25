@@ -1,4 +1,4 @@
-"""Regression tests for Round 16 Elevation ClickHouse slow-query optimizations."""
+"""Regression tests for Round 16 High-Scale ClickHouse slow-query optimizations."""
 
 from __future__ import annotations
 

@@ -141,6 +141,63 @@ def test_prewarm_log_accounting_warms_and_swallows_errors():
     mock_compute.assert_called_once_with({"name": "svc-1", "service_id": "svc-1"}, hours=24, by="hour")
 
 
+def test_log_accounting_degrades_on_fastly_401_and_raises_502_on_other_errors(monkeypatch):
+    import pytest
+    from fastapi import HTTPException
+
+    from backend import config as svcconfig
+    from backend.high_scale import postgres_control
+    from backend.routers.admin import log_accounting as _la
+
+    for c in (
+        _la._FASTLY_COUNTS_CACHE,
+        _la._CLICKHOUSE_COUNTS_CACHE,
+        _la._LOCAL_COUNTS_CACHE,
+        _la._LATEST_INGEST_CACHE,
+    ):
+        c.clear()
+
+    now_hr = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    lbl = (now_hr - timedelta(hours=1)).strftime("%Y-%m-%dT%H")
+
+    class _FakePG:
+        def request_flush_accounting(self, sid, start, end, width):
+            return {lbl: (42, 1)}
+
+        def latest_request_ingest(self, sid):
+            return datetime.now(UTC) - timedelta(seconds=30)
+
+    class _FakeReg:
+        def resolve(self, _sid):
+            return object()
+
+    monkeypatch.setattr(_la, "get_high_scale_service_registry", lambda: _FakeReg())
+    monkeypatch.setattr(postgres_control, "PostgresControlPlane", _FakePG)
+    monkeypatch.setattr(_la, "_clickhouse_row_counts_per_bucket", lambda *_a, **_kw: {lbl: 42})
+    monkeypatch.setattr(svcconfig, "get_fastly_api_key", lambda _sid: "tok-expired")
+    monkeypatch.setattr(svcconfig, "load_config", lambda _sid: {})
+    monkeypatch.setattr(
+        _la,
+        "_fetch_fastly_request_counts",
+        lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("HTTP 401 GET /service/log-auth/ts\n    Unauthorized")),
+    )
+
+    src = {"name": "svc-la-auth", "service_id": "svc-la-auth", "logging_service_id": "log-auth"}
+    res = _la.compute_log_accounting(src, hours=24, by="hour")
+    assert res["totals"].fastly_requests == 0
+    assert res["totals"].our_rows == 42
+    assert len(res["buckets"]) == 1
+
+    monkeypatch.setattr(
+        _la,
+        "_fetch_fastly_request_counts",
+        lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("HTTP 500 upstream down")),
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        _la.compute_log_accounting(src, hours=24, by="hour")
+    assert exc_info.value.status_code == 502
+
+
 # ── 2. Postgres storage_billing_summary split branch & covering indexes ──────
 
 

@@ -397,6 +397,36 @@ def test_usage_get_endpoints_emit_cache_control(monkeypatch):
         assert resp.headers.get("cache-control") == usage._USAGE_CACHE_CONTROL
 
 
+def test_usage_bandwidth_degrades_on_fastly_401_and_403_keeps_502_on_500(monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    src = {"name": "svc-auth", "service_id": "svc-auth", "logging_service_id": "log-auth", "cdn_service_id": "cdn-auth"}
+    app = FastAPI()
+    app.include_router(usage.router)
+    app.dependency_overrides[usage.get_source] = lambda: src
+    monkeypatch.setattr(usage, "get_fastly_api_key", lambda _sid: "tok-auth")
+    monkeypatch.setattr(usage, "api_key_or_mock", lambda k: k)
+
+    client = TestClient(app)
+    for code in (401, 403):
+        usage._USAGE_RESPONSE_MEMO.cache.clear()
+
+        def _auth_fail(*_a, _code=code, **_kw):
+            raise RuntimeError(f"HTTP {_code} GET /service/cdn-auth/ts/hour\n    Unauthorized")
+
+        monkeypatch.setattr(usage, "_fastly_api", _auth_fail)
+        resp = client.get("/api/usage/bandwidth?start=2026-11-24T10:00:00Z&end=2026-11-24T11:00:00Z&by=hour")
+        assert resp.status_code == 200, (code, resp.text)
+        assert resp.json()["data"] == []
+        assert resp.json()["total_bytes"] == 0
+
+    usage._USAGE_RESPONSE_MEMO.cache.clear()
+    monkeypatch.setattr(usage, "_fastly_api", lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("HTTP 500 boom")))
+    resp_500 = client.get("/api/usage/bandwidth?start=2026-11-24T10:00:00Z&end=2026-11-24T11:00:00Z&by=hour")
+    assert resp_500.status_code == 502
+
+
 def test_usage_current_storage_runs_independent_postgres_queries_concurrently(monkeypatch):
     import threading
 

@@ -297,6 +297,25 @@ describe('Alerts & Insights Pages', () => {
     expect(screen.getByTestId('alerts-create-btn')).toBeInTheDocument()
   })
 
+  test('does not fetch Fastly logging-settings on passive /alerts load and fetches only when create modal opens', async () => {
+    let loggingSettingsCalls = 0
+    installBaseHandlers([])
+    server.use(
+      http.get(`${API_BASE}/api/services/test-svc/logging-settings`, () => {
+        loggingSettingsCalls += 1
+        return HttpResponse.json({ period: 60 })
+      }),
+    )
+
+    renderWithQuery(<AlertsClient />, { queryClient })
+    expect(await screen.findByTestId('alerts-empty-state')).toBeInTheDocument()
+    await new Promise((r) => setTimeout(r, 250))
+    expect(loggingSettingsCalls).toBe(0)
+
+    fireEvent.click(screen.getByTestId('alerts-create-btn'))
+    await waitFor(() => expect(loggingSettingsCalls).toBe(1))
+  })
+
   test('renders configured rules, KPI summary cards, and status filter tabs', async () => {
     installBaseHandlers(SAMPLE_ALERTS)
     renderWithQuery(<AlertsClient />, { queryClient })

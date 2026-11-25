@@ -1,4 +1,4 @@
-"""Focused unit tests for Round 13 Elevation network, origin, insights, and log-accounting optimizations."""
+"""Focused unit tests for Round 13 High-Scale network, origin, insights, and log-accounting optimizations."""
 
 from __future__ import annotations
 

@@ -2476,7 +2476,10 @@ mod tests {
     #[test]
     fn worker_target_bytes_caps_large_targets_and_preserves_smaller_ones() {
         assert_eq!(worker_target_bytes(None), None);
-        assert_eq!(worker_target_bytes(Some(128 << 20)), Some(MAX_COMPACT_BYTES));
+        assert_eq!(
+            worker_target_bytes(Some(128 << 20)),
+            Some(MAX_COMPACT_BYTES)
+        );
         assert_eq!(worker_target_bytes(Some(2 << 20)), Some(2 << 20));
     }
 }

@@ -308,7 +308,10 @@ export function FreshnessBadge({ lastTickTime, timezone }: { lastTickTime: Date 
 
 export function RtDownBanner() {
   return (
-    <Alert variant="destructive" className="mb-4">
+    <Alert
+      variant="default"
+      className="mb-4 border-amber-500/50 text-amber-700 dark:text-amber-400 [&>svg]:text-amber-500"
+    >
       <AlertTriangle className="h-4 w-4" />
       <AlertDescription>Fastly RT unavailable — showing last-known-good values.</AlertDescription>
     </Alert>

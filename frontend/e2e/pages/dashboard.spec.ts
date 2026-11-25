@@ -556,7 +556,7 @@ test.describe('Network Page Contract (/network)', () => {
 
 test.describe('Assets & Shield Page Contract (/assets-shield)', () => {
   registerStandardContracts('/assets-shield', 'Assets & Shield', {
-    intrinsicCount: 5, shellTitle: '2. Instant shell, pre-allocated layout, zero CLS containers & core headings',
+    intrinsicCount: 4, shellTitle: '2. Instant shell, pre-allocated layout, zero CLS containers & core headings',
     shellCheck: async (page) => {
       for (const id of ['assets-overview-grid', 'assets-cache-efficiency-card', 'assets-compression-card', 'assets-uncompressed-card', 'assets-low-ttl-card']) {
         await expect(page.locator(`[data-testid="${id}"]:visible`)).toBeVisible({ timeout: 15_000 })

@@ -368,7 +368,16 @@ def compute_log_accounting(source: dict[str, Any], hours: int = 24, by: str = "h
         try:
             fastly_counts, ms_fastly = fut_fastly.result()
         except Exception as e:
-            raise_internal(logger, e, code="fastly_stats_failed", status=502)
+            from backend.core.fastly.client import is_fastly_auth_error
+
+            if is_fastly_auth_error(e):
+                logger.warning(
+                    "[log-accounting] Fastly stats auth failed for %s; returning local/ClickHouse counts only",
+                    logging_svc_id,
+                )
+                fastly_counts, ms_fastly = {}, 0.0
+            else:
+                raise_internal(logger, e, code="fastly_stats_failed", status=502)
         local_counts, ms_sqlite = fut_sqlite.result()
         ch_counts, ms_ch = fut_ch.result()
         latest_ingest_str, ms_latest = fut_latest.result()
