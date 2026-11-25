@@ -2,7 +2,6 @@ import type { DashboardFilter } from "./dashboard/filters";
 import { Histogram } from "./dashboard/histogram";
 import {
   fetchManifest,
-  fetchManifestWithSummaries,
   filesOverlapping,
   IncompleteManifestError,
   type ManifestFile,
@@ -17,6 +16,7 @@ import {
   type Rollup,
   type RollupAgg,
   type RollupResult,
+  type TimeInterval,
 } from "./dashboard/rollup-query";
 import {
   CLOUD_INSIGHT_DETECTORS,
@@ -469,6 +469,36 @@ const ROLLUP_INSIGHT_COLUMNS = new Set(
 const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
 const ALIGN_MIN_WINDOW_HOURS = 6;
+const UNCOVERED_COALESCE_MAX_SPAN_MS = DAY_MS;
+
+export type CoalescedUncoveredGroup = {
+  startMs: number;
+  endMs: number;
+  intervals: TimeInterval[];
+};
+
+/**
+ * Coalesces nearby uncovered intervals into bounded `[minStart, maxEnd]` spans
+ * (at most `maxSpanMs`, default 24h) so scattered gaps across multi-day ranges
+ * share one raw `/api/files` listing instead of one request per gap.
+ */
+export function coalesceUncoveredIntervals(
+  intervals: readonly TimeInterval[],
+  maxSpanMs = UNCOVERED_COALESCE_MAX_SPAN_MS,
+): CoalescedUncoveredGroup[] {
+  const merged = mergeTimeIntervals(intervals);
+  const groups: CoalescedUncoveredGroup[] = [];
+  for (const iv of merged) {
+    const prev = groups[groups.length - 1];
+    if (prev && iv.endMs - prev.startMs <= maxSpanMs) {
+      prev.endMs = Math.max(prev.endMs, iv.endMs);
+      prev.intervals.push(iv);
+    } else {
+      groups.push({ startMs: iv.startMs, endMs: iv.endMs, intervals: [iv] });
+    }
+  }
+  return groups;
+}
 
 export async function insightsFromRollup(
   body: InsightsRollupRequest,
@@ -516,51 +546,59 @@ export async function insightsFromRollup(
 
     const wCoverage = planBundleCoverage(windowSummaries, fromWindow, toEnd);
     const bCoverage = planBundleCoverage(baselineSummaries, fromStart, fromWindow);
-    const uncovered = mergeTimeIntervals([...bCoverage.uncovered, ...wCoverage.uncovered]);
+    const uncoveredGroups = coalesceUncoveredIntervals([
+      ...bCoverage.uncovered,
+      ...wCoverage.uncovered,
+    ]);
 
     const rawByKey = new Map<string, ManifestFile>();
-    const extraSummariesByKey = new Map<string, ManifestFile>();
-    if (uncovered.length) {
-      try {
-        const parts = await Promise.all(
-          uncovered.map((iv) =>
-            fetchManifestWithSummaries(
-              source.fetchJson,
-              isoFloor(iv.startMs),
-              isoCeil(iv.endMs),
-              signal,
-            ),
-          ),
-        );
-        for (const part of parts) {
-          if (!part.raw.complete || !part.summaries.complete) return [null, null] as const;
-          for (const f of part.raw.files) rawByKey.set(f.key, f);
-          for (const f of part.summaries.files) extraSummariesByKey.set(f.key, f);
+    if (uncoveredGroups.length) {
+      const fetchRawInterval = async (startMs: number, endMs: number): Promise<ManifestFile[] | null> => {
+        try {
+          const raw = await fetchManifest(
+            source.fetchJson,
+            isoFloor(startMs),
+            isoCeil(endMs),
+            signal,
+            undefined,
+            undefined,
+            true,
+          );
+          return raw.complete ? raw.files : null;
+        } catch (error) {
+          if (error instanceof IncompleteManifestError) return null;
+          throw error;
         }
-      } catch (error) {
-        if (error instanceof IncompleteManifestError) return [null, null] as const;
-        throw error;
+      };
+
+      const groupResults = await Promise.all(
+        uncoveredGroups.map(async (group) => {
+          const coalescedFiles = await fetchRawInterval(group.startMs, group.endMs);
+          if (coalescedFiles !== null) return coalescedFiles;
+          if (group.intervals.length <= 1) return null;
+          const individual = await Promise.all(
+            group.intervals.map((iv) => fetchRawInterval(iv.startMs, iv.endMs)),
+          );
+          if (individual.some((files) => files === null)) return null;
+          return individual.flatMap((files) => files!);
+        }),
+      );
+      if (groupResults.some((files) => files === null)) return [null, null] as const;
+      for (const files of groupResults) {
+        for (const f of files!) rawByKey.set(f.key, f);
       }
     }
 
     const allRaw = [...rawByKey.values()];
-    const extraSummaries = [...extraSummariesByKey.values()];
-    const combineSummaries = (base: ManifestFile[], fromMs: number, toMs: number) => {
-      if (!extraSummaries.length) return base;
-      const byKey = new Map<string, ManifestFile>();
-      for (const f of base) byKey.set(f.key, f);
-      for (const f of filesOverlapping(extraSummaries, fromMs, toMs)) byKey.set(f.key, f);
-      return [...byKey.values()];
-    };
 
     const windowManifest: PrefetchedRollupManifest = {
       raw: { files: filesOverlapping(allRaw, fromWindow, toEnd), complete: true },
-      summaries: { files: combineSummaries(windowSummaries, fromWindow, toEnd), complete: true },
+      summaries: { files: windowSummaries, complete: true },
       summaryFirst: true,
     };
     const baselineManifest: PrefetchedRollupManifest = {
       raw: { files: filesOverlapping(allRaw, fromStart, fromWindow), complete: true },
-      summaries: { files: combineSummaries(baselineSummaries, fromStart, fromWindow), complete: true },
+      summaries: { files: baselineSummaries, complete: true },
       summaryFirst: true,
     };
 

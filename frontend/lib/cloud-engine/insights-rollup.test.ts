@@ -32,7 +32,7 @@ import {
   handleInsights,
 } from "./insights";
 import { INSIGHTS_RESIDUAL_FIELDS } from "./insights-residual";
-import { INSIGHTS_SUMMARY_SPEC, insightsBaselineFromRollup, insightsBaselineRollup, insightsDeferredDetectors, insightsFromRollup, ipDetectorsRuledOut, rollupInsightsBaseline } from "./insights-rollup";
+import { INSIGHTS_SUMMARY_SPEC, coalesceUncoveredIntervals, insightsBaselineFromRollup, insightsBaselineRollup, insightsDeferredDetectors, insightsFromRollup, ipDetectorsRuledOut, rollupInsightsBaseline } from "./insights-rollup";
 import { parquetWriteBuffer } from "hyparquet-writer";
 import { _coalesced_ip_security_aggregates, INSIGHT_DEFINITIONS } from "./insights";
 import type { Rollup } from "./dashboard/rollup-query";
@@ -912,6 +912,8 @@ describe("insightsFromRollup summary-first multi-day manifest handling", () => {
     endMs: number;
     dayCount?: number;
     missingLastHourBundle?: boolean;
+    missingHourStartsMs?: number[];
+    omitInlineSummaries?: boolean;
     rawTruncatedOverMs?: number;
     summaryIncomplete?: boolean;
     tailRawIncomplete?: boolean;
@@ -922,9 +924,19 @@ describe("insightsFromRollup summary-first multi-day manifest handling", () => {
     const hourBundles: { key: string; start: string; end: string; size: number; rows: number; kind: "hour"; sources: number }[] = [];
     const bufs: Record<string, ArrayBuffer> = {};
     const tailStartMs = options.endMs - HOUR;
+    const missingHours = new Set(options.missingHourStartsMs ?? []);
+    if (options.missingLastHourBundle) missingHours.add(tailStartMs);
+
+    const dayHasMissingHour = (dayStart: number) => {
+      for (const h of missingHours) {
+        if (h >= dayStart && h < dayStart + DAY) return true;
+      }
+      return false;
+    };
 
     const firstDay = Math.floor(startMs / DAY) * DAY;
     const lastDay = Math.floor((options.endMs - 1) / DAY) * DAY;
+    const rawFiles: { key: string; start: string; end: string; size: number; rows: number }[] = [];
     for (let d = firstDay; d <= lastDay; d += DAY) {
       const dt = new Date(d);
       const y = dt.getUTCFullYear();
@@ -943,7 +955,26 @@ describe("insightsFromRollup summary-first multi-day manifest handling", () => {
       bufs[dayKey] = sampleDayBuf;
       for (let h = 0; h < 24; h++) {
         const hStart = d + h * HOUR;
-        if (options.missingLastHourBundle && hStart >= tailStartMs && hStart < options.endMs) continue;
+        if (missingHours.has(hStart)) {
+          const rawKey = `processed/request/raw-${hStart}.parquet`;
+          const rawBuf = parquetWriteBuffer({
+            columnData: [
+              { name: "timestamp", type: "TIMESTAMP", data: [new Date(hStart + 60_000), new Date(hStart + 120_000)] },
+              { name: "status", type: "INT64", data: [BigInt(200), BigInt(200)] },
+              { name: "url", type: "STRING", data: ["/ok", "/ok"] },
+              { name: "ip", type: "STRING", data: ["1.1.1.1", "1.1.1.1"] },
+            ],
+          });
+          bufs[rawKey] = rawBuf;
+          rawFiles.push({
+            key: rawKey,
+            start: new Date(hStart).toISOString(),
+            end: new Date(hStart + HOUR).toISOString(),
+            size: rawBuf.byteLength,
+            rows: 2,
+          });
+          continue;
+        }
         const hh = String(h).padStart(2, "0");
         const hKey = `processed/summary_bundle/request/year=${y}/month=${m}/day=${day}/hour_bundle=${hh}-c4-n800-h0000000000000002.parquet`;
         hourBundles.push({
@@ -959,24 +990,6 @@ describe("insightsFromRollup summary-first multi-day manifest handling", () => {
       }
     }
 
-    const tailRawKey = `processed/request/tail-raw.parquet`;
-    const tailRawBuf = parquetWriteBuffer({
-      columnData: [
-        { name: "timestamp", type: "TIMESTAMP", data: [new Date(tailStartMs + 60_000), new Date(tailStartMs + 120_000)] },
-        { name: "status", type: "INT64", data: [BigInt(200), BigInt(200)] },
-        { name: "url", type: "STRING", data: ["/ok", "/ok"] },
-        { name: "ip", type: "STRING", data: ["1.1.1.1", "1.1.1.1"] },
-      ],
-    });
-    bufs[tailRawKey] = tailRawBuf;
-    const tailRawFile = {
-      key: tailRawKey,
-      start: new Date(tailStartMs).toISOString(),
-      end: new Date(options.endMs).toISOString(),
-      size: tailRawBuf.byteLength,
-      rows: 2,
-    };
-
     const rawCalls: string[] = [];
     const summaryCalls: string[] = [];
 
@@ -988,7 +1001,7 @@ describe("insightsFromRollup summary-first multi-day manifest handling", () => {
       for (const db of dayBundles) {
         const s = Date.parse(db.start);
         const e = Date.parse(db.end);
-        if (s >= fromMs && e <= toMs && !(options.missingLastHourBundle && tailStartMs >= s && tailStartMs < e)) {
+        if (s >= fromMs && e <= toMs && !dayHasMissingHour(s)) {
           out.push(db);
           coveredDays.add(s);
         }
@@ -1024,7 +1037,9 @@ describe("insightsFromRollup summary-first multi-day manifest handling", () => {
         if (options.rawTruncatedOverMs !== undefined && toMs - fromMs > options.rawTruncatedOverMs) {
           return {
             files: [],
-            summary_files: params.get("summaries") === "1" ? summariesForRange(fromMs, toMs) : undefined,
+            ...(!options.omitInlineSummaries && params.get("summaries") === "1"
+              ? { summary_files: summariesForRange(fromMs, toMs) }
+              : {}),
             next_cursor: null,
             complete: false,
           };
@@ -1032,12 +1047,14 @@ describe("insightsFromRollup summary-first multi-day manifest handling", () => {
         if (options.tailRawIncomplete && toMs > tailStartMs) {
           return { files: [], next_cursor: null, complete: false };
         }
-        const files = options.missingLastHourBundle && fromMs < options.endMs && toMs > tailStartMs
-          ? [tailRawFile]
-          : [];
+        const files = rawFiles.filter(
+          (f) => Date.parse(f.end) > fromMs && Date.parse(f.start) < toMs,
+        );
         return {
           files,
-          ...(params.get("summaries") === "1" ? { summary_files: summariesForRange(fromMs, toMs) } : {}),
+          ...(!options.omitInlineSummaries && params.get("summaries") === "1"
+            ? { summary_files: summariesForRange(fromMs, toMs) }
+            : {}),
           next_cursor: null,
           complete: true,
         };
@@ -1147,5 +1164,148 @@ describe("insightsFromRollup summary-first multi-day manifest handling", () => {
     );
     expect(result).toBeNull();
     expect(rawCalls).toHaveLength(0);
+  });
+
+  it("coalesces scattered uncovered intervals within 24h spans without splitting contiguous ranges", () => {
+    const base = Date.UTC(2025, 0, 2, 0, 0, 0);
+    const groups = coalesceUncoveredIntervals([
+      { startMs: base + 1 * HOUR, endMs: base + 2 * HOUR },
+      { startMs: base + 5 * HOUR, endMs: base + 6 * HOUR },
+      { startMs: base + 22 * HOUR, endMs: base + 23 * HOUR },
+      // 3 days later: two gaps within 12h
+      { startMs: base + 3 * DAY + 2 * HOUR, endMs: base + 3 * DAY + 3 * HOUR },
+      { startMs: base + 3 * DAY + 13 * HOUR, endMs: base + 3 * DAY + 14 * HOUR },
+    ]);
+    expect(groups).toHaveLength(2);
+    expect(groups[0]).toEqual({
+      startMs: base + 1 * HOUR,
+      endMs: base + 23 * HOUR,
+      intervals: [
+        { startMs: base + 1 * HOUR, endMs: base + 2 * HOUR },
+        { startMs: base + 5 * HOUR, endMs: base + 6 * HOUR },
+        { startMs: base + 22 * HOUR, endMs: base + 23 * HOUR },
+      ],
+    });
+    expect(groups[1]).toEqual({
+      startMs: base + 3 * DAY + 2 * HOUR,
+      endMs: base + 3 * DAY + 14 * HOUR,
+      intervals: [
+        { startMs: base + 3 * DAY + 2 * HOUR, endMs: base + 3 * DAY + 3 * HOUR },
+        { startMs: base + 3 * DAY + 13 * HOUR, endMs: base + 3 * DAY + 14 * HOUR },
+      ],
+    });
+    // A single contiguous 8-day uncovered range stays intact as 1 group.
+    const single = coalesceUncoveredIntervals([{ startMs: base, endMs: base + 8 * DAY }]);
+    expect(single).toHaveLength(1);
+    expect(single[0].endMs - single[0].startMs).toBe(8 * DAY);
+  });
+
+  it("coalesces scattered uncovered gaps across an 8-day window into bounded raw-only listings without re-fetching summaries", async () => {
+    const END = Date.UTC(2025, 0, 9, 0, 0, 0);
+    const day2 = Date.UTC(2025, 0, 2, 0, 0, 0);
+    const day8 = Date.UTC(2025, 0, 8, 0, 0, 0);
+    // 9 scattered uncovered hours across 2 days (5 in baseline day2, 4 in window day8).
+    const missingHourStartsMs = [
+      day2 + 1 * HOUR,
+      day2 + 5 * HOUR,
+      day2 + 11 * HOUR,
+      day2 + 18 * HOUR,
+      day2 + 22 * HOUR,
+      day8 + 2 * HOUR,
+      day8 + 8 * HOUR,
+      day8 + 15 * HOUR,
+      day8 + 21 * HOUR,
+    ];
+    const { src, rawCalls, summaryCalls } = makeMultiDayServer({
+      endMs: END,
+      missingHourStartsMs,
+      omitInlineSummaries: true,
+      rawTruncatedOverMs: DAY,
+    });
+    const result = await insightsFromRollup(
+      withSettings({
+        ...body,
+        clamp_end: new Date(END).toISOString(),
+        window_size_hrs: 24,
+        baseline_hours: 168,
+        earliest_log_at: new Date(END - 14 * DAY).toISOString(),
+      }),
+      [],
+      src,
+      signal,
+    );
+    expect(result).not.toBeNull();
+    // 20 covered hour_bundles (each from sampleHourBuf) + 4 uncovered raw hours (2 requests each).
+    const hourReq = (await decodeRollup(sampleHourBuf, 300_000))!.dims.get("proto")!;
+    let perHourReqs = 0;
+    for (const agg of hourReq.values()) perHourReqs += agg.requests;
+    expect(result!.window_total_requests).toBe(20 * perHourReqs + 4 * 2);
+
+    // Only 1 view=summary call for the whole 8-day window; never re-fetched for uncovered gaps.
+    expect(summaryCalls).toHaveLength(1);
+    // 9 scattered gaps coalesced into 2 bounded (<=24h) raw listings (3 /api/files calls total).
+    expect(rawCalls).toHaveLength(2);
+    for (const url of rawCalls) {
+      const p = new URL(url, "http://x").searchParams;
+      expect(p.get("view")).toBeNull();
+      expect(Date.parse(p.get("to")!) - Date.parse(p.get("from")!)).toBeLessThanOrEqual(DAY);
+    }
+    const ranges = rawCalls.map((url) => {
+      const p = new URL(url, "http://x").searchParams;
+      return [p.get("from"), p.get("to")];
+    }).sort();
+    expect(ranges).toEqual([
+      [new Date(day2 + 1 * HOUR).toISOString(), new Date(day2 + 23 * HOUR).toISOString()],
+      [new Date(day8 + 2 * HOUR).toISOString(), new Date(day8 + 22 * HOUR).toISOString()],
+    ]);
+  });
+
+  it("falls back to individual gap listings when a coalesced span truncates, and to null if a single gap truncates", async () => {
+    const END = Date.UTC(2025, 0, 9, 0, 0, 0);
+    const day8 = Date.UTC(2025, 0, 8, 0, 0, 0);
+    // Two gaps 14h apart: coalesced 14h span exceeds rawTruncatedOverMs (2h), individual 1h spans succeed.
+    const { src, rawCalls, summaryCalls } = makeMultiDayServer({
+      endMs: END,
+      missingHourStartsMs: [day8 + 2 * HOUR, day8 + 15 * HOUR],
+      omitInlineSummaries: true,
+      rawTruncatedOverMs: 2 * HOUR,
+    });
+    const result = await insightsFromRollup(
+      withSettings({
+        ...body,
+        clamp_end: new Date(END).toISOString(),
+        window_size_hrs: 24,
+        baseline_hours: 168,
+        earliest_log_at: new Date(END - 14 * DAY).toISOString(),
+      }),
+      [],
+      src,
+      signal,
+    );
+    expect(result).not.toBeNull();
+    expect(summaryCalls).toHaveLength(1);
+    // 1 coalesced attempt (truncated) + 2 individual 1h fallbacks = 3 raw calls.
+    expect(rawCalls).toHaveLength(3);
+
+    // If even a 1h gap truncates, falls back cleanly to null.
+    const { src: truncSrc } = makeMultiDayServer({
+      endMs: END,
+      missingHourStartsMs: [day8 + 2 * HOUR, day8 + 15 * HOUR],
+      omitInlineSummaries: true,
+      rawTruncatedOverMs: 30 * 60_000,
+    });
+    const truncResult = await insightsFromRollup(
+      withSettings({
+        ...body,
+        clamp_end: new Date(END).toISOString(),
+        window_size_hrs: 24,
+        baseline_hours: 168,
+        earliest_log_at: new Date(END - 14 * DAY).toISOString(),
+      }),
+      [],
+      truncSrc,
+      signal,
+    );
+    expect(truncResult).toBeNull();
   });
 });
