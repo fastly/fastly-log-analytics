@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
+from backend.core.clickhouse.client import rewrite_materialized_cf_sql
 from backend.high_scale._common import visible_fact_clauses
 from backend.repositories.insights.shaping import fingerprint_column as _fingerprint_column
 
@@ -307,7 +310,21 @@ def impossible_distance(
         if not POP_CODE.fullmatch(code):
             raise ValueError("invalid POP code")
         pops.append(f"('{code}', {float(lat)!r}, {float(lon)!r})")
-    edge = " AND lower(edge) IN ('1', 'true')" if edge_only else ""
+    edge = " AND edge IN ('1', 'true', 'True', 'TRUE')" if edge_only else ""
+    prewhere_parts: list[str] = []
+    if edge_only:
+        prewhere_parts.append("custom_fields['edge'] IN ('1', 'true', 'True', 'TRUE')")
+    prewhere_parts.extend(
+        [
+            f"custom_fields['{fingerprint_column}'] != ''",
+            "custom_fields['pop'] != ''",
+            "custom_fields['tcp_rtt'] != ''",
+            "custom_fields['lat'] != ''",
+            "custom_fields['lon'] != ''",
+            "toFloat64OrNull(custom_fields['tcp_rtt']) > 0",
+            "toFloat64OrNull(custom_fields['tcp_rtt']) <= 100100",
+        ]
+    )
     columns: tuple[str, ...] = ("ip", "pop", "lat", "lon", "tcp_rtt", "country", "city", fingerprint_column)
     if edge_only:
         columns += ("edge",)
@@ -325,8 +342,13 @@ def impossible_distance(
     return Detection(
         columns,
         sql,
-        row_filter=f"lat IS NOT NULL AND lon IS NOT NULL AND tcp_rtt IS NOT NULL AND tcp_rtt > 0 AND {fingerprint_column} != ''{edge}",
+        row_filter=(
+            "lat IS NOT NULL AND lon IS NOT NULL "
+            "AND lat BETWEEN -90 AND 90 AND lon BETWEEN -180 AND 180 "
+            f"AND tcp_rtt IS NOT NULL AND tcp_rtt > 0 AND tcp_rtt <= 100100 AND {fingerprint_column} != ''{edge}"
+        ),
         window_only=True,
+        prewhere=" AND ".join(prewhere_parts),
         needs_baseline=False,
     )
 
@@ -788,7 +810,18 @@ def botnet_grouping(fingerprint_column: str) -> Detection:
     return Detection(("ip", fingerprint_column), _fingerprint_spread(fingerprint_column, with_ratio=True))
 
 
-def _base_sql(detection: Detection, insight_id: str) -> str:
+def rewrite_materialized_cf(sql: str, params: Mapping[str, Any] | None = None, *, use_cf: bool = False) -> str:
+    """Rewrite known ``custom_fields[...]`` references to materialized ``_cf_*`` columns when enabled."""
+    return rewrite_materialized_cf_sql(sql, params) if use_cf else sql
+
+
+def _base_sql(
+    detection: Detection,
+    insight_id: str,
+    *,
+    use_cf: bool = False,
+    params: Mapping[str, Any] | None = None,
+) -> str:
     projection = ", ".join(f"{COLUMNS[column]} AS {column}" for column in detection.columns)
     lower = "{window_start:DateTime64(3)}" if detection.window_only else "{baseline_start:DateTime64(3)}"
     scope = " AND ".join(visible_fact_clauses("request"))
@@ -804,12 +837,13 @@ def _base_sql(detection: Detection, insight_id: str) -> str:
             f"FROM request_facts PREWHERE {scope} AND event_timestamp >= {lower} "
             f"AND event_timestamp < {{window_end:DateTime64(3)}}{where_clause}"
         )
-    return (
+    sql = (
         f"/* insight:{insight_id} */ WITH base AS (SELECT {projection}, "
         "event_timestamp < {window_start:DateTime64(3)} AS is_b, "
         "event_timestamp >= {window_start:DateTime64(3)} AS is_w "
         f"{from_clause}) {detection.sql}"
     )
+    return rewrite_materialized_cf(sql, params, use_cf=use_cf)
 
 
 def _detection_for(insight_id: str, present: set[str]) -> Detection | None:
