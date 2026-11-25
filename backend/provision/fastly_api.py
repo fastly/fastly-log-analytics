@@ -1,5 +1,4 @@
 import datetime
-import json
 import os
 import re
 import shutil
@@ -650,8 +649,6 @@ def ensure_cdn_service(
     if not logging_service_id:
         raise ValueError("logging_service_id or service_id must be provided in config.")
 
-    config_path = _svcconfig.config_path(logging_service_id)
-
     def _merge_inputs(disk_cfg: dict) -> None:
         disk_cfg.update(cfg)
         disk_cfg["fos_access_key_id"] = fos_access_key
@@ -664,7 +661,7 @@ def ensure_cdn_service(
             _svcconfig.save_config(logging_service_id, new_cfg)
 
     def _read_cdn_sid() -> tuple[dict, str]:
-        updated = json.loads(config_path.read_text())
+        updated = _svcconfig.load_config(logging_service_id) or {}
         return updated, updated.get("fos_proxy", {}).get("service_id") or updated.get("cdn_service_id", "")
 
     creation_notified = False
@@ -721,7 +718,7 @@ def redeploy_cdn_vcl(cdn_service_id: str, token: str, rate_limiting: bool = True
         )
         is None
     ):
-        raise FileNotFoundError(_svcconfig.config_path(logging_service_id))
+        raise FileNotFoundError(f"Service config for {logging_service_id} not found")
 
     result = reconcile_cdn_service_state(
         logging_service_id=logging_service_id, token=token, status_cb=status_cb, activate=True
@@ -906,15 +903,20 @@ def remove_logging_endpoint(
 
 
 def update_logging_endpoint(cfg: dict, token: str):
-    """Safely update the log configuration of an existing FOS endpoint using the declarative reconciler."""
+    """Safely update the log configuration of an existing FOS endpoint using the transactional reconciler."""
     service_id = cfg["logging_service_id"]
-    endpoint_name = cfg.get("provisioning", {}).get("endpoint_name", "Fastly Object Storage Logs")
+    endpoint_name = cfg.get("endpoint_name") or (cfg.get("provisioning") or {}).get(
+        "endpoint_name", "Fastly Object Storage Logs"
+    )
     sample_rate, edge_only, period, path = (
         cfg.get("sample_rate"),
         cfg.get("edge_only"),
         cfg.get("log_period"),
         cfg.get("fos_path"),
     )
+    if period is not None:
+        if isinstance(period, bool) or not (1 <= int(period) <= 3600):
+            raise ValueError("Rotation period must be between 1 and 3600 seconds")
     custom_condition_req = (
         cfg["custom_condition"]
         if "custom_condition" in cfg
@@ -951,6 +953,12 @@ def update_logging_endpoint(cfg: dict, token: str):
         raise RuntimeError(f"Service config for {service_id} not found: {e}")
     if service_cfg is None:
         raise RuntimeError(f"Service config for {service_id} is empty or None")
+
+    detected_rl: bool | None = None
+    try:
+        detected_rl = account_has_rate_limiting(token, service_id)
+    except Exception:
+        detected_rl = None
 
     cmcd_enabled_req, cmcd_mode_req, cmcd_version_req = (
         cfg.get("cmcd_enabled"),
@@ -992,6 +1000,14 @@ def update_logging_endpoint(cfg: dict, token: str):
             prov["edge_only"] = bool(edge_only)
         if period is not None:
             target["log_period"] = int(period)
+            target["fos_prefix"] = ""
+            if "cron_sync" in prov and isinstance(prov["cron_sync"], dict):
+                if int(period) < 60:
+                    prov["cron_sync"]["interval_seconds"] = int(period)
+                    prov["cron_sync"].pop("interval_mins", None)
+                else:
+                    prov["cron_sync"]["interval_mins"] = max(1, int(period) // 60)
+                    prov["cron_sync"].pop("interval_seconds", None)
         if endpoint_name is not None:
             prov["endpoint_name"] = endpoint_name
         if custom_condition_req is not None:
@@ -1003,39 +1019,38 @@ def update_logging_endpoint(cfg: dict, token: str):
                 if existing_custom:
                     incoming_lf["custom_fields"] = list(existing_custom)
             target["log_fields"] = incoming_lf
+        if detected_rl is not None:
+            prov["rate_limiting"] = detected_rl
 
         reconcile_cfg_system_custom_fields(target)
         if path is not None:
             target["fos_path"] = path
 
-    if _svcconfig.mutate_config(service_id, _apply_requested_changes) is None:
-        raise RuntimeError(f"Service config for {service_id} is empty or None")
-
-    try:
-        detected_rl = account_has_rate_limiting(token, service_id)
-        current_rl = ((_svcconfig.load_config(service_id) or {}).get("provisioning") or {}).get("rate_limiting")
-        if detected_rl is not None and current_rl != detected_rl:
-            _svcconfig.mutate_config(
-                service_id,
-                lambda target: target.setdefault("provisioning", {}).__setitem__("rate_limiting", detected_rl),
-            )
-            msg = (
-                "ℹ️ Edge rate limiting is now available on this account — redeploy the CDN service to enable it."
-                if detected_rl
-                else "ℹ️ Edge rate limiting is not available on this account."
-            )
-            yield {"type": "status", "message": msg}
-    except Exception:
-        pass
+    current_rl = (service_cfg.get("provisioning") or {}).get("rate_limiting")
+    if detected_rl is not None and current_rl != detected_rl:
+        msg = (
+            "ℹ️ Edge rate limiting is now available on this account — redeploy the CDN service to enable it."
+            if detected_rl
+            else "ℹ️ Edge rate limiting is not available on this account."
+        )
+        yield {"type": "status", "message": msg}
 
     yield {"type": "progress", "current": 1, "total": total_steps}
 
     from backend.provision.cli import run_with_events
-    from backend.provision.declarative.reconciler import reconcile_vcl_state
+    from backend.provision.declarative.reconciler import transactional_vcl_reconcile
 
     yield {"type": "status", "message": f"🔍 Starting declarative reconciliation for service {service_id}..."}
     try:
-        result = yield from run_with_events(reconcile_vcl_state, service_id, token, dry_run=False)
+        result = yield from run_with_events(
+            transactional_vcl_reconcile,
+            service_id,
+            token,
+            _apply_requested_changes,
+            prefer_deployed_snapshot=True,
+            dry_run=False,
+            activate=True,
+        )
         if result.error:
             raise RuntimeError(result.error)
 

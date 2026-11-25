@@ -77,9 +77,8 @@ def _diff(
 @contextmanager
 def _mock_cfg_file(**extra: Any):
     cfg = {"service_id": "srv_test", "log_period": 60, "sample_rate": 100, **extra}
-    with patch("pathlib.Path.exists", return_value=True), patch("pathlib.Path.read_text") as mock_read:
-        mock_read.return_value = json.dumps(cfg)
-        yield mock_read
+    svcconfig.save_config("srv_test", dict(cfg))
+    yield cfg
 
 
 # ── From test_diff.py ──
@@ -157,7 +156,7 @@ class TestIaCReconciler:
     @patch("backend.provision.session_scoring_orchestrator._resolve_tenant_matrix_for_deploy")
     def test_build_desired_state_scoring_disabled(self, mock_resolve_matrix, mock_scorer_pkg, mock_config_dir):
         cfg = {"service_id": "srv_123", "log_period": 60, "sample_rate": 100, "scoring": {"enabled": False}}
-        (mock_config_dir / "srv_123.json").write_text(json.dumps(cfg))
+        svcconfig.save_config("srv_123", cfg)
         desired = build_desired_state("srv_123", "token")
         assert desired.service_id == "srv_123" and desired.compute_scorer is None and len(desired.kv_stores) == 0
         assert desired.vcl_service.name == "Fastly Log Analytics"
@@ -173,7 +172,7 @@ class TestIaCReconciler:
             "sample_rate": 100,
             "scoring": {"enabled": True, "scoring_domain": "fos-srv123-session-scorer.edgecompute.app"},
         }
-        (mock_config_dir / "srv_123.json").write_text(json.dumps(cfg))
+        svcconfig.save_config("srv_123", cfg)
         matrix_file = tmp_path / "matrix_srv_123.json"
         matrix_file.write_text(json.dumps({"weights": [1, 2, 3]}))
         mock_resolve_matrix.return_value = matrix_file
@@ -232,8 +231,7 @@ class TestIaCReconciler:
             "sample_rate": 100,
             "scoring": {"enabled": True, "scoring_domain": "fos-srv123-session-scorer.edgecompute.app"},
         }
-        config_file = mock_config_dir / "srv_123.json"
-        config_file.write_text(json.dumps(cfg))
+        svcconfig.save_config("srv_123", cfg)
         mock_discover.return_value = {"kv_stores": {}, "compute_scorer": None}
         mock_ensure_scoring_svc.return_value = {
             "scoring_service_id": "compute_srv_id",
@@ -244,7 +242,8 @@ class TestIaCReconciler:
 
         status_cb = MagicMock()
         reconcile_infrastructure("srv_123", "token", dry_run=False, status_cb=status_cb)
-        updated_cfg = json.loads(config_file.read_text())
+        updated_cfg = svcconfig._read_config_fresh("srv_123")
+        assert updated_cfg is not None
         assert updated_cfg["scoring"]["enabled"] is True
         assert updated_cfg["scoring"]["scoring_service_id"] == "compute_srv_id"
         assert updated_cfg["scoring"]["deployed_package_sha"] == "wasm_sha_abc"
@@ -263,14 +262,14 @@ class TestIaCReconciler:
             "sample_rate": 100,
             "scoring": {"enabled": True, "scoring_domain": "fos-srv123-session-scorer.edgecompute.app"},
         }
-        config_file = mock_config_dir / "srv_123.json"
-        config_file.write_text(json.dumps(original_cfg))
+        svcconfig.save_config("srv_123", dict(original_cfg))
+        saved_original = svcconfig._read_config_fresh("srv_123")
         mock_discover.return_value = {"kv_stores": {}, "compute_scorer": None}
         mock_ensure_scoring_svc.side_effect = RuntimeError("Fastly API rate limit 429")
 
         with pytest.raises(RuntimeError, match="Fastly API rate limit 429"):
             reconcile_infrastructure("srv_123", "token", dry_run=False, status_cb=MagicMock())
-        assert json.loads(config_file.read_text()) == original_cfg
+        assert svcconfig._read_config_fresh("srv_123") == saved_original
 
     @patch("backend.provision.declarative.reconciler.delete_scoring_service")
     @patch("backend.provision.declarative.reconciler.reconcile_vcl_state")
@@ -289,8 +288,7 @@ class TestIaCReconciler:
                 "scoring_config_store_id": "cfg_store_id",
             },
         }
-        config_file = mock_config_dir / "srv_123.json"
-        config_file.write_text(json.dumps(original_cfg))
+        svcconfig.save_config("srv_123", dict(original_cfg))
         mock_discover.return_value = {
             "kv_stores": {"scoring_matrix_srv_123": {"id": "matrix_store_id"}},
             "compute_scorer": {"id": "compute_srv_id", "name": "Session Scoring Service for srv_123"},
@@ -309,7 +307,8 @@ class TestIaCReconciler:
             token="token",
             status_cb=status_cb,
         )
-        assert "scoring" not in json.loads(config_file.read_text())
+        after_cfg = svcconfig._read_config_fresh("srv_123")
+        assert after_cfg is not None and "scoring" not in after_cfg
 
 
 # ── From test_iac_reconciler_config_merge.py ──
@@ -331,7 +330,9 @@ def _lock_held() -> bool:
 
 
 def _persisted() -> dict:
-    return json.loads(svcconfig.config_path(SID).read_text())
+    cfg = svcconfig._read_config_fresh(SID)
+    assert cfg is not None
+    return cfg
 
 
 def _concurrent_write() -> None:
@@ -390,7 +391,6 @@ def scoring_not_desired():
         yield build
 
 
-@pytest.mark.no_postgres
 def test_enable_persists_only_scoring_and_keeps_concurrent_writes(enable_stubs, scoring_desired):
     seeded = _seed(scoring={"enabled": True, "request_secret": "r" * 8})
 
@@ -425,14 +425,13 @@ def test_enable_does_not_hold_the_config_lock_across_fastly_calls(enable_stubs, 
     assert held == [False, False]
 
 
-@pytest.mark.no_postgres
-def test_failure_after_persist_rolls_back_only_scoring_and_keeps_concurrent_writes(enable_stubs, scoring_desired):
+def test_failure_after_persist_rolls_back_full_config_snapshot(enable_stubs, scoring_desired):
     original_scoring = {"enabled": True, "scoring_domain": "old.example.test"}
     seeded = _seed(scoring=original_scoring)
+    baseline = json.loads(svcconfig.snapshot_config(SID) or "{}")
 
     def _boom(*_a, **_kw):
         assert _persisted()["scoring"]["scoring_service_id"] == "compute_id"
-        _concurrent_write()
         raise RuntimeError("vcl sync failed")
 
     enable_stubs.reconcile.side_effect = _boom
@@ -451,13 +450,12 @@ def test_failure_after_persist_rolls_back_only_scoring_and_keeps_concurrent_writ
         reconcile_infrastructure(SID, "tok")
 
     saved = _persisted()
+    assert saved == baseline
     assert saved["scoring"] == original_scoring
-    assert saved["concurrent_key"] == "kept"
     assert saved["rum"]["cid_salt"] == seeded["rum"]["cid_salt"]
     delete.assert_called_once_with(token="tok", **created)
 
 
-@pytest.mark.no_postgres
 def test_failure_after_persist_removes_scoring_that_did_not_exist_before(enable_stubs, scoring_desired):
     _seed()
     enable_stubs.reconcile.side_effect = RuntimeError("vcl sync failed")
@@ -470,13 +468,13 @@ def test_failure_after_persist_removes_scoring_that_did_not_exist_before(enable_
 
 def test_failure_before_any_persist_leaves_the_file_untouched(enable_stubs, scoring_desired):
     _seed(scoring={"enabled": True})
-    before = svcconfig.config_path(SID).read_text()
+    before = svcconfig.snapshot_config(SID)
     enable_stubs.ensure.side_effect = RuntimeError("fastly 429")
 
     with pytest.raises(RuntimeError, match="fastly 429"):
         reconcile_infrastructure(SID, "tok")
 
-    assert svcconfig.config_path(SID).read_text() == before
+    assert svcconfig.snapshot_config(SID) == before
 
 
 def test_disable_strips_scoring_fields_and_block_and_keeps_concurrent_writes(disable_stubs, scoring_not_desired):
@@ -496,18 +494,15 @@ def test_disable_strips_scoring_fields_and_block_and_keeps_concurrent_writes(dis
     assert disable_stubs.delete.call_args.kwargs["scoring_keys_store_id"] == "k"
 
 
-@pytest.mark.no_postgres
-def test_disable_failure_restores_scoring_block_and_fields_and_keeps_concurrent_writes(
-    disable_stubs, scoring_not_desired
-):
+def test_disable_failure_restores_full_config_snapshot(disable_stubs, scoring_not_desired):
     original_scoring = {"enabled": True, "scoring_keys_store_id": "k"}
     _seed(scoring=original_scoring, log_fields={"custom_fields": [dict(SCORING_FIELD), dict(USER_FIELD)]})
+    baseline = json.loads(svcconfig.snapshot_config(SID) or "{}")
 
     def _boom(*_a, **_kw):
         stripped = _persisted()
         assert stripped["scoring"]["enabled"] is False
         assert [cf["name"] for cf in stripped["log_fields"]["custom_fields"]] == ["my_custom"]
-        _concurrent_write()
         raise RuntimeError("vcl sync failed")
 
     disable_stubs.reconcile.side_effect = _boom
@@ -516,9 +511,9 @@ def test_disable_failure_restores_scoring_block_and_fields_and_keeps_concurrent_
         reconcile_infrastructure(SID, "tok")
 
     saved = _persisted()
+    assert saved == baseline
     assert saved["scoring"] == original_scoring
     assert {cf["name"] for cf in saved["log_fields"]["custom_fields"]} == {SCORING_FIELD["name"], "my_custom"}
-    assert saved["concurrent_key"] == "kept"
     disable_stubs.delete.assert_not_called()
 
 
@@ -587,10 +582,9 @@ def test_validation_failure_raises_vcl_validation_error_even_if_active_version_m
         snippets_to_add=[VCLSnippet(name="x", priority=10, body="# c", subroutine="recv")]
     )
 
-    with patch("pathlib.Path.exists", return_value=True), patch("pathlib.Path.read_text") as mock_read:
-        mock_read.return_value = json.dumps({"service_id": "srv_test", "log_period": 60, "sample_rate": 100})
-        with pytest.raises(VclValidationError):
-            reconcile_vcl_state("srv_test", "token", dry_run=False)
+    svcconfig.save_config("srv_test", {"service_id": "srv_test", "log_period": 60, "sample_rate": 100})
+    with pytest.raises(VclValidationError):
+        reconcile_vcl_state("srv_test", "token", dry_run=False)
     mock_activate.assert_not_called()
 
 
@@ -598,9 +592,18 @@ def test_validation_failure_raises_vcl_validation_error_even_if_active_version_m
 
 
 class TestRoutersIaC:
+    @staticmethod
+    def _apply_pre_mutate(mock_reconcile):
+        def _side_effect(sid, _tok, **kw):
+            pre = kw.get("pre_mutate")
+            if pre is not None:
+                svcconfig.mutate_config(sid, pre)
+
+        mock_reconcile.side_effect = _side_effect
+
     def _post_route(self, mock_config_dir, extra_cfg, path, payload, expected_msg):
         cfg = {"service_id": "srv_123", "log_period": 60, "sample_rate": 100, **extra_cfg}
-        (mock_config_dir / "srv_123.json").write_text(json.dumps(cfg))
+        svcconfig.save_config("srv_123", cfg)
         response = TestClient(app).post(path, json=payload)
         assert response.status_code == 200
         assert any(expected_msg in line for line in response.iter_lines() if line)
@@ -610,6 +613,7 @@ class TestRoutersIaC:
     @patch("backend.routers.session_scoring.resolve_fastly_token", return_value="fake_token")
     @patch("backend.provision.declarative.reconciler.reconcile_infrastructure")
     def test_scoring_enable_route(self, mock_reconcile, mock_resolve, mock_pragmas, mock_config_dir):
+        self._apply_pre_mutate(mock_reconcile)
         updated_cfg = self._post_route(
             mock_config_dir,
             {"scoring": {"enabled": False, "scoring_domain": "scoring.example.com"}},
@@ -624,6 +628,7 @@ class TestRoutersIaC:
     @patch("backend.routers.session_scoring.resolve_fastly_token", return_value="fake_token")
     @patch("backend.provision.declarative.reconciler.reconcile_infrastructure")
     def test_scoring_disable_route(self, mock_reconcile, mock_resolve, mock_config_dir):
+        self._apply_pre_mutate(mock_reconcile)
         updated_cfg = self._post_route(
             mock_config_dir,
             {"scoring": {"enabled": True, "scoring_domain": "scoring.example.com"}},
@@ -638,6 +643,7 @@ class TestRoutersIaC:
     @patch("backend.routers.performance._resolve_token", return_value="fake_token")
     @patch("backend.provision.declarative.reconciler.reconcile_infrastructure")
     def test_cmcd_enable_route(self, mock_reconcile, mock_resolve, mock_config_dir):
+        self._apply_pre_mutate(mock_reconcile)
         updated_cfg = self._post_route(
             mock_config_dir,
             {},
@@ -657,6 +663,7 @@ class TestRoutersIaC:
     @patch("backend.routers.performance._resolve_token", return_value="fake_token")
     @patch("backend.provision.declarative.reconciler.reconcile_infrastructure")
     def test_cmcd_disable_route(self, mock_reconcile, mock_resolve, mock_config_dir):
+        self._apply_pre_mutate(mock_reconcile)
         updated_cfg = self._post_route(
             mock_config_dir,
             {"cmcd": {"enabled": True, "mode": "query_string", "version": 1}},
@@ -702,8 +709,8 @@ def test_update_local_config_goes_through_the_locked_mutate_config(tmp_path, mon
     )
     reconciler._update_local_config("svc-recon", lambda c: c.__setitem__("last_activated_version", 7))
     assert calls == ["svc-recon"]
-    saved = json.loads((tmp_path / "svc-recon.json").read_text())
-    assert saved["last_activated_version"] == 7 and saved["other"] == "keep"
+    saved = svcconfig._read_config_fresh("svc-recon")
+    assert saved is not None and saved["last_activated_version"] == 7 and saved["other"] == "keep"
 
 
 def test_update_local_config_raises_on_oserror_and_missing_config(monkeypatch):
@@ -1436,23 +1443,20 @@ class TestCdnReconciliation:
     def test_reconcile_cdn_dry_run(
         self, mock_fetch_active_version, mock_fetch_dicts, mock_fetch_backends, mock_fetch_snippets, mock_find_service
     ):
-        with (
-            patch("pathlib.Path.exists", return_value=True),
-            patch("pathlib.Path.read_text") as mock_read,
-            patch("backend.provision.declarative.reconciler._update_local_config") as mock_update,
-        ):
-            mock_read.return_value = json.dumps(
-                {
-                    "service_id": "logging_svc_test",
-                    "cdn_service_name": "Test CDN Svc",
-                    "cdn_url": "https://test-cdn.drew.com",
-                    "fos_region": "us-east-1",
-                    "fos_bucket": "test-bucket",
-                    "fos_access_key_id": "key",
-                    "fos_secret_access_key": "secret",
-                    "cdn_secret": "auth-secret",
-                }
-            )
+        svcconfig.save_config(
+            "logging_svc_test",
+            {
+                "service_id": "logging_svc_test",
+                "cdn_service_name": "Test CDN Svc",
+                "cdn_url": "https://test-cdn.drew.com",
+                "fos_region": "us-east-1",
+                "fos_bucket": "test-bucket",
+                "fos_access_key_id": "key",
+                "fos_secret_access_key": "secret",
+                "cdn_secret": "auth-secret",
+            },
+        )
+        with patch("backend.provision.declarative.reconciler._update_local_config") as mock_update:
             result = reconcile_cdn_service_state(
                 logging_service_id="logging_svc_test", token="token", dry_run=True, activate=True
             )
@@ -1631,7 +1635,7 @@ class TestLoggingEndpointGeneration:
         endpoints = desired_logging_endpoints(_state(rum_enabled=True, fos_prefix="raw"))
         rum = [e for e in endpoints if e.name == "Fastly RUM Logs"]
         assert len(rum) == 1 and "raw/rum/" in rum[0].path
-        assert rum[0].response_condition == "rum_log_condition" and rum[0].period == 60
+        assert rum[0].response_condition == "rum_log_condition" and rum[0].period == 300
 
     def test_generator_rum_endpoint_logs_the_whole_beacon_url_in_the_lean_format(self):
         from backend.core.fastly.client import generate_rum_log_format
@@ -1646,9 +1650,9 @@ class TestLoggingEndpointGeneration:
         ]  # fmt: skip
 
     def test_generator_rum_endpoint_respects_rum_log_period(self):
-        endpoints = desired_logging_endpoints(_state(rum_enabled=True, rum_log_period=300, fos_prefix="raw"))
+        endpoints = desired_logging_endpoints(_state(rum_enabled=True, rum_log_period=120, fos_prefix="raw"))
         rum = [e for e in endpoints if e.name == "Fastly RUM Logs"]
-        assert len(rum) == 1 and rum[0].period == 300
+        assert len(rum) == 1 and rum[0].period == 120
 
     def test_generator_rum_endpoint_not_created_when_disabled(self):
         assert not [e for e in desired_logging_endpoints(_state(rum_enabled=False)) if "RUM" in e.name]
@@ -2462,9 +2466,11 @@ def test_sec15_feature_state_rejects_unsafe_conditions_and_expressions(bad_kwarg
 @pytest.mark.security_regression
 @pytest.mark.no_postgres
 def test_sec15_feature_state_allows_rum_url_condition_and_enforces_canonical_system_fields():
-    # 1. rum_custom_condition with req.url succeeds across FeatureState.from_config and FeatureState
-    st_rum = _state(rum_enabled=True, rum={"custom_condition": 'req.url !~ "^/healthz"'})
-    assert st_rum.rum_custom_condition == 'req.url !~ "^/healthz"'
+    # 1. Safe rum_custom_condition succeeds across FeatureState.from_config and FeatureState; req.url path predicates are rejected
+    st_rum = _state(rum_enabled=True, rum={"custom_condition": 'req.url.ext != "png"'})
+    assert st_rum.rum_custom_condition == 'req.url.ext != "png"'
+    with pytest.raises(ValueError, match="req.url"):
+        _state(rum_enabled=True, rum={"custom_condition": 'req.url !~ "^/healthz"'})
 
     # 2. FeatureState.from_config overwrites tampered non-malicious system field definitions with canonical
     st_canon = _state(
@@ -2545,32 +2551,29 @@ def test_sec15_feature_state_allows_rum_url_condition_and_enforces_canonical_sys
 
 
 @pytest.mark.security_regression
-@pytest.mark.no_postgres
 def test_sec12_reconcile_cdn_service_state_lifecycle_and_write_only_dictionaries(mock_config_dir):
     from backend.core.fastly.client import load_vcl
     from backend.provision.declarative import fastly_ops as fi
     from backend.provision.declarative import orchestrate as orch_mod
 
     sid = "srv_cdn_sec12"
-    cfg_file = mock_config_dir / f"{sid}.json"
-    cfg_file.write_text(
-        json.dumps(
-            {
-                "service_id": sid,
-                "log_period": 60,
-                "sample_rate": 100,
-                "fos_bucket": "my-bucket",
-                "fos_region": "us-east-1",
-                "fos_access_key_id": "AKIA_X",
-                "fos_secret_access_key": "SEC_X",
-                "cdn_url": "https://cdn-sec12.global.ssl.fastly.net",
-                "cdn_secret": "cdn-secret-abc",
-            }
-        )
+    svcconfig.save_config(
+        sid,
+        {
+            "service_id": sid,
+            "log_period": 60,
+            "sample_rate": 100,
+            "fos_bucket": "my-bucket",
+            "fos_region": "us-east-1",
+            "fos_access_key_id": "AKIA_X",
+            "fos_secret_access_key": "SEC_X",
+            "cdn_url": "https://cdn-sec12.global.ssl.fastly.net",
+            "cdn_secret": "cdn-secret-abc",
+        },
     )
 
     # 1. Missing cdn_url raises ValueError
-    (mock_config_dir / "srv_no_url.json").write_text(json.dumps({"service_id": "srv_no_url"}))
+    svcconfig.save_config("srv_no_url", {"service_id": "srv_no_url"})
     with pytest.raises(ValueError, match="CDN URL is required"):
         reconcile_cdn_service_state("srv_no_url", "tok")
 
@@ -2631,8 +2634,8 @@ def test_sec12_reconcile_cdn_service_state_lifecycle_and_write_only_dictionaries
     assert installed_backends[0].ssl_sni_hostname == "us-east-1.object.fastlystorage.app"
 
     # 4. Reused CDN service missing domain calls _ensure_cdn_domain and clones/activates domain addition
-    (mock_config_dir / "srv_reuse.json").write_text(
-        json.dumps({"service_id": "srv_reuse", "cdn_url": "https://reuse-cdn.global.ssl.fastly.net"})
+    svcconfig.save_config(
+        "srv_reuse", {"service_id": "srv_reuse", "cdn_url": "https://reuse-cdn.global.ssl.fastly.net"}
     )
     domain_posts: list[dict[str, Any]] = []
     with (
@@ -2674,22 +2677,20 @@ def test_sec12_reconcile_cdn_service_state_lifecycle_and_write_only_dictionaries
 
 
 @pytest.mark.security_regression
-@pytest.mark.no_postgres
 def test_sec15_apply_diff_and_highest_version_helpers(mock_config_dir):
     from backend.provision.declarative import fastly_ops as fi
     from backend.provision.declarative.models import ServiceDictionary
 
     sid = "srv_apply_sec15"
-    (mock_config_dir / f"{sid}.json").write_text(
-        json.dumps(
-            {
-                "service_id": sid,
-                "fos_bucket": "bkt",
-                "fos_region": "us-east-1",
-                "fos_access_key_id": "AKIA",
-                "fos_secret_access_key": "SK",
-            }
-        )
+    svcconfig.save_config(
+        sid,
+        {
+            "service_id": sid,
+            "fos_bucket": "bkt",
+            "fos_region": "us-east-1",
+            "fos_access_key_id": "AKIA",
+            "fos_secret_access_key": "SK",
+        },
     )
     state = _state(
         service_id=sid,
@@ -2767,7 +2768,6 @@ def test_sec15_apply_diff_and_highest_version_helpers(mock_config_dir):
 
 
 @pytest.mark.security_regression
-@pytest.mark.no_postgres
 def test_declarative_error_and_normalization_edge_cases(mock_config_dir):
     from filelock import Timeout as FileLockTimeout
 
@@ -2809,7 +2809,10 @@ def test_declarative_error_and_normalization_edge_cases(mock_config_dir):
         FeatureState.from_config({"service_id": "s"})
 
     # 2. Lock timeout, RUM tracker warning resilience, active-version helpers, and _apply_diff error branches
-    with patch("filelock.SoftFileLock.acquire", side_effect=FileLockTimeout("locked")):
+    with (
+        patch("backend.core.metadata.pg_pool.is_postgres", return_value=False),
+        patch("filelock.SoftFileLock.acquire", side_effect=FileLockTimeout("locked")),
+    ):
         with pytest.raises(LockAcquisitionTimeout):
             fi.acquire_vcl_lock("svc_contended", timeout_sec=0)
 
@@ -2846,15 +2849,47 @@ def test_declarative_error_and_normalization_edge_cases(mock_config_dir):
     )
     with (
         patch.object(fi, "delete_snippet", side_effect=RuntimeError("gone")),
-        patch.object(fi, "delete_backend", side_effect=RuntimeError("gone")),
-        patch.object(fi, "delete_dictionary", side_effect=RuntimeError("gone")),
+        pytest.raises(RuntimeError, match="gone"),
+    ):
+        fi._apply_diff("svc1", "tok", 2, DiffResult(snippets_to_remove=["Fastly Log Analytics - vcl_recv"]))
+
+    with (
+        patch.object(fi, "delete_snippet", side_effect=RuntimeError("404 not found")),
+        patch.object(fi, "delete_backend", side_effect=RuntimeError("404 not found")),
+        patch.object(fi, "delete_dictionary", side_effect=RuntimeError("404 not found")),
         patch("backend.core.fastly.client.ensure_condition"),
         patch.object(fi, "create_or_update_dictionary", side_effect=RuntimeError("dict err")),
-        patch.object(fi, "create_or_update_snippet", side_effect=RuntimeError("snip err")),
-        patch.object(fi, "create_or_update_logging_endpoint", side_effect=RuntimeError("ep err")),
+        pytest.raises(RuntimeError, match="dict err"),
     ):
         fi._apply_diff("svc1", "tok", 2, purge_diff, desired_endpoints=[ep_sample], status_cb=warn_msgs.append)
-    assert any("Failed to install logging endpoint" in m for m in warn_msgs)
+
+    with (
+        patch("backend.core.fastly.client.ensure_condition"),
+        patch.object(fi, "create_or_update_snippet", side_effect=RuntimeError("snip err")),
+        pytest.raises(RuntimeError, match="snip err"),
+    ):
+        fi._apply_diff(
+            "svc1",
+            "tok",
+            2,
+            DiffResult(snippets_to_add=[purge_diff.snippets_to_add[0]]),
+            desired_endpoints=[],
+            status_cb=warn_msgs.append,
+        )
+
+    with (
+        patch("backend.core.fastly.client.ensure_condition"),
+        patch.object(fi, "create_or_update_logging_endpoint", side_effect=RuntimeError("ep err")),
+        pytest.raises(RuntimeError, match="ep err"),
+    ):
+        fi._apply_diff(
+            "svc1",
+            "tok",
+            2,
+            DiffResult(endpoints_to_add=[ep_sample]),
+            desired_endpoints=[ep_sample],
+            status_cb=warn_msgs.append,
+        )
 
     with patch.object(fi, "create_or_update_backend", side_effect=RuntimeError("backend err")):
         with pytest.raises(RuntimeError, match="backend err"):
@@ -2868,19 +2903,18 @@ def test_declarative_error_and_normalization_edge_cases(mock_config_dir):
 
     # 3. CDN reconcile up-to-date early exit, activate=False, and VclValidationError rollback message
     sid = "srv_cdn_edges"
-    (mock_config_dir / f"{sid}.json").write_text(
-        json.dumps(
-            {
-                "service_id": sid,
-                "fos_bucket": "bkt",
-                "fos_region": "us-east-1",
-                "fos_access_key_id": "AKIA",
-                "fos_secret_access_key": "SK",
-                "cdn_service_id": "cdn_1",
-                "cdn_url": "https://cdn-edges.global.ssl.fastly.net",
-                "cdn_secret": "sec",
-            }
-        )
+    svcconfig.save_config(
+        sid,
+        {
+            "service_id": sid,
+            "fos_bucket": "bkt",
+            "fos_region": "us-east-1",
+            "fos_access_key_id": "AKIA",
+            "fos_secret_access_key": "SK",
+            "cdn_service_id": "cdn_1",
+            "cdn_url": "https://cdn-edges.global.ssl.fastly.net",
+            "cdn_secret": "sec",
+        },
     )
     matching_snips = [VCLSnippet(name=n, subroutine=st, body=c, priority=pr) for n, st, c, pr in _CDN_SNIPPETS]
     matching_bk = [
@@ -2945,21 +2979,22 @@ def test_declarative_error_and_normalization_edge_cases(mock_config_dir):
         with pytest.raises(VclValidationError):
             reconcile_cdn_service_state(sid, "tok", status_cb=warn_msgs.append)
 
-    # 4. Bootstrap when config missing + reconcile_infrastructure dry_run / missing-config guard
-    with (
-        patch.object(fi, "fetch_active_version", return_value=None),
-        patch.object(orch_mod, "_fetch_highest_version", return_value=None),
-    ):
-        boot_state = orch_mod._load_or_bootstrap_feature_state("srv_boot_missing", "tok", persist_bootstrap=True)
-    assert boot_state.service_id == "srv_boot_missing"
+    # 4. Missing config guards across _load_or_bootstrap_feature_state and reconcile_infrastructure
+    with pytest.raises(RuntimeError, match="No service config found for srv_boot_missing"):
+        orch_mod._load_or_bootstrap_feature_state("srv_boot_missing", "tok", persist_bootstrap=True)
 
     with (
         patch.object(orch_mod, "build_desired_state"),
         patch.object(orch_mod, "discover_current_state", return_value={}),
     ):
-        reconcile_infrastructure("srv_unpersisted", "tok", dry_run=True, status_cb=warn_msgs.append)
-        with pytest.raises(RuntimeError, match="Configuration file"):
+        with pytest.raises(RuntimeError, match="Service configuration for srv_unpersisted"):
+            reconcile_infrastructure("srv_unpersisted", "tok", dry_run=True, status_cb=warn_msgs.append)
+        with pytest.raises(RuntimeError, match="Service configuration for srv_unpersisted"):
             reconcile_infrastructure("srv_unpersisted", "tok", dry_run=False)
+        svcconfig.save_config(
+            "srv_persisted_dry", {"service_id": "srv_persisted_dry", "log_period": 60, "sample_rate": 100}
+        )
+        reconcile_infrastructure("srv_persisted_dry", "tok", dry_run=True, status_cb=warn_msgs.append)
 
 
 @pytest.mark.no_postgres
@@ -3014,7 +3049,6 @@ def test_sec12_create_or_update_dictionary_creates_only_on_404() -> None:
     assert ("POST", "/service/svc1/version/2/dictionary") in calls
 
 
-@pytest.mark.no_postgres
 @pytest.mark.security_regression
 def test_sec15_log_fields_set_rejects_and_canonicalizes_system_custom_fields(mock_config_dir) -> None:
     from fastapi.testclient import TestClient
@@ -3022,18 +3056,16 @@ def test_sec15_log_fields_set_rejects_and_canonicalizes_system_custom_fields(moc
     from backend.main import app
 
     sid = "svc_rum_lf_canon"
-    cfg_path = mock_config_dir / f"{sid}.json"
-    cfg_path.write_text(
-        json.dumps(
-            {
-                "service_id": sid,
-                "name": "RUM Canon Svc",
-                "log_period": 60,
-                "rum_enabled": True,
-                "rum": {"enabled": True},
-                "log_fields": {"schema_version": 2, "groups": ["A"], "custom_fields": []},
-            }
-        )
+    svcconfig.save_config(
+        sid,
+        {
+            "service_id": sid,
+            "name": "RUM Canon Svc",
+            "log_period": 60,
+            "rum_enabled": True,
+            "rum": {"enabled": True},
+            "log_fields": {"schema_version": 2, "groups": ["A"], "custom_fields": []},
+        },
     )
 
     with (
@@ -3072,7 +3104,8 @@ def test_sec15_log_fields_set_rejects_and_canonicalizes_system_custom_fields(moc
             },
         )
         assert r_partial.status_code == 200, r_partial.text
-        persisted = json.loads(cfg_path.read_text())
+        persisted = svcconfig._read_config_fresh(sid)
+        assert persisted is not None
         rum_entries = [cf for cf in persisted["log_fields"]["custom_fields"] if cf["name"] == "rum_cid"]
         assert len(rum_entries) == 1
         assert rum_entries[0]["collection_stage"] == "beacon"
@@ -3083,17 +3116,15 @@ def test_sec15_log_fields_set_rejects_and_canonicalizes_system_custom_fields(moc
 
         # 3. When RUM is disabled on the service, rum_* entries are stripped just like disabled CMCD/scoring
         sid_off = "svc_rum_lf_off"
-        cfg_off_path = mock_config_dir / f"{sid_off}.json"
-        cfg_off_path.write_text(
-            json.dumps(
-                {
-                    "service_id": sid_off,
-                    "name": "RUM Off Svc",
-                    "log_period": 60,
-                    "rum_enabled": False,
-                    "log_fields": {"schema_version": 2, "groups": ["A"], "custom_fields": []},
-                }
-            )
+        svcconfig.save_config(
+            sid_off,
+            {
+                "service_id": sid_off,
+                "name": "RUM Off Svc",
+                "log_period": 60,
+                "rum_enabled": False,
+                "log_fields": {"schema_version": 2, "groups": ["A"], "custom_fields": []},
+            },
         )
         r_off = client.post(
             f"/api/services/{sid_off}/log-fields",
@@ -3117,11 +3148,11 @@ def test_sec15_log_fields_set_rejects_and_canonicalizes_system_custom_fields(moc
             },
         )
         assert r_off.status_code == 200, r_off.text
-        persisted_off = json.loads(cfg_off_path.read_text())
+        persisted_off = svcconfig._read_config_fresh(sid_off)
+        assert persisted_off is not None
         assert [cf["name"] for cf in persisted_off["log_fields"]["custom_fields"]] == ["my_user_cf"]
 
 
-@pytest.mark.no_postgres
 @pytest.mark.security_regression
 def test_sec15_custom_fields_endpoints_protect_all_system_fields_and_list_cleanly_after_rum_toggle(
     mock_config_dir,
@@ -3132,18 +3163,16 @@ def test_sec15_custom_fields_endpoints_protect_all_system_fields_and_list_cleanl
     from backend.provision import orchestrator
 
     sid = "svc_rum_cf_endpoints"
-    cfg_path = mock_config_dir / f"{sid}.json"
-    cfg_path.write_text(
-        json.dumps(
-            {
-                "service_id": sid,
-                "name": "RUM CF Endpoints Svc",
-                "log_period": 60,
-                "rum_enabled": True,
-                "rum": {"enabled": True},
-                "log_fields": {"schema_version": 2, "groups": ["A"], "custom_fields": []},
-            }
-        )
+    svcconfig.save_config(
+        sid,
+        {
+            "service_id": sid,
+            "name": "RUM CF Endpoints Svc",
+            "log_period": 60,
+            "rum_enabled": True,
+            "rum": {"enabled": True},
+            "log_fields": {"schema_version": 2, "groups": ["A"], "custom_fields": []},
+        },
     )
 
     with (
@@ -3183,7 +3212,7 @@ def test_sec15_custom_fields_endpoints_protect_all_system_fields_and_list_cleanl
         assert r_export.status_code == 200
         assert [f["name"] for f in r_export.json()["custom_fields"]] == ["user_edge_cf"]
 
-        before_cfg = json.loads(cfg_path.read_text())
+        before_cfg = svcconfig._read_config_fresh(sid)
 
         for sys_name in ("service_id", "rum_cid", "fastly_req_id", "rum_body", "edge_score", "cmcd_sid"):
             r_post = client.post(
@@ -3227,7 +3256,7 @@ def test_sec15_custom_fields_endpoints_protect_all_system_fields_and_list_cleanl
             )
             assert r_imp.status_code == 422, f"IMPORT {sys_name!r} returned {r_imp.status_code}: {r_imp.text}"
 
-        assert json.loads(cfg_path.read_text()) == before_cfg
+        assert svcconfig._read_config_fresh(sid) == before_cfg
 
     sid_ingest = "svc_rum_ingest_strip"
     orchestrator.write_service_config(
@@ -3253,7 +3282,8 @@ def test_sec15_custom_fields_endpoints_protect_all_system_fields_and_list_cleanl
             },
         }
     )
-    ingested_cfg = json.loads((mock_config_dir / f"{sid_ingest}.json").read_text())
+    ingested_cfg = svcconfig._read_config_fresh(sid_ingest)
+    assert ingested_cfg is not None
     assert [cf["name"] for cf in ingested_cfg["log_fields"]["custom_fields"]] == ["user_kept_cf"]
 
 

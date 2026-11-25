@@ -154,7 +154,9 @@ export function useDashboardCards(): DashboardCard[] {
     const FORCE_VISIBLE = new Set(['_bot_name', ...NGWAF_CARD_IDS])
     const FORCE_HIDDEN = new Set(['rid', 'prid', 'waf_sig', 'waf_req_id'])
 
-    const activeIds = new Set<string>(bootstrap.active_log_field_ids ?? [])
+    const rawActiveIds = (bootstrap as { active_log_field_ids?: unknown }).active_log_field_ids
+    const hasActiveIds = Array.isArray(rawActiveIds)
+    const activeIds = new Set<string>(hasActiveIds ? (rawActiveIds as string[]) : [])
 
     const standardCards: DashboardCard[] = catalog.fields
       .filter(f => {
@@ -184,7 +186,7 @@ export function useDashboardCards(): DashboardCard[] {
         let inActiveFormat: boolean
         if (FORCE_HIDDEN.has(f.id)) inActiveFormat = false
         else if (FORCE_VISIBLE.has(f.id)) inActiveFormat = true
-        else inActiveFormat = activeIds.size === 0 ? true : activeIds.has(f.id)
+        else inActiveFormat = !hasActiveIds ? true : activeIds.has(f.id)
         return {
           id: f.id,
           label: f.label || f.id,
@@ -205,7 +207,7 @@ export function useDashboardCards(): DashboardCard[] {
       .map(c => ({
         id: c.id,
         label: c.label,
-        inActiveFormat: activeIds.size === 0 ? true : activeIds.has(c.id),
+        inActiveFormat: !hasActiveIds ? true : activeIds.has(c.id),
       }))
 
     const seen = new Set<string>()

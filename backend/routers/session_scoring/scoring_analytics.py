@@ -276,7 +276,13 @@ def _table_columns(service_id: str) -> set[str]:
     in_test = bool(os.getenv("PYTEST_CURRENT_TEST"))
     if not in_test and (cached := _table_columns_cache.get(service_id)) is not None:
         return cached
-    cols = set(_SCORING_COLUMNS)
+    from backend import config as svcconfig
+
+    try:
+        cfg = svcconfig.load_config(service_id) or {}
+    except Exception:
+        cfg = {}
+    cols = set(svcconfig.active_log_field_ids(cfg))
     if not in_test:
         _table_columns_cache[service_id] = cols
     return cols

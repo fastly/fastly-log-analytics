@@ -272,7 +272,7 @@ def reconstruct_service_config(
     cfg.setdefault("log_period", DEFAULT_LOG_PERIOD_SECONDS)
     cfg.setdefault("log_retention_days", 30)
     cfg.setdefault("logging_enabled", True)
-    cfg.setdefault("rum_enabled", False)
+    svcconfig.set_rum_enabled(cfg, svcconfig.is_rum_enabled(cfg))
 
     raw_prov = cfg.get("provisioning")
     prov: dict[str, Any] = raw_prov if isinstance(raw_prov, dict) else {}
@@ -883,10 +883,15 @@ def restore_from_fos(
             dr_service_config=dr_service_cfg if isinstance(dr_service_cfg, dict) else None,
         )
 
+        (ensure_pg_schema_fn or ensure_pg_schema)()
         (save_config_fn or svcconfig.save_config)(sid, cfg)
+        if save_config_fn is None:
+            activated_ver = cfg.get("last_activated_version")
+            if not isinstance(activated_ver, int) or isinstance(activated_ver, bool):
+                activated_ver = None
+            svcconfig.record_deployed_config(sid, activated_ver)
         CacheRegistry.clear("routers.bootstrap._bootstrap_cache")
         (clear_fos_client_fn or clear_fos_client)(sid)
-        (ensure_pg_schema_fn or ensure_pg_schema)()
 
         views_restored = 0
         alerts_restored = 0

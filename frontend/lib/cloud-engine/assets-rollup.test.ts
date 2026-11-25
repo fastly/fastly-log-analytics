@@ -1,5 +1,8 @@
 // @vitest-environment node
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+vi.mock("./active-log-fields", () => ({
+  cloudActiveLogFieldIds: async () => new Set(["ttl", "resp_header_content_encoding"]),
+}));
 import { queryAssetsAggregates } from "./assets";
 import { assetsAggregatesFromRollup, assetsFromRollup, assetsRollupEligible } from "./assets-rollup";
 import { DuckDBAnalyticalEngine as ParquetEngine } from "./dashboard/duckdb";

@@ -99,6 +99,7 @@ const KNOWN_SEGMENTS: &[&str] = &[
     "jobs",
     "step",
     "reconcile",
+    "rollback",
     "preview",
     "telemetry",
     "query",

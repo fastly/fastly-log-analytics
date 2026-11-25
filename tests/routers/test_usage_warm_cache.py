@@ -104,7 +104,14 @@ def test_prefill_caches_endpoint_chain_stats_and_edge_ratio_while_reflecting_loc
     monkeypatch.setattr(
         svcconfig,
         "load_config",
-        lambda _name: {"provisioning": {"cron_sync": {"snapshot_interval_minutes": snapshot_interval["value"]}}},
+        lambda _name: {
+            "log_period": 60,
+            "provisioning": {
+                "sample_rate": 50,
+                "edge_only": True,
+                "cron_sync": {"snapshot_interval_minutes": snapshot_interval["value"]},
+            },
+        },
     )
     monkeypatch.setattr(svcconfig, "get_status", lambda _name: {})
     monkeypatch.setattr(svcconfig, "load_usage_logging_config", lambda: {})
@@ -118,7 +125,7 @@ def test_prefill_caches_endpoint_chain_stats_and_edge_ratio_while_reflecting_loc
     assert first.edge_ratio == 82.5
     assert first.requests_per_day == 1000
     assert first.snapshot_interval_minutes == 5
-    assert counts == {"version": 1, "endpoint": 1, "condition": 1, "stats": 1, "ch": 1}
+    assert counts == {"version": 0, "endpoint": 0, "condition": 0, "stats": 1, "ch": 1}
 
     # Warm reload with a local config change must reuse external/CH caches AND reflect local config immediately
     snapshot_interval["value"] = 60
@@ -127,11 +134,11 @@ def test_prefill_caches_endpoint_chain_stats_and_edge_ratio_while_reflecting_loc
     assert second.edge_ratio == 82.5
     assert second.requests_per_day == 1000
     assert second.snapshot_interval_minutes == 60
-    assert counts == {"version": 1, "endpoint": 1, "condition": 1, "stats": 1, "ch": 1}
+    assert counts == {"version": 0, "endpoint": 0, "condition": 0, "stats": 1, "ch": 1}
 
-    # Different service must not share svc-a's cached endpoint chain, stats, or edge ratio
+    # Different service must not share svc-a's cached stats or edge ratio
     asyncio.run(usage.prefill(source_b))
-    assert counts == {"version": 2, "endpoint": 2, "condition": 2, "stats": 2, "ch": 2}
+    assert counts == {"version": 0, "endpoint": 0, "condition": 0, "stats": 2, "ch": 2}
 
 
 def test_usage_current_storage_warm_hit_service_isolation_time_range_and_invalidation(monkeypatch):

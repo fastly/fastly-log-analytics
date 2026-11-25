@@ -105,6 +105,8 @@ class LogFieldsConfig:
     groups: list[str] = field(default_factory=list)
     custom_fields: list[dict[str, Any]] = field(default_factory=list)
     field_overrides: dict[str, Any] = field(default_factory=dict)
+    field_limits: dict[str, int] = field(default_factory=dict)
+    preset: str | None = None
 
 
 def _subdict(cfg: dict[str, Any], key: str) -> dict[str, Any]:
@@ -177,7 +179,7 @@ class FeatureState:
 
     def __post_init__(self) -> None:
         """Validate cross-feature dependencies and field constraints."""
-        from backend.core.fastly.client import _assert_faro_version_safe
+        from backend.core.fastly.client import _assert_faro_version_safe, validate_rum_custom_condition
         from backend.core.vcl_generator import validate_quoted_literal, validate_url_exclusion_regex
 
         if not isinstance(self.service_id, str) or not self.service_id:
@@ -206,8 +208,9 @@ class FeatureState:
             raise ValueError(cond_err)
         if not isinstance(self.rum_custom_condition, str):
             raise ValueError("'rum_custom_condition' must be a string")
-        if rum_cond_err := validate_vcl_custom_condition(self.rum_custom_condition, field_name="rum_custom_condition"):
-            raise ValueError(rum_cond_err)
+        if self.rum_enabled or self.rum_custom_condition:
+            if rum_cond_err := validate_rum_custom_condition(self.rum_custom_condition):
+                raise ValueError(rum_cond_err)
         if self.faro_version is not None:
             if not isinstance(self.faro_version, str):
                 raise ValueError(f"faro_version must be a string, got {self.faro_version!r}")
@@ -313,7 +316,7 @@ class FeatureState:
     @classmethod
     def from_config(cls, cfg: dict) -> FeatureState:
         """Parse raw config dict and construct FeatureState with automatic dependency injection."""
-        from backend.core.fastly.client import _assert_faro_version_safe
+        from backend.core.fastly.client import _assert_faro_version_safe, validate_rum_custom_condition
         from backend.core.vcl_generator import validate_quoted_literal, validate_url_exclusion_regex
 
         raw_sid = cfg.get("service_id")
@@ -358,10 +361,11 @@ class FeatureState:
 
         top_rum_cond = _cfg_str(cfg.get("rum_custom_condition"), "rum_custom_condition").strip()
         nested_rum_cond = _cfg_str(rum_dict.get("custom_condition"), "rum.custom_condition").strip()
-        for rval in (top_rum_cond, nested_rum_cond):
-            if rval and (r_err := validate_vcl_custom_condition(rval, field_name="rum_custom_condition")):
-                raise ValueError(r_err)
-        rum_custom_condition = top_rum_cond if cfg.get("rum_custom_condition") is not None else nested_rum_cond
+        rum_custom_condition = nested_rum_cond if rum_dict.get("custom_condition") is not None else top_rum_cond
+        if rum_enabled or rum_custom_condition:
+            for rval in (nested_rum_cond, top_rum_cond):
+                if rval and (r_err := validate_rum_custom_condition(rval)):
+                    raise ValueError(r_err)
 
         nested_faro = _cfg_str(rum_dict.get("faro_version"), "rum.faro_version")
         top_faro = _cfg_str(cfg.get("faro_version"), "faro_version")
@@ -453,6 +457,13 @@ class FeatureState:
             if lf_cfg.get("field_overrides") is not None
             else (cfg["field_overrides"] if cfg.get("field_overrides") is not None else {})
         )
+        field_limits = (
+            lf_cfg["field_limits"]
+            if lf_cfg.get("field_limits") is not None
+            else (cfg["field_limits"] if cfg.get("field_limits") is not None else {})
+        )
+        raw_preset = lf_cfg.get("preset") if lf_cfg.get("preset") is not None else cfg.get("preset")
+        preset = _cfg_str(raw_preset, "log_fields.preset") or None if raw_preset is not None else None
         if not isinstance(custom_fields, list):
             raise ValueError("custom_fields must be a list")
         canonical_fields = _canonical_system_fields()
@@ -502,7 +513,13 @@ class FeatureState:
                     if f["name"] not in existing_names:
                         injected_fields.append(dict(f) if as_copy else f)
         log_fields_config = TypeAdapter(LogFieldsConfig).validate_python(
-            {"groups": log_groups, "custom_fields": injected_fields, "field_overrides": field_overrides}
+            {
+                "groups": log_groups,
+                "custom_fields": injected_fields,
+                "field_overrides": field_overrides,
+                "field_limits": field_limits,
+                "preset": preset,
+            }
         )
         return cls(
             service_id=service_id,
@@ -551,6 +568,8 @@ class FeatureState:
             "log_groups": self.log_fields.groups,
             "custom_fields": self.log_fields.custom_fields,
             "field_overrides": self.log_fields.field_overrides,
+            "field_limits": self.log_fields.field_limits,
+            **({"preset": self.log_fields.preset} if self.log_fields.preset is not None else {}),
         }
 
 

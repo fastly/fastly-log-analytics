@@ -73,7 +73,6 @@ from backend.provision.session_scoring import (  # noqa: F401
     _scoring_service_name,
     _store_id,
     _tenant_matrix_path,
-    _update_live_scoring_snippet,
     _write_matrix_to_kv,
     delete_scoring_service,
     deliver_snippet,

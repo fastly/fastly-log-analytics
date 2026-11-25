@@ -158,7 +158,13 @@ def _read_l2_enforce_state(service_id: str, config_store_id: str, token: str) ->
     return block
 
 
-def _push_matrix_to_kv_if_configured(service_id: str, cfg: dict | None, matrix_dict: dict | None = None) -> bool:
+def _push_matrix_to_kv_if_configured(
+    service_id: str,
+    cfg: dict | None,
+    matrix_dict: dict | None = None,
+    *,
+    raise_on_error: bool = False,
+) -> bool:
     matrix_store_id = ((cfg or {}).get("scoring") or {}).get("scoring_matrix_store_id", "")
     resolved_token = resolve_fastly_token(service_id)
     if not matrix_store_id or not resolved_token:
@@ -185,13 +191,57 @@ def _push_matrix_to_kv_if_configured(service_id: str, cfg: dict | None, matrix_d
         return True
     except Exception as exc:
         logger.warning(f"Could not write matrix to scoring_matrix KV: {exc}")
+        if raise_on_error:
+            raise
         return False
+
+
+def _scoring_enabled_at_raw(scoring: dict, config_store_id: str = "", token: str = "") -> str:
+    raw = scoring.get("scoring_enabled_at")
+    if raw is not None and str(raw).strip().isdigit():
+        return str(raw).strip()
+    iso_val = scoring.get("enabled_at")
+    if isinstance(iso_val, str) and iso_val.strip():
+        try:
+            dt = datetime.fromisoformat(iso_val.strip().replace("Z", "+00:00"))
+            return str(int(dt.timestamp()))
+        except ValueError:
+            pass
+    if config_store_id and token:
+        return _l2_get_item(config_store_id, _SCORING_ENABLED_AT_KEY, token)
+    return ""
+
+
+def _l2_state_from_scoring_cfg(scoring: dict, *, config_store_id: str = "", token: str = "") -> dict:
+    return _build_l2_enforce_block(
+        scoring_enabled_at_raw=_scoring_enabled_at_raw(scoring, config_store_id, token),
+        l2_enforce_raw="1" if scoring.get(_L2_ENFORCE_ENABLED_KEY) else "0",
+        l2_enabled_at_raw=str(scoring.get(_L2_ENABLED_AT_KEY) or ""),
+        now_epoch=int(datetime.now(UTC).timestamp()),
+    )
+
+
+def _restore_scoring_snapshot(service_id: str, baseline_raw: str | None, orig_scoring: dict | None) -> None:
+    from backend import config as svcconfig
+
+    if baseline_raw is not None:
+        svcconfig.restore_config_snapshot(service_id, baseline_raw)
+        return
+    svcconfig.mutate_config(
+        service_id,
+        lambda c: c.__setitem__("scoring", dict(orig_scoring)) if orig_scoring is not None else c.pop("scoring", None),
+    )
 
 
 def l2_enforce_readiness_block(service_id: str) -> dict:
     _cfg, scoring = _load_scoring_cfg(service_id)
-    config_store_id = scoring.get("scoring_config_store_id")
+    config_store_id = scoring.get("scoring_config_store_id") or ""
     token = resolve_fastly_token(service_id) if config_store_id else ""
+    if _L2_ENFORCE_ENABLED_KEY in scoring:
+        try:
+            return _l2_state_from_scoring_cfg(scoring, config_store_id=config_store_id, token=token)
+        except Exception:  # noqa: BLE001 — advisory block must never break health
+            return _l2_enforce_unavailable()
     if not config_store_id or not token:
         return _l2_enforce_unavailable()
     try:
@@ -328,7 +378,24 @@ def scoring_retrain(
         fos_published = True
     except Exception as exc:
         logger.warning(f"Could not publish matrix to FOS: {exc}")
-    kv_written = _push_matrix_to_kv_if_configured(service_id, cfg, matrix_dict)
+    import copy
+
+    baseline_raw = svcconfig.snapshot_config(service_id)
+    orig_scoring = copy.deepcopy(cfg.get("scoring"))
+    updated_cfg = (
+        svcconfig.mutate_config(
+            service_id,
+            lambda c: c.setdefault("scoring", {}).__setitem__("matrix_version", matrix_version),
+        )
+        or cfg
+    )
+    try:
+        kv_written = _push_matrix_to_kv_if_configured(service_id, updated_cfg, matrix_dict, raise_on_error=True)
+    except Exception as exc:
+        _restore_scoring_snapshot(service_id, baseline_raw, orig_scoring)
+        raise_internal(logger, exc, code="scoring_matrix_kv_push_failed")
+    if baseline_raw is not None:
+        svcconfig.record_deployed_config(service_id)
     _bust_analytics_cache(service_id)
     _record_scoring_audit(
         service_id,
@@ -380,8 +447,13 @@ def scoring_retrain(
     dependencies=[Depends(require_admin)],
 )
 def scoring_enforce_threshold_get(service_id: ServiceId, token: str = Header(default="")) -> dict:
-    """Read the live enforce_threshold value from the scoring_config ConfigStore (None = disabled)."""
+    """Read the enforce_threshold value from service config, falling back to Fastly ConfigStore."""
     _cfg, config_store_id, resolved_token = _require_scoring_config_store(service_id, token)
+    scoring = _cfg.get("scoring") or {}
+    if _ENFORCE_THRESHOLD_KEY in scoring:
+        raw_val = scoring.get(_ENFORCE_THRESHOLD_KEY)
+        threshold: int | None = int(raw_val) if raw_val is not None and not isinstance(raw_val, bool) else None
+        return {"threshold": threshold, "enforced": threshold is not None, "key": _ENFORCE_THRESHOLD_KEY}
     cache_key = (service_id, config_store_id)
     cached = _enforce_threshold_cache.get(cache_key)
     if cached is not None:
@@ -390,7 +462,7 @@ def scoring_enforce_threshold_get(service_id: ServiceId, token: str = Header(def
         raw = _l2_get_item(config_store_id, _ENFORCE_THRESHOLD_KEY, resolved_token)
     except RuntimeError as exc:
         raise_internal(logger, exc, code="enforce_threshold_read_failed", status=502)
-    threshold: int | None = int(raw) if raw and raw.isdigit() else None
+    threshold = int(raw) if raw and raw.isdigit() else None
     result = {"threshold": threshold, "enforced": threshold is not None, "key": _ENFORCE_THRESHOLD_KEY}
     _enforce_threshold_cache[cache_key] = result
     return result
@@ -408,15 +480,28 @@ def scoring_enforce_threshold_put(
     token: str = Header(default=""),
     confirm: bool = Query(default=False, description="Set true to actually apply the enforcement change"),
 ) -> dict:
-    """Write the live enforce_threshold to the scoring_config ConfigStore (null disables enforcement)."""
+    """Write the live enforce_threshold to service config and scoring_config ConfigStore."""
+    import copy
+
+    from backend import config as svcconfig
+
     _require_confirm(confirm, "Pass ?confirm=true to actually change enforcement. This affects live edge blocking.")
     _cfg, config_store_id, resolved_token = _require_scoring_config_store(service_id, token)
     threshold = _validate_threshold_0_100(body.threshold)
     value = str(threshold) if threshold is not None else ""
+    baseline_raw = svcconfig.snapshot_config(service_id)
+    orig_scoring = copy.deepcopy(_cfg.get("scoring"))
+    svcconfig.mutate_config(
+        service_id,
+        lambda c: c.setdefault("scoring", {}).__setitem__(_ENFORCE_THRESHOLD_KEY, threshold),
+    )
     try:
         _upsert_config_store_item(resolved_token, config_store_id, _ENFORCE_THRESHOLD_KEY, value)
     except Exception as e:
+        _restore_scoring_snapshot(service_id, baseline_raw, orig_scoring)
         raise_internal(logger, e, code="scoring_enforce_threshold_put_failed")
+    if baseline_raw is not None:
+        svcconfig.record_deployed_config(service_id)
     _enforce_threshold_cache.pop((service_id, config_store_id), None)
     _record_scoring_audit(
         service_id,
@@ -443,8 +528,14 @@ def scoring_enforce_threshold_put(
     dependencies=[Depends(require_admin)],
 )
 def scoring_l2_enforce_get(service_id: ServiceId, token: str = Header(default="")) -> dict:
-    """Read the live L2-enforcement opt-in + fade-in state from the scoring_config ConfigStore."""
+    """Read the live L2-enforcement opt-in + fade-in state from service config or ConfigStore."""
     _cfg, config_store_id, resolved_token = _require_scoring_config_store(service_id, token)
+    scoring = _cfg.get("scoring") or {}
+    if _L2_ENFORCE_ENABLED_KEY in scoring:
+        try:
+            return _l2_state_from_scoring_cfg(scoring, config_store_id=config_store_id, token=resolved_token)
+        except RuntimeError as exc:
+            raise_internal(logger, exc, code="l2_enforce_read_failed", status=502)
     try:
         return _read_l2_enforce_state(service_id, config_store_id, resolved_token)
     except RuntimeError as exc:
@@ -463,26 +554,52 @@ def scoring_l2_enforce_put(
     token: str = Header(default=""),
     confirm: bool = Query(default=False, description="Set true to actually apply the L2-enforcement change"),
 ) -> dict:
-    """Opt edge Layer-2 in/out of the enforced combined score via scoring_config ConfigStore."""
+    """Opt edge Layer-2 in/out of the enforced combined score via service config + ConfigStore."""
+    import copy
+
+    from backend import config as svcconfig
+
     _require_confirm(confirm, "Pass ?confirm=true to actually change L2 enforcement. This affects live edge blocking.")
     _cfg, config_store_id, resolved_token = _require_scoring_config_store(service_id, token)
     enabled = bool(body.enabled)
+    scoring = _cfg.get("scoring") or {}
+    baseline_raw = svcconfig.snapshot_config(service_id)
+    orig_scoring = copy.deepcopy(_cfg.get("scoring"))
     try:
-        l2_enabled_at: int | None
-        if enabled:
+        if _L2_ENFORCE_ENABLED_KEY in scoring:
+            currently_on = bool(scoring.get(_L2_ENFORCE_ENABLED_KEY))
+        else:
             currently_on = _l2_get_item(config_store_id, _L2_ENFORCE_ENABLED_KEY, resolved_token).strip() == "1"
+
+        existing_anchor = _l2_parse_epoch(str(scoring.get(_L2_ENABLED_AT_KEY) or ""))
+        if existing_anchor is None:
             existing_anchor = _l2_parse_epoch(_l2_get_item(config_store_id, _L2_ENABLED_AT_KEY, resolved_token))
-            _upsert_config_store_item(resolved_token, config_store_id, _L2_ENFORCE_ENABLED_KEY, "1")
+
+        l2_enabled_at: int | None
+        write_anchor = False
+        if enabled:
             if (not currently_on) or (existing_anchor is None):
                 l2_enabled_at = int(datetime.now(UTC).timestamp())
-                _upsert_config_store_item(resolved_token, config_store_id, _L2_ENABLED_AT_KEY, str(l2_enabled_at))
+                write_anchor = True
             else:
                 l2_enabled_at = existing_anchor
         else:
-            _upsert_config_store_item(resolved_token, config_store_id, _L2_ENFORCE_ENABLED_KEY, "0")
-            l2_enabled_at = _l2_parse_epoch(_l2_get_item(config_store_id, _L2_ENABLED_AT_KEY, resolved_token))
+            l2_enabled_at = existing_anchor
+
+        def _apply_l2(c: dict) -> None:
+            s = c.setdefault("scoring", {})
+            s[_L2_ENFORCE_ENABLED_KEY] = enabled
+            s[_L2_ENABLED_AT_KEY] = l2_enabled_at
+
+        svcconfig.mutate_config(service_id, _apply_l2)
+        _upsert_config_store_item(resolved_token, config_store_id, _L2_ENFORCE_ENABLED_KEY, "1" if enabled else "0")
+        if write_anchor and l2_enabled_at is not None:
+            _upsert_config_store_item(resolved_token, config_store_id, _L2_ENABLED_AT_KEY, str(l2_enabled_at))
     except Exception as e:
+        _restore_scoring_snapshot(service_id, baseline_raw, orig_scoring)
         raise_internal(logger, e, code="scoring_l2_enforce_put_failed")
+    if baseline_raw is not None:
+        svcconfig.record_deployed_config(service_id)
     _l2_enforce_cache.pop((service_id, config_store_id), None)
     _bust_analytics_cache(service_id)
     _record_scoring_audit(
@@ -545,10 +662,21 @@ def scoring_matrix_versions_restore(
             tenant_matrix_path.unlink()
     except Exception as exc:
         logger.warning(f"Could not remove local {tenant_matrix_path.name} after restore: {exc}")
+    import copy
+
+    pre_cfg = svcconfig.load_config(service_id) or {}
+    baseline_raw = svcconfig.snapshot_config(service_id)
+    orig_scoring = copy.deepcopy(pre_cfg.get("scoring"))
     cfg = svcconfig.mutate_config(
         service_id, lambda c: c.setdefault("scoring", {}).__setitem__("matrix_version", version)
     )
-    kv_written = _push_matrix_to_kv_if_configured(service_id, cfg)
+    try:
+        kv_written = _push_matrix_to_kv_if_configured(service_id, cfg, raise_on_error=True)
+    except Exception as exc:
+        _restore_scoring_snapshot(service_id, baseline_raw, orig_scoring)
+        raise_internal(logger, exc, code="scoring_matrix_kv_push_failed")
+    if baseline_raw is not None:
+        svcconfig.record_deployed_config(service_id)
     _bust_analytics_cache(service_id)
     _record_scoring_audit(
         service_id,

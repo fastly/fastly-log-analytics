@@ -474,6 +474,11 @@ pub(super) const ROUTES: &[(&str, &str, Class)] = &[
         "/api/admin/services/fixtureService/reconcile",
         Class::Admin,
     ),
+    (
+        "POST",
+        "/api/admin/services/fixtureService/rollback",
+        Class::Admin,
+    ),
     ("GET", "/api/admin/system-checks", Class::Admin),
     ("POST", "/api/admin/system-checks", Class::Admin),
     ("POST", "/api/admin/provision/validate", Class::Admin),

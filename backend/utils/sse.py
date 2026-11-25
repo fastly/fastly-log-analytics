@@ -177,6 +177,7 @@ def stream_iac_reconcile(
     done_event: dict[str, Any] | Callable[[], dict[str, Any]],
     after_done: Callable[[], None] | None = None,
     error_event: Callable[[Exception], dict[str, Any]] | None = None,
+    pre_mutate: Callable[[dict[str, Any]], None] | None = None,
     log_label: str = "reconcile_infrastructure",
     logger_obj: Any = None,
 ) -> EventSourceResponse:
@@ -188,7 +189,12 @@ def stream_iac_reconcile(
     def _stream() -> Iterator[str]:
         yield json.dumps({"type": "status", "message": start_message})
         try:
-            for event in run_with_events(reconcile_infrastructure, service_id, resolved_token):
+            events = (
+                run_with_events(reconcile_infrastructure, service_id, resolved_token, pre_mutate=pre_mutate)
+                if pre_mutate is not None
+                else run_with_events(reconcile_infrastructure, service_id, resolved_token)
+            )
+            for event in events:
                 yield json.dumps(event)
             done_payload = done_event() if callable(done_event) else done_event
             yield json.dumps(done_payload)

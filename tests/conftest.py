@@ -334,6 +334,7 @@ _PER_TEST_RESET_TABLES = (
     "remote_invites",
     "remote_share_audit_logs",
     "share_settings",
+    "service_configs",
 )
 
 
@@ -380,6 +381,7 @@ def isolate_metadata_db(tmp_path, monkeypatch, request):
                 pass
 
     metadata_db._clear_ingested_filenames_cache()
+    svcconfig.invalidate_config_cache()
 
     import backend.core.metadata.usage_log as _usage_log_db
     import backend.core.share_db as _share_db_connection
@@ -414,9 +416,11 @@ def isolate_metadata_db(tmp_path, monkeypatch, request):
 @pytest.fixture(autouse=True)
 def _reset_module_caches(request):
     """Reset module-level caches between tests."""
+    from backend import config as svcconfig
     from backend.utils.bounded_cache import CacheRegistry
 
     CacheRegistry.clear_all()
+    svcconfig.invalidate_config_cache()
     yield
     if request.node.get_closest_marker("no_postgres") is not None:
         return

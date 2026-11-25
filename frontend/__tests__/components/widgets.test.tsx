@@ -2442,6 +2442,19 @@ describe('TimeSeriesChart, ScorerSeries, PlotlyChart, TrafficChart, CardGrid, Fi
       expect(populatedCard.className).toContain('min-h-[392px]')
       expect(populatedCard.className).toContain('[contain-intrinsic-size:392px]')
     })
+
+    it('gates NGWAF and User-Agent empty-state hints on useActiveLogFields rather than empty rows', () => {
+      mocks.logFieldsCatalog.mockReturnValue({ data: SAMPLE_CATALOG })
+      mocks.activeFields.add('waf_sig')
+      mocks.activeFields.add('ua')
+
+      const { rerender } = render(<TopTenTable title="NGWAF Bots" field="_ngwaf_bot_name" data={{ top: [], total: 0 }} />)
+      expect(screen.getByText('No data available')).toBeInTheDocument()
+      expect(screen.queryByText(/Requires NGWAF fields/i)).toBeNull()
+
+      rerender(<TopTenTable title="Bots" field="_bot_name" data={{ top: [], total: 0 }} />)
+      expect(screen.queryByText(/Requires User-Agent field/i)).toBeNull()
+    })
   })
 
   const geoCatalog = {

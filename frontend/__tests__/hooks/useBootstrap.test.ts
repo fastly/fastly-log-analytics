@@ -400,8 +400,8 @@ describe('useLogFieldsCatalog & useActiveLogFields', () => {
     const { result: empty } = renderHook(() => useActiveLogFields(), {
       wrapper: catalogWrapper(CATALOG, { services: [], active_service_id: 'svc-1', active_log_field_ids: [] }),
     })
-    expect(empty.current.ready).toBe(false)
-    expect(empty.current.isFieldActive('ottfb')).toBe(true)
+    expect(empty.current.ready).toBe(true)
+    expect(empty.current.isFieldActive('ottfb')).toBe(false)
 
     const { result: populated } = renderHook(() => useActiveLogFields(), {
       wrapper: catalogWrapper(CATALOG, { services: [], active_service_id: 'svc-1', active_log_field_ids: ['ottfb', 'country'] }),
@@ -418,6 +418,48 @@ describe('useLogFieldsCatalog & useActiveLogFields', () => {
     })
     expect(noCat.current.isFieldActive('ottfb')).toBe(true)
     expect(noCat.current.isGroupActive('L')).toBe(false)
+  })
+
+  it('resolves per-service active_log_field_ids from bootstrap.services with zero extra fetches and invalidates status caches', async () => {
+    let bootstrapCalls = 0
+    server.use(
+      http.get(`${API_BASE}/api/bootstrap`, () => {
+        bootstrapCalls += 1
+        return HttpResponse.json({
+          services: [
+            { service_id: 'svc-1', name: 'Primary', active_log_field_ids: ['elapsed', 'status'] },
+            { service_id: 'svc-2', name: 'Secondary', active_log_field_ids: ['edge', 'cache'] },
+          ],
+          active_service_id: 'svc-1',
+          active_log_field_ids: ['elapsed', 'status'],
+        })
+      }),
+      http.get(`${API_BASE}/api/log-fields/catalog`, () =>
+        HttpResponse.json({ fields: [], groups: [] }),
+      ),
+    )
+
+    const qc = createTestQueryClient({ queries: { gcTime: 60_000 } })
+    const wrapperWithQc = makeQueryWrapper(qc)
+    const { result: svc1Result } = renderHook(() => useActiveLogFields('svc-1'), { wrapper: wrapperWithQc })
+    await waitFor(() => expect(svc1Result.current.ready).toBe(true))
+    expect(svc1Result.current.isFieldActive('elapsed')).toBe(true)
+    expect(svc1Result.current.isFieldActive('edge')).toBe(false)
+
+    const { result: svc2Result } = renderHook(() => useActiveLogFields('svc-2'), { wrapper: wrapperWithQc })
+    await waitFor(() => expect(svc2Result.current.ready).toBe(true))
+    expect(svc2Result.current.isFieldActive('edge')).toBe(true)
+    expect(svc2Result.current.isFieldActive('elapsed')).toBe(false)
+    expect(bootstrapCalls).toBe(1)
+
+    const { invalidateCloudConfigMetadata } = await import('@/lib/cloud-engine/metadata-cache')
+    const invSpy = vi.spyOn(qc, 'invalidateQueries')
+    act(() => {
+      invalidateCloudConfigMetadata()
+    })
+    expect(invSpy).toHaveBeenCalledWith({ queryKey: ['rum-status'] })
+    expect(invSpy).toHaveBeenCalledWith({ queryKey: ['scoring-status'] })
+    invSpy.mockRestore()
   })
 })
 
@@ -1698,7 +1740,7 @@ describe('useDashboardBundle, useSSE, useUrlServiceSync, useDashboardCards, useF
       expect(result.current.map(c => c.id)).toEqual(expectedIds)
     })
 
-    it('marks all standard cards inActiveFormat=true when active_log_field_ids is empty and honours non-empty list + virtuals', () => {
+    it('marks standard cards inActiveFormat=true when active_log_field_ids is unset, inactive on empty [], and honours non-empty list + virtuals', () => {
       const fields = [
         { id: 'status', label: 'S', group: 'EDGE' },
         { id: 'method', label: 'M', group: 'EDGE' },
@@ -1707,9 +1749,19 @@ describe('useDashboardBundle, useSSE, useUrlServiceSync, useDashboardCards, useF
         { id: 'waf_sig_ind', label: 'Sig', group: 'EDGE' },
       ]
       useLogFieldsCatalogMock.mockReturnValue({ data: { fields } })
-      useBootstrapMock.mockReturnValue({ data: { active_log_field_ids: [], ngwaf_configured: true } })
+      useBootstrapMock.mockReturnValue({ data: { ngwaf_configured: true } })
       const { result, rerender } = renderHook(() => useDashboardCards())
       expect(result.current.every(c => c.inActiveFormat)).toBe(true)
+
+      useBootstrapMock.mockReturnValue({ data: { active_log_field_ids: [], ngwaf_configured: true } })
+      rerender()
+      expect(Object.fromEntries(result.current.map(c => [c.id, c.inActiveFormat]))).toEqual({
+        status: false,
+        method: false,
+        _bot_name: true,
+        _ngwaf_bot_name: true,
+        waf_sig_ind: true,
+      })
 
       useBootstrapMock.mockReturnValue({ data: { active_log_field_ids: ['status'], ngwaf_configured: true } })
       rerender()

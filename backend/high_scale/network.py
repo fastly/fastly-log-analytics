@@ -1688,6 +1688,12 @@ def network_bundle(
     )
     memo_key: str | None = None
     if is_real_ch and start_time is not None and end_time is not None:
+        from backend import config as svcconfig
+
+        try:
+            _svc_cfg = svcconfig.load_config(service.service_id) or {}
+        except Exception:
+            _svc_cfg = {}
         memo_key = digest_cache_key(
             {
                 "ep": "hs_network_bundle",
@@ -1701,6 +1707,7 @@ def network_bundle(
                 "rc": str(getattr(req, "region_country", "US") or "US"),
                 "sec": sorted(sections) if sections is not None else None,
                 "m": str(getattr(req, "metric", "health_score") or "health_score"),
+                "af": sorted(svcconfig.active_log_field_ids(_svc_cfg)),
             },
             {"name": service.service_id, "service_id": service.service_id},
         )

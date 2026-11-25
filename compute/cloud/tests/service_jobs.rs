@@ -8,6 +8,8 @@ mod delete_data;
 mod dr_recovery;
 #[path = "service_jobs/provisioning.rs"]
 mod provisioning;
+#[path = "service_jobs/reconcile_rollback_and_attach_scoring.rs"]
+mod reconcile_rollback_and_attach_scoring;
 #[path = "service_jobs/retries_and_budgets.rs"]
 mod retries_and_budgets;
 #[path = "service_jobs/support.rs"]

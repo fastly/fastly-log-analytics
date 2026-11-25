@@ -150,6 +150,9 @@ class ServiceConfig(BaseModel):
     rum_enabled: bool | None = None
     rum: RumConfigSection | None = None
     rum_log_period: int | None = None
+    cmcd_enabled: bool | None = None
+    scoring_enabled: bool | None = None
+    active_log_field_ids: list[str] | None = None
 
 
 class ServicesListResponse(BaseResponse):
@@ -158,6 +161,7 @@ class ServicesListResponse(BaseResponse):
 
 class LogFieldsConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
+    preset: str | None = None
     groups: list[str] = Field(default_factory=list)
     field_overrides: dict[str, bool] = Field(default_factory=dict)
     field_limits: dict[str, int] | None = None
@@ -166,6 +170,27 @@ class LogFieldsConfig(BaseModel):
 
 class LogFieldsUpdateRequest(BaseModel):
     log_fields: LogFieldsConfig
+
+
+class LoggingSettingsUpdateBody(BaseModel):
+    """Optional JSON body for ``POST /api/services/{service_id}/logging-settings/update``."""
+
+    model_config = ConfigDict(extra="ignore")
+    log_fields: LogFieldsConfig | None = None
+
+
+class ServiceRollbackBody(BaseModel):
+    """Optional JSON body for ``POST /api/services/{service_id}/rollback``."""
+
+    token: str = ""
+
+
+class ServiceRollbackResponse(BaseResponse):
+    """Response for ``POST /api/services/{service_id}/rollback``."""
+
+    ok: bool = True
+    activated_version: int | None = None
+    message: str = ""
 
 
 class LogFormatHistoryEntry(WireSafeModel):

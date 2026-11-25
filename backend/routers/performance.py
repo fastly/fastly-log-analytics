@@ -181,18 +181,13 @@ def cmcd_enable(
 
     from backend import config as svcconfig
 
-    svcconfig.mutate_config(
-        service_id,
-        lambda c: c.__setitem__(
-            "cmcd",
-            {
-                "enabled": True,
-                "mode": mode,
-                "version": version,
-                "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
-            },
-        ),
-    )
+    def _pre_mutate(c: dict) -> None:
+        c["cmcd"] = {
+            "enabled": True,
+            "mode": mode,
+            "version": version,
+            "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+        }
 
     def _done_event() -> dict:
         cfg = svcconfig.load_config(service_id) or {}
@@ -202,11 +197,18 @@ def cmcd_enable(
             "cmcd": cfg.get("cmcd", {}),
         }
 
+    def _after_done() -> None:
+        from backend.utils.bounded_cache import CacheRegistry
+
+        CacheRegistry.clear("services.vcl._logging_settings_cache")
+
     return stream_iac_reconcile(
         service_id,
         resolved_token,
+        pre_mutate=_pre_mutate,
         start_message=f"Enabling CMCD v{version} collection for {service_id}...",
         done_event=_done_event,
+        after_done=_after_done,
         log_label="cmcd_enable",
         logger_obj=logger,
     )
@@ -229,19 +231,22 @@ def cmcd_disable(
             detail={"error": "Fastly API token required"},
         )
 
-    from backend import config as svcconfig
-
     def _disable(c: dict) -> None:
-        if "cmcd" in c:
+        if "cmcd" in c and isinstance(c["cmcd"], dict):
             c["cmcd"]["enabled"] = False
 
-    svcconfig.mutate_config(service_id, _disable)
+    def _after_done() -> None:
+        from backend.utils.bounded_cache import CacheRegistry
+
+        CacheRegistry.clear("services.vcl._logging_settings_cache")
 
     return stream_iac_reconcile(
         service_id,
         resolved_token,
+        pre_mutate=_disable,
         start_message=f"Disabling CMCD collection for {service_id}...",
         done_event={"type": "done", "message": "CMCD collection disabled."},
+        after_done=_after_done,
         log_label="cmcd_disable",
         logger_obj=logger,
     )

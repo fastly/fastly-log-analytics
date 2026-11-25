@@ -1,5 +1,8 @@
 // @vitest-environment node
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+vi.mock("./active-log-fields", () => ({
+  cloudActiveLogFieldIds: async () => new Set(["ttl", "resp_header_content_encoding"]),
+}));
 import {
   computeSummaryFromDims,
   emptyAssetsAggregates,

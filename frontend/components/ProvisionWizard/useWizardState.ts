@@ -176,7 +176,7 @@ export function useWizardEffects(args: WizardEffectsArgs) {
   }, [step, selectedService?.id, token])
 
   const persistNgwafWorkspace = useEffectEvent(() => {
-    if (isDone && step === "execute" && config.ngwaf_workspace_id && selectedService?.id) {
+    if (status === "done" && step === "execute" && config.ngwaf_workspace_id && selectedService?.id) {
       client
         .PATCH("/api/provision/services/{service_id}/ngwaf-workspace", {
           params: { path: { service_id: selectedService.id } },
@@ -191,7 +191,7 @@ export function useWizardEffects(args: WizardEffectsArgs) {
   })
   useEffect(() => {
     persistNgwafWorkspace()
-  }, [isDone])
+  }, [status])
 }
 
 export function useWizardState(open: boolean, onOpenChange: (open: boolean) => void): WizardState {
@@ -503,13 +503,13 @@ export function useWizardState(open: boolean, onOpenChange: (open: boolean) => v
   }, [open])
 
   useEffect(() => {
-    if (status === "done" || isDone) {
+    if (status === "done") {
       clearDraft()
       draftIdRef.current = null
       draftCreatedAtRef.current = null
       queryClient.invalidateQueries({ queryKey: queryKeys.services() })
     }
-  }, [status, isDone, queryClient])
+  }, [status, queryClient])
 
   const filteredServices = Array.isArray(servicesData)
     ? servicesData.filter(

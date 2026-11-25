@@ -21,8 +21,6 @@ from backend.routers.rum import beacon_ingest
 from backend.routers.services.crud import _trim_for_analyst
 from backend.utils import terraform_gen
 
-pytestmark = pytest.mark.no_postgres
-
 _DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 
@@ -735,7 +733,7 @@ def test_rotate_fos_credentials_uses_opaque_key_description():
             "backend.routers.services.crud.load_service_config",
             return_value={"fos_region": "us-east-1", "fos_bucket": "fla-0123456789abcdef01234567"},
         ),
-        patch("backend.routers.services.crud.mutate_service_config", return_value=None),
+        patch("backend.routers.services.crud.mutate_service_config", return_value={}),
         patch("backend.core.fastly.client.fastly", side_effect=fake_fastly),
     ):
         res = services_crud.api_service_update_credentials(fake_req, "SensitiveSvcId777", body)

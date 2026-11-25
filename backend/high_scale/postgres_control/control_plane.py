@@ -1219,9 +1219,14 @@ class PostgresControlPlane:
             return tuple(_source_from_row(row) for row in rows)
 
     def expirable_archive_manifests(
-        self, service_id: str, domain_retention_days: Mapping[str, int], *, limit: int = 100
+        self,
+        service_id: str,
+        domain_retention_days: Mapping[str, int],
+        *,
+        limit: int = 100,
+        include_retained_sources: bool = False,
     ) -> tuple[ArchiveManifest, ...]:
-        """Manifests whose raw source is already gone and whose coverage is older than the domain's retention.
+        """Manifests whose raw source is already gone (or retained under delete_after=False) and whose coverage is older than retention.
 
         A domain with a retention of 0 days (or less) is kept forever.
         """
@@ -1234,10 +1239,15 @@ class PostgresControlPlane:
         predicate = " OR ".join(
             "(domain = %s AND coverage_end < statement_timestamp() - make_interval(days => %s))" for _ in windows
         )
+        state_clause = (
+            "state IN ('manifest_committed', 'deletion_eligible', 'source_deleted')"
+            if include_retained_sources
+            else "state = 'source_deleted'"
+        )
         params = [value for window in windows for value in window]
         with self.transaction(read_only=True) as connection:
             rows = connection.execute(
-                "SELECT * FROM high_scale_archive_manifests WHERE service_id = %s AND state = 'source_deleted' "
+                f"SELECT * FROM high_scale_archive_manifests WHERE service_id = %s AND {state_clause} "
                 f"AND archive_expired_at IS NULL AND ({predicate}) ORDER BY coverage_end LIMIT %s",
                 (service_id, *params, limit),
             ).fetchall()

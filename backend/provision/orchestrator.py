@@ -1,5 +1,6 @@
 """Core provisioning orchestrator and state management."""
 
+import copy
 import json
 import logging
 import os
@@ -218,7 +219,7 @@ def _reject_unsafe_fos_component(field: str, value: str, *, allow_slash: bool) -
 
 
 def write_service_config(state: dict):
-    """Write a service config JSON file to configs/{service_id}.json."""
+    """Write or merge a service config in PostgreSQL (``service_configs`` table)."""
     from backend import config as svcconfig
 
     service_id = state.get("logging_service_id") or state.get("service_id")
@@ -226,59 +227,109 @@ def write_service_config(state: dict):
         raise ValueError("ingest state missing logging_service_id / service_id")
 
     def _build_cfg(existing_cfg: dict) -> dict:
-        fos_key = state.get("fos_access_key_id") or state.get("fos_access_key", "")
-        fos_secret = state.get("fos_secret_access_key") or state.get("fos_secret_key", "")
-        bucket = state.get("fos_bucket") or state.get("fos_bucket_name", "")
-        fos_prefix = ""
-        _reject_unsafe_fos_component("fos_bucket", bucket, allow_slash=False)
-        region = state.get("fos_region", "us-east-1")
-        cdn_url = state.get("cdn_url", "")
-        incoming_lf = dict(state.get("log_fields") or {})
-        incoming_custom = incoming_lf.get("custom_fields")
-        existing_custom = list((existing_cfg.get("log_fields") or {}).get("custom_fields") or [])
-        if not incoming_custom and existing_custom:
-            incoming_lf["custom_fields"] = lf._filter_user_custom_fields(existing_custom)
-        else:
-            incoming_lf["custom_fields"] = lf._filter_user_custom_fields(incoming_lf.get("custom_fields", []))
         import datetime as _dt
 
+        cfg = copy.deepcopy(existing_cfg)
+        fos_key = (
+            state.get("fos_access_key_id") or state.get("fos_access_key") or existing_cfg.get("fos_access_key_id", "")
+        )
+        fos_secret = (
+            state.get("fos_secret_access_key")
+            or state.get("fos_secret_key")
+            or existing_cfg.get("fos_secret_access_key", "")
+        )
+        bucket = state.get("fos_bucket") or state.get("fos_bucket_name") or existing_cfg.get("fos_bucket", "")
+        fos_prefix = ""
+        _reject_unsafe_fos_component("fos_bucket", bucket, allow_slash=False)
+        region = state.get("fos_region") or existing_cfg.get("fos_region", "us-east-1")
+        cdn_url = state.get("cdn_url") or existing_cfg.get("cdn_url", "")
+        if state.get("log_fields"):
+            incoming_lf = dict(state["log_fields"])
+            incoming_custom = incoming_lf.get("custom_fields")
+            existing_custom = list((existing_cfg.get("log_fields") or {}).get("custom_fields") or [])
+            if not incoming_custom and existing_custom:
+                incoming_lf["custom_fields"] = lf._filter_user_custom_fields(existing_custom)
+            else:
+                incoming_lf["custom_fields"] = lf._filter_user_custom_fields(incoming_lf.get("custom_fields", []))
+        else:
+            incoming_lf = dict(existing_cfg.get("log_fields") or {})
+            if "custom_fields" in incoming_lf:
+                incoming_lf["custom_fields"] = lf._filter_user_custom_fields(list(incoming_lf["custom_fields"] or []))
+            else:
+                incoming_lf["custom_fields"] = []
+
         created_at = existing_cfg.get("created_at") or _dt.datetime.now(_dt.UTC).isoformat()
-        cfg = {
-            "service_id": service_id,
-            "name": state.get("name") or state.get("service_name") or service_id,
-            "created_at": created_at,
-            "storage_mode": state.get("storage_mode", "cloud"),
-            "fos_endpoint": region_endpoint(region),
-            "fos_access_key_id": fos_key,
-            "fos_secret_access_key": fos_secret,
-            "fos_bucket": bucket,
-            "fos_prefix": fos_prefix,
-            "raw_layout_version": 3,
-            "fos_region": region,
-            "cdn_url": cdn_url,
-            "cdn_secret": state.get("cdn_secret", ""),
-            "cdn_service_id": state.get("cdn_service_id", ""),
-            "fastly_api_key": state.get("fastly_api_key") or state.get("admin_token", ""),
-            "log_retention_days": int(state.get("log_retention_days", 30)),
-            "log_fields": incoming_lf,
-        }
-        for preserved_key in ("scoring", "cmcd", "ngwaf_workspace_id", "rum"):
-            if preserved_key not in state and preserved_key in existing_cfg:
-                cfg[preserved_key] = existing_cfg[preserved_key]
-            elif preserved_key in state:
-                cfg[preserved_key] = state[preserved_key]
+        cfg.update(
+            {
+                "service_id": service_id,
+                "name": state.get("name") or state.get("service_name") or existing_cfg.get("name") or service_id,
+                "created_at": created_at,
+                "storage_mode": state.get("storage_mode") or existing_cfg.get("storage_mode", "cloud"),
+                "fos_endpoint": region_endpoint(region),
+                "fos_access_key_id": fos_key,
+                "fos_secret_access_key": fos_secret,
+                "fos_bucket": bucket,
+                "fos_prefix": fos_prefix,
+                "raw_layout_version": 3,
+                "fos_region": region,
+                "cdn_url": cdn_url,
+                "cdn_secret": state.get("cdn_secret") or existing_cfg.get("cdn_secret", ""),
+                "cdn_service_id": state.get("cdn_service_id") or existing_cfg.get("cdn_service_id", ""),
+                "fastly_api_key": (
+                    state.get("fastly_api_key") or state.get("admin_token") or existing_cfg.get("fastly_api_key", "")
+                ),
+                "log_retention_days": int(state.get("log_retention_days", existing_cfg.get("log_retention_days", 30))),
+                "log_fields": incoming_lf,
+            }
+        )
+        for preserved_key in (
+            "scoring",
+            "cmcd",
+            "fos_proxy",
+            "feature_enabled_fields",
+            "metadata_retention",
+            "remote_frontend",
+        ):
+            if preserved_key in state:
+                if isinstance(state[preserved_key], dict) and isinstance(existing_cfg.get(preserved_key), dict):
+                    merged_sub = dict(existing_cfg[preserved_key])
+                    merged_sub.update(state[preserved_key])
+                    cfg[preserved_key] = merged_sub
+                else:
+                    cfg[preserved_key] = state[preserved_key]
+        if existing_cfg.get("ngwaf_workspace_id"):
+            cfg["ngwaf_workspace_id"] = existing_cfg["ngwaf_workspace_id"]
+        elif state.get("ngwaf_workspace_id"):
+            cfg["ngwaf_workspace_id"] = state["ngwaf_workspace_id"]
+
+        if isinstance(state.get("rum"), dict):
+            merged_rum = dict(existing_cfg.get("rum") or {})
+            merged_rum.update(state["rum"])
+            cfg["rum"] = merged_rum
+
         logging_enabled = state.get("logging_enabled")
         if logging_enabled is None:
-            logging_enabled = existing_cfg.get("logging_enabled", True)
-        rum_enabled = state.get("rum_enabled")
-        if rum_enabled is None:
-            rum_enabled = existing_cfg.get("rum_enabled", False)
+            logging_enabled = svcconfig.is_logging_enabled(existing_cfg)
         cfg["logging_enabled"] = bool(logging_enabled)
-        cfg["rum_enabled"] = bool(rum_enabled)
-        if cfg["rum_enabled"] and not cfg.get("rum"):
-            import datetime as _dt
 
-            cfg["rum"] = {"enabled": True, "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds")}
+        rum_enabled = state.get("rum_enabled")
+        if rum_enabled is None and isinstance(state.get("rum"), dict) and state["rum"].get("enabled") is not None:
+            rum_enabled = bool(state["rum"]["enabled"])
+        if rum_enabled is None:
+            rum_enabled = svcconfig.is_rum_enabled(existing_cfg)
+        if (
+            bool(rum_enabled)
+            or "rum_enabled" in state
+            or "rum" in state
+            or "rum" in cfg
+            or "rum_enabled" in existing_cfg
+        ):
+            svcconfig.set_rum_enabled(cfg, bool(rum_enabled))
+            if bool(rum_enabled) and not (cfg.get("rum") or {}).get("enabled_at"):
+                cfg.setdefault("rum", {})["enabled_at"] = _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds")
+        else:
+            cfg["rum_enabled"] = False
+
         if "log_period" in state:
             cfg["log_period"] = state["log_period"]
         elif "log_period" in state.get("provisioning", {}):
@@ -291,50 +342,75 @@ def write_service_config(state: dict):
         if _rate_limiting is None:
             _rate_limiting = (existing_cfg.get("provisioning") or {}).get("rate_limiting")
         rate_limiting_val = True if _rate_limiting is None else bool(_rate_limiting)
+        existing_prov = dict(existing_cfg.get("provisioning") or {})
+        existing_cron_sync = dict(existing_prov.get("cron_sync") or {})
         prov_in = state.get("provisioning", {})
         cron_sync_in = prov_in.get("cron_sync", {})
 
-        def _int_opt(key: str, default: int, *, sub: dict = cron_sync_in) -> int:
-            return int(state.get(key, sub.get(key, default)))
+        def _int_opt(key: str, default: int, *, sub: dict = cron_sync_in, ex: dict = existing_cron_sync) -> int:
+            return int(state.get(key, sub.get(key, ex.get(key, default))))
 
         raw_snap = state.get("snapshot_interval_minutes", cron_sync_in.get("snapshot_interval_minutes"))
         if raw_snap is None:
-            raw_snap = (existing_cfg.get("provisioning") or {}).get("cron_sync", {}).get("snapshot_interval_minutes")
+            raw_snap = existing_cron_sync.get("snapshot_interval_minutes")
         snap_interval = svcconfig.resolve_snapshot_interval_minutes(None, raw_snap)
 
-        cfg["provisioning"] = {
-            "endpoint_name": prov_in.get("endpoint_name", "Fastly Object Storage Logs"),
-            "cdn_service_id": state.get("cdn_service_id", prov_in.get("cdn_service_id", "")),
-            "cdn_url": cdn_url,
-            "cdn_shield": state.get("cdn_shield", prov_in.get("cdn_shield", "")),
-            "sample_rate": state.get("sample_rate", prov_in.get("sample_rate", "100")),
-            "edge_only": state.get("edge_only", prov_in.get("edge_only", True)),
-            "custom_condition": state.get("custom_condition", prov_in.get("custom_condition", "")),
-            "rate_limiting": rate_limiting_val,
-            "cron_sync": {
-                "enabled": state.get("enable_cron_sync", cron_sync_in.get("enabled", True)),
-                "delete_after": state.get("delete_after", cron_sync_in.get("delete_after", True)),
+        existing_cron_sync.update(
+            {
+                "enabled": state.get(
+                    "enable_cron_sync", cron_sync_in.get("enabled", existing_cron_sync.get("enabled", True))
+                ),
+                "delete_after": state.get(
+                    "delete_after", cron_sync_in.get("delete_after", existing_cron_sync.get("delete_after", True))
+                ),
                 "interval_seconds": sync_interval_seconds,
                 "log_enabled": True,
-                "log_retention_days": int(state.get("log_retention_days", 30)),
+                "log_retention_days": _int_opt("log_retention_days", 30),
                 "data_retention_days": _int_opt("data_retention_days", 30),
                 "rum_retention_days": _int_opt("rum_retention_days", 30),
                 "cache_retention_days": _int_opt("cache_retention_days", 90),
                 "snapshot_interval_minutes": snap_interval,
-            },
-            "temp_admin_key_id": state.get("temp_admin_key_id", prov_in.get("temp_admin_key_id")),
-        }
+            }
+        )
+        existing_prov.update(
+            {
+                "endpoint_name": prov_in.get(
+                    "endpoint_name", existing_prov.get("endpoint_name", "Fastly Object Storage Logs")
+                ),
+                "cdn_service_id": state.get(
+                    "cdn_service_id", prov_in.get("cdn_service_id", existing_prov.get("cdn_service_id", ""))
+                )
+                or existing_prov.get("cdn_service_id", ""),
+                "cdn_url": cdn_url,
+                "cdn_shield": state.get("cdn_shield", prov_in.get("cdn_shield", existing_prov.get("cdn_shield", ""))),
+                "sample_rate": state.get(
+                    "sample_rate", prov_in.get("sample_rate", existing_prov.get("sample_rate", "100"))
+                ),
+                "edge_only": state.get("edge_only", prov_in.get("edge_only", existing_prov.get("edge_only", True))),
+                "custom_condition": state.get(
+                    "custom_condition", prov_in.get("custom_condition", existing_prov.get("custom_condition", ""))
+                ),
+                "rate_limiting": rate_limiting_val,
+                "cron_sync": existing_cron_sync,
+                "temp_admin_key_id": state.get(
+                    "temp_admin_key_id", prov_in.get("temp_admin_key_id", existing_prov.get("temp_admin_key_id"))
+                ),
+            }
+        )
+        cfg["provisioning"] = existing_prov
         return cfg
 
     def _apply(target: dict) -> None:
-        target.update(_build_cfg(target))
+        merged = _build_cfg(target)
+        target.clear()
+        target.update(merged)
 
     with svcconfig.config_lock(service_id):
         if svcconfig.mutate_config(service_id, _apply) is None:
             first_cfg: dict = {}
             _apply(first_cfg)
             svcconfig.save_config(service_id, first_cfg)
-    ok(f"Service config written → configs/{service_id}.json")
+    ok(f"Service config written → PostgreSQL service_configs ({service_id})")
 
 
 class _PreflightError(Exception):
@@ -452,15 +528,8 @@ def provision(cfg: dict, _resume_from_state: bool = False):
     state = load_state() if _resume_from_state else {}
     state.update(cfg)
     state.setdefault("_created_resources", {"fos_key_ids": []})
-    config_existed = False
     _check_service_id = cfg.get("logging_service_id")
-    if _check_service_id:
-        try:
-            if os.path.exists(svcconfig.config_path(_check_service_id)):
-                config_existed = True
-        except Exception:
-            pass
-    original_config = svcconfig.snapshot_config(_check_service_id) if config_existed and _check_service_id else None
+    original_config = svcconfig.snapshot_config(_check_service_id) if _check_service_id else None
     if cfg.get("fos_access_key_id") and cfg.get("fos_secret_access_key"):
         state.setdefault("fos_access_key", cfg["fos_access_key_id"])
         state.setdefault("fos_secret_key", cfg["fos_secret_access_key"])
@@ -606,7 +675,7 @@ def provision(cfg: dict, _resume_from_state: bool = False):
         step(7, total, "Reconciling logging configuration")
         write_service_config(state)
         ok("Service config written (for reconciler)")
-        if state.get("rum_enabled"):
+        if svcconfig.is_rum_enabled(state):
             rum_state_raw = state.get("rum")
             rum_state_cfg = rum_state_raw if isinstance(rum_state_raw, dict) else {}
             resolved_faro_version = rum_state_cfg.get("faro_version") or DEFAULT_FARO_VERSION
@@ -651,9 +720,16 @@ def provision(cfg: dict, _resume_from_state: bool = False):
         yield {"type": "status", "message": "⚙️ Step 8/8: Finalizing service configuration..."}
         step(8, total, "Finalizing configuration")
         write_service_config(state)
+        svc_id_done = state.get("logging_service_id")
+        if svc_id_done and svcconfig.load_config(svc_id_done) is not None:
+            svcconfig.record_deployed_config(
+                svc_id_done,
+                state.get("activated_logging_version"),
+                previous_version=state.get("previous_logging_version"),
+            )
         if is_mock_mode():
             yield {"type": "progress", "current": 8, "total": total}
-            yield {"type": "done", "message": "🎉 Provisioning complete!"}
+            yield {"type": "done", "message": "🎉 Provisioning complete!", "activated_version": new_ver}
             return
         try:
             from backend.core import metadata as metadata_db
@@ -691,7 +767,7 @@ def provision(cfg: dict, _resume_from_state: bool = False):
         except Exception:
             logger.exception("[provision] post-provision audit step failed (non-fatal)")
         yield {"type": "progress", "current": 8, "total": total}
-        yield {"type": "done", "message": "🎉 Provisioning complete!"}
+        yield {"type": "done", "message": "🎉 Provisioning complete!", "activated_version": new_ver}
         try:
             os.remove(_state_file_path())
         except FileNotFoundError:
@@ -734,9 +810,8 @@ def provision(cfg: dict, _resume_from_state: bool = False):
         if not rollback_failed:
             try:
                 if original_config is None:
-                    cfg_path = svcconfig.config_path(service_id) if service_id else None
-                    if cfg_path and os.path.exists(cfg_path):
-                        os.remove(cfg_path)
+                    if service_id:
+                        svcconfig.delete_config(service_id)
                 elif service_id:
                     svcconfig.restore_config_snapshot(service_id, original_config)
                 else:
@@ -914,10 +989,8 @@ def cleanup_local_data(service_id: str, bucket: str = None, remove_data: bool = 
     from backend import config as svcconfig
 
     if service_id:
-        cfg_path = svcconfig.config_path(service_id)
-        if os.path.exists(cfg_path):
-            os.remove(cfg_path)
-            ok(f"Removed service config: {cfg_path}")
+        if svcconfig.delete_config(service_id):
+            ok(f"Removed service config for {service_id}")
     if remove_data:
         if service_id:
             try:

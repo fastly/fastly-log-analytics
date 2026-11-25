@@ -3,6 +3,7 @@
 import React, { useState } from 'react'
 import { TrendingUp } from 'lucide-react'
 import { useReportPageState, useAnalyticsReportQuery } from '@/hooks/useReportPageState'
+import { useActiveLogFields } from '@/hooks/useBootstrap'
 import { client, unwrapClient } from '@/lib/api'
 import type { RangeWire } from '@/lib/utils'
 import { ReportLayout } from '@/components/ReportLayout'
@@ -42,6 +43,10 @@ interface FastlyValueBodyProps {
 
 function FastlyValueBody({ startTime, endTime, activeServiceId, filterPayload }: FastlyValueBodyProps) {
   const { relativeRange, isAutoRange, anchor } = useReportPageState()
+  const { ready: ioFieldsReady, isFieldActive } = useActiveLogFields()
+  const ioFieldsEnabled = ioFieldsReady
+    ? isFieldActive('io_input_format') || isFieldActive('io_output_format')
+    : undefined
   const [activeTab, setActiveTab] = useState<TabId>('summary')
   const sections = React.useMemo(() => {
     if (activeTab === 'summary') return [...SUMMARY_SECTIONS]
@@ -221,7 +226,7 @@ function FastlyValueBody({ startTime, endTime, activeServiceId, filterPayload }:
                 />
               </TabsContent>
               <TabsContent value="io">
-                <IOValueTab data={data?.io} loading={loading} rollup={rollup} />
+                <IOValueTab data={data?.io} loading={loading} rollup={rollup} ioFieldsEnabled={ioFieldsEnabled} />
               </TabsContent>
             </div>
           )}

@@ -219,6 +219,9 @@ export interface paths {
                                 /** @enum {string} */
                                 mode: "attached";
                                 missing_fields: string[];
+                                rum_present?: boolean;
+                                cmcd_present?: boolean;
+                                scoring_present?: boolean;
                             };
                         };
                     };
@@ -410,6 +413,25 @@ export interface paths {
                         activate?: boolean;
                         cmcd?: components["schemas"]["CmcdConfig"];
                         rum?: components["schemas"]["RumConfig"];
+                        logging_enabled?: boolean;
+                        logging_endpoint_name?: string;
+                        log_period?: number;
+                        sample_rate?: number;
+                        edge_only?: boolean;
+                        custom_condition?: string;
+                        rum_enabled?: boolean;
+                        rum_log_period?: number;
+                        faro_version?: string;
+                        rum_custom_condition?: string;
+                        capture_vitals?: boolean;
+                        capture_performance?: boolean;
+                        capture_errors?: boolean;
+                        capture_events?: boolean;
+                        delete_after?: boolean;
+                        log_retention_days?: number;
+                        rum_retention_days?: number;
+                        compaction?: components["schemas"]["CompactionSetting"];
+                        log_fields?: components["schemas"]["CaptureFields"];
                     };
                 };
             };
@@ -421,6 +443,56 @@ export interface paths {
                     };
                     content: {
                         "application/json": components["schemas"]["ControlJobResponse"];
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/services/{service_id}/rollback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    service_id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        generation: string;
+                        token?: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Rolled back service configuration and Fastly active version */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            service: components["schemas"]["InstalledService"];
+                            generation: string;
+                            activated_version: number;
+                        };
                     };
                 };
             };

@@ -981,11 +981,14 @@ def test_update_settings_reconcile_and_missing(custom_condition: str):
         "fastly_api_key": "tok-stored",
         "rum_enabled": True,
         "rum": {"enabled": True, **_rum_settings(True, True, True, True)},
+        "log_fields": {"field_overrides": {"rid": True}},
     }
     payload = _rum_settings(cond=custom_condition)
     with (
         patch("backend.config.load_config", return_value=cfg),
         patch("backend.config.mutate_config", side_effect=mutate_via_save(mock_save := MagicMock())),
+        patch("backend.core.fastly.client.get_active_version", return_value=5),
+        patch("backend.provision.declarative.reconciler._purge_rum_surrogate_key"),
         patch("backend.provision.rum_assets.upload_rum_tracker_js", return_value={"skipped": False}) as mock_upload,
         patch("backend.provision.declarative.reconciler.reconcile_vcl_state") as mock_reconcile,
     ):
@@ -994,8 +997,10 @@ def test_update_settings_reconcile_and_missing(custom_condition: str):
     # One save for the settings and one for the refreshed VCL fingerprint.
     assert mock_save.call_count == 2
     mock_upload.assert_called_once_with(SVC, "tok-stored", overwrite=True)
-    # Saving is the redeploy path, so the VCL is reconciled even when the condition is unchanged.
-    mock_reconcile.assert_called_once_with(SVC, "tok-stored", dry_run=False, activate=True)
+    if custom_condition:
+        mock_reconcile.assert_called_once_with(SVC, "tok-stored", dry_run=False, activate=True)
+    else:
+        mock_reconcile.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -1010,12 +1015,15 @@ def test_update_settings_rolls_back_on_failure(upload_err, reconcile_err, custom
         "fastly_api_key": "tok-stored",
         "rum_enabled": True,
         "rum": {"enabled": True, "capture_vitals": True, "custom_condition": ""},
+        "log_fields": {"field_overrides": {"rid": True}},
     }
     test_client = TestClient(_make_app(analyst=False))
     payload = _rum_settings(False, False, False, False, cond=custom_condition)
     with (
         patch("backend.config.load_config", return_value=cfg),
         patch("backend.config.mutate_config", side_effect=mutate_via_save(mock_save := MagicMock())),
+        patch("backend.core.fastly.client.get_active_version", return_value=5),
+        patch("backend.provision.declarative.reconciler._purge_rum_surrogate_key"),
         patch(
             "backend.provision.rum_assets.upload_rum_tracker_js",
             side_effect=upload_err if upload_err else (lambda *a, **kw: {"skipped": False}),

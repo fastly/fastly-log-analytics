@@ -9,7 +9,7 @@ import logging
 import sys
 import time
 from collections.abc import Callable
-from dataclasses import asdict, replace
+from dataclasses import replace
 from typing import Any
 
 from backend.core.fastly.client import fastly, find_service_by_name
@@ -64,7 +64,6 @@ from backend.provision.declarative.vcl_builder import (
 )
 from backend.provision.session_scoring_orchestrator import (
     _SCORER_PACKAGE,
-    _SCORING_FIELD_NAMES,
     MATRIX_STORE_NAME_TEMPLATE,
     _deploy_wasm_package,
     _find_kv_store,
@@ -108,21 +107,12 @@ def _record_reconcile_audit(
 
 
 def _load_or_bootstrap_feature_state(service_id: str, token: str, *, persist_bootstrap: bool = False) -> FeatureState:
-    from backend.config import config_lock, save_config
-    from backend.config import config_path as _config_path
+    from backend import config as svcconfig
 
-    config_path = _config_path(service_id)
-    if not config_path.exists():
-        state = _bootstrap_featurestate_from_fastly(service_id, token)
-        if persist_bootstrap:
-            try:
-                with config_lock(service_id):
-                    if not config_path.exists():
-                        save_config(service_id, asdict(state))
-            except OSError as e:
-                logging.getLogger("backend.scheduler").info(f"Skipped updating read-only config cache: {e}")
-        return state
-    return FeatureState.from_config(json.loads(config_path.read_text()))
+    cfg = svcconfig.load_config(service_id)
+    if cfg is None:
+        raise RuntimeError(f"No service config found for {service_id}")
+    return FeatureState.from_config(cfg)
 
 
 def _with_service_timing_origins(service_id: str, token: str, state: FeatureState, *, persist: bool) -> FeatureState:
@@ -263,6 +253,78 @@ def reconcile_vcl_state(
     return result
 
 
+def transactional_vcl_reconcile(
+    service_id: str,
+    token: str,
+    mutate_fn: Callable[[dict[str, Any]], None] | None = None,
+    *,
+    prefer_deployed_snapshot: bool = False,
+    dry_run: bool = False,
+    activate: bool = True,
+    status_cb: Callable[[str], None] | None = None,
+) -> ReconciliationResult:
+    """Snapshot config -> mutate -> reconcile VCL -> record deployed or roll back Fastly + config."""
+    from backend import config as svcconfig
+
+    with acquire_vcl_lock(service_id):
+        baseline_raw = svcconfig.snapshot_config(service_id, prefer_deployed=prefer_deployed_snapshot)
+        if baseline_raw is None:
+            raise RuntimeError(f"No service config found for {service_id}")
+        try:
+            prev_ver = fastly_integration.fetch_active_version(service_id, token)
+        except Exception:
+            prev_ver = None
+
+        if mutate_fn is not None and svcconfig.mutate_config(service_id, mutate_fn) is None:
+            raise RuntimeError(f"No service config found for {service_id}")
+
+        try:
+            result = reconcile_vcl_state(
+                service_id,
+                token,
+                dry_run=dry_run,
+                status_cb=status_cb,
+                activate=activate,
+            )
+            if result.error:
+                raise RuntimeError(result.error)
+        except Exception:
+            try:
+                new_ver = fastly_integration.fetch_active_version(service_id, token)
+            except Exception:
+                new_ver = None
+            if new_ver is not None and prev_ver is not None and new_ver != prev_ver:
+                try:
+                    fastly("PUT", f"/service/{service_id}/version/{prev_ver}/activate", token=token)
+                except Exception:
+                    logger.warning(
+                        "Failed to re-activate previous Fastly version %s for %s during rollback",
+                        prev_ver,
+                        service_id,
+                        exc_info=True,
+                    )
+            svcconfig.restore_config_snapshot(service_id, baseline_raw)
+            raise
+
+        if dry_run:
+            if mutate_fn is not None:
+                svcconfig.restore_config_snapshot(service_id, baseline_raw)
+            return result
+
+        if not activate:
+            svcconfig.restore_config_snapshot(service_id, baseline_raw)
+            return result
+
+        activated_ver = result.activated_version
+        if activated_ver is None:
+            try:
+                activated_ver = fastly_integration.fetch_active_version(service_id, token)
+            except Exception:
+                activated_ver = prev_ver
+        svcconfig.record_deployed_config(service_id, activated_ver, previous_version=prev_ver)
+        return result
+
+
 def _finalize_reconcile_early_exit(
     result: ReconciliationResult,
     service_id: str,
@@ -292,17 +354,16 @@ def reconcile_cdn_service_state(
     on_created: Callable[[str], None] | None = None,
 ) -> ReconciliationResult:
     """Execute the complete reconciliation control loop for the FOS Proxy / CDN service (Steps 1-8)."""
-    from backend.config import config_path as _config_path
+    from backend import config as svcconfig
     from backend.core.fastly.client import SHIELD_MAP, load_vcl, region_endpoint
     from backend.provision.fastly_api import _CDN_SNIPPETS
 
     cdn_managed_backend_names = {"fos_origin"}
     cdn_managed_dictionary_names = {"fos_credentials", "cdn_auth"}
     start_time = time.time()
-    config_path = _config_path(logging_service_id)
-    if not config_path.exists():
-        raise FileNotFoundError(f"Configuration file {config_path} not found.")
-    cfg = json.loads(config_path.read_text())
+    cfg = svcconfig.load_config(logging_service_id)
+    if cfg is None:
+        raise FileNotFoundError(f"Service configuration for {logging_service_id} not found.")
     fos_proxy_cfg = cfg.get("fos_proxy", {})
     cdn_service_id = fos_proxy_cfg.get("service_id") or cfg.get("cdn_service_id", "")
     cdn_service_name = (
@@ -719,177 +780,204 @@ def verify_compute_scorer_readiness(
 
 
 def reconcile_infrastructure(
-    logging_service_id: str, token: str, dry_run: bool = False, status_cb: Callable[[str], None] | None = None
+    logging_service_id: str,
+    token: str,
+    dry_run: bool = False,
+    status_cb: Callable[[str], None] | None = None,
+    *,
+    pre_mutate: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
     """The central unified IaC control loop managing all multi-service resource operations."""
-    desired = build_desired_state(logging_service_id, token)
-    if status_cb:
-        status_cb("⏳ Discovering active edge resources on Fastly account...")
-    current = discover_current_state(logging_service_id, token)
-    if dry_run:
-        return
-    from backend.config import config_path as _config_path
-    from backend.config import mutate_config, snapshot_config
+    from backend.config import mutate_config, record_deployed_config, restore_config_snapshot, snapshot_config
 
-    config_path = _config_path(logging_service_id)
-    if (orig_config_content := snapshot_config(logging_service_id)) is None:
-        raise RuntimeError(f"Configuration file {config_path} is required for live deployment.")
-    cfg = json.loads(orig_config_content)
-    orig_scoring = copy.deepcopy(cfg.get("scoring"))
-    orig_scoring_fields = [
-        copy.deepcopy(cf)
-        for cf in (cfg.get("log_fields") or {}).get("custom_fields") or []
-        if cf.get("name") in _SCORING_FIELD_NAMES
-    ]
-    persisted = False
-    created_scoring_resources: dict[str, str] = {}
-
-    def _persist(apply: Callable[[dict[str, Any]], None]) -> None:
-        nonlocal persisted
-        persisted = True
-        if mutate_config(logging_service_id, apply) is None:
-            raise RuntimeError(f"Configuration file {config_path} disappeared during reconciliation.")
-
-    def _rollback_owned_keys(disk_cfg: dict[str, Any]) -> None:
-        if orig_scoring is None:
-            disk_cfg.pop("scoring", None)
-        else:
-            disk_cfg["scoring"] = copy.deepcopy(orig_scoring)
-        if orig_scoring_fields:
-            _remove_scoring_custom_fields(disk_cfg)
-            lf = disk_cfg.setdefault("log_fields", {})
-            lf["custom_fields"] = [*(lf.get("custom_fields") or []), *copy.deepcopy(orig_scoring_fields)]
-
-    try:
-        apply_phase3: Callable[[dict[str, Any]], None] | None = None
-        if desired.compute_scorer:
+    with acquire_vcl_lock(logging_service_id):
+        if (orig_config_content := snapshot_config(logging_service_id)) is None:
+            raise RuntimeError(f"Service configuration for {logging_service_id} is required for live deployment.")
+        if dry_run:
+            build_desired_state(logging_service_id, token)
             if status_cb:
-                status_cb("⏳ Phase 1: Reconciling edge KV Stores...")
-                status_cb("⏳ Phase 2: Reconciling Compute Scorer Service and uploading WASM package...")
-            from backend.provision.opaque_names import generate_opaque_scorer_domain
+                status_cb("⏳ Discovering active edge resources on Fastly account...")
+            discover_current_state(logging_service_id, token)
+            return
 
-            cfg_scoring = cfg.get("scoring") or {}
-            persisted_scorer_domain = (cfg_scoring.get("scoring_domain") or cfg_scoring.get("domain") or "").strip()
-            raw_desired_domain = desired.compute_scorer.domains[0] if desired.compute_scorer.domains else ""
-            desired_scorer_domain = raw_desired_domain.strip() if isinstance(raw_desired_domain, str) else ""
-            candidate_scorer_domain = (
-                persisted_scorer_domain or desired_scorer_domain or generate_opaque_scorer_domain()
-            )
+        try:
+            prev_ver = fastly_integration.fetch_active_version(logging_service_id, token)
+        except Exception:
+            prev_ver = None
 
-            def _persist_scorer_domain(selected_domain: str) -> None:
-                def _apply_dom(disk_cfg: dict[str, Any]) -> None:
-                    s = disk_cfg.setdefault("scoring", {})
-                    if isinstance(s, dict):
-                        s["scoring_domain"] = selected_domain
-                        s["domain"] = selected_domain
+        persisted = False
 
-                _persist(_apply_dom)
+        def _persist(apply: Callable[[dict[str, Any]], None]) -> None:
+            nonlocal persisted
+            persisted = True
+            if mutate_config(logging_service_id, apply) is None:
+                raise RuntimeError(f"Service configuration for {logging_service_id} disappeared during reconciliation.")
 
-            if not persisted_scorer_domain:
-                _persist_scorer_domain(candidate_scorer_domain)
+        if pre_mutate is not None:
+            _persist(pre_mutate)
 
-            import inspect
+        desired = build_desired_state(logging_service_id, token)
+        if status_cb:
+            status_cb("⏳ Discovering active edge resources on Fastly account...")
+        current = discover_current_state(logging_service_id, token)
 
-            ensure_kwargs: dict[str, Any] = {"status_cb": status_cb}
-            ensure_sig = inspect.signature(ensure_scoring_service).parameters
-            if "preferred_domain" in ensure_sig:
-                ensure_kwargs["preferred_domain"] = candidate_scorer_domain
-                ensure_kwargs["allow_domain_retry"] = not bool(persisted_scorer_domain)
-                ensure_kwargs["on_domain_selected"] = _persist_scorer_domain
+        cfg = json.loads(snapshot_config(logging_service_id) or orig_config_content)
+        created_scoring_resources: dict[str, str] = {}
 
-            scoring_meta = ensure_scoring_service(logging_service_id, token, **ensure_kwargs)
-            created_scoring_resources = dict(scoring_meta.get("created_resources") or {})
-            scoring_service_id, matrix_store_id = (
-                scoring_meta["scoring_service_id"],
-                scoring_meta.get("scoring_matrix_store_id", ""),
-            )
-            _write_matrix_to_kv(matrix_store_id, logging_service_id, token, status_cb=status_cb)
-            package_meta = _deploy_wasm_package(scoring_service_id, matrix_store_id, token, status_cb=status_cb)
-            resolved_domain = scoring_meta.get("scoring_domain") or (
-                desired.compute_scorer.domains[0] if desired.compute_scorer.domains else ""
-            )
-            if resolved_domain:
-                desired.compute_scorer.domains = [resolved_domain]
-            cfg_scoring = cfg.get("scoring") or {}
-            new_scoring: dict[str, Any] = {
-                "enabled": True,
-                "scoring_service_id": scoring_service_id,
-                **{
-                    k: scoring_meta.get(k, "")
-                    for k in (
-                        "scoring_service_name",
-                        "scoring_domain",
-                        "scoring_keys_store_id",
-                        "scoring_config_store_id",
+        try:
+            apply_phase3: Callable[[dict[str, Any]], None] | None = None
+            if desired.compute_scorer:
+                if status_cb:
+                    status_cb("⏳ Phase 1: Reconciling edge KV Stores...")
+                    status_cb("⏳ Phase 2: Reconciling Compute Scorer Service and uploading WASM package...")
+                from backend.provision.opaque_names import generate_opaque_scorer_domain
+
+                cfg_scoring = cfg.get("scoring") or {}
+                persisted_scorer_domain = (cfg_scoring.get("scoring_domain") or cfg_scoring.get("domain") or "").strip()
+                raw_desired_domain = desired.compute_scorer.domains[0] if desired.compute_scorer.domains else ""
+                desired_scorer_domain = raw_desired_domain.strip() if isinstance(raw_desired_domain, str) else ""
+                candidate_scorer_domain = (
+                    persisted_scorer_domain or desired_scorer_domain or generate_opaque_scorer_domain()
+                )
+
+                def _persist_scorer_domain(selected_domain: str) -> None:
+                    def _apply_dom(disk_cfg: dict[str, Any]) -> None:
+                        s = disk_cfg.setdefault("scoring", {})
+                        if isinstance(s, dict):
+                            s["scoring_domain"] = selected_domain
+                            s["domain"] = selected_domain
+
+                    _persist(_apply_dom)
+
+                if not persisted_scorer_domain:
+                    _persist_scorer_domain(candidate_scorer_domain)
+
+                import inspect
+
+                ensure_kwargs: dict[str, Any] = {"status_cb": status_cb}
+                ensure_sig = inspect.signature(ensure_scoring_service).parameters
+                if "preferred_domain" in ensure_sig:
+                    ensure_kwargs["preferred_domain"] = candidate_scorer_domain
+                    ensure_kwargs["allow_domain_retry"] = not bool(persisted_scorer_domain)
+                    ensure_kwargs["on_domain_selected"] = _persist_scorer_domain
+
+                scoring_meta = ensure_scoring_service(logging_service_id, token, **ensure_kwargs)
+                created_scoring_resources = dict(scoring_meta.get("created_resources") or {})
+                scoring_service_id, matrix_store_id = (
+                    scoring_meta["scoring_service_id"],
+                    scoring_meta.get("scoring_matrix_store_id", ""),
+                )
+                _write_matrix_to_kv(matrix_store_id, logging_service_id, token, status_cb=status_cb)
+                package_meta = _deploy_wasm_package(scoring_service_id, matrix_store_id, token, status_cb=status_cb)
+                resolved_domain = scoring_meta.get("scoring_domain") or (
+                    desired.compute_scorer.domains[0] if desired.compute_scorer.domains else ""
+                )
+                if resolved_domain:
+                    desired.compute_scorer.domains = [resolved_domain]
+                cfg_scoring = cfg.get("scoring") or {}
+                new_scoring: dict[str, Any] = {
+                    "enabled": True,
+                    "scoring_service_id": scoring_service_id,
+                    **{
+                        k: scoring_meta.get(k, "")
+                        for k in (
+                            "scoring_service_name",
+                            "scoring_domain",
+                            "scoring_keys_store_id",
+                            "scoring_config_store_id",
+                        )
+                    },
+                    "scoring_matrix_store_id": matrix_store_id,
+                    "request_secret": scoring_meta.get("request_secret", cfg_scoring.get("request_secret", "")),
+                    "aes_key_hex": scoring_meta.get("aes_key_hex", "") or cfg_scoring.get("aes_key_hex", ""),
+                    "deployed_package_sha": package_meta["sha"],
+                    "deployed_package_files_hash": package_meta["files_hash"],
+                    "deployed_vcl_sha": scorer_vcl_fingerprint(logging_service_id),
+                }
+
+                def _set_scoring(disk_cfg: dict[str, Any]) -> None:
+                    existing_scoring = disk_cfg.get("scoring")
+                    base_scoring = copy.deepcopy(existing_scoring) if isinstance(existing_scoring, dict) else {}
+                    base_scoring.update(copy.deepcopy(new_scoring))
+                    disk_cfg["scoring"] = base_scoring
+
+                apply_phase3 = _set_scoring
+                if status_cb:
+                    status_cb("⏳ Phase 2.5: Issuing HTTP readiness checks on deployed domain...")
+                verify_compute_scorer_readiness(desired.compute_scorer, token, status_cb=status_cb)
+            elif current["compute_scorer"]:
+                if status_cb:
+                    status_cb("⏳ Phase 4: Executing safe reverse-topological teardown of disabled assets...")
+                    status_cb("⏳ Stripping VCL scoring backend and snippets first...")
+
+                def _disable_scoring_keys(disk_cfg: dict[str, Any]) -> None:
+                    _remove_scoring_custom_fields(disk_cfg)
+                    if "scoring" in disk_cfg:
+                        disk_cfg["scoring"]["enabled"] = False
+
+                apply_phase3 = _disable_scoring_keys
+            if status_cb:
+                status_cb("⏳ Phase 3: Syncing VCL Edge Logging Configurations, Custom Fields, and Backends...")
+            if apply_phase3 is not None:
+                _persist(apply_phase3)
+            vcl_result = reconcile_vcl_state(logging_service_id, token, dry_run=False, status_cb=status_cb)
+            if not desired.compute_scorer and current["compute_scorer"]:
+                if status_cb:
+                    status_cb("⏳ Sleeping/Draining edge requests for 5 seconds to ensure clean cutover...")
+                time.sleep(5.0)
+                if status_cb:
+                    status_cb("⏳ Deleting serverless Compute Scorer service and resources last...")
+                old_matrix_store_id = (
+                    current["kv_stores"]
+                    .get(MATRIX_STORE_NAME_TEMPLATE.format(sid=logging_service_id), {})
+                    .get("id", "")
+                )
+                prior_scoring = json.loads(orig_config_content).get("scoring") or {}
+                delete_scoring_service(
+                    scoring_service_id=current["compute_scorer"].get("id"),
+                    scoring_keys_store_id=prior_scoring.get("scoring_keys_store_id", ""),
+                    scoring_config_store_id=prior_scoring.get("scoring_config_store_id", ""),
+                    scoring_matrix_store_id=old_matrix_store_id,
+                    token=token,
+                    status_cb=status_cb,
+                )
+                _persist(lambda disk_cfg: disk_cfg.pop("scoring", None))
+            activated_ver = getattr(vcl_result, "activated_version", None)
+            if activated_ver is None:
+                try:
+                    activated_ver = fastly_integration.fetch_active_version(logging_service_id, token)
+                except Exception:
+                    activated_ver = prev_ver
+            record_deployed_config(logging_service_id, activated_ver, previous_version=prev_ver)
+            if status_cb:
+                status_cb("✅ Infrastructure state reconciliation completed successfully.")
+        except Exception as err:
+            logger.error("IaC reconciliation failure, executing transactional configuration rollback", exc_info=True)
+            if status_cb:
+                status_cb(
+                    f"❌ Error during reconciliation: {redact_error_text(err)}. Rolling back to previous configuration..."
+                )
+            try:
+                new_ver = fastly_integration.fetch_active_version(logging_service_id, token)
+            except Exception:
+                new_ver = None
+            if new_ver is not None and prev_ver is not None and new_ver != prev_ver:
+                try:
+                    fastly("PUT", f"/service/{logging_service_id}/version/{prev_ver}/activate", token=token)
+                except Exception:
+                    logger.warning(
+                        "Failed to re-activate previous Fastly version %s for %s during IaC rollback",
+                        prev_ver,
+                        logging_service_id,
+                        exc_info=True,
                     )
-                },
-                "scoring_matrix_store_id": matrix_store_id,
-                "request_secret": scoring_meta.get("request_secret", cfg_scoring.get("request_secret", "")),
-                "aes_key_hex": scoring_meta.get("aes_key_hex", "") or cfg_scoring.get("aes_key_hex", ""),
-                "deployed_package_sha": package_meta["sha"],
-                "deployed_package_files_hash": package_meta["files_hash"],
-                "deployed_vcl_sha": scorer_vcl_fingerprint(logging_service_id),
-            }
-
-            def _set_scoring(disk_cfg: dict[str, Any]) -> None:
-                existing_scoring = disk_cfg.get("scoring")
-                base_scoring = copy.deepcopy(existing_scoring) if isinstance(existing_scoring, dict) else {}
-                base_scoring.update(copy.deepcopy(new_scoring))
-                disk_cfg["scoring"] = base_scoring
-
-            apply_phase3 = _set_scoring
-            if status_cb:
-                status_cb("⏳ Phase 2.5: Issuing HTTP readiness checks on deployed domain...")
-            verify_compute_scorer_readiness(desired.compute_scorer, token, status_cb=status_cb)
-        elif current["compute_scorer"]:
-            if status_cb:
-                status_cb("⏳ Phase 4: Executing safe reverse-topological teardown of disabled assets...")
-                status_cb("⏳ Stripping VCL scoring backend and snippets first...")
-
-            def _disable_scoring_keys(disk_cfg: dict[str, Any]) -> None:
-                _remove_scoring_custom_fields(disk_cfg)
-                if "scoring" in disk_cfg:
-                    disk_cfg["scoring"]["enabled"] = False
-
-            apply_phase3 = _disable_scoring_keys
-        if status_cb:
-            status_cb("⏳ Phase 3: Syncing VCL Edge Logging Configurations, Custom Fields, and Backends...")
-        if apply_phase3 is not None:
-            _persist(apply_phase3)
-        reconcile_vcl_state(logging_service_id, token, dry_run=False, status_cb=status_cb)
-        if not desired.compute_scorer and current["compute_scorer"]:
-            if status_cb:
-                status_cb("⏳ Sleeping/Draining edge requests for 5 seconds to ensure clean cutover...")
-            time.sleep(5.0)
-            if status_cb:
-                status_cb("⏳ Deleting serverless Compute Scorer service and resources last...")
-            old_matrix_store_id = (
-                current["kv_stores"].get(MATRIX_STORE_NAME_TEMPLATE.format(sid=logging_service_id), {}).get("id", "")
-            )
-            prior_scoring = json.loads(orig_config_content).get("scoring") or {}
-            delete_scoring_service(
-                scoring_service_id=current["compute_scorer"].get("id"),
-                scoring_keys_store_id=prior_scoring.get("scoring_keys_store_id", ""),
-                scoring_config_store_id=prior_scoring.get("scoring_config_store_id", ""),
-                scoring_matrix_store_id=old_matrix_store_id,
-                token=token,
-                status_cb=status_cb,
-            )
-            _persist(lambda disk_cfg: disk_cfg.pop("scoring", None))
-        if status_cb:
-            status_cb("✅ Infrastructure state reconciliation completed successfully.")
-    except Exception as err:
-        logger.error("IaC reconciliation failure, executing transactional configuration rollback", exc_info=True)
-        if status_cb:
-            status_cb(
-                f"❌ Error during reconciliation: {redact_error_text(err)}. Rolling back to previous configuration..."
-            )
-        rollback_error: RuntimeError | None = None
-        if persisted:
-            if mutate_config(logging_service_id, _rollback_owned_keys) is None:
-                rollback_error = RuntimeError("IaC rollback failed because the service configuration disappeared")
-        if created_scoring_resources:
-            delete_scoring_service(token=token, **created_scoring_resources)
-        if rollback_error:
-            raise rollback_error from err
-        raise err
+            rollback_error: RuntimeError | None = None
+            try:
+                restore_config_snapshot(logging_service_id, orig_config_content)
+            except Exception as restore_exc:
+                rollback_error = RuntimeError(f"IaC rollback failed: {restore_exc}")
+            if created_scoring_resources:
+                delete_scoring_service(token=token, **created_scoring_resources)
+            if rollback_error:
+                raise rollback_error from err
+            raise err

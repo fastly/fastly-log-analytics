@@ -38,13 +38,14 @@ def _resolve_rum_js_service_id(request: Request, service_id: str | None) -> str 
     Unauthenticated remote callers never fall back to the first configured
     service so ``GET /js/rum.js`` cannot be probed to enumerate raw service IDs.
     """
+    from backend.core.request_context import ACTIVE_SERVICE_COOKIE
     from backend.utils.remote_access import is_request_remote
 
     sid = service_id
     if not sid:
         sid = request.headers.get("x-service-id")
     if not sid:
-        sid = request.cookies.get("active_service_id")
+        sid = request.cookies.get(ACTIVE_SERVICE_COOKIE) or request.cookies.get("active_service_id")
 
     if sid and not svcconfig.load_config(sid):
         sid = None

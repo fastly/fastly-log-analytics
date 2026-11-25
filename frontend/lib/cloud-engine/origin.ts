@@ -2,6 +2,8 @@ import { quoteIdent, sqlEscape } from "@/lib/sqlBuilder";
 import { getDuckDBEngine, type DuckDBColumnType, type DuckDBReadContext } from "./dashboard/duckdb";
 import { compileFiltersToSql } from "./dashboard/duckdb";
 import type { DashboardFilter } from "./dashboard/filters";
+import { cloudActiveLogFieldIds } from "./active-log-fields";
+import { fetchCloudMetadata } from "./metadata-cache";
 import type { Schema } from "@/types/api";
 
 export type OriginSectionName =
@@ -1064,6 +1066,7 @@ export async function queryOriginIpHealthWithFallback(
 
 export async function queryOriginAggregates(
   body: {
+    service_id?: string;
     start_time?: string;
     end_time?: string;
     filters?: Record<string, { mode?: string; values?: string[] }>;
@@ -1142,7 +1145,11 @@ export async function queryOriginAggregates(
   }
 
   if (want("pop_latency")) {
-    const hasEdge = actualCols.has("edge");
+    const activeFields = await cloudActiveLogFieldIds(
+      body.service_id,
+      signal ?? new AbortController().signal,
+    );
+    const requiresGroupC = !activeFields.has("edge");
     const sql = buildOriginPopLatencySql(
       table,
       where,
@@ -1152,12 +1159,12 @@ export async function queryOriginAggregates(
     if (sql) {
       const rows = await executor.query(sql, signal);
       out.pop_latency = shapeOriginPopLatencyRows(rows, {
-        requiresGroupC: !hasEdge,
+        requiresGroupC,
       });
     } else {
       out.pop_latency = {
         has_data: false,
-        requires_group_c: !hasEdge,
+        requires_group_c: requiresGroupC,
         rows: [],
       };
     }
@@ -1187,8 +1194,26 @@ export async function queryOriginAggregates(
   return out;
 }
 
+async function readOriginEdgeOnly(
+  serviceId: string | undefined,
+  explicit: boolean | undefined,
+  signal: AbortSignal,
+): Promise<boolean> {
+  if (typeof explicit === "boolean") return explicit;
+  if (!serviceId) return false;
+  const response = await fetchCloudMetadata("/api/services", signal).catch(() => null);
+  if (!response?.ok) return false;
+  const { services = [] } = (await response.json().catch(() => ({}))) as {
+    services?: Array<{ service_id?: string; edge_only?: boolean }>;
+  };
+  const service = services.find((item) => item.service_id === serviceId);
+  return Boolean(service?.edge_only);
+}
+
 export async function queryOriginShieldingAnalysis(
   body: {
+    service_id?: string;
+    edge_only?: boolean;
     start_time?: string;
     end_time?: string;
     filters?: Record<string, { mode?: string; values?: string[] }>;
@@ -1198,17 +1223,22 @@ export async function queryOriginShieldingAnalysis(
   signal?: AbortSignal,
   executor: OriginSqlExecutor = customOriginExecutor ?? createDefaultOriginExecutor(),
 ): Promise<OriginShieldingAnalysisResponse> {
+  const effectiveSignal = signal ?? new AbortController().signal;
+  const [activeFields, edgeOnly] = await Promise.all([
+    cloudActiveLogFieldIds(body.service_id, effectiveSignal),
+    readOriginEdgeOnly(body.service_id, body.edge_only, effectiveSignal),
+  ]);
   const table = executor.tableName ?? "requests";
   const actualCols = executor.getColumns
     ? await executor.getColumns(table, signal)
     : new Set<string>();
   const required = ["edge", "rid", "prid", "pop"];
-  const missing = required.filter((col) => !actualCols.has(col));
+  const missing = required.filter((col) => !activeFields.has(col));
   if (missing.length > 0 || !originLatencyUsExpr(actualCols, null)) {
     return {
       has_data: false,
       requires_fields: missing,
-      edge_only: false,
+      edge_only: edgeOnly,
       rows: [],
       total_routes: 0,
       truncated: false,
@@ -1224,7 +1254,7 @@ export async function queryOriginShieldingAnalysis(
     return {
       has_data: false,
       requires_fields: [],
-      edge_only: true,
+      edge_only: edgeOnly,
       rows: [],
       total_routes: 0,
       truncated: false,
@@ -1236,7 +1266,7 @@ export async function queryOriginShieldingAnalysis(
   return {
     has_data: true,
     requires_fields: [],
-    edge_only: false,
+    edge_only: edgeOnly,
     rows: shaped,
     total_routes: totalRoutes,
     truncated: totalRoutes > shaped.length,

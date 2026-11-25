@@ -68,6 +68,7 @@ import {
 } from "./metadata-cache";
 import { cloudRumMutation } from "./rum-management";
 import { cloudLoggingSettings } from "./logging-settings";
+import { cloudCustomFields } from "./custom-fields";
 import { cloudDeleteData } from "./delete-data";
 import { cloudTeardown } from "./teardown";
 import { cloudProvisionExecute } from "./provision";
@@ -844,6 +845,48 @@ async function prepareInsightsScan(
   }
 }
 
+async function loadServiceRollupFlags(
+  serviceId: string | undefined,
+  signal: AbortSignal,
+): Promise<{
+  active_log_field_ids?: string[];
+  edge_only?: boolean;
+  cmcd_available?: boolean;
+}> {
+  try {
+    const response = await fetchCloudMetadata("/api/services", signal);
+    if (!response.ok) return {};
+    const payload = (await response.json()) as {
+      services?: Array<{
+        service_id?: string;
+        active_log_field_ids?: string[];
+        edge_only?: boolean;
+        cmcd?: { enabled?: boolean };
+      }>;
+    };
+    const services = payload.services;
+    if (!Array.isArray(services) || services.length === 0) return {};
+    const service =
+      serviceId === undefined
+        ? services[0]
+        : services.find((item) => item.service_id === serviceId);
+    if (!service) return {};
+    const activeIds = Array.isArray(service.active_log_field_ids)
+      ? service.active_log_field_ids
+      : undefined;
+    return {
+      ...(activeIds ? { active_log_field_ids: activeIds } : {}),
+      ...(typeof service.edge_only === "boolean" ? { edge_only: service.edge_only } : {}),
+      cmcd_available:
+        Boolean(service.cmcd?.enabled) ||
+        Boolean(activeIds?.includes("cmcd_sid")),
+    };
+  } catch (error) {
+    if (signal.aborted) throw error;
+    return {};
+  }
+}
+
 /**
  * Answers a summary read (`answerFromRollup`) in the dashboard engine worker, so
  * decoding and merging summaries stays off the main thread, or in-thread over
@@ -882,10 +925,17 @@ async function cloudNetworkRollup(
   const { start } = queryRange({ ...params, end }, 24);
   const rawServiceId = params.service_id ?? request.headers.get("x-service-id");
   const serviceId = rawServiceId ? decodeUriStrict(String(rawServiceId)) : undefined;
+  const serviceFlags = await loadServiceRollupFlags(serviceId, request.signal);
+  assertAdapterEpoch(request, entryMetaEpoch);
   let answer: unknown;
   try {
     answer = await rollupAnswer(path, {
-      ...params, start_time: start, end_time: end, ...serviceId ? { service_id: serviceId } : {},
+      ...params,
+      start_time: start,
+      end_time: end,
+      ...serviceId ? { service_id: serviceId } : {},
+      ...(serviceFlags.active_log_field_ids ? { active_log_field_ids: serviceFlags.active_log_field_ids } : {}),
+      ...(typeof serviceFlags.edge_only === "boolean" ? { edge_only: serviceFlags.edge_only } : {}),
     }, serviceId, request.signal);
     assertAdapterEpoch(request, entryMetaEpoch);
   } catch (error) {
@@ -957,10 +1007,26 @@ async function cloudSectionRollup(
   const { start } = queryRange({ ...params, end }, 24);
   const rawServiceId = params.service_id ?? request.headers.get("x-service-id");
   const serviceId = pathServiceId ?? (rawServiceId ? decodeUriStrict(String(rawServiceId)) : undefined);
+  const serviceFlags =
+    path === "/api/assets/aggregates" ||
+    path === "/api/origin/aggregates" ||
+    path === "/api/origin/shielding-analysis" ||
+    path === "/api/cmcd/aggregates"
+      ? await loadServiceRollupFlags(serviceId, request.signal)
+      : {};
+  assertAdapterEpoch(request, entryMetaEpoch);
   const finish = route.decorate?.(start, end, { ...params, ...serviceId ? { service_id: serviceId } : {} });
   try {
     const answer = await rollupAnswer(path, {
-      ...params, start_time: start, end_time: end, ...serviceId ? { service_id: serviceId } : {},
+      ...params,
+      start_time: start,
+      end_time: end,
+      ...serviceId ? { service_id: serviceId } : {},
+      ...(serviceFlags.active_log_field_ids ? { active_log_field_ids: serviceFlags.active_log_field_ids } : {}),
+      ...(typeof serviceFlags.edge_only === "boolean" ? { edge_only: serviceFlags.edge_only } : {}),
+      ...(path === "/api/cmcd/aggregates" && typeof serviceFlags.cmcd_available === "boolean"
+        ? { available: serviceFlags.cmcd_available }
+        : {}),
     }, serviceId, request.signal);
     assertAdapterEpoch(request, entryMetaEpoch);
     if (!answer) return null;
@@ -1532,17 +1598,37 @@ async function handleCloudRequest(
   return response;
 }
 
-function isCloudConfigMutation(method: string, path: string): boolean {
+export function isCloudConfigMutation(method: string, path: string): boolean {
   if (method === "POST" && ["/api/provision/execute", "/api/provision/teardown"].includes(path)) {
+    return true;
+  }
+  if (method === "PATCH" && /^\/api\/provision\/services\/[^/]+\/ngwaf-workspace$/.test(path)) {
+    return true;
+  }
+  if (method === "POST" && /^\/api\/admin\/services\/[^/]+\/(?:reconcile|rollback)$/.test(path)) {
+    return true;
+  }
+  if (method === "PATCH" && /^\/api\/admin\/services\/[^/]+$/.test(path)) {
     return true;
   }
   if (method === "POST" && /^\/api\/services\/[^/]+\/rum\/(?:enable|disable|upgrade|settings)$/.test(path)) {
     return true;
   }
-  if (method === "GET" && /^\/api\/services\/[^/]+\/logging-settings\/update$/.test(path)) {
+  if ((method === "GET" || method === "POST") && /^\/api\/services\/[^/]+\/logging-settings\/update$/.test(path)) {
     return true;
   }
-  return method === "POST" && /^\/api\/services\/[^/]+\/log-fields$/.test(path);
+  if (method === "POST" && /^\/api\/services\/[^/]+\/log-fields$/.test(path)) {
+    return true;
+  }
+  if (/^\/api\/services\/[^/]+\/custom-fields(?:\/import|\/[^/]+)?$/.test(path)) {
+    if (path.endsWith("/validate-vcl") || path.endsWith("/export")) return false;
+    return ["POST", "PATCH", "DELETE"].includes(method);
+  }
+  if (method === "POST" && /^\/api\/services\/[^/]+\/scoring\/(?:matrix-versions\/[^/]+\/restore|matrix\/versions\/restore|enable|disable|teardown|retrain|rotate-key)$/.test(path)) {
+    return true;
+  }
+  return ["PUT", "POST", "PATCH", "DELETE"].includes(method) &&
+    /^\/api\/services\/[^/]+\/scoring\/(?:threshold|enforce-threshold|enforce-status-code|exclude-regex|labels(?:\/[^/]+)?)$/.test(path);
 }
 
 async function handleCloudRequestInner(
@@ -1559,8 +1645,7 @@ async function handleCloudRequestInner(
         emit(payload);
         if (
           !invalidated &&
-          payload.type === "done" &&
-          payload.status === "complete"
+          (payload.type === "done" || payload.type === "error")
         ) {
           invalidated = true;
           invalidateCloudConfigMetadata();
@@ -1574,6 +1659,10 @@ async function handleCloudRequestInner(
   }
   if (/^\/api\/services\/[^/]+\/(?:logging-settings(?:\/update)?|log-fields)$/.test(path)) {
     const bridged = await cloudLoggingSettings(request, runJobStream);
+    if (bridged) return bridged;
+  }
+  if (/^\/api\/services\/[^/]+\/custom-fields(?:\/|$)/.test(path)) {
+    const bridged = await cloudCustomFields(request);
     if (bridged) return bridged;
   }
   if (path === "/api/admin/reset-logs") {
@@ -1616,6 +1705,64 @@ async function handleCloudRequestInner(
     assertOpsEpoch(startOpsEpoch, request.signal);
     return response;
   }
+  const matrixVersionsMatch = path.match(/^\/api\/services\/([^/]+)\/scoring\/matrix-versions$/);
+  if (matrixVersionsMatch && request.method === "GET") {
+    const sid = decodeUriStrict(matrixVersionsMatch[1]);
+    const res = await fetch(`/api/services/${encodeURIComponent(sid)}/scoring/matrix/versions`, {
+      credentials: "include",
+      signal: request.signal,
+    });
+    if (!res.ok) return res;
+    const data = (await res.json()) as {
+      versions?: Array<string | Record<string, unknown>>;
+      active_version?: string | null;
+      current_version?: string | null;
+    };
+    const versions = (data.versions ?? []).map((entry) =>
+      typeof entry === "string" ? { version: entry } : entry,
+    );
+    return jsonResponse(
+      {
+        versions,
+        current_version: data.current_version ?? data.active_version ?? null,
+      },
+      request,
+    );
+  }
+  const matrixRestoreMatch = path.match(/^\/api\/services\/([^/]+)\/scoring\/matrix-versions\/([^/]+)\/restore$/);
+  if (matrixRestoreMatch && request.method === "POST") {
+    const sid = decodeUriStrict(matrixRestoreMatch[1]);
+    const version = decodeUriStrict(matrixRestoreMatch[2]);
+    const res = await fetch(
+      `/api/services/${encodeURIComponent(sid)}/scoring/matrix/versions/restore?confirm=true`,
+      {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ version }),
+        signal: request.signal,
+      },
+    );
+    if (!res.ok) return res;
+    const data = (await res.json()) as {
+      ok?: boolean;
+      version?: string;
+      restored_version?: string;
+      generation?: string;
+      deploy_hint?: string | null;
+    };
+    const restoredVersion = data.restored_version ?? data.version ?? version;
+    return jsonResponse(
+      {
+        ok: data.ok !== false,
+        restored_version: restoredVersion,
+        current_version: restoredVersion,
+        generation: data.generation,
+        deploy_hint: data.deploy_hint ?? null,
+      },
+      request,
+    );
+  }
   if (/^\/api\/services\/[^/]+\/scoring\//.test(path) && !isLocalScan(path, request.method)) {
     if (isNativeCloudRoute(request.method, path)) return null;
     assertAdapterEpoch(request, entryMetaEpoch);
@@ -1645,7 +1792,24 @@ async function handleCloudRequestInner(
     const catalog = await withLoading("listing", () => loadCloudCatalog(request, entryMetaEpoch));
     assertAdapterEpoch(request, entryMetaEpoch);
     if (catalog instanceof Response) return catalog;
-    return jsonResponse(path === "/api/schema" ? cloudSchema(catalog) : catalog, request);
+    if (path === "/api/schema") {
+      const schemaServiceId = url.searchParams.get("service_id") ?? request.headers.get("x-service-id") ?? undefined;
+      let activeIds: ReadonlySet<string> | undefined;
+      const servicesRes = await fetchCloudMetadata("/api/services", request.signal).catch(() => null);
+      if (servicesRes?.ok) {
+        const servicesPayload = (await servicesRes.json().catch(() => null)) as {
+          services?: Array<{ service_id?: string; active_log_field_ids?: string[] }>;
+        } | null;
+        const service = schemaServiceId
+          ? servicesPayload?.services?.find((item) => item.service_id === schemaServiceId)
+          : servicesPayload?.services?.[0];
+        if (Array.isArray(service?.active_log_field_ids)) {
+          activeIds = new Set(service.active_log_field_ids);
+        }
+      }
+      return jsonResponse(cloudSchema(catalog, activeIds), request);
+    }
+    return jsonResponse(catalog, request);
   }
   const stage = path === "/api/bootstrap" || path === "/api/auth/session" || path === "/api/services"
     ? "session" : path === "/api/log-extents" ? "range" : path === "/api/files" ? "listing" : null;
@@ -2749,6 +2913,37 @@ async function dispatchCloudRequest(
   }
   // Page 8: Origin Analytics (/api/origin/*)
   if (pathname.startsWith("/api/origin/")) {
+    const params = await (async () => {
+      if (method !== "POST") return {} as Record<string, unknown>;
+      return (await request.clone().json().catch(() => ({}))) as Record<string, unknown>;
+    })();
+    const originServiceId =
+      (typeof params.service_id === "string" && params.service_id) ||
+      searchParams.get("service_id") ||
+      request.headers.get("x-service-id") ||
+      undefined;
+    const originFlags = await loadServiceRollupFlags(originServiceId, request.signal);
+    if (originServiceId || typeof originFlags.edge_only === "boolean") {
+      const enrichedUrl = new URL(request.url);
+      if (originServiceId) enrichedUrl.searchParams.set("service_id", originServiceId);
+      const bodyWithSvc =
+        method === "POST"
+          ? JSON.stringify({
+              ...params,
+              ...(originServiceId ? { service_id: originServiceId } : {}),
+              ...(typeof originFlags.edge_only === "boolean" && typeof params.edge_only !== "boolean"
+                ? { edge_only: originFlags.edge_only }
+                : {}),
+            })
+          : undefined;
+      const reqWithSvc = new Request(enrichedUrl, {
+        method: request.method,
+        headers: request.headers,
+        signal: request.signal,
+        ...(bodyWithSvc !== undefined ? { body: bodyWithSvc } : {}),
+      });
+      return handleOriginRequest(reqWithSvc, pathname, enrichedUrl, read);
+    }
     return handleOriginRequest(request, pathname, url, read);
   }
 
@@ -2897,9 +3092,16 @@ async function dispatchCloudRequest(
     const serviceId = cmcdServiceMatch
       ? decodeUriStrict(cmcdServiceMatch[1])
       : String(params.service_id ?? "default");
+    const cmcdFlags = await loadServiceRollupFlags(
+      serviceId === "default" ? undefined : serviceId,
+      request.signal,
+    );
     const data = await handleCmcdRequest(pathname, {
       ...params,
       service_id: serviceId,
+      ...(typeof cmcdFlags.cmcd_available === "boolean" && typeof params.available !== "boolean"
+        ? { available: cmcdFlags.cmcd_available }
+        : {}),
       signal: request.signal,
       engine: read,
     } as CmcdQueryParams);
@@ -2915,6 +3117,7 @@ async function dispatchCloudRequest(
       params as unknown as SessionsListRequest,
       {
         serviceId: String(params.service_id ?? "default"),
+        signal: request.signal,
         maskIps,
         role,
         availableColumns: cols && cols.size > 0 ? cols : undefined,
@@ -3223,12 +3426,21 @@ export async function cloudStreamFetch(
           job?: { id: string; status?: string };
         };
         if (initPayload.job?.id) {
+          let invalidated = false;
+          const emitAndInvalidate: SseEmit = (payload) => {
+            emit(payload);
+            if (!invalidated && (payload.type === "done" || payload.type === "error")) {
+              invalidated = true;
+              invalidateCloudConfigMetadata();
+            }
+          };
           await stepJobToCompletion(
             initPayload.job.id,
-            emit,
+            emitAndInvalidate,
             signal,
           );
         } else {
+          invalidateCloudConfigMetadata();
           emit({ type: "result", data: initPayload });
           emit({ type: "done", status: "complete", data: initPayload });
         }

@@ -696,27 +696,42 @@ def sessions_endpoint(
             session["flagged"] = bool(session.get("flagged"))
             session["is_streaming"] = bool(session.get("is_streaming"))
             sessions.append(session)
-        has_rtt = bool(first.get("any_rtt")) or (
-            use_slim_index and any(r.get("median_rtt_ms") is not None for r in rows)
-        )
-        has_ja4 = bool(first.get("any_ja4"))
-        has_edge = bool(first.get("any_edge")) or (
-            use_slim_index and any((int(r.get("edge_count") or 0) + int(r.get("shield_count") or 0)) > 0 for r in rows)
-        )
-        has_edge_sid = bool(first.get("any_edge_sid")) or (
-            use_slim_index and any(bool(r.get("edge_sid")) for r in rows)
-        )
-        has_cmcd = bool(first.get("any_cmcd")) or (
-            use_slim_index and any(int(r.get("streaming_reqs") or 0) > 0 for r in rows)
-        )
-        if use_slim_index and rows and not has_cmcd:
-            cmcd_probe = service.client.execute(
-                "SELECT 1 AS c FROM cmcd_projection_facts WHERE service_id = {service_id:String} "
-                "AND event_timestamp >= {start_time:DateTime64(3)} "
-                "AND event_timestamp < {end_time:DateTime64(3)} AND cmcd['sid'] != '' LIMIT 1",
-                params,
+        from backend import config as svcconfig
+
+        try:
+            svc_cfg = svcconfig.load_config(service.service_id)
+        except Exception:
+            svc_cfg = None
+        if svc_cfg is not None:
+            active_fields = set(svcconfig.active_log_field_ids(svc_cfg))
+            has_rtt = "tcp_rtt" in active_fields
+            has_ja4 = "ja4" in active_fields
+            has_edge = "edge" in active_fields
+            has_edge_sid = "edge_sid" in active_fields
+            has_cmcd = svcconfig.is_cmcd_enabled(svc_cfg) or ("cmcd_sid" in active_fields)
+        else:
+            has_rtt = bool(first.get("any_rtt")) or (
+                use_slim_index and any(r.get("median_rtt_ms") is not None for r in rows)
             )
-            has_cmcd = bool(cmcd_probe)
+            has_ja4 = bool(first.get("any_ja4"))
+            has_edge = bool(first.get("any_edge")) or (
+                use_slim_index
+                and any((int(r.get("edge_count") or 0) + int(r.get("shield_count") or 0)) > 0 for r in rows)
+            )
+            has_edge_sid = bool(first.get("any_edge_sid")) or (
+                use_slim_index and any(bool(r.get("edge_sid")) for r in rows)
+            )
+            has_cmcd = bool(first.get("any_cmcd")) or (
+                use_slim_index and any(int(r.get("streaming_reqs") or 0) > 0 for r in rows)
+            )
+            if use_slim_index and rows and not has_cmcd:
+                cmcd_probe = service.client.execute(
+                    "SELECT 1 AS c FROM cmcd_projection_facts WHERE service_id = {service_id:String} "
+                    "AND event_timestamp >= {start_time:DateTime64(3)} "
+                    "AND event_timestamp < {end_time:DateTime64(3)} AND cmcd['sid'] != '' LIMIT 1",
+                    params,
+                )
+                has_cmcd = bool(cmcd_probe)
         result = shape_sessions_envelope(
             sessions,
             total=total,
@@ -788,7 +803,7 @@ def sessions_detail(
         url,
         toInt32OrZero(custom_fields['status']) AS status,
         custom_fields['method'] AS method,
-        custom_fields['protocol'] AS protocol,
+        custom_fields['proto'] AS protocol,
         toInt64OrZero(custom_fields['resp_bytes']) AS resp_bytes,
         toFloat64OrNull(custom_fields['elapsed']) AS elapsed,
         toFloat64OrZero(custom_fields['tcp_rtt']) AS tcp_rtt,

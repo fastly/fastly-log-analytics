@@ -364,7 +364,6 @@ def test_custom_field_patch_allows_type_change_before_storage_write():
     assert saved
 
 
-@pytest.mark.no_postgres
 def test_custom_field_lifecycle_validates_changes_rejects_unsupported_values_and_removes():
     cfg = _cfg(log_fields={"preset": "standard", "groups": ["A"], "schema_version": 2, "custom_fields": []})
     with _mutate_cfg_ctx(
@@ -716,7 +715,6 @@ def test_get_enriched_services_normalizes_legacy_and_custom_snapshot_interval():
     assert by_id["svc_custom"]["cron_sync"]["snapshot_interval_minutes"] == 60
 
 
-@pytest.mark.no_postgres
 def test_write_service_config_persists_and_preserves_snapshot_interval_minutes():
     from backend import config as svcconfig
     from backend.provision.orchestrator import write_service_config
@@ -823,25 +821,17 @@ def _seed_cache(service_id: str, **overrides) -> dict:
 
 
 @patch("backend.config.load_config")
-@patch("backend.core.fastly.client.get_active_version")
-@patch("backend.core.fastly.client.fastly")
-@patch("backend.core.fastly.client.find_condition")
-def test_logging_settings_extracts_custom_condition(
-    mock_find_condition, mock_fastly, mock_get_active_version, mock_load_config
-):
+def test_logging_settings_extracts_custom_condition(mock_load_config):
     mock_load_config.return_value = {
         "fastly_api_key": "test_token",
-        "provisioning": {"endpoint_name": "Test Endpoint"},
-    }
-    mock_get_active_version.return_value = 1
-    mock_fastly.return_value = {
-        "name": "Test Endpoint",
-        "period": 120,
-        "path": "/logs/raw/%Y-%m-%d/",
-        "response_condition": "Log Sampling",
-    }
-    mock_find_condition.return_value = {
-        "statement": '!segmented_caching.is_inner_req && (req.restarts == 0 && fastly.ff.visits_this_service == 0) && randombool(50, 100) && (std.tolower(req.url) !~ "\\.(jpg|png)$")'
+        "log_period": 120,
+        "last_activated_version": 1,
+        "provisioning": {
+            "endpoint_name": "Test Endpoint",
+            "sample_rate": 50,
+            "edge_only": True,
+            "custom_condition": 'std.tolower(req.url) !~ "\\.(jpg|png)$"',
+        },
     }
 
     response = client.get("/api/services/test-service/logging-settings")
@@ -852,24 +842,12 @@ def test_logging_settings_extracts_custom_condition(
 
 
 @patch("backend.config.load_config")
-@patch("backend.core.fastly.client.get_active_version")
-@patch("backend.core.fastly.client.fastly")
-@patch("backend.core.fastly.client.find_condition")
-def test_logging_settings_custom_condition_fallback(
-    mock_find_condition, mock_fastly, mock_get_active_version, mock_load_config
-):
+def test_logging_settings_custom_condition_fallback(mock_load_config):
     mock_load_config.return_value = {
         "fastly_api_key": "test_token",
+        "log_period": 60,
         "provisioning": {"endpoint_name": "Test Endpoint", "custom_condition": 'req.http.host == "example.com"'},
     }
-    mock_get_active_version.return_value = 1
-    mock_fastly.return_value = {
-        "name": "Test Endpoint",
-        "period": 60,
-        "path": "/logs/raw/",
-        "response_condition": "Log Sampling",
-    }
-    mock_find_condition.return_value = {"statement": "!segmented_caching.is_inner_req && randombool(100, 100)"}
 
     response = client.get("/api/services/test-service/logging-settings")
     assert response.status_code == 200
@@ -884,6 +862,7 @@ def _run_logging_settings_update(
     events: list[dict],
     initial_state: dict | None = None,
     mid_stream_hook=None,
+    use_real_endpoint: bool = False,
 ) -> tuple[dict, dict]:
     disk_state = copy.deepcopy(
         initial_state
@@ -909,11 +888,29 @@ def _run_logging_settings_update(
             if idx == 0 and mid_stream_hook is not None:
                 mid_stream_hook(disk_state)
 
+    from backend.provision.fastly_api import update_logging_endpoint as _real_update_logging_endpoint
+
+    def _real_spy(cfg, tok):
+        captured_cfg.update(cfg)
+        yield from _real_update_logging_endpoint(cfg, tok)
+
+    def _fake_reconcile(sid, _token, mutator=None, **_kwargs):
+        if mutator is not None:
+            config.mutate_config(sid, mutator)
+        if mid_stream_hook is not None:
+            mid_stream_hook(disk_state)
+        return MagicMock(error=None, activated_version=99, changes_applied=["mock"])
+
+    endpoint_side_effect = _real_spy if use_real_endpoint else _gen
+
     with (
         patch("backend.config.load_config", side_effect=_load),
         patch("backend.config.save_config", side_effect=_save) as mock_save,
         patch("backend.config.mutate_config", side_effect=mutate_via_save(mock_save)),
-        patch("backend.provision.update_logging_endpoint", side_effect=_gen),
+        patch("backend.provision.update_logging_endpoint", side_effect=endpoint_side_effect),
+        patch("backend.provision.declarative.reconciler.transactional_vcl_reconcile", side_effect=_fake_reconcile),
+        patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=False),
+        patch("backend.provision._sync_crontab"),
         patch("backend.core.fos_client.get_source_for_service", return_value=None),
     ):
         response = client.post(f"/api/services/{service_id}/logging-settings/update", params=params)
@@ -927,6 +924,7 @@ def test_update_logging_settings_passes_custom_condition():
         "test-service",
         {"period": 120, "sample_rate": 25, "edge_only": True, "custom_condition": 'req.http.x-test == "1"'},
         events=[{"type": "status", "message": "starting"}, {"type": "done", "changed": True}],
+        use_real_endpoint=True,
     )
     assert captured_cfg["log_period"] == 120 and captured_cfg["sample_rate"] == 25 and captured_cfg["edge_only"] is True
     assert captured_cfg["custom_condition"] == 'req.http.x-test == "1"'
@@ -991,6 +989,7 @@ def test_long_running_endpoint_preserves_background_changes():
             "provisioning": {"sample_rate": 100, "edge_only": False},
         },
         mid_stream_hook=lambda state: state.__setitem__("name", "Updated Background Name"),
+        use_real_endpoint=True,
     )
     assert disk_state["log_period"] == 3600
     assert disk_state["provisioning"]["sample_rate"] == 50 and disk_state["provisioning"]["edge_only"] is True
@@ -1377,56 +1376,39 @@ def test_logging_settings_errors(client, tmp_path, monkeypatch):
     _cfg_dir(tmp_path, monkeypatch)
     assert client.get(f"/api/services/{MOCK_SERVICE_ID}/logging-settings", headers=_SVC_HEADERS).status_code == 404
 
-    _cfg_dir(tmp_path, monkeypatch, {"fastly_api_key": "tok"})
-    with patch("backend.core.fastly.client.get_active_version", return_value=None):
-        assert client.get(f"/api/services/{MOCK_SERVICE_ID}/logging-settings", headers=_SVC_HEADERS).status_code == 400
-
-    with patch("backend.core.fastly.client.get_active_version", side_effect=RuntimeError("network")):
+    with patch("backend.routers.services.vcl.load_service_config", side_effect=RuntimeError("db down")):
         assert client.get(f"/api/services/{MOCK_SERVICE_ID}/logging-settings", headers=_SVC_HEADERS).status_code == 500
 
 
 @pytest.mark.usefixtures("_clear_cron_schedule_ttl_cache")
 @pytest.mark.parametrize(
-    ("cfg_extra", "resp_cond", "cond_stmt", "expected"),
+    ("cfg_extra", "expected"),
     [
         (
-            {},
-            "Log Sampling",
-            "randombool(25, 100) && req.restarts == 0",
+            {
+                "log_period": 60,
+                "last_activated_version": 42,
+                "provisioning": {"sample_rate": 25, "edge_only": True},
+            },
             {"sample_rate": 25, "edge_only": True, "version": 42, "period": 60},
         ),
         (
-            {},
-            "Log Sampling",
-            'randombool(100, 100) && (req.url ~ "^/api/")',
+            {"provisioning": {"custom_condition": 'req.url ~ "^/api/"'}},
             {"custom_condition": 'req.url ~ "^/api/"'},
         ),
         (
             {},
-            None,
-            None,
             {"sample_rate": 100, "edge_only": False},
         ),
         (
             {"provisioning": {"custom_condition": "saved_predicate"}},
-            None,
-            None,
             {"custom_condition": "saved_predicate"},
         ),
     ],
 )
-def test_logging_settings_parsing_and_defaults(
-    client, tmp_path, monkeypatch, cfg_extra, resp_cond, cond_stmt, expected
-):
+def test_logging_settings_parsing_and_defaults(client, tmp_path, monkeypatch, cfg_extra, expected):
     _cfg_dir(tmp_path, monkeypatch, {"fastly_api_key": "tok", **cfg_extra})
-    fake_ep = {"format": "x", "period": 60, "path": "/raw/", "response_condition": resp_cond}
-    fake_cond = {"statement": cond_stmt} if cond_stmt else None
-    with (
-        patch("backend.core.fastly.client.get_active_version", return_value=42),
-        patch("backend.core.fastly.client.fastly", return_value=fake_ep),
-        patch("backend.core.fastly.client.find_condition", return_value=fake_cond),
-    ):
-        resp = client.get(f"/api/services/{MOCK_SERVICE_ID}/logging-settings", headers=_SVC_HEADERS)
+    resp = client.get(f"/api/services/{MOCK_SERVICE_ID}/logging-settings", headers=_SVC_HEADERS)
     assert resp.status_code == 200
     body = resp.json()
     for k, v in expected.items():
@@ -1542,9 +1524,14 @@ def test_update_logging_settings_validation_and_sse(client, tmp_path, monkeypatc
         == 400
     )
 
-    fake_events = [{"type": "status", "message": "ok"}, {"type": "done", "changed": True, "version": 99}]
+    def _apply_reconcile(sid, _token, mutator=None, **_kwargs):
+        if mutator is not None:
+            config.mutate_config(sid, mutator)
+        return MagicMock(error=None, activated_version=99, changes_applied=["mock"])
+
     with (
-        patch("backend.provision.update_logging_endpoint", return_value=iter(fake_events)),
+        patch("backend.provision.declarative.reconciler.transactional_vcl_reconcile", side_effect=_apply_reconcile),
+        patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=False),
         patch("backend.provision._sync_crontab"),
     ):
         resp = client.post(
@@ -1557,7 +1544,8 @@ def test_update_logging_settings_validation_and_sse(client, tmp_path, monkeypatc
     assert (fresh["provisioning"]["sample_rate"], fresh["provisioning"]["edge_only"]) == (50, True)
 
     with (
-        patch("backend.provision.update_logging_endpoint", return_value=iter([{"type": "done", "changed": True}])),
+        patch("backend.provision.declarative.reconciler.transactional_vcl_reconcile", side_effect=_apply_reconcile),
+        patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=False),
         patch("backend.provision._sync_crontab"),
     ):
         client.post(f"/api/services/{MOCK_SERVICE_ID}/logging-settings/update", params={"period": 30})
@@ -2024,7 +2012,7 @@ def test_completed_run_streams_from_db_and_cross_tenant_isolation(isolate_metada
         assert "tenant-b" not in (event.get("message") or "")
 
 
-@pytest.mark.no_postgres
+@pytest.mark.usefixtures("_clear_cron_schedule_ttl_cache")
 def test_custom_fields_null_description_coalesced_across_log_fields_set_patch_and_delete():
     cf_null_desc = {
         **_FIELD_CREATE_BODY,
@@ -2060,3 +2048,19 @@ def test_custom_fields_null_description_coalesced_across_log_fields_set_patch_an
         resp_del = _client().delete("/api/services/svc1/custom-fields/cf_env")
     assert resp_del.status_code == 200
     assert resp_del.json()["field"]["description"] == ""
+
+
+def test_load_config_with_page_load_telemetry_does_not_deadlock():
+    from backend.utils.telemetry.metrics import get_page_load_id, set_page_load_id
+
+    sid = "svc-telemetry-reentrancy"
+    config.save_config(sid, {"service_id": sid, "name": "Reentrancy Svc"})
+    config.invalidate_config_cache()
+    prev_page = get_page_load_id()
+    set_page_load_id("plid-reentrancy-test")
+    try:
+        loaded = config.load_config(sid)
+        assert loaded is not None and loaded["service_id"] == sid
+        assert config.get_active_service_id() is not None
+    finally:
+        set_page_load_id(prev_page)

@@ -193,8 +193,7 @@ class Scheduler:
                 continue
             prov = cfg.get("provisioning", {})
             sync_cfg = prov.get("cron_sync", {})
-            if not sync_cfg.get("enabled", True):
-                continue
+            request_sync_enabled = bool(sync_cfg.get("enabled", True)) and svcconfig.is_logging_enabled(cfg)
             log_period = int(cfg.get("log_period", DEFAULT_LOG_PERIOD_SECONDS))
             if sync_cfg.get("interval_mins"):
                 interval_seconds = max(5, int(sync_cfg["interval_mins"]) * 60)
@@ -202,49 +201,50 @@ class Scheduler:
                 interval_seconds = max(5, int(sync_cfg["interval_seconds"]))
             else:
                 interval_seconds = max(5, log_period // 2 if log_period >= 60 else log_period)
-            job_id = f"log_discovery_{service_id}"
-            seen_ids.add(job_id)
-            if job_id in self._job_ids:
-                try:
-                    job = self._sched.get_job(job_id)
-                    if job:
-                        job.reschedule("interval", seconds=interval_seconds)
-                        logger.info(
-                            "[scheduler] Rescheduled log_discovery job %s to every %ds.", job_id, interval_seconds
-                        )
-                except Exception as e:
-                    logger.error("[scheduler] Failed to reschedule sync job %s: %s", job_id, e)
-            else:
-                self._add_job(
-                    _run_service_cron,
-                    "interval",
-                    seconds=interval_seconds,
-                    jitter=None if interval_seconds <= 15 else 2,
-                    start_date=None,
-                    args=[service_id],
-                    id=job_id,
-                    max_instances=1,
-                    coalesce=True,
-                    misfire_grace_time=60,
-                )
-                self._job_ids[job_id] = job_id
-                logger.info("🔄 [scheduler] Registered log_discovery job %s (every %ds).", job_id, interval_seconds)
-            sweep_cfg = prov.get("cron_ledger_sweep", {})
-            if sweep_cfg.get("enabled", True):
-                sweep_interval_mins = max(1, int(sweep_cfg.get("interval_minutes", 15)))
-                sweep_job_id = f"ledger_sweep_{service_id}"
-                self._register_reschedulable_job(
-                    sweep_job_id,
-                    _run_ledger_sweep,
-                    "interval",
-                    seen_ids,
-                    "🧹 [scheduler] Registered ledger_sweep job %s (every %dm).",
-                    sweep_job_id,
-                    sweep_interval_mins,
-                    minutes=sweep_interval_mins,
-                    args=[service_id],
-                    misfire_grace_time=300,
-                )
+            if request_sync_enabled:
+                job_id = f"log_discovery_{service_id}"
+                seen_ids.add(job_id)
+                if job_id in self._job_ids:
+                    try:
+                        job = self._sched.get_job(job_id)
+                        if job:
+                            job.reschedule("interval", seconds=interval_seconds)
+                            logger.info(
+                                "[scheduler] Rescheduled log_discovery job %s to every %ds.", job_id, interval_seconds
+                            )
+                    except Exception as e:
+                        logger.error("[scheduler] Failed to reschedule sync job %s: %s", job_id, e)
+                else:
+                    self._add_job(
+                        _run_service_cron,
+                        "interval",
+                        seconds=interval_seconds,
+                        jitter=None if interval_seconds <= 15 else 2,
+                        start_date=None,
+                        args=[service_id],
+                        id=job_id,
+                        max_instances=1,
+                        coalesce=True,
+                        misfire_grace_time=60,
+                    )
+                    self._job_ids[job_id] = job_id
+                    logger.info("🔄 [scheduler] Registered log_discovery job %s (every %ds).", job_id, interval_seconds)
+                sweep_cfg = prov.get("cron_ledger_sweep", {})
+                if sweep_cfg.get("enabled", True):
+                    sweep_interval_mins = max(1, int(sweep_cfg.get("interval_minutes", 15)))
+                    sweep_job_id = f"ledger_sweep_{service_id}"
+                    self._register_reschedulable_job(
+                        sweep_job_id,
+                        _run_ledger_sweep,
+                        "interval",
+                        seen_ids,
+                        "🧹 [scheduler] Registered ledger_sweep job %s (every %dm).",
+                        sweep_job_id,
+                        sweep_interval_mins,
+                        minutes=sweep_interval_mins,
+                        args=[service_id],
+                        misfire_grace_time=300,
+                    )
             rum_cfg = cfg.get("rum")
             rum_cfg = rum_cfg if isinstance(rum_cfg, dict) else {}
             rum_enabled = svcconfig.is_rum_enabled(cfg)
@@ -284,7 +284,7 @@ class Scheduler:
             alerts_seconds = int(alerts_cfg.get("interval_seconds") or log_period)
             self._register_alerts_evaluation_job(service_id, alerts_seconds, seen_ids, enabled=alerts_enabled)
             full_sweep_cfg = prov.get("cron_full_sweep", {})
-            if full_sweep_cfg.get("enabled", True):
+            if request_sync_enabled and full_sweep_cfg.get("enabled", True):
                 full_job_id = f"full_sync_{service_id}"
                 cron_hours = str(full_sweep_cfg.get("cron_hours", "3,9,15,21"))
                 cron_minute = int(full_sweep_cfg.get("cron_minute", 30))
@@ -304,7 +304,7 @@ class Scheduler:
                 )
             heal_cfg = prov.get("cron_gap_heal", {})
             has_logging_svc = bool(cfg.get("logging_service_id") or cfg.get("service_id"))
-            if heal_cfg.get("enabled", True) and has_logging_svc:
+            if request_sync_enabled and heal_cfg.get("enabled", True) and has_logging_svc:
                 heal_job_id = f"gap_heal_{service_id}"
                 interval_mins = int(heal_cfg.get("interval_minutes", 30))
                 self._register_reschedulable_job(

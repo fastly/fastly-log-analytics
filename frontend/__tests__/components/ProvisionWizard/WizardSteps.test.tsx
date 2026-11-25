@@ -990,6 +990,18 @@ describe('buildHandleModalClose', () => {
     expect(reload).toHaveBeenCalled()
   })
 
+  it('on close after error even when isDone is true: does not reload or select failed service', () => {
+    vi.useFakeTimers()
+    const reload = vi.fn()
+    Object.defineProperty(window, 'location', { configurable: true, value: { reload } })
+    const deps = makeDeps({ status: 'error', isDone: true, selectedService: { id: 'svc-fail', name: 'fail', provisioned: false } })
+    buildHandleModalClose(deps)(false)
+    expect(deps.setActiveServiceId).not.toHaveBeenCalled()
+    expect(reload).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(300)
+    expect(deps.reset).toHaveBeenCalled()
+  })
+
   it('on close mid-flight: defers a reset chain via setTimeout(300)', () => {
     vi.useFakeTimers()
     const deps = makeDeps({ status: 'idle' })
@@ -1230,6 +1242,7 @@ test('LogSettingsModal shows custom fields in review step', async () => {
 test('LogSettingsModal Deploy POSTs body wrapped in { log_fields }', async () => {
   const user = userEvent.setup()
   const onOpenChange = vi.fn()
+  sseState.start.mockClear()
 
   vi.spyOn(apiLib.client, 'GET').mockImplementation(async (url: string) => {
     if (url.includes('/api/log-fields/catalog')) {
@@ -1239,12 +1252,10 @@ test('LogSettingsModal Deploy POSTs body wrapped in { log_fields }', async () =>
           presets: {},
       })
     }
-    return getOk({ log_fields: { groups: ['core'], field_overrides: {} } })
+    return getOk({ log_fields: { groups: ['core'], field_overrides: {}, custom_fields: [] } })
   })
 
-  const postSpy = vi.fn<(url: unknown, opts: { body: { log_fields: object } }) => Promise<{ data: { ok: boolean } }>>(
-    async () => ({ data: { ok: true } }),
-  )
+  const postSpy = vi.fn(async (_url?: string) => ({ data: { ok: true } }))
   vi.spyOn(apiLib.client, 'POST').mockImplementation(postSpy)
 
   renderWithQuery(
@@ -1263,20 +1274,67 @@ test('LogSettingsModal Deploy POSTs body wrapped in { log_fields }', async () =>
   await user.click(screen.getAllByRole('button', { name: /Deploy to Fastly/i })[0])
 
   await waitFor(() => {
-    const logFieldsCall = postSpy.mock.calls.find(([u]) =>
-      typeof u === 'string' && u.includes('/log-fields')
-    )
-    expect(logFieldsCall).toBeDefined()
+    expect(sseState.start).toHaveBeenCalledTimes(1)
   })
 
+  const [url, body] = sseState.start.mock.calls[0]
+  expect(url).toMatch(/^\/api\/services\/test-svc\/logging-settings\/update\?/)
+  expect(body).toHaveProperty('log_fields')
+  expect(body.log_fields).toHaveProperty('groups')
+  expect(body.log_fields).toHaveProperty('field_overrides')
+  expect(body.log_fields).toHaveProperty('custom_fields')
   const logFieldsCall = postSpy.mock.calls.find(([u]) =>
     typeof u === 'string' && u.includes('/log-fields')
-  )!
-  const [url, opts] = logFieldsCall
-  expect(url).toBe('/api/services/{service_id}/log-fields')
-  expect(opts).toHaveProperty('body.log_fields')
-  expect(opts.body.log_fields).toHaveProperty('groups')
-  expect(opts.body.log_fields).toHaveProperty('field_overrides')
+  )
+  expect(logFieldsCall).toBeUndefined()
+})
+
+test('LogSettingsModal shows and preserves Session Scoring Fields (edge_*) when present', async () => {
+  const user = userEvent.setup()
+  sseState.start.mockClear()
+
+  vi.spyOn(apiLib.client, 'GET').mockImplementation(async (url: string) => {
+    if (url.includes('/api/log-fields/catalog')) {
+      return getOk({
+        groups: [{ id: 'core', label: 'Core', fields: ['ip'] }],
+        fields: [{ id: 'ip', label: 'IP Address', group: 'core', is_custom: false }],
+        presets: {},
+      })
+    }
+    if (url.includes('/logging-settings')) {
+      return getOk({ period: 60, sample_rate: 100, edge_only: true, custom_condition: '' })
+    }
+    return getOk({
+      log_fields: {
+        groups: ['core'],
+        field_overrides: {},
+        custom_fields: [
+          { name: 'edge_score', label: 'Edge Score', description: 'Combined score', bytes_estimate: 4, enabled: true },
+        ],
+      },
+    })
+  })
+
+  renderWithQuery(
+    <LogSettingsModal
+      service={{ service_id: 'test-svc', name: 'Test Service', capture: 'attached' } as ServiceConfig}
+      open={true}
+      onOpenChange={vi.fn()}
+    />,
+  )
+
+  await waitFor(() => expect(screen.getByText('Session Scoring Fields')).toBeInTheDocument())
+  await user.click(screen.getAllByRole('button', { name: /Next Step/i })[0])
+  await waitFor(() => expect(screen.getAllByText('Define Custom Log Fields').length).toBeGreaterThan(0))
+  await user.click(screen.getAllByRole('button', { name: /Next Step/i })[0])
+  await waitFor(() => expect(screen.getAllByText('Review Log Configuration Changes').length).toBeGreaterThan(0))
+  await user.click(screen.getAllByRole('button', { name: /Deploy to Fastly/i })[0])
+
+  await waitFor(() => expect(sseState.start).toHaveBeenCalledTimes(1))
+  const [, body] = sseState.start.mock.calls[0]
+  expect(body.log_fields.custom_fields).toEqual([
+    expect.objectContaining({ name: 'edge_score', enabled: true }),
+  ])
 })
 
 test('LogSettingsModal has no axe-detectable a11y violations', async () => {

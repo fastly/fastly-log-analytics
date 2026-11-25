@@ -209,14 +209,111 @@ interface StandardFieldsStepProps {
   toggleField: (fieldId: string, checked: boolean, defaultEnabledByGroup: boolean) => void
   updateFieldLimit: (fieldId: string, limit?: number) => void
   togglePreset: (presetGroups: string[]) => void; isPresetActive: (groups: string[]) => boolean
+  capture?: string
+}
+
+type ScoringFieldEntry = {
+  name: string
+  label?: string
+  description?: string
+  bytes_estimate?: number
+  enabled?: boolean
+}
+
+function SessionScoringFieldsSection({
+  fields,
+  onToggleField,
+  onToggleAll,
+}: {
+  fields: ScoringFieldEntry[]
+  onToggleField: (name: string, enabled: boolean) => void
+  onToggleAll: (enabled: boolean) => void
+}) {
+  const anyEnabled = fields.some((f) => f.enabled !== false)
+  const totalBytes = fields.reduce((sum, f) => sum + (f.enabled !== false ? Number(f.bytes_estimate ?? 0) : 0), 0)
+  return (
+    <CollapsibleSectionShell
+      checked={anyEnabled}
+      onCheckedChange={(checked) => onToggleAll(checked)}
+      headerContent={
+        <>
+          <h4 className="text-xs font-bold tracking-tight uppercase text-foreground/80">Session Scoring Fields</h4>
+          <span className="text-[10px] text-muted-foreground ml-1">+{totalBytes} bytes</span>
+        </>
+      }
+    >
+      {fields.length === 0 ? (
+        <p className="text-[11px] text-muted-foreground leading-relaxed">
+          No <code>edge_*</code> session scoring custom fields are configured for this attached service.
+        </p>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2">
+          {fields.map((field) => {
+            const enabled = field.enabled !== false
+            return (
+              <div key={field.name} className="flex items-start space-x-2 p-2 rounded-md hover:bg-muted/50 transition-colors">
+                <Checkbox
+                  id={`scoring-field-${field.name}`}
+                  checked={enabled}
+                  onCheckedChange={(c) => onToggleField(field.name, c === true)}
+                  className="mt-0.5"
+                />
+                <div className="grid gap-0.5 leading-none flex-1">
+                  <Label htmlFor={`scoring-field-${field.name}`} className="text-[11px] font-mono cursor-pointer">
+                    {field.label || field.name}
+                    <span className="font-sans text-[10px] text-muted-foreground ml-1 font-normal">
+                      (~{Number(field.bytes_estimate ?? 0)} B)
+                    </span>
+                  </Label>
+                  {field.description && (
+                    <p className="text-[10px] text-muted-foreground line-clamp-2 leading-tight mt-1" title={field.description}>
+                      {field.description}
+                    </p>
+                  )}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </CollapsibleSectionShell>
+  )
 }
 
 export function StandardFieldsStep({
   catalog, config, setConfig, period, setPeriod, sampleRate, setSampleRate,
   edgeOnly, setEdgeOnly, customCondition, setCustomCondition,
   cmcdEnabled, setCmcdEnabled, cmcdMode, setCmcdMode, cmcdVersion, setCmcdVersion,
-  toggleGroup, toggleField, updateFieldLimit, togglePreset, isPresetActive,
+  toggleGroup, toggleField, updateFieldLimit, togglePreset, isPresetActive, capture,
 }: StandardFieldsStepProps) {
+  const scoringCustomFields = useMemo(
+    () =>
+      (config.custom_fields ?? []).filter(
+        (cf): cf is ScoringFieldEntry & Record<string, unknown> =>
+          typeof (cf as { name?: unknown })?.name === 'string' &&
+          String((cf as { name: string }).name).startsWith('edge_'),
+      ) as ScoringFieldEntry[],
+    [config.custom_fields],
+  )
+  const toggleScoringField = (name: string, enabled: boolean) => {
+    setConfig({
+      ...config,
+      custom_fields: (config.custom_fields ?? []).map((cf) =>
+        (cf as { name?: unknown })?.name === name ? { ...cf, enabled } : cf,
+      ) as LogFieldsConfig['custom_fields'],
+    })
+  }
+  const toggleAllScoringFields = (enabled: boolean) => {
+    setConfig({
+      ...config,
+      custom_fields: (config.custom_fields ?? []).map((cf) =>
+        typeof (cf as { name?: unknown })?.name === 'string' &&
+        String((cf as { name: string }).name).startsWith('edge_')
+          ? { ...cf, enabled }
+          : cf,
+      ) as LogFieldsConfig['custom_fields'],
+    })
+  }
   return (
     <div className="m-0 border-none p-0 outline-none space-y-8">
       <div className="space-y-4">
@@ -343,6 +440,13 @@ export function StandardFieldsStep({
               onModeChange={setCmcdMode}
               version={cmcdVersion ?? 1}
               onVersionChange={setCmcdVersion}
+            />
+          )}
+          {(scoringCustomFields.length > 0 || capture === 'attached') && (
+            <SessionScoringFieldsSection
+              fields={scoringCustomFields}
+              onToggleField={toggleScoringField}
+              onToggleAll={toggleAllScoringFields}
             />
           )}
         </div>

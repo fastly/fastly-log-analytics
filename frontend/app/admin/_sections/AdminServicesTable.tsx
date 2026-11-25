@@ -220,7 +220,11 @@ function NgwafDialogBody({ service, onClose }: NgwafDialogProps) {
   const saveWorkspaceMutation = useMutation({
     mutationFn: async ({ serviceId, token, workspaceId }: { serviceId: string; token: string; workspaceId: string | null }) =>
       unwrapClient(client.PATCH('/api/provision/services/{service_id}/ngwaf-workspace', { params: { path: { service_id: serviceId } }, headers: { Authorization: `Bearer ${token}` }, body: { ngwaf_workspace_id: workspaceId } })),
-    onSuccess: () => { setNgwafSaved(true); queryClient.invalidateQueries({ queryKey: queryKeys.services() }) },
+    onSuccess: () => {
+      setNgwafSaved(true)
+      queryClient.invalidateQueries({ queryKey: queryKeys.services() })
+      queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap() })
+    },
     onError: (e) => setNgwafFetchError(extractApiError(e) || 'Failed to save'),
   })
   const ngwafFetching = fetchWorkspacesMutation.isPending, ngwafSaving = saveWorkspaceMutation.isPending

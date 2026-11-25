@@ -136,6 +136,7 @@ class ProvisionExecuteRequest(BaseModel):
     rum_custom_condition: str | None = None
     bucket_generated: bool = False
     cdn_domain_generated: bool = False
+    ngwaf_workspace_id: str | None = None
 
 
 class ProvisionValidateRequest(BaseModel):

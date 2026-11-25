@@ -342,24 +342,24 @@ fn lost_source_index_peer_reply_reuses_immutable_receipts_on_retry() {
 
 #[test]
 fn scheduled_forward_traffic_does_not_starve_a_same_minute_late_object() {
-    let fake = Fake::new(BASE + 10);
+    let fake = Fake::new(BASE + 60);
     tick_runtime(&fake);
     let mut svc = service();
-    svc.log_period = 10;
+    svc.log_period = 60;
     fake.kv.borrow_mut().insert(
         format!("svc:{SID}"),
         (1, serde_json::to_value(svc).unwrap()),
     );
     put_raw(&fake, BASE, "z", &[line(BASE + 1, "initial")]);
-    for now in 10..20 {
+    for now in 60..70 {
         fake.now.set((BASE + now) as u64);
         run_tick(&fake);
         assert!(fake.calls.get() <= 32);
     }
     let late = put_raw(&fake, BASE, "a", &[line(BASE + 2, "late")]);
-    fake.mtimes.borrow_mut().insert(late, BASE + 15);
-    put_raw(&fake, BASE, "zz", &[line(BASE + 11, "forward")]);
-    for now in 20..=30 {
+    fake.mtimes.borrow_mut().insert(late, BASE + 65);
+    put_raw(&fake, BASE, "zz", &[line(BASE + 61, "forward")]);
+    for now in 120..=130 {
         fake.now.set((BASE + now) as u64);
         run_tick(&fake);
         assert!(fake.calls.get() <= 32);

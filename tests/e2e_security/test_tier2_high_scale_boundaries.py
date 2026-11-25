@@ -948,13 +948,11 @@ def test_f3_downloads_sanitize_crlf_and_quote_injection_in_content_disposition(
     )
 
     # Phase B3: Quote & semicolon parameter injection on uncached FOS StreamingResponse branch (cdn_url="")
-    cfg_path = Path(svcconfig.CONFIGS_DIR) / "svc-a.json"
-    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-    cfg["cdn_url"] = ""
-    cfg["provisioning"]["cdn_url"] = ""
-    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
-    with svcconfig._config_cache_lock:
-        svcconfig._config_cache.clear()
+    def _clear_cdn_url(c: dict[str, Any]) -> None:
+        c["cdn_url"] = ""
+        c.setdefault("provisioning", {})["cdn_url"] = ""
+
+    svcconfig.mutate_config("svc-a", _clear_cdn_url)
     fos_client.reload_default_source()
 
     fos_quote_rel = 'raw/2026-11-01/fosquote"; evil="pwned.json.gz'
@@ -973,11 +971,11 @@ def test_f3_downloads_sanitize_crlf_and_quote_injection_in_content_disposition(
     )
 
     # Phase B4: Quote & semicolon parameter injection on uncached Fastly HTTPS CDN StreamingResponse branch
-    cfg["cdn_url"] = "https://cdn-svc-a.global.ssl.fastly.net"
-    cfg["provisioning"]["cdn_url"] = "https://cdn-svc-a.global.ssl.fastly.net"
-    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
-    with svcconfig._config_cache_lock:
-        svcconfig._config_cache.clear()
+    def _set_fastly_cdn_url(c: dict[str, Any]) -> None:
+        c["cdn_url"] = "https://cdn-svc-a.global.ssl.fastly.net"
+        c.setdefault("provisioning", {})["cdn_url"] = "https://cdn-svc-a.global.ssl.fastly.net"
+
+    svcconfig.mutate_config("svc-a", _set_fastly_cdn_url)
     fos_client.reload_default_source()
 
     class _FakeCdnSocket:
@@ -1026,14 +1024,13 @@ def test_f3_downloads_reject_unsafe_ssrf_and_redirecting_cdn_urls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """SEC-09c: /api/download blocks metadata cdn_url SSRF with 400 and SafeRedirectHandler blocks 302 redirects on Fastly CDN URLs."""
+
     # Phase A: Private/metadata cdn_url is rejected 400 BEFORE any network attempt
-    cfg_path = Path(svcconfig.CONFIGS_DIR) / "svc-a.json"
-    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-    cfg["cdn_url"] = "http://169.254.169.254/latest/meta-data"
-    cfg["provisioning"]["cdn_url"] = "http://169.254.169.254/latest/meta-data"
-    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
-    with svcconfig._config_cache_lock:
-        svcconfig._config_cache.clear()
+    def _set_metadata_cdn_url(c: dict[str, Any]) -> None:
+        c["cdn_url"] = "http://169.254.169.254/latest/meta-data"
+        c.setdefault("provisioning", {})["cdn_url"] = "http://169.254.169.254/latest/meta-data"
+
+    svcconfig.mutate_config("svc-a", _set_metadata_cdn_url)
     fos_client.reload_default_source()
 
     called_urls: list[str] = []
@@ -1052,11 +1049,11 @@ def test_f3_downloads_reject_unsafe_ssrf_and_redirecting_cdn_urls(
 
     # Phase B: Allowlisted Fastly HTTPS cdn_url returning 302 -> http://169.254.169.254/latest/meta-data/
     # Leave urllib.request.urlopen UNPATCHED (_STDLIB_URLOPEN) so _open_safe_cdn exercises SafeRedirectHandler!
-    cfg["cdn_url"] = "https://cdn-svc-a.global.ssl.fastly.net"
-    cfg["provisioning"]["cdn_url"] = "https://cdn-svc-a.global.ssl.fastly.net"
-    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
-    with svcconfig._config_cache_lock:
-        svcconfig._config_cache.clear()
+    def _set_valid_cdn_url(c: dict[str, Any]) -> None:
+        c["cdn_url"] = "https://cdn-svc-a.global.ssl.fastly.net"
+        c.setdefault("provisioning", {})["cdn_url"] = "https://cdn-svc-a.global.ssl.fastly.net"
+
+    svcconfig.mutate_config("svc-a", _set_valid_cdn_url)
     fos_client.reload_default_source()
 
     attempted_connections: list[tuple[str, str, dict[str, str]]] = []

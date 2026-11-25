@@ -172,6 +172,28 @@ describe('attach UI', () => {
     expect(attached.log_fields.field_overrides).toEqual({ server_region: false })
   })
 
+  it('adds the 9 edge_* scoring custom fields when scoring_present is true', () => {
+    const offer = {
+      serviceId: 'svc-1',
+      available: true as const,
+      missingFields: ['edge_matrix_version'],
+      data: {
+        capture: {
+          mode: 'attached',
+          missing_fields: ['edge_matrix_version'],
+          rum_present: false,
+          cmcd_present: false,
+          scoring_present: true,
+        },
+      },
+    }
+    const attached = applyAttach(INITIAL_CONFIG, offer)
+    const customFields = (attached.log_fields.custom_fields ?? []) as Array<{ name: string; enabled: boolean }>
+    expect(customFields).toHaveLength(9)
+    expect(customFields.find((f) => f.name === 'edge_score')?.enabled).toBe(true)
+    expect(customFields.find((f) => f.name === 'edge_matrix_version')?.enabled).toBe(false)
+  })
+
   it('skips features and fields steps in attach mode', () => {
     setCloudModeRuntime(true)
     expect(

@@ -10,7 +10,6 @@ import threading
 import time
 import typing
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -986,10 +985,10 @@ def _isolate_config_dirs(tmp_path, monkeypatch):
     monkeypatch.setattr(svcconfig, "CACHE_DATA_DIR", tmp_path / "data" / "cache")
     monkeypatch.setattr(svcconfig, "SYSTEM_DATA_DIR", tmp_path / "data" / "system")
     monkeypatch.setattr(svcconfig, "_USAGE_LOGGING_CONFIG_PATH", tmp_path / "data" / "system" / "usage_logging.json")
-    for fn in (svcconfig._name_cache.clear, svcconfig._config_cache.clear, svcconfig._invalidate_service_ids_cache):
+    for fn in (svcconfig._name_cache.clear, svcconfig.invalidate_config_cache):
         fn()
     yield
-    for fn in (svcconfig._name_cache.clear, svcconfig._config_cache.clear, svcconfig._invalidate_service_ids_cache):
+    for fn in (svcconfig._name_cache.clear, svcconfig.invalidate_config_cache):
         fn()
 
 
@@ -1014,60 +1013,70 @@ def test_path_helpers():
     assert p.name == "svc-abc.json" and p.parent.name == "configs"
 
 
-def test_save_and_load_config_lifecycle(tmp_path):
+def test_save_and_load_config_lifecycle(monkeypatch):
     assert svcconfig.load_config("nonexistent") is None
-    shutil.rmtree(svcconfig.CONFIGS_DIR, ignore_errors=True)
-    assert not svcconfig.CONFIGS_DIR.exists()
     cfg = _cfg(service_id="svc-rt")
     svcconfig.save_config("svc-rt", cfg)
-    assert svcconfig.CONFIGS_DIR.exists()
-    assert not (svcconfig.CONFIGS_DIR / "svc-rt.tmp").exists() and (svcconfig.CONFIGS_DIR / "svc-rt.json").exists()
+    assert not svcconfig.config_path("svc-rt").exists(), "Postgres SSOT must not write local JSON files"
     a, b = svcconfig.load_config("svc-rt"), svcconfig.load_config("svc-rt")
-    assert a == cfg and a is not b
+    assert a is not None and b is not None and a["service_id"] == "svc-rt" and a is not b
     a["mutated"] = True
-    assert "mutated" not in svcconfig.load_config("svc-rt")
+    assert "mutated" not in (svcconfig.load_config("svc-rt") or {})
+
+    assert svcconfig.delete_config("svc-rt") is True
+    assert svcconfig.load_config("svc-rt") is None
+    assert svcconfig.delete_config("svc-rt") is False
+
+    from backend.core.metadata import pg_pool
+
+    monkeypatch.delenv("METADATA_DSN", raising=False)
+    monkeypatch.setattr(pg_pool, "_pool", None)
+    svcconfig.invalidate_config_cache()
+    with pytest.raises(RuntimeError, match="METADATA_DSN"):
+        svcconfig.load_config("svc-rt")
 
 
-def test_load_config_picks_up_save_via_mtime_and_collision():
-    svcconfig.save_config("svc-rev", _cfg(service_id="svc-rev", name="before"))
-    assert svcconfig.load_config("svc-rev")["name"] == "before"
-    time.sleep(0.005)
-    svcconfig.save_config("svc-rev", _cfg(service_id="svc-rev", name="after"))
-    assert svcconfig.load_config("svc-rev")["name"] == "after"
+def test_snapshot_cache_hits_and_immediate_invalidation(monkeypatch):
+    from backend.core.metadata import pg_pool
+    from backend.routers import bootstrap as bootstrap_router
+    from backend.routers.services import vcl as vcl_router
 
-    svcconfig.save_config("svc-coll", _cfg(service_id="svc-coll", name="first"))
-    svcconfig.load_config("svc-coll")
-    real_stat = os.stat
-    frozen_ns = svcconfig.config_path("svc-coll").stat().st_mtime_ns
+    svcconfig.save_config("svc-hit", _cfg(service_id="svc-hit", cdn_service_id="cdn-hit"))
+    assert svcconfig.load_config("svc-hit") is not None
 
-    class _FrozenStat:
-        def __init__(self, real):
-            self._real = real
+    db_calls = {"n": 0}
+    real_get_conn = pg_pool.get_pg_readonly_connection
 
-        def __getattr__(self, name):
-            return getattr(self._real, name)
+    def _counting_conn():
+        db_calls["n"] += 1
+        return real_get_conn()
 
-        @property
-        def st_mtime_ns(self):
-            return frozen_ns
+    monkeypatch.setattr(pg_pool, "get_pg_readonly_connection", _counting_conn)
+    # Pool token changes on monkeypatch swap, so first call fills the snapshot cache cleanly.
+    assert svcconfig.load_config("svc-hit")["cdn_service_id"] == "cdn-hit"
+    assert db_calls["n"] == 1
+    for _ in range(10):
+        assert svcconfig.load_config("svc-hit")["service_id"] == "svc-hit"
+        assert svcconfig.list_service_ids() == ["svc-hit"]
+        assert len(svcconfig.list_configs()) == 1
+        assert svcconfig.get_cdn_service_id_map() == {"cdn-hit": "svc-hit"}
+        assert svcconfig.get_active_service_id() == "svc-hit"
+    assert db_calls["n"] == 1, "Repeated hot-path reads within TTL must make zero extra DB queries"
 
-    with patch("os.stat", side_effect=lambda path, *a, **kw: _FrozenStat(real_stat(path, *a, **kw))):
-        svcconfig.save_config("svc-coll", _cfg(service_id="svc-coll", name="second"))
-        loaded = svcconfig.load_config("svc-coll")
-    assert loaded is not None and loaded["name"] == "second"
+    bootstrap_router._bootstrap_cache["svc-hit"] = {"stale": True}
+    vcl_router._logging_settings_cache["svc-hit"] = {"stale": True}
+    svcconfig.mutate_config("svc-hit", lambda c: c.__setitem__("name", "Updated"))
+    assert "svc-hit" not in bootstrap_router._bootstrap_cache
+    assert "svc-hit" not in vcl_router._logging_settings_cache
+    assert svcconfig.load_config("svc-hit")["name"] == "Updated"
 
-
-def test_load_config_avoids_reread_when_mtime_unchanged(monkeypatch):
-    svcconfig.save_config("svc-hit", _cfg(service_id="svc-hit"))
-    svcconfig.load_config("svc-hit")
-    open_calls = {"n": 0}
-    real_open = svcconfig.open if hasattr(svcconfig, "open") else open
-    monkeypatch.setattr(
-        "builtins.open", lambda *a, **kw: (open_calls.__setitem__("n", open_calls["n"] + 1), real_open(*a, **kw))[1]
-    )
-    for _ in range(5):
-        svcconfig.load_config("svc-hit")
-    assert open_calls["n"] == 0, "cache hit must skip open()"
+    svcconfig.record_deployed_config("svc-hit", activated_version=10)
+    svcconfig.mutate_config("svc-hit", lambda c: c.__setitem__("name", "Draft"))
+    svcconfig.record_deployed_config("svc-hit", activated_version=11, previous_version=10)
+    assert svcconfig.load_config("svc-hit")["last_activated_version"] == 11
+    restored, prev_ver = svcconfig.rollback_deployed_config("svc-hit")
+    assert prev_ver == 10 and restored["last_activated_version"] == 10
+    assert svcconfig.load_config("svc-hit")["name"] == "Updated"
 
 
 def test_update_status_and_get_status():
@@ -1082,7 +1091,7 @@ def test_update_status_and_get_status():
     assert out["last_sync_at"] == "2026-01-01" and out["manual_pause"] is True and before <= out["updated_at"] <= after
 
 
-def test_list_service_ids_and_active_service_id(monkeypatch):
+def test_list_service_ids_and_active_service_id():
     assert svcconfig.list_service_ids() == [] and svcconfig.get_active_service_id() is None
     for sid in ("zeta", "alpha", "mu"):
         svcconfig.save_config(sid, _cfg(service_id=sid))
@@ -1091,37 +1100,19 @@ def test_list_service_ids_and_active_service_id(monkeypatch):
     assert svcconfig.get_active_service_id(fallback_to_first=False) is None
 
 
-def test_list_service_ids_caches_glob_until_dir_changes(monkeypatch):
-    svcconfig.save_config("alpha", _cfg(service_id="alpha"))
-    real_glob = Path.glob
-    calls = {"n": 0}
+def test_list_configs_and_legacy_file_migration():
+    svcconfig.CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
+    (svcconfig.CONFIGS_DIR / "bad.json").write_text("{not json")
+    (svcconfig.CONFIGS_DIR / "a.json").write_text(json.dumps(_cfg(service_id="a", name="A", last_activated_version=4)))
+    (svcconfig.CONFIGS_DIR / "b.json").write_text(json.dumps(_cfg(service_id="b", name="B")))
 
-    def counting_glob(self, pattern, *a, **k):
-        if pattern == "*.json" and self == svcconfig.CONFIGS_DIR:
-            calls["n"] += 1
-        return real_glob(self, pattern, *a, **k)
+    imported = svcconfig.migrate_legacy_file_configs_once()
+    assert imported == 2
+    assert svcconfig.migrate_legacy_file_configs_once() == 0
 
-    monkeypatch.setattr(Path, "glob", counting_glob)
-    assert svcconfig.list_service_ids() == ["alpha"] and calls["n"] >= 1
-    first = calls["n"]
-    for _ in range(5):
-        svcconfig.list_service_ids()
-    assert calls["n"] == first
-    svcconfig.save_config("beta", _cfg(service_id="beta"))
-    assert svcconfig.list_service_ids() == ["alpha", "beta"]
-    svcconfig.config_path("alpha").unlink()
-    svcconfig._invalidate_service_ids_cache()
-    assert svcconfig.list_service_ids() == ["beta"]
-
-
-def test_list_configs():
-    svcconfig.save_config("a", _cfg(service_id="a", name="A"))
-    svcconfig.save_config("b", _cfg(service_id="b", name="B"))
     out = svcconfig.list_configs()
     assert [c["service_id"] for c in out] == ["a", "b"] and {c["name"] for c in out} == {"A", "B"}
-    (svcconfig.CONFIGS_DIR / "bad.json").write_text("{not json")
-    with pytest.raises(json.JSONDecodeError):
-        svcconfig.list_configs()
+    assert svcconfig.snapshot_config("a", prefer_deployed=True) is not None
 
 
 def test_config_to_source_field_mappings():
@@ -1219,10 +1210,6 @@ def test_refresh_all_service_names():
 
 def test_fastly_credential_and_ngwaf_helpers():
     assert svcconfig.get_fastly_api_key("nonexistent") == ""
-    with patch("backend.config._atomic_write_json", side_effect=OSError(30, "Read-only file system")):
-        svcconfig.save_config("svc-ro", _cfg(service_id="svc-ro"))
-    assert svcconfig.get_fastly_api_key(None) == ""
-
     svcconfig.save_config(
         "alpha",
         _cfg(service_id="alpha", fastly_api_key="key-active", cdn_service_id="cdn-123", ngwaf_workspace_id="ws-1"),

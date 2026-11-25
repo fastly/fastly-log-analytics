@@ -1138,12 +1138,22 @@ def test_l2_enforce_get_and_put(client, with_config):
     assert any((p or {}).get("item_value") == "1" for _, _, p in writes)
     assert audits[0][1] == "l2_enforce_enabled"
 
-    # Re-enable when already on preserves anchor
+    # Re-enable when already on preserves anchor from stored config
     with _capture_fastly_and_audit(get_handler=_get_l2_saturated) as (writes_on, _):
         r_on = client.put(f"/api/services/{LOG_SVC}/scoring/l2-enforce?confirm=true", json={"enabled": True}).json()
-    assert r_on["l2_enabled_at"] == 1700000000
+    assert r_on["l2_enabled_at"] == r_en["l2_enabled_at"]
     assert not any(
         path.endswith("/item/l2_enabled_at") or (p or {}).get("item_key") == "l2_enabled_at" for _, path, p in writes_on
+    )
+
+    # Legacy config without stored l2_enabled_at falls back to ConfigStore anchor
+    with_config[LOG_SVC] = _enforce_cfg()
+    with _capture_fastly_and_audit(get_handler=_get_l2_saturated) as (writes_legacy, _):
+        r_legacy = client.put(f"/api/services/{LOG_SVC}/scoring/l2-enforce?confirm=true", json={"enabled": True}).json()
+    assert r_legacy["l2_enabled_at"] == 1700000000
+    assert not any(
+        path.endswith("/item/l2_enabled_at") or (p or {}).get("item_key") == "l2_enabled_at"
+        for _, path, p in writes_legacy
     )
 
     # Disable writes "0"

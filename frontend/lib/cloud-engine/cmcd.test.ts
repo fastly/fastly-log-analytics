@@ -1,6 +1,15 @@
 // @vitest-environment node
 import { parquetWriteBuffer } from "hyparquet-writer";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+vi.mock("./active-log-fields", () => ({
+  cloudActiveLogFieldIds: async () => new Set(["cmcd_sid"]),
+  cloudServiceFlags: async () => ({
+    serviceId: "default",
+    activeIds: new Set(["cmcd_sid"]),
+    edgeOnly: false,
+    cmcdEnabled: true,
+  }),
+}));
 import {
   classifySessionDurationBucket,
   CMCD_REQUIRED_ANY_COLUMNS,

@@ -704,7 +704,16 @@ pub fn coordinate_reporting<R: Runtime>(
     let (schema_hash, custom) = if options.stream == super::rum::STREAM {
         (super::rum::schema_hash().to_owned(), Vec::new())
     } else {
-        let schema = convert::RequestSchema::for_fields(&service.log_fields);
+        let active_fields = if service.pending_job_id.is_some() {
+            service
+                .deployed_snapshot
+                .as_ref()
+                .and_then(|snap| snap.get("log_fields"))
+                .unwrap_or(&service.log_fields)
+        } else {
+            &service.log_fields
+        };
+        let schema = convert::RequestSchema::for_fields(active_fields);
         (schema.hash().to_owned(), schema.custom().to_vec())
     };
     let mut ctx = Ctx {
@@ -809,6 +818,9 @@ fn step<R: Runtime>(ctx: &mut Ctx<'_, '_, R>) -> Result<(), String> {
 /// tick loaded it, the write lost a race or fewer than `after` calls would remain; a later tick
 /// retries.
 fn commit_fields<R: Runtime>(ctx: &mut Ctx<'_, '_, R>, after: u32) -> Result<bool, String> {
+    if ctx.store.service.pending_job_id.is_some() {
+        return Ok(true);
+    }
     let names: BTreeSet<String> = ctx.custom.iter().map(|c| c.name.clone()).collect();
     let pending = |fields: &Value| -> bool {
         fields["custom_fields"]

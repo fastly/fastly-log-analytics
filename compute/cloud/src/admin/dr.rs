@@ -12,6 +12,9 @@ const STRIPPED_SERVICE_FIELDS: &[&str] = &[
     "data_reset",
     "generation",
     "active_log_field_ids",
+    "deployed_snapshot",
+    "previous_deployed_snapshot",
+    "previous_activated_version",
     "_audit",
     "_audit_outbox",
     "_audit_outbox_base",
@@ -297,6 +300,9 @@ fn bootstrap_service(owner_id: String, input: &RecoverInput, now: u64) -> Servic
         scoring: None,
         cdn_shield: String::new(),
         stored_log_field_ids: None,
+        deployed_snapshot: None,
+        previous_deployed_snapshot: None,
+        previous_activated_version: None,
     }
 }
 
@@ -327,6 +333,7 @@ fn validate_dr_scoring(
             .enforce_status_code
             .is_some_and(|c| !(400..=599).contains(&c))
         || sc.threshold.is_some_and(|t| t > 100)
+        || sc.enforce_threshold.is_some_and(|t| t > 100)
         || sc
             .matrix_version
             .as_deref()
@@ -2802,8 +2809,12 @@ mod tests {
 
         let mut deployed = value.clone();
         deployed["active_log_field_ids"] = json!(["as_deployed"]);
-        let read: Service = serde_json::from_value(deployed).unwrap();
-        assert_eq!(read.active_log_field_ids(), vec!["as_deployed"]);
+        let read: Service = serde_json::from_value(deployed.clone()).unwrap();
+        assert_eq!(read.active_log_field_ids(), resolved);
+
+        deployed["log_fields"] = Value::Null;
+        let fallback: Service = serde_json::from_value(deployed).unwrap();
+        assert_eq!(fallback.active_log_field_ids(), vec!["as_deployed"]);
 
         let mut older = value;
         older
@@ -2897,11 +2908,17 @@ mod tests {
                 exclude_url_regex: String::new(),
                 enforce_status_code: None,
                 threshold: Some(50),
+                enforce_threshold: None,
+                l2_enforce_enabled: None,
+                l2_enabled_at: None,
                 matrix_version: None,
                 last_retrain_at: None,
             }),
             stored_log_field_ids: None,
             cdn_shield: String::new(),
+            deployed_snapshot: None,
+            previous_deployed_snapshot: None,
+            previous_activated_version: None,
         }
     }
 

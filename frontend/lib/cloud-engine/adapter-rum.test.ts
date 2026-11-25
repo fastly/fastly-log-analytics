@@ -33,6 +33,9 @@ function nativeApi({
 }: { stepStatus?: string; reconcileStatus?: number; missingJob?: boolean } = {}) {
   const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = input instanceof Request ? input : new Request(new URL(String(input), "http://localhost"), init);
+    if (request.method === "GET" && request.url.endsWith("/api/services")) {
+      return Response.json({ services: [{ service_id: "svc-1" }] });
+    }
     if (request.method === "GET" && request.url.endsWith("/api/admin/services/svc-1")) {
       return Response.json({ service: { rum }, generation: "generation-7" });
     }
@@ -305,8 +308,10 @@ describe("Cloud RUM native lifecycle bridge", () => {
     expect(await (call![0] as Request).json()).toMatchObject({ dry_run: true, activate: false });
   });
 
-  it("reports failed native lifecycle jobs as SSE errors without a successful done frame", async () => {
-    nativeApi({ stepStatus: "failed" });
+  it("reports failed native lifecycle jobs as SSE errors without a successful done frame and invalidates metadata cache", async () => {
+    const fetchMock = nativeApi({ stepStatus: "failed" });
+    await handleCloudAnalyticalRequest(new Request("http://localhost/api/services"));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     const response = await cloudStreamFetch("http://localhost/api/services/svc-1/rum/enable", {
       method: "POST", body: "{}",
     });
@@ -314,5 +319,28 @@ describe("Cloud RUM native lifecycle bridge", () => {
     expect(events).toContain('"type":"error"');
     expect(events).toContain("activation_failed");
     expect(events).not.toContain('"type":"done"');
+    await handleCloudAnalyticalRequest(new Request("http://localhost/api/services"));
+    const servicesCalls = fetchMock.mock.calls.filter(([input]) =>
+      String(input instanceof Request ? input.url : input).endsWith("/api/services"),
+    );
+    expect(servicesCalls).toHaveLength(2);
+  });
+
+  it("applies faro_version together with RUM capture settings in a single reconcile request", async () => {
+    const fetchMock = nativeApi();
+    const response = await handleCloudAnalyticalRequest(new Request("http://localhost/api/services/svc-1/rum/settings", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ capture_vitals: false, sample_rate: 0.5, faro_version: "2.14.0" }),
+    }));
+    expect(response?.status).toBe(200);
+    const reconcileCall = fetchMock.mock.calls.find(([input]) =>
+      input instanceof Request && input.url.endsWith("/reconcile"),
+    );
+    expect(reconcileCall).toBeDefined();
+    expect(await (reconcileCall![0] as Request).json()).toMatchObject({
+      generation: "generation-7",
+      rum: { capture_vitals: false, sample_rate: 0.5, faro_version: "2.14.0" },
+    });
   });
 });

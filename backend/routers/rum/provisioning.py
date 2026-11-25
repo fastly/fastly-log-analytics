@@ -376,7 +376,16 @@ def update_rum_settings(
 
     import copy
 
+    from backend.core.fastly.client import fastly, get_active_version
+    from backend.provision.declarative.reconciler import _purge_rum_surrogate_key, reconcile_vcl_state
+    from backend.provision.rum_assets import upload_rum_tracker_js
+
     original_cfg = copy.deepcopy(cfg)
+    baseline_raw = svcconfig.snapshot_config(service_id)
+    prev_cond = (cfg.get("rum") or {}).get("custom_condition", "")
+    prev_fp = rum_vcl_fingerprint(service_id, cfg)
+    prev_active_fields = svcconfig.active_log_field_ids(cfg)
+    prev_ver = get_active_version(service_id, token)
 
     def _apply_settings(c: dict) -> None:
         rum_block = c.setdefault("rum", {})
@@ -393,56 +402,64 @@ def update_rum_settings(
             # Client timings are matched to request logs by `rid`, so RUM keeps that field on.
             claim_feature_fields(c, "rum")
 
-    def _roll_back_settings(c: dict) -> None:
-        original_rum = original_cfg.get("rum") or {}
-        rum_block = c.setdefault("rum", {})
-        for key in _RUM_SETTING_KEYS:
-            if key in original_rum:
-                rum_block[key] = original_rum[key]
-            else:
-                rum_block.pop(key, None)
+    def _restore_original_cfg() -> None:
+        if baseline_raw is not None:
+            svcconfig.restore_config_snapshot(service_id, baseline_raw)
+            return
 
-    svcconfig.mutate_config(service_id, _apply_settings)
+        def _reset(c: dict) -> None:
+            c.clear()
+            c.update(copy.deepcopy(original_cfg))
 
-    from backend.provision.rum_assets import upload_rum_tracker_js
-
-    try:
-        res = upload_rum_tracker_js(service_id, token, overwrite=True)
-    except Exception as e:
-        try:
-            svcconfig.mutate_config(service_id, _roll_back_settings)
-        except Exception as rollback_err:
-            logger.error(f"Failed to rollback service config for {service_id}: {rollback_err}")
-        raise_internal(
-            logger,
-            e,
-            code="rum_tracker_upload_failed",
-            message="Failed to upload RUM tracker wrapper to FOS",
-        )
-
-    # Saving settings is also the redeploy path: reconcile every time so the edge VCL follows the
-    # config and the generator (a reconcile with nothing to change makes no Fastly version).
-    from backend.provision.declarative.reconciler import reconcile_vcl_state
-
-    try:
-        reconcile_vcl_state(service_id, token, dry_run=False, activate=True)
-    except Exception as e:
-        try:
-            svcconfig.mutate_config(service_id, _roll_back_settings)
-        except Exception as rollback_err:
-            logger.error(f"Failed to rollback service config for {service_id}: {rollback_err}")
-        raise_internal(
-            logger,
-            e,
-            code="rum_reconcile_failed",
-            message="Failed to reconcile and deploy updated RUM conditions to Fastly",
-        )
+        svcconfig.mutate_config(service_id, _reset)
 
     def _refresh_vcl_sha(c: dict) -> None:
         if svcconfig.is_rum_enabled(c):
             c["rum_vcl_sha"] = rum_vcl_fingerprint(service_id, c)
 
-    svcconfig.mutate_config(service_id, _refresh_vcl_sha)
+    updated_cfg = svcconfig.mutate_config(service_id, _apply_settings) or cfg
+    vcl_changed = (
+        (body.custom_condition != prev_cond)
+        or (rum_vcl_fingerprint(service_id, updated_cfg) != prev_fp)
+        or (svcconfig.active_log_field_ids(updated_cfg) != prev_active_fields)
+    )
+    vcl_reconciled = False
+    new_ver: int | None = None
+
+    try:
+        if vcl_changed:
+            reconcile_res = reconcile_vcl_state(service_id, token, dry_run=False, activate=True)
+            vcl_reconciled = True
+            new_ver = getattr(reconcile_res, "activated_version", None)
+        res = upload_rum_tracker_js(service_id, token, overwrite=True)
+        _purge_rum_surrogate_key(service_id, token)
+        svcconfig.mutate_config(service_id, _refresh_vcl_sha)
+        if baseline_raw is not None:
+            svcconfig.record_deployed_config(
+                service_id,
+                new_ver,
+                previous_version=(
+                    prev_ver if vcl_reconciled and new_ver and prev_ver and new_ver != prev_ver else None
+                ),
+            )
+    except Exception as e:
+        if vcl_reconciled and prev_ver:
+            try:
+                cur_ver = get_active_version(service_id, token)
+                if cur_ver and cur_ver != prev_ver:
+                    fastly("PUT", f"/service/{service_id}/version/{prev_ver}/activate", token=token)
+            except Exception as fastly_rb_err:
+                logger.error(f"Failed to reactivate Fastly version {prev_ver} for {service_id}: {fastly_rb_err}")
+        try:
+            _restore_original_cfg()
+        except Exception as rollback_err:
+            logger.error(f"Failed to rollback service config for {service_id}: {rollback_err}")
+        raise_internal(
+            logger,
+            e,
+            code="rum_reconcile_failed" if vcl_changed else "rum_tracker_upload_failed",
+            message="Failed to update RUM settings and reconcile Fastly configuration",
+        )
 
     return {
         "ok": True,

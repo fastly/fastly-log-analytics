@@ -125,11 +125,13 @@ def get_enriched_services(active_service_id: str | None = None) -> list[dict[str
                     "cron_ngwaf", {"interval_mins": 15, "log_enabled": True, "log_retention_days": 7}
                 ),
                 "ngwaf_workspace_id": cfg.get("ngwaf_workspace_id"),
-                "logging_enabled": cfg.get("logging_enabled", True),
+                "logging_enabled": svcconfig.is_logging_enabled(cfg),
                 "rum_enabled": svcconfig.is_rum_enabled(cfg),
                 "rum": cfg.get("rum"),
                 "rum_log_period": rum_lp,
-                "cmcd_enabled": bool((cfg.get("cmcd") or {}).get("enabled")),
+                "cmcd_enabled": svcconfig.is_cmcd_enabled(cfg),
+                "scoring_enabled": svcconfig.is_scoring_enabled(cfg),
+                "active_log_field_ids": svcconfig.active_log_field_ids(cfg),
             }
         )
 

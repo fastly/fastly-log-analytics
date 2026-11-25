@@ -478,8 +478,32 @@ pub fn run(
                     None,
                 )?;
             }
-            if service.rum.enabled && service.capture != Capture::Attached && job.kind != "teardown"
-            {
+            let needs_rum_sync = job.changes.iter().any(|c| c.resource == "fos_object")
+                || (service.rum.enabled
+                    && service.capture != Capture::Attached
+                    && job.kind != "teardown");
+            advance(
+                job,
+                if needs_rum_sync {
+                    "sync_rum"
+                } else if job.kind == "teardown" {
+                    "remove_front"
+                } else {
+                    "finalize"
+                },
+            );
+            Ok(())
+        }
+        "sync_rum" => {
+            let delete = job
+                .changes
+                .iter()
+                .find(|c| c.resource == "fos_object")
+                .is_some_and(|c| c.action == "delete")
+                || !service.rum.enabled
+                || (job.kind == "teardown" && job.options.remove_snippets);
+            sync_rum_fos_objects(context, service, delete)?;
+            if !delete {
                 let purge_path = format!("/service/{}/purge/rum-js", service.service_id);
                 context.discard_uncertainty("POST", &purge_path, None);
                 let _ = context.api_status("POST", &purge_path, token, None)?;
@@ -492,14 +516,6 @@ pub fn run(
                     "finalize"
                 },
             );
-            Ok(())
-        }
-        "sync_rum" => {
-            sync_rum_fos_objects(context, service, false)?;
-            let purge_path = format!("/service/{}/purge/rum-js", service.service_id);
-            context.discard_uncertainty("POST", &purge_path, None);
-            let _ = context.api_status("POST", &purge_path, token, None)?;
-            advance(job, "finalize");
             Ok(())
         }
         _ => Err(Error::new(409, "invalid_reconcile_step")),
@@ -1075,7 +1091,7 @@ fn apply(
             upsert_rum_dictionary_item(context, service, draft, token, &change.name)?;
         }
     } else if change.resource == "fos_object" {
-        sync_rum_fos_objects(context, service, change.action == "delete")?;
+        // Deferred until post-validate/activate (`sync_rum`) so validation failure never overwrites live FOS assets.
     } else {
         let mut body = change.body.clone();
         if change.resource == "snippet"

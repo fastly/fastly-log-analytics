@@ -317,6 +317,8 @@ def _compute_prefill_rates(
         "min_billed_days": int(global_rates.get("min_billed_days", 30)),
         "billing_zone": str(global_rates.get("billing_zone", "MBZ200")),
         "fos_region": None,
+        "rum_enabled": False,
+        "rum_log_period": None,
         "rum_beacons_per_day": 0,
     }
 
@@ -337,7 +339,18 @@ def _compute_prefill_rates(
                     result["billing_zone"] = derived_zone
                     result["cdn_egress_rate_per_gb"] = _BILLING_ZONE_RATES[derived_zone]
             result["sample_rate"] = int(prov.get("sample_rate", 100))
-            result["edge_only"] = prov.get("edge_only", True)
+            result["edge_only"] = bool(prov.get("edge_only", True))
+            result["rum_enabled"] = svcconfig.is_rum_enabled(cfg)
+            rum_val = cfg.get("rum")
+            rum_dict = rum_val if isinstance(rum_val, dict) else {}
+            rum_lp = rum_dict.get("log_period")
+            if rum_lp is None:
+                rum_lp = cfg.get("rum_log_period")
+            if rum_lp is not None and not isinstance(rum_lp, bool):
+                try:
+                    result["rum_log_period"] = int(rum_lp)
+                except (ValueError, TypeError):
+                    pass
             result["delete_after"] = bool(cron_sync.get("delete_after", True))
             result["log_retention_days"] = int(cron_sync.get("data_retention_days", 30))
             result["rum_retention_days"] = int(cron_sync.get("rum_retention_days", result["log_retention_days"]))
@@ -546,7 +559,7 @@ async def prefill(source: dict[str, Any] = Depends(get_source)) -> PrefillRespon
     timer = SectionTimer()
     section_timings = timer.entries
 
-    fast_result, prov = _compute_prefill_rates(source, include_metadata_averages=False)
+    fast_result, _prov = _compute_prefill_rates(source, include_metadata_averages=False)
     result: dict[str, Any] = {
         "requests_per_day": None,
         "edge_requests_per_day": None,
@@ -563,47 +576,6 @@ async def prefill(source: dict[str, Any] = Depends(get_source)) -> PrefillRespon
 
     api_key = api_key_or_mock(get_fastly_api_key(source["service_id"]))
     now = datetime.now(UTC)
-
-    async def _resolve_endpoint_chain() -> dict[str, Any]:
-        if not api_key:
-            return {}
-        from backend.core.fastly.client import find_condition, get_active_version, get_log_endpoint
-
-        logging_svc_id = (
-            source.get("logging_service_id") or source.get("service_id") or get_fastly_logging_service_id() or ""
-        ).strip()
-        token_scope = sha256(api_key.encode()).hexdigest()[:16]
-        updates: dict[str, Any] = {}
-        try:
-            if not logging_svc_id:
-                return updates
-            endpoint_name = prov.get("endpoint_name", "Fastly Object Storage Logs")
-            ep_cache_key = (logging_svc_id, endpoint_name, token_scope)
-            cached_ep = _PREFILL_ENDPOINT_CACHE.get(ep_cache_key)
-            if cached_ep is not None:
-                return dict(cached_ep)
-            active_ver = await asyncio.to_thread(get_active_version, logging_svc_id, api_key)
-            if not active_ver:
-                return updates
-            current_ep = await asyncio.to_thread(get_log_endpoint, logging_svc_id, active_ver, endpoint_name, api_key)
-            if "period" in current_ep:
-                updates["log_period_seconds"] = int(current_ep["period"])
-            cond_name = current_ep.get("response_condition")
-            if cond_name == "Log Sampling":
-                import re
-
-                cond = await asyncio.to_thread(find_condition, cond_name, logging_svc_id, active_ver, api_key)
-                if cond:
-                    stmt = cond.get("statement", "")
-                    m = re.search(r"randombool\((\d+),", stmt)
-                    if m:
-                        updates["sample_rate"] = int(m.group(1))
-                    if "req.restarts == 0" in stmt:
-                        updates["edge_only"] = True
-            _PREFILL_ENDPOINT_CACHE[ep_cache_key] = dict(updates)
-        except Exception:
-            logger.debug("_resolve_endpoint_chain: step failed (ignored)", exc_info=True)
-        return updates
 
     async def _fetch_stats() -> dict[str, Any] | None:
         if not api_key:
@@ -677,9 +649,8 @@ async def prefill(source: dict[str, Any] = Depends(get_source)) -> PrefillRespon
             return None
 
     _t = _time.perf_counter()
-    (avg_nodes, rum_beacons), chain_updates, payload, edge_ratio = await asyncio.gather(
+    (avg_nodes, rum_beacons), payload, edge_ratio = await asyncio.gather(
         _fetch_metadata(),
-        _resolve_endpoint_chain(),
         _fetch_stats(),
         _fetch_edge_ratio(),
     )
@@ -691,7 +662,6 @@ async def prefill(source: dict[str, Any] = Depends(get_source)) -> PrefillRespon
 
     if api_key:
         try:
-            result.update(chain_updates)
             daily_reqs: dict[str, int] = {}
             daily_edge: dict[str, int] = {}
             missing_edge_days: set[str] = set()

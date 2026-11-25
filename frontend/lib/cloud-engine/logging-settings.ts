@@ -109,7 +109,32 @@ export async function cloudLoggingSettings(request: Request, runJob: RunJob): Pr
     return Response.json({ ok: true, ...logFields(patched.service) });
   }
 
-  if (route === "logging-settings/update" && request.method === "GET") {
+  if (route === "logging-settings/update" && (request.method === "GET" || request.method === "POST")) {
+    let logFields: Record<string, unknown> | undefined;
+    if (request.method === "POST") {
+      const text = await request.text();
+      if (text.trim() !== "") {
+        let parsed: { log_fields?: unknown };
+        try {
+          parsed = JSON.parse(text) as { log_fields?: unknown };
+        } catch (error) {
+          if (!(error instanceof SyntaxError)) throw error;
+          return failure("invalid_json", 400);
+        }
+        if (
+          parsed &&
+          typeof parsed === "object" &&
+          !Array.isArray(parsed) &&
+          "log_fields" in parsed &&
+          parsed.log_fields !== undefined
+        ) {
+          if (!parsed.log_fields || typeof parsed.log_fields !== "object" || Array.isArray(parsed.log_fields)) {
+            return failure("invalid_input", 400);
+          }
+          logFields = parsed.log_fields as Record<string, unknown>;
+        }
+      }
+    }
     const period = parseInteger(url.searchParams.get("period"), "period");
     if (period instanceof Response) return period;
     const sampleRate = parseInteger(url.searchParams.get("sample_rate"), "sample_rate");
@@ -124,20 +149,21 @@ export async function cloudLoggingSettings(request: Request, runJob: RunJob): Pr
       if (version instanceof Response) return version;
       cmcd.version = version;
     }
-    const patched = await patchService(serviceId, {
-      generation: read.generation,
-      log_period: period,
-      sample_rate: sampleRate,
-      edge_only: url.searchParams.get("edge_only") !== "false",
-      custom_condition: url.searchParams.get("custom_condition") ?? "",
-      cmcd,
-    }, signal);
-    if (patched.response) return patched.response;
     const reconciled = await fetch(`/api/admin/services/${encodeURIComponent(serviceId)}/reconcile`, {
       method: "POST",
       credentials: "include",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ generation: patched.generation, activate: true, dry_run: false }),
+      body: JSON.stringify({
+        generation: read.generation,
+        ...(logFields ? { log_fields: logFields } : {}),
+        log_period: period,
+        sample_rate: sampleRate,
+        edge_only: url.searchParams.get("edge_only") !== "false",
+        custom_condition: url.searchParams.get("custom_condition") ?? "",
+        cmcd,
+        activate: true,
+        dry_run: false,
+      }),
       signal,
     });
     if (!reconciled.ok) return reconciled;

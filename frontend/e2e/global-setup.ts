@@ -21,6 +21,87 @@ import { E2E_BACKEND_PORT, E2E_FRONTEND_PORT } from '../playwright.config'
 import { backendTestEnvironment } from '../__tests__/helpers/msw/handlers'
 
 const HOST = '127.0.0.1'
+const DEFAULT_E2E_METADATA_POSTGRES_DSN =
+  'postgresql://fla:fla_test_password@localhost:5432/fla_e2e_test'
+
+function _resolveE2eMetadataDsn(): string {
+  const dsn =
+    process.env.FLA_E2E_METADATA_POSTGRES_DSN ||
+    process.env.TEST_METADATA_DSN ||
+    DEFAULT_E2E_METADATA_POSTGRES_DSN
+  let parsed: URL
+  try {
+    parsed = new URL(dsn)
+  } catch {
+    throw new Error(`E2E metadata DSN must be a valid PostgreSQL URL, got: ${dsn}`)
+  }
+  const dbName = parsed.pathname.replace(/^\/+/, '')
+  if (!dbName || !/^(test_.+|.+_test)$/i.test(dbName)) {
+    throw new Error(
+      `E2E metadata DSN must target an isolated test database (test_* or *_test), got "${dbName || '<empty>'}" in ${dsn}`,
+    )
+  }
+  return dsn
+}
+
+function _seedPostgresServiceConfigs(
+  sandbox: string,
+  configsDir: string,
+  repoRoot: string,
+  metaDsn: string,
+): void {
+  const script = `
+import json, os
+from pathlib import Path
+from urllib.parse import urlparse, urlunparse
+import psycopg
+
+dsn = os.environ["METADATA_DSN"]
+parsed = urlparse(dsn)
+db_name = parsed.path.lstrip("/")
+maint_dsn = urlunparse(parsed._replace(path="/postgres"))
+with psycopg.connect(maint_dsn, autocommit=True) as admin_conn:
+    if not admin_conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (db_name,)).fetchone():
+        try:
+            admin_conn.execute(f'CREATE DATABASE "{db_name}"')
+        except psycopg.errors.DuplicateDatabase:
+            pass
+
+from backend.core.metadata.pg_schema import ensure_pg_schema
+ensure_pg_schema(dsn)
+
+configs_dir = Path(os.environ["CONTRACT_CONFIGS_DIR"])
+with psycopg.connect(dsn, autocommit=True) as conn:
+    conn.execute("DELETE FROM service_configs")
+    for p in sorted(configs_dir.glob("*.json")):
+        data = json.loads(p.read_text(encoding="utf-8"))
+        sid = data.get("service_id") or p.stem
+        conn.execute(
+            """
+            INSERT INTO service_configs (service_id, config_json, revision, updated_at)
+            VALUES (%s, %s, 1, NOW()::text)
+            ON CONFLICT (service_id) DO UPDATE SET
+                config_json = EXCLUDED.config_json,
+                revision = service_configs.revision + 1,
+                updated_at = NOW()::text
+            """,
+            (sid, json.dumps(data)),
+        )
+`
+  execFileSync(
+    'uv',
+    ['run', '--project', repoRoot, 'python', '-c', script],
+    {
+      cwd: repoRoot,
+      env: {
+        ...backendTestEnvironment(sandbox),
+        METADATA_DSN: metaDsn,
+        CONTRACT_CONFIGS_DIR: configsDir,
+      },
+      stdio: 'pipe',
+    },
+  )
+}
 
 function _clickhouseEnv(): Record<string, string> {
   return {
@@ -35,7 +116,12 @@ function _clickhouseEnv(): Record<string, string> {
   }
 }
 
-function _seedSyntheticLogs(sandbox: string, configsDir: string, repoRoot: string): void {
+function _seedSyntheticLogs(
+  sandbox: string,
+  configsDir: string,
+  repoRoot: string,
+  metaDsn: string,
+): void {
   try {
     const cfgPath = join(configsDir, 'svc-playwright-e2e.json')
     execFileSync(
@@ -66,6 +152,7 @@ function _seedSyntheticLogs(sandbox: string, configsDir: string, repoRoot: strin
         cwd: sandbox,
         env: {
           ...backendTestEnvironment(sandbox),
+          METADATA_DSN: metaDsn,
           ..._clickhouseEnv(),
         },
         stdio: 'pipe',
@@ -202,9 +289,11 @@ async function globalSetup() {
   // first via mkdir(parents=True), so we mirror that here.
   mkdirSync(configsDir, { recursive: true })
   mkdirSync(dataDir, { recursive: true })
+  const e2eMetaDsn = _resolveE2eMetadataDsn()
   _seedDefaultServiceConfig(configsDir)
   _seedRealRtServiceConfig(configsDir)
-  _seedSyntheticLogs(sandbox, configsDir, repoRoot)
+  _seedPostgresServiceConfigs(sandbox, configsDir, repoRoot, e2eMetaDsn)
+  _seedSyntheticLogs(sandbox, configsDir, repoRoot, e2eMetaDsn)
 
   // Wire the analyst-OAuth feature against the in-process mock IdP (all on
   // 127.0.0.1, no network). The registry points discovery at the backend's own
@@ -244,6 +333,7 @@ async function globalSetup() {
           frontendPort: E2E_FRONTEND_PORT,
           registryPath: oauthRegistryPath,
         }),
+        METADATA_DSN: e2eMetaDsn,
         ..._clickhouseEnv(),
       },
       stdio: ['ignore', 'pipe', 'pipe'],

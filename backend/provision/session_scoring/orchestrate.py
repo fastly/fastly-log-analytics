@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import copy
 import datetime as _dt
-import urllib.parse
-from collections.abc import Callable
 from typing import Any
 
 import backend.config as svcconfig
-from backend.core.fastly.client import ensure_vcl_snippet, fastly, get_active_version
-from backend.provision.cli import BOLD, _c, draft_version, fail, info, ok, rollback_to_version, warn
+from backend.core.fastly.client import fastly, get_active_version
+from backend.provision.cli import BOLD, _c, draft_version, fail, info, ok, warn
 from backend.provision.session_scoring.stores import (
     _delete_scoring_matrix_from_fos,
     _publish_scoring_fos_side_effects,
@@ -20,9 +18,6 @@ from backend.provision.session_scoring.stores import (
 from backend.provision.session_scoring.wasm_deploy import (
     DEFAULT_ASSET_EXT_REGEX,
     DEFAULT_ENFORCE_STATUS_CODE,
-    SCORING_ENFORCE_NAME,
-    SCORING_RECV_NAME,
-    SCORING_SNIPPET_PRIORITY,
     _deploy_wasm_package,
     _remove_scoring_backend,
     _remove_scoring_snippets,
@@ -41,7 +36,6 @@ __all__ = [
     "_add_scoring_custom_fields",
     "_clone_swap_snippet",
     "_remove_scoring_custom_fields",
-    "_update_live_scoring_snippet",
     "disable_scoring",
     "enable_scoring",
     "merge_scoring_custom_fields",
@@ -338,6 +332,8 @@ def enable_scoring(logging_service_id: str, token: str, *, status_cb=None) -> di
         if res.error:
             raise RuntimeError(f"Reconciliation failed: {res.error}")
         new_ver = res.activated_version or active_ver
+        if svcconfig.snapshot_config(logging_service_id) is not None:
+            svcconfig.record_deployed_config(logging_service_id, new_ver, previous_version=active_ver)
         if status_cb:
             status_cb(f"✅ Done — Compute scorer v{compute_ver} + logging VCL v{new_ver} are now live.")
         scoring_meta["logging_service_active_version"] = new_ver
@@ -380,55 +376,20 @@ def disable_scoring(logging_service_id: str, token: str, *, status_cb=None) -> N
     info(f"Disabling session scoring for {_c(BOLD, logging_service_id)}")
     if status_cb:
         status_cb(f"⏳ Disabling session scoring for {logging_service_id}...")
-    # ── Stage 1: clone active version. ──────────────────────────────────────
-    active_ver = get_active_version(logging_service_id, token)
-    if active_ver is None:
-        raise RuntimeError(f"Logging service {logging_service_id} has no active version")
-    ts = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-    # ── Stage 4 (validate + activate) is owned by draft_version. ───────────
-    with draft_version(
+    from backend.provision.declarative.reconciler import transactional_vcl_reconcile
+
+    def _disable_scoring_cfg(target: dict[str, Any]) -> None:
+        _remove_scoring_custom_fields(target)
+        if isinstance(target.get("scoring"), dict):
+            target["scoring"]["enabled"] = False
+
+    res = transactional_vcl_reconcile(
         logging_service_id,
         token,
-        base_version=active_ver,
-        call=fastly,
-        comment=f"Disable session scoring {ts}",
-        on_failure=lambda exc: fail(f"disable_scoring VCL phase failed: {exc}"),
-    ) as new_ver:
-        # ── Stage 2: remove scoring VCL bits. ───────────────────────────────
-        _remove_scoring_snippets(logging_service_id, new_ver, token)
-        _remove_scoring_backend(logging_service_id, new_ver, token)
-
-        # ── Stage 3: drop the 6 custom_fields + regen log format. ───────────
-        cfg = copy.deepcopy(cfg)
-        _remove_scoring_custom_fields(cfg)
-        from backend.core.fastly.client import list_log_endpoints
-        from backend.provision.fastly_api import generate_capture_vcl, load_log_format
-
-        capture = generate_capture_vcl(cfg.get("log_fields"))
-        ensure_vcl_snippet(
-            "Fastly Log Analysis Capture", "recv", capture["recv"], 1, logging_service_id, new_ver, token
-        )
-        if "recv_reset" in capture:
-            ensure_vcl_snippet(
-                "Fastly Log Analysis Reset Client IP",
-                "recv",
-                capture["recv_reset"],
-                -100,
-                logging_service_id,
-                new_ver,
-                token,
-            )
-        endpoint_name = cfg.get("provisioning", {}).get("endpoint_name", "Fastly Object Storage Logs")
-        existing_endpoints = list_log_endpoints(logging_service_id, new_ver, token)
-        if endpoint_name in existing_endpoints:
-            new_format = load_log_format(cfg.get("log_fields"))
-            encoded = urllib.parse.quote(endpoint_name, safe="")
-            fastly(
-                "PUT",
-                f"/service/{logging_service_id}/version/{new_ver}/logging/fos/{encoded}",
-                {"format": new_format, "format_version": 2},
-                token=token,
-            )
+        mutate_fn=_disable_scoring_cfg,
+        status_cb=status_cb,
+    )
+    new_ver = res.activated_version or get_active_version(logging_service_id, token)
     ok(f"Logging service version {new_ver} active (scoring stripped)")
 
     def _clear_scoring(target: dict) -> None:
@@ -437,6 +398,8 @@ def disable_scoring(logging_service_id: str, token: str, *, status_cb=None) -> N
 
     if svcconfig.mutate_config(logging_service_id, _clear_scoring) is None:
         raise RuntimeError(f"No config found while persisting scoring disable for {logging_service_id}")
+    if svcconfig.snapshot_config(logging_service_id) is not None:
+        svcconfig.record_deployed_config(logging_service_id, new_ver)
 
     # ── Stage 5: tear down the Compute service + stores. ───────────────────
     failed_stores = delete_scoring_service(
@@ -520,28 +483,24 @@ def _clone_swap_snippet(
     sid: str, token: str, *, active_ver: int, comment: str, snippet_name: str, vcl_type: str, body: str, priority: int
 ) -> int:
     """Clone ``active_ver`` → set its comment → install ONE VCL snippet →     validate → activate, returning the new active version."""
+    from backend.core.fastly.client import ensure_vcl_snippet
+
     with draft_version(sid, token, base_version=active_ver, call=fastly, comment=comment, rollback=False) as new_ver:
         ensure_vcl_snippet(snippet_name, vcl_type, body, priority, sid, new_ver, token)
     return new_ver
 
 
-def _update_live_scoring_snippet(
+def _reconcile_scoring_setting(
     logging_service_id: str,
     token: str,
     *,
-    fn_name: str,
     setting_label: str,
     scoring_key: str,
     scoring_value: Any,
-    snippet_name: str,
-    vcl_type: str,
-    body: str,
-    priority: int,
-    info_label: str,
-    comment_fn: Callable[[str], str],
-    ok_suffix: str,
 ) -> int:
-    def _mutate(target: dict) -> None:
+    from backend.provision.declarative.reconciler import transactional_vcl_reconcile
+
+    def _mutate(target: dict[str, Any]) -> None:
         scoring = target.get("scoring") or {}
         if not scoring.get("enabled"):
             raise RuntimeError(
@@ -551,75 +510,42 @@ def _update_live_scoring_snippet(
         scoring[scoring_key] = scoring_value
         target["scoring"] = scoring
 
-    if svcconfig.mutate_config(logging_service_id, _mutate) is None:
-        raise RuntimeError(f"No config found for logging service {logging_service_id}")
-    active_ver = get_active_version(logging_service_id, token)
-    if active_ver is None:
+    res = transactional_vcl_reconcile(logging_service_id, token, mutate_fn=_mutate)
+    if res.error:
+        raise RuntimeError(res.error)
+    new_ver = res.activated_version or get_active_version(logging_service_id, token)
+    if new_ver is None:
         raise RuntimeError(f"Logging service {logging_service_id} has no active version")
-    info(f"Cloning version {active_ver} to update {info_label}")
-    ts = _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-    try:
-        new_ver = _clone_swap_snippet(
-            logging_service_id,
-            token,
-            active_ver=active_ver,
-            comment=comment_fn(ts),
-            snippet_name=snippet_name,
-            vcl_type=vcl_type,
-            body=body,
-            priority=priority,
-        )
-        ok(f"Logging service version {new_ver} active ({ok_suffix})")
-        return new_ver
-    except Exception as exc:
-        fail(f"{fn_name} failed: {exc}")
-        rollback_to_version(logging_service_id, token, active_ver, call=fastly)
-        raise
+    return int(new_ver)
 
 
 def update_recv_exclusion_regex(logging_service_id: str, token: str, *, new_regex: str) -> dict[str, Any]:
-    """Re-publish ONLY the recv VCL snippet with a new exclusion regex."""
+    """Re-publish VCL with a new scoring exclusion regex via declarative transactional reconcile."""
     cleaned = (new_regex or "").strip()
     effective_regex = resolve_exclude_url_regex(cleaned or None)
     is_default = effective_regex == DEFAULT_ASSET_EXT_REGEX
-    new_recv_body = recv_snippet(logging_service_id, exclude_url_regex=cleaned or None)
-    new_ver = _update_live_scoring_snippet(
+    recv_snippet(logging_service_id, exclude_url_regex=cleaned or None)
+    new_ver = _reconcile_scoring_setting(
         logging_service_id,
         token,
-        fn_name="update_recv_exclusion_regex",
         setting_label="recv exclusion regex",
         scoring_key="exclude_url_regex",
         scoring_value=cleaned or None,
-        snippet_name=SCORING_RECV_NAME,
-        vcl_type="recv",
-        body=new_recv_body,
-        priority=SCORING_SNIPPET_PRIORITY,
-        info_label="recv-snippet exclusion regex",
-        comment_fn=lambda ts: f"Update scoring recv exclusion regex {ts}",
-        ok_suffix="recv exclusion regex updated",
     )
     return {"effective_regex": effective_regex, "is_default": is_default, "logging_service_active_version": new_ver}
 
 
 def update_enforce_status_code(logging_service_id: str, token: str, *, new_status_code: int | None) -> dict[str, Any]:
-    """Re-publish ONLY the enforce VCL snippet with a new status code."""
+    """Re-publish VCL with a new scoring enforce status code via declarative transactional reconcile."""
     effective_code = resolve_enforce_status_code(new_status_code)
     is_default = effective_code == DEFAULT_ENFORCE_STATUS_CODE
-    new_enforce_body = enforce_snippet(effective_code)
-    new_ver = _update_live_scoring_snippet(
+    enforce_snippet(effective_code)
+    new_ver = _reconcile_scoring_setting(
         logging_service_id,
         token,
-        fn_name="update_enforce_status_code",
         setting_label="enforce status code",
         scoring_key="enforce_status_code",
         scoring_value=None if is_default else effective_code,
-        snippet_name=SCORING_ENFORCE_NAME,
-        vcl_type="recv",
-        body=new_enforce_body,
-        priority=SCORING_SNIPPET_PRIORITY + 1,
-        info_label=f"enforce-snippet status code → {effective_code}",
-        comment_fn=lambda ts: f"Update scoring enforce status code → {effective_code} ({ts})",
-        ok_suffix=f"enforce status code → {effective_code}",
     )
     return {
         "effective_status_code": effective_code,

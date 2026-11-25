@@ -1,5 +1,14 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from "vitest";
+vi.mock("./active-log-fields", () => ({
+  cloudActiveLogFieldIds: async () => new Set(["edge", "rid", "prid", "pop"]),
+  cloudServiceFlags: async () => ({
+    serviceId: "default",
+    activeIds: new Set(["edge", "rid", "prid", "pop"]),
+    edgeOnly: false,
+    cmcdEnabled: false,
+  }),
+}));
 import { parquetWriteBuffer } from "hyparquet-writer";
 import { getDuckDBEngine } from "./dashboard/test-fixtures";
 import {

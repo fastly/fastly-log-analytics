@@ -6,6 +6,7 @@
  * - `GET|POST|PUT|PATCH|DELETE /api/services/{id}/scoring/*`
  */
 
+import { cloudActiveLogFieldIds } from "./active-log-fields";
 import { requireSafeIdent } from "./sql-validator";
 import { CloudBudgetError } from "./range-loader";
 import { redactQueryRowsForPii } from "./query";
@@ -105,6 +106,7 @@ export interface SessionDetailResponse {
 export interface CloudSessionsContext {
   customColumnTypes?: ReadonlyMap<string, DuckDBColumnType>;
   serviceId?: string;
+  signal?: AbortSignal;
   tableName?: string;
   maskIps?: boolean;
   role?: "admin" | "analyst" | "analyst-no-pii";
@@ -565,6 +567,10 @@ export async function handleSessionsList(
   );
   const maskIps = Boolean(ctx.maskIps || ctx.role === "analyst-no-pii");
   const serviceId = body.service_id ?? ctx.serviceId ?? "default";
+  const activeFields = await cloudActiveLogFieldIds(
+    body.service_id ?? ctx.serviceId,
+    ctx.signal ?? new AbortController().signal,
+  );
   let cols: ReadonlySet<string> =
     ctx.availableColumns ??
     new Set([
@@ -731,11 +737,11 @@ export async function handleSessionsList(
       total: rawRows.length > 0 && rawRows[0]._total_sessions != null ? Number(rawRows[0]._total_sessions) : sessions.length,
       page,
       limit,
-      has_rtt: cols.has("tcp_rtt"),
-      has_ja4: cols.has("ja4"),
-      has_edge: cols.has("edge"),
-      has_edge_sid: cols.has("edge_sid"),
-      has_cmcd: cols.has("cmcd_sid"),
+      has_rtt: activeFields.has("tcp_rtt") || activeFields.has("client_rtt_us"),
+      has_ja4: activeFields.has("ja4"),
+      has_edge: activeFields.has("edge"),
+      has_edge_sid: activeFields.has("edge_sid"),
+      has_cmcd: activeFields.has("cmcd_sid"),
       min_reqs_flag: minReqsFlag,
       min_4xx_pct_flag: min4xxPctFlag,
       asn_names: asnNames,

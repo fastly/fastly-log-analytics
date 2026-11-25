@@ -168,7 +168,48 @@ class HighScaleServiceRegistry:
 
     def resolve(self, service_id: str) -> HighScaleService | None:
         service = self._services.get(service_id)
-        return service if service is not None and service.service_id == service_id else None
+        if service is not None and service.service_id == service_id:
+            return service
+        return self._resolve_from_config(service_id)
+
+    def get(self, service_id: str) -> HighScaleService | None:
+        return self.resolve(service_id)
+
+    def _resolve_from_config(self, service_id: str) -> HighScaleService | None:
+        if not service_id:
+            return None
+        try:
+            from backend import config as app_config
+            from backend.core.clickhouse import get_clickhouse_client
+
+            if app_config.load_config(service_id) is None:
+                return None
+            client = get_clickhouse_client()
+            if client is None or not os.getenv("HIGH_SCALE_CURSOR_SECRET"):
+                return None
+            cursor_secret = _cursor_secret_from_environment()
+            manifest_catalog = _default_control_factory()
+
+            def _archive_for(sid: str) -> ArchivePublication | None:
+                try:
+                    return _default_archive_factory(sid)
+                except Exception:
+                    logger.warning("high-scale cold-tier archive wiring failed for %s", sid, exc_info=True)
+                    return None
+
+            register_high_scale_services(
+                self,
+                client=client,
+                service_ids=(service_id,),
+                cursor_secret=cursor_secret,
+                owner_epoch=int(os.getenv("HIGH_SCALE_OWNER_EPOCH", "1")),
+                manifest_catalog=manifest_catalog,
+                archive_for=_archive_for,
+            )
+            return self._services.get(service_id)
+        except Exception:
+            logger.debug("high-scale on-the-fly service registration skipped for %s", service_id, exc_info=True)
+            return None
 
 
 _registry = HighScaleServiceRegistry()

@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import time
 from datetime import UTC, datetime
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
 from backend.core import log_fields as lf_module
 from backend.core import metadata as metadata_db
+from backend.core.fastly.client import fastly
 from backend.core.request_context import require_admin
 from backend.core.service_defaults import DEFAULT_LOG_PERIOD_SECONDS
 from backend.models.common import (
@@ -20,16 +21,21 @@ from backend.models.common import (
     LogFieldsUpdateRequest,
     LogFieldsUpdateResponse,
     LoggingSettingsResponse,
+    LoggingSettingsUpdateBody,
+    ServiceRollbackBody,
+    ServiceRollbackResponse,
 )
 from backend.repositories.utils.response_shaping import SectionTimer
 from backend.utils.auth import require_service_in_scope
 from backend.utils.bounded_cache import BoundedTTLCache
+from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry
 from backend.utils.router_utils import (
     load_service_config,
     make_error,
     mutate_service_config,
     query_errors,
     redact_error_text,
+    require_fastly_token,
     stored_fastly_token,
 )
 from backend.utils.sse import sse_response
@@ -42,6 +48,7 @@ router = APIRouter(dependencies=[Depends(require_admin)])
 
 _LOGGING_SETTINGS_CACHE_TTL = 300.0
 _logging_settings_cache: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=_LOGGING_SETTINGS_CACHE_TTL)
+_CacheRegistry.register("services.vcl._logging_settings_cache", _logging_settings_cache)
 
 
 def _cmcd_settings_response(
@@ -88,51 +95,18 @@ def api_service_logging_settings(request: Request, service_id: str):
     if cached_fields is not None:
         return LoggingSettingsResponse.with_telemetry(ok=True, section_timings=[], is_cached=True, **cached_fields)
 
+    _t = time.perf_counter()
     cfg = load_service_config(service_id)
-    token = stored_fastly_token(cfg)
-    endpoint_name = cfg.get("provisioning", {}).get("endpoint_name", "Fastly Object Storage Logs")
-    from backend.core.fastly.client import find_condition, get_active_version, get_log_endpoint
-
-    _t = time.perf_counter()
-    active_ver = get_active_version(service_id, token)
-    timer.mark("get_active_version", _t)
-    if not active_ver:
-        raise HTTPException(status_code=400, detail={"error": "No active version found"})
-    _t = time.perf_counter()
-    ep = get_log_endpoint(service_id, active_ver, endpoint_name, token)
-    timer.mark("get_logging_endpoint", _t)
-    sample_rate, edge_only, custom_condition = 100, False, ""
-    cond_name = ep.get("response_condition")
-    if cond_name:
-        _t = time.perf_counter()
-        cond = find_condition(cond_name, service_id, active_ver, token)
-        timer.mark("find_condition", _t)
-        stmt = cond.get("statement", "") if cond else ""
-        if m := re.search(r"randombool\((\d+),", stmt):
-            sample_rate = int(m.group(1))
-        edge_only = "req.restarts == 0" in stmt
-        if mc := re.search(r" && \((?!req\.restarts == 0)(.+)\)$", stmt):
-            custom_condition = mc.group(1)
-    if not custom_condition:
-        custom_condition = cfg.get("provisioning", {}).get("custom_condition", "")
-    m_pref = re.search(r"\A/?(.*?)/raw/", ep.get("path", ""))
-    prefix = m_pref.group(1).strip("/") if m_pref else ""
-    format_match = True
-    try:
-        from backend.provision import load_log_format
-
-        format_match = (ep.get("format") or "").strip() == load_log_format(cfg.get("log_fields"))
-    except Exception:
-        logger.debug("api_service_logging_settings: step failed (ignored)", exc_info=True)
-
+    timer.mark("load_service_config", _t)
+    prov = cfg.get("provisioning") or {}
     cacheable = {
-        "prefix": prefix,
-        "period": ep.get("period", 60),
-        "sample_rate": sample_rate,
-        "edge_only": edge_only,
-        "custom_condition": custom_condition,
-        "format_match": format_match,
-        "version": active_ver,
+        "prefix": "",
+        "period": int(cfg.get("log_period", DEFAULT_LOG_PERIOD_SECONDS)),
+        "sample_rate": int(prov.get("sample_rate", 100)),
+        "edge_only": bool(prov.get("edge_only", False)),
+        "custom_condition": str(prov.get("custom_condition") or ""),
+        "format_match": True,
+        "version": cfg.get("last_activated_version"),
         "cmcd": _cmcd_settings_response(cfg),
     }
     _logging_settings_cache[service_id] = cacheable
@@ -175,21 +149,13 @@ def api_service_log_fields_get(request: Request, service_id: str):
     )
 
 
-@router.post(
-    "/services/{service_id}/log-fields",
-    response_model=LogFieldsUpdateResponse,
-    response_model_exclude_unset=True,
-)
-def api_service_log_fields_set(request: Request, service_id: str, body: LogFieldsUpdateRequest):
+def _normalize_log_fields_payload(raw_lf: Any, cfg: dict) -> dict:
     from backend.config import is_rum_enabled
     from backend.core.catalog import validate_custom_field_entry
     from backend.provision.cmcd_fields import _CMCD_FIELD_NAMES, reconcile_system_custom_fields
     from backend.provision.rum_orchestrator import _RUM_CUSTOM_FIELDS, _RUM_FIELD_NAMES
     from backend.provision.session_scoring.orchestrate import _SCORING_FIELD_NAMES
 
-    require_service_in_scope(request, service_id)
-    cfg = load_service_config(service_id)
-    raw_lf = body.log_fields
     new_lf: dict = (
         raw_lf.model_dump(exclude_none=True) if hasattr(raw_lf, "model_dump") else (dict(raw_lf) if raw_lf else {})
     )
@@ -252,6 +218,19 @@ def api_service_log_fields_set(request: Request, service_id: str, body: LogField
             for cf in new_lf["custom_fields"]
         ]
     new_lf["schema_version"] = 2
+    return new_lf
+
+
+@router.post(
+    "/services/{service_id}/log-fields",
+    response_model=LogFieldsUpdateResponse,
+    response_model_exclude_unset=True,
+)
+def api_service_log_fields_set(request: Request, service_id: str, body: LogFieldsUpdateRequest):
+    require_service_in_scope(request, service_id)
+    cfg = load_service_config(service_id)
+    old_lf = cfg.get("log_fields", {})
+    new_lf = _normalize_log_fields_payload(body.log_fields, cfg)
     old_hash = old_lf.get("format_hash")
     new_hash = lf_module.format_hash(new_lf)
     if old_hash == new_hash:
@@ -260,6 +239,7 @@ def api_service_log_fields_set(request: Request, service_id: str, body: LogField
     new_lf["format_updated_at"] = datetime.now(UTC).isoformat()
     cfg["log_fields"] = new_lf
     mutate_service_config(service_id, lambda c: c.__setitem__("log_fields", new_lf))
+    _logging_settings_cache.pop(service_id, None)
     try:
         from backend.core.metadata.base import export_admin_state
 
@@ -286,6 +266,7 @@ def api_service_update_logging_settings(
     cmcd_enabled: bool | None = Query(default=None),
     cmcd_mode: str | None = Query(default=None),
     cmcd_version: int | None = Query(default=None),
+    body: LoggingSettingsUpdateBody | None = Body(default=None),
 ):
     from backend import config as svcconfig
     from backend.provision.cli import analytics_log_path
@@ -313,10 +294,19 @@ def api_service_update_logging_settings(
         if cond_msg:
             raise HTTPException(status_code=400, detail=make_error("invalid_custom_condition", cond_msg))
         custom_condition = custom_condition.strip()
-    if not 1 <= period <= 86400:
-        raise HTTPException(status_code=400, detail={"error": "Rotation period must be between 1 and 86400 seconds"})
+    if not 1 <= period <= 3600:
+        raise HTTPException(status_code=400, detail={"error": "Rotation period must be between 1 and 3600 seconds"})
     if not 1 <= sample_rate <= 100:
         raise HTTPException(status_code=400, detail={"error": "Sample rate must be between 1 and 100"})
+
+    body_log_fields: dict | None = None
+    raw_body_log_fields = getattr(body, "log_fields", None)
+    if raw_body_log_fields is not None:
+        body_log_fields = _normalize_log_fields_payload(raw_body_log_fields, cfg)
+        body_log_fields["format_hash"] = lf_module.format_hash(body_log_fields)
+        body_log_fields["format_updated_at"] = datetime.now(UTC).isoformat()
+
+    effective_update_format = bool(update_format or body_log_fields is not None)
     token = stored_fastly_token(cfg)
     endpoint_name = prov.get("endpoint_name", "Fastly Object Storage Logs")
     path = analytics_log_path()
@@ -325,7 +315,7 @@ def api_service_update_logging_settings(
         try:
             from backend.provision import update_logging_endpoint
 
-            update_cfg = {
+            update_cfg: dict[str, Any] = {
                 "logging_service_id": service_id,
                 "endpoint_name": endpoint_name,
                 "log_period": period,
@@ -333,45 +323,31 @@ def api_service_update_logging_settings(
                 "sample_rate": sample_rate,
                 "edge_only": edge_only,
                 "custom_condition": custom_condition,
-                "update_format": update_format,
+                "update_format": effective_update_format,
                 "cmcd_enabled": cmcd_enabled,
                 "cmcd_mode": cmcd_mode,
                 "cmcd_version": cmcd_version,
             }
+            if body_log_fields is not None:
+                update_cfg["log_fields"] = body_log_fields
+
             for event in update_logging_endpoint(update_cfg, token):
                 if event.get("type") == "done":
                     new_ver = int(event.get("version") or 0)
                     if event.get("changed", False):
-                        if update_format and new_ver:
-                            _logging_settings_cache[service_id] = {
-                                "prefix": "",
-                                "period": period,
-                                "sample_rate": sample_rate,
-                                "edge_only": edge_only,
-                                "custom_condition": custom_condition,
-                                "format_match": True,
-                                "version": new_ver,
-                                "cmcd": _cmcd_settings_response(cfg, cmcd_enabled, cmcd_mode, cmcd_version),
-                            }
-                        else:
-                            _logging_settings_cache.pop(service_id, None)
-
-                    def _apply_logging_settings(fresh_cfg: dict) -> None:
-                        fresh_prov = fresh_cfg.setdefault("provisioning", {})
-                        fresh_prov["sample_rate"] = sample_rate
-                        fresh_prov["edge_only"] = edge_only
-                        fresh_prov["custom_condition"] = custom_condition
-                        fresh_cfg["log_period"] = period
-                        fresh_cfg["fos_prefix"] = ""
-                        if "cron_sync" in fresh_prov:
-                            if period < 60:
-                                fresh_prov["cron_sync"]["interval_seconds"] = period
-                                fresh_prov["cron_sync"].pop("interval_mins", None)
-                            else:
-                                fresh_prov["cron_sync"]["interval_mins"] = max(1, period // 60)
-                                fresh_prov["cron_sync"].pop("interval_seconds", None)
-
-                    svcconfig.mutate_config(service_id, _apply_logging_settings)
+                        _logging_settings_cache.pop(service_id, None)
+                    if event.get("changed", False) and effective_update_format and new_ver:
+                        cfg_after = svcconfig.load_config(service_id) or cfg
+                        _logging_settings_cache[service_id] = {
+                            "prefix": "",
+                            "period": period,
+                            "sample_rate": sample_rate,
+                            "edge_only": edge_only,
+                            "custom_condition": custom_condition,
+                            "format_match": True,
+                            "version": new_ver,
+                            "cmcd": _cmcd_settings_response(cfg_after, cmcd_enabled, cmcd_mode, cmcd_version),
+                        }
                     if event.get("changed", False):
                         _details: dict = {
                             k: {"from": old_v, "to": new_v}
@@ -391,7 +367,7 @@ def api_service_update_logging_settings(
                         ):
                             if v is not None:
                                 _details[k] = v
-                        if update_format:
+                        if effective_update_format:
                             _details["log_fields_deployed"] = True
                         _record_audit_best_effort(service_id, "logging_settings_update", _details, "stream")
                     try:
@@ -402,6 +378,92 @@ def api_service_update_logging_settings(
                         logger.warning("stream: _sync_crontab failed (ignored)", exc_info=True)
                 yield json.dumps(event)
         except Exception as e:
+            _logging_settings_cache.pop(service_id, None)
             yield _sse("error", redact_error_text(e))
 
     return sse_response(stream())
+
+
+@router.post(
+    "/services/{service_id}/rollback",
+    response_model=ServiceRollbackResponse,
+    response_model_exclude_unset=True,
+)
+def api_service_rollback(
+    request: Request,
+    service_id: str,
+    body: ServiceRollbackBody | None = Body(default=None),
+) -> dict[str, Any]:
+    """Roll back a service's Fastly active version and persisted deployed config snapshot."""
+    from backend import config as svcconfig
+    from backend.provision.declarative.fastly_ops import acquire_vcl_lock
+
+    require_service_in_scope(request, service_id)
+    load_service_config(service_id)
+    token = require_fastly_token(service_id, (body.token or "").strip() if body else "")
+
+    with acquire_vcl_lock(service_id):
+        db_row = None
+        try:
+            with svcconfig.config_lock(service_id), svcconfig._open_or_reuse_conn(service_id) as (conn, _):
+                db_row = conn.execute(
+                    "SELECT previous_deployed_config_json, previous_activated_version "
+                    "FROM service_configs WHERE service_id = ?",
+                    (service_id,),
+                ).fetchone()
+        except Exception:
+            db_row = None
+
+        if db_row is not None:
+            if db_row["previous_deployed_config_json"] is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=make_error(
+                        "no_rollback_snapshot",
+                        f"No previous deployed config snapshot recorded for {service_id}",
+                    ),
+                )
+            prev_ver = db_row["previous_activated_version"]
+            if prev_ver is not None:
+                try:
+                    fastly("PUT", f"/service/{service_id}/version/{prev_ver}/activate", token=token)
+                except Exception as exc:
+                    raise HTTPException(
+                        status_code=502,
+                        detail=make_error(
+                            "rollback_activate_failed",
+                            redact_error_text(f"Failed to reactivate Fastly version {prev_ver}: {exc}"),
+                        ),
+                    ) from exc
+            _restored, activated_ver = svcconfig.rollback_deployed_config(service_id)
+        else:
+            try:
+                _restored, activated_ver = svcconfig.rollback_deployed_config(service_id)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=make_error(
+                        "no_rollback_snapshot",
+                        f"No previous deployed config snapshot recorded for {service_id}",
+                    ),
+                ) from exc
+            if activated_ver is not None:
+                try:
+                    fastly("PUT", f"/service/{service_id}/version/{activated_ver}/activate", token=token)
+                except Exception as exc:
+                    raise HTTPException(
+                        status_code=502,
+                        detail=make_error(
+                            "rollback_activate_failed",
+                            redact_error_text(f"Failed to reactivate Fastly version {activated_ver}: {exc}"),
+                        ),
+                    ) from exc
+
+    _logging_settings_cache.pop(service_id, None)
+    _record_audit_best_effort(service_id, "service_rollback", {"activated_version": activated_ver}, "rollback")
+    msg = (
+        f"Rolled back service {service_id} to Fastly version {activated_ver}."
+        if activated_ver is not None
+        else f"Rolled back service {service_id} configuration snapshot."
+    )
+    return {"ok": True, "activated_version": activated_ver, "message": msg}

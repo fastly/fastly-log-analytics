@@ -111,7 +111,7 @@ fn attach_alongside(other_has_rum: bool) {
     );
     assert_eq!(
         validated["capture"],
-        json!({"mode":"attached","missing_fields":[],"rum_present":other_has_rum,"cmcd_present":false})
+        json!({"mode":"attached","missing_fields":[],"rum_present":other_has_rum,"cmcd_present":false,"scoring_present":false})
     );
     let default_bucket = validated["defaults"]["fos_bucket_name"]
         .as_str()

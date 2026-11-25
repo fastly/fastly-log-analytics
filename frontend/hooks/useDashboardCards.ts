@@ -204,6 +204,7 @@ export function useRumStatus(
       return res.ok ? res.data : null
     },
     enabled: !!serviceId && enabled,
+    staleTime: refetchInterval ? 0 : 60_000,
     refetchInterval,
   })
 }

@@ -302,15 +302,17 @@ export function useBootstrapSyncEffects(
   }, [data, bootstrapIsStale, resolvedActiveServiceId, isRealQueryResult])
 }
 
-export function useBootstrap() {
+function useBootstrapQuery() {
   const queryClient = useQueryClient()
   useEffect(() => subscribeCloudMetadataInvalidation(() => {
     void queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap() })
     void queryClient.invalidateQueries({ queryKey: queryKeys.services() })
     void queryClient.invalidateQueries({ queryKey: queryKeys.logFieldsCatalog() })
+    void queryClient.invalidateQueries({ queryKey: ['rum-status'] })
+    void queryClient.invalidateQueries({ queryKey: ['scoring-status'] })
   }), [queryClient])
 
-  const query = useQuery({
+  return useQuery({
     queryKey: queryKeys.bootstrap(),
     queryFn: async ({ signal }) => {
       const data = await unwrapClient(client.GET('/api/bootstrap', { signal }))
@@ -335,7 +337,10 @@ export function useBootstrap() {
       return settings?.initializing === true ? 2000 : false
     },
   })
+}
 
+export function useBootstrap() {
+  const query = useBootstrapQuery()
   const activeServiceId = useServiceStore(state => state.activeServiceId)
   useBootstrapSyncEffects(query, activeServiceId)
 
@@ -422,17 +427,28 @@ export function useFieldValues({ field, search, limit = 50, enabled = true }: Us
 
 /**
  * Single source of truth for "is this log field / field-group actually enabled
- * for the active service?" — derived from `bootstrap.active_log_field_ids`.
+ * for the active (or specified) service?" — derived from `bootstrap.services`
+ * first so per-service switches/inspections stay cached with zero extra fetches,
+ * falling back to `bootstrap.active_log_field_ids`.
  */
-export function useActiveLogFields() {
-  const { data: bootstrap } = useBootstrap()
-  const { data: catalog } = useLogFieldsCatalog()
+export function useActiveLogFields(serviceIdOverride?: string | null) {
+  const { data: bootstrap } = useBootstrapQuery()
+  const activeServiceId = useEffectiveServiceId()
+  const effectiveSid = serviceIdOverride ?? activeServiceId ?? bootstrap?.active_service_id ?? null
+  const { data: catalog } = useLogFieldsCatalog(effectiveSid ?? undefined)
 
   return useMemo(() => {
-    const ids =
-      (bootstrap as { active_log_field_ids?: string[] } | undefined)?.active_log_field_ids ?? []
-    const activeIds = new Set<string>(ids)
-    const ready = activeIds.size > 0
+    const matchedSvc = effectiveSid
+      ? bootstrap?.services?.find((s) => s.service_id === effectiveSid)
+      : undefined
+    const svcIds = (matchedSvc as { active_log_field_ids?: unknown } | undefined)?.active_log_field_ids
+    const topLevelIds =
+      !effectiveSid || effectiveSid === bootstrap?.active_service_id
+        ? (bootstrap as { active_log_field_ids?: unknown } | undefined)?.active_log_field_ids
+        : undefined
+    const rawIds = Array.isArray(svcIds) ? svcIds : topLevelIds
+    const ready = Array.isArray(rawIds)
+    const activeIds = new Set<string>(ready ? (rawIds as string[]) : [])
 
     const isFieldActive = (id: string): boolean => !ready || activeIds.has(id)
 
@@ -444,5 +460,5 @@ export function useActiveLogFields() {
     }
 
     return { ready, isFieldActive, isGroupActive }
-  }, [bootstrap, catalog])
+  }, [bootstrap, catalog, effectiveSid])
 }

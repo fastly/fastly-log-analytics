@@ -265,8 +265,18 @@ class HighScaleArchiveExpirer:
         retention = {
             d: (days + self.MARGIN_DAYS if days > 0 else 0) for d, days in self._retention_loader(service_id).items()
         }
+        try:
+            svc_cfg = config.load_config(service_id)
+        except Exception:
+            svc_cfg = None
+        include_retained_sources = not config.resolve_raw_delete_after(svc_cfg)
+        manifests = (
+            self._control.expirable_archive_manifests(service_id, retention, limit=limit, include_retained_sources=True)
+            if include_retained_sources
+            else self._control.expirable_archive_manifests(service_id, retention, limit=limit)
+        )
         expired = 0
-        for manifest in self._control.expirable_archive_manifests(service_id, retention, limit=limit):
+        for manifest in manifests:
             try:
                 self._archive.expire(manifest)
                 self._control.mark_archive_expired(manifest.manifest_id)
@@ -316,6 +326,12 @@ class HighScaleDeletionSweeper:
         return result
 
     def _sweep_sources(self, *, service_id: str, limit: int = 100, now: datetime | None = None) -> DeletionSweepResult:
+        try:
+            svc_cfg = config.load_config(service_id)
+        except Exception:
+            svc_cfg = None
+        if not config.resolve_raw_delete_after(svc_cfg):
+            return DeletionSweepResult(0, 0)
         manifest_to_keys: dict[str, list[str]] = {}
         for source in self._control.deletable_sources(service_id, limit=limit):
             manifest_id = getattr(source, "archive_manifest_id", None)

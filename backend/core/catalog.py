@@ -273,8 +273,15 @@ def resolve_active_log_field_ids(lf_config: dict) -> list[str]:
 
 def resolve_enabled_fields(cfg: dict) -> set:
     """Expand group selections and per-field overrides into a flat set of enabled field IDs."""
-    if cfg is None:
-        cfg = {"groups": PRESETS["standard"]["groups"], "field_overrides": {}}
+    if cfg is None or ("groups" not in cfg and "preset" not in cfg):
+        cfg = {**(cfg or {}), "groups": PRESETS["standard"]["groups"]}
+    elif "groups" not in cfg and "preset" in cfg:
+        preset_def = PRESETS.get(cfg["preset"], PRESETS["standard"])
+        cfg = {
+            **cfg,
+            "groups": preset_def["groups"],
+            "field_overrides": {**preset_def.get("field_overrides", {}), **cfg.get("field_overrides", {})},
+        }
     enabled = {f["id"] for f in LOG_FIELD_CATALOG if f["group"] is None}
     enabled_groups = set(cfg.get("groups", []))
     changed = True

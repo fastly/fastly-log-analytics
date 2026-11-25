@@ -40,8 +40,9 @@ for p in [Path.cwd(), Path("/app"), Path(__file__).resolve().parent.parent.paren
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from backend.config import list_configs, load_config  # noqa: E402
+from backend.config import list_configs, load_config, save_config  # noqa: E402
 from backend.core.catalog import LOG_FIELD_CATALOG  # noqa: E402
+from backend.core.metadata.base import closing_pg_pool, ensure_pg_schema  # noqa: E402
 from scripts.lib.log_factory import (  # noqa: E402
     build_pop_wave_weights,
     generate_rum_records,
@@ -471,6 +472,7 @@ def run_target_fos(
             base_dir = f"{prefix}/{min_prefix}" if prefix else min_prefix
             ts_slug = now_utc.strftime("%Y-%m-%dT%H:%M:%S.000")
 
+            specs: list[tuple[int, int, int, str, int, str, str | None]]
             if simulate_pops:
                 if target_rps > 0:
                     wave_rows = min(rows_remaining, max(1, target_rps * log_period))
@@ -814,69 +816,77 @@ def main() -> int:
     except ValueError as exc:
         parser.error(str(exc))
 
-    src = None
-    if args.config:
-        with open(args.config) as f:
-            src = json.load(f)
-    elif args.service_id:
-        src = load_config(args.service_id)
-    else:
-        configs = list_configs()
-        if configs:
-            src = configs[0]
-            print(f"Using default active service: {src.get('service_id')}")
+    with closing_pg_pool():
+        if os.getenv("METADATA_DSN"):
+            ensure_pg_schema()
+
+        src = None
+        if args.config:
+            with open(args.config) as f:
+                src = json.load(f)
+            if os.getenv("METADATA_DSN") and isinstance(src, dict):
+                sid = str(src.get("service_id") or Path(args.config).stem)
+                src.setdefault("service_id", sid)
+                save_config(sid, src)
+        elif args.service_id:
+            src = load_config(args.service_id)
         else:
-            print("ERROR: No configured services found in configs/", file=sys.stderr)
+            configs = list_configs()
+            if configs:
+                src = configs[0]
+                print(f"Using default active service: {src.get('service_id')}")
+            else:
+                print("ERROR: No configured services found in service_configs", file=sys.stderr)
+                return 2
+
+        if not src:
+            print(f"ERROR: Could not load configuration for service {args.service_id!r}", file=sys.stderr)
             return 2
 
-    if not src:
-        print(f"ERROR: Could not load configuration for service {args.service_id!r}", file=sys.stderr)
-        return 2
+        span_hours = args.span_days * 24 if args.span_days else args.span_hours
+        end_dt = datetime.now(UTC)
+        start_dt = end_dt - timedelta(hours=span_hours)
 
-    span_hours = args.span_days * 24 if args.span_days else args.span_hours
-    end_dt = datetime.now(UTC)
-    start_dt = end_dt - timedelta(hours=span_hours)
+        res = 0
+        if args.target == "local":
+            res = run_target_local(
+                src=src, scenario=args.scenario, rows=args.rows, start_dt=start_dt, end_dt=end_dt,
+                batch_size=args.batch_size, file_rows=args.file_rows, seed=args.seed, commit=args.commit,
+                clean=args.clean, dry_run=args.dry_run, rate_rps=args.rate_rps, burst_rps=args.burst_rps,
+                burst_duration=args.burst_duration, burst_interval=args.burst_interval,
+            )
+        elif args.target == "fos":
+            res = run_target_fos(
+                src=src, scenario=args.scenario, rows=args.rows, start_dt=start_dt, end_dt=end_dt,
+                batch_size=args.batch_size, seed=args.seed, dry_run=args.dry_run, rate_rps=args.rate_rps,
+                burst_rps=args.burst_rps, burst_duration=args.burst_duration, burst_interval=args.burst_interval,
+                upload_workers=args.upload_workers, compression=args.compression, gen_workers=args.gen_workers,
+                simulate_pops=args.simulate_pops, pop_count=args.pop_count, log_period=args.log_period,
+                rum_ratio=args.rum_ratio, live_timestamps=args.live_timestamps,
+            )
+        elif args.target == "clickhouse":
+            res = run_target_clickhouse(
+                src=src, scenario=args.scenario, rows=args.rows, start_dt=start_dt, end_dt=end_dt,
+                batch_size=args.batch_size, seed=args.seed, dry_run=args.dry_run,
+                clickhouse_host=args.clickhouse_host, clickhouse_port=args.clickhouse_port,
+                clickhouse_database=args.clickhouse_database, clickhouse_user=args.clickhouse_user,
+                clickhouse_password=args.clickhouse_password, rate_rps=args.rate_rps, burst_rps=args.burst_rps,
+                burst_duration=args.burst_duration, burst_interval=args.burst_interval,
+                clean=args.clean,
+            )
 
-    res = 0
-    if args.target == "local":
-        res = run_target_local(
-            src=src, scenario=args.scenario, rows=args.rows, start_dt=start_dt, end_dt=end_dt,
-            batch_size=args.batch_size, file_rows=args.file_rows, seed=args.seed, commit=args.commit,
-            clean=args.clean, dry_run=args.dry_run, rate_rps=args.rate_rps, burst_rps=args.burst_rps,
-            burst_duration=args.burst_duration, burst_interval=args.burst_interval,
-        )
-    elif args.target == "fos":
-        res = run_target_fos(
-            src=src, scenario=args.scenario, rows=args.rows, start_dt=start_dt, end_dt=end_dt,
-            batch_size=args.batch_size, seed=args.seed, dry_run=args.dry_run, rate_rps=args.rate_rps,
-            burst_rps=args.burst_rps, burst_duration=args.burst_duration, burst_interval=args.burst_interval,
-            upload_workers=args.upload_workers, compression=args.compression, gen_workers=args.gen_workers,
-            simulate_pops=args.simulate_pops, pop_count=args.pop_count, log_period=args.log_period,
-            rum_ratio=args.rum_ratio, live_timestamps=args.live_timestamps,
-        )
-    elif args.target == "clickhouse":
-        res = run_target_clickhouse(
-            src=src, scenario=args.scenario, rows=args.rows, start_dt=start_dt, end_dt=end_dt,
-            batch_size=args.batch_size, seed=args.seed, dry_run=args.dry_run,
-            clickhouse_host=args.clickhouse_host, clickhouse_port=args.clickhouse_port,
-            clickhouse_database=args.clickhouse_database, clickhouse_user=args.clickhouse_user,
-            clickhouse_password=args.clickhouse_password, rate_rps=args.rate_rps, burst_rps=args.burst_rps,
-            burst_duration=args.burst_duration, burst_interval=args.burst_interval,
-            clean=args.clean,
-        )
+        if res == 0 and args.with_clickhouse and args.target != "clickhouse":
+            res = run_target_clickhouse(
+                src=src, scenario=args.scenario, rows=args.rows, start_dt=start_dt, end_dt=end_dt,
+                batch_size=args.batch_size, seed=args.seed, dry_run=args.dry_run,
+                clickhouse_host=args.clickhouse_host, clickhouse_port=args.clickhouse_port,
+                clickhouse_database=args.clickhouse_database, clickhouse_user=args.clickhouse_user,
+                clickhouse_password=args.clickhouse_password, rate_rps=args.rate_rps, burst_rps=args.burst_rps,
+                burst_duration=args.burst_duration, burst_interval=args.burst_interval,
+                clean=args.clean,
+            )
 
-    if res == 0 and args.with_clickhouse and args.target != "clickhouse":
-        res = run_target_clickhouse(
-            src=src, scenario=args.scenario, rows=args.rows, start_dt=start_dt, end_dt=end_dt,
-            batch_size=args.batch_size, seed=args.seed, dry_run=args.dry_run,
-            clickhouse_host=args.clickhouse_host, clickhouse_port=args.clickhouse_port,
-            clickhouse_database=args.clickhouse_database, clickhouse_user=args.clickhouse_user,
-            clickhouse_password=args.clickhouse_password, rate_rps=args.rate_rps, burst_rps=args.burst_rps,
-            burst_duration=args.burst_duration, burst_interval=args.burst_interval,
-            clean=args.clean,
-        )
-
-    return res
+        return res
 
 
 if __name__ == "__main__":

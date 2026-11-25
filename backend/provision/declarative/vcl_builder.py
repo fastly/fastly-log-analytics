@@ -14,6 +14,7 @@ from backend.core.fastly.client import (
     generate_rum_recv_parts,
     generate_rum_vcl,
 )
+from backend.core.service_defaults import DEFAULT_RUM_LOG_PERIOD_SECONDS
 from backend.provision import cli as log_paths
 from backend.provision.cli import VclBuilder
 from backend.provision.declarative.models import (
@@ -52,11 +53,15 @@ def build_rum_log_condition(desired_state: FeatureState | None) -> str:
 
 
 def _state_log_fields_dict(state: FeatureState) -> dict[str, Any]:
-    return {
+    d: dict[str, Any] = {
         "groups": state.log_fields.groups,
         "custom_fields": state.log_fields.custom_fields,
         "field_overrides": state.log_fields.field_overrides,
+        "field_limits": state.log_fields.field_limits,
     }
+    if state.log_fields.preset is not None:
+        d["preset"] = state.log_fields.preset
+    return d
 
 
 def logging_service_snippets(state: FeatureState) -> list[VCLSnippet]:
@@ -368,13 +373,15 @@ def generate_log_format(state: FeatureState) -> str:
     from backend.provision.rum_orchestrator import _RUM_FIELD_NAMES
 
     custom_fields = [cf for cf in state.log_fields.custom_fields if cf.get("name") not in _RUM_FIELD_NAMES]
-    return load_log_format(
-        {
-            "groups": state.log_fields.groups,
-            "custom_fields": custom_fields,
-            "field_overrides": state.log_fields.field_overrides,
-        }
-    )
+    d: dict[str, Any] = {
+        "groups": state.log_fields.groups,
+        "custom_fields": custom_fields,
+        "field_overrides": state.log_fields.field_overrides,
+        "field_limits": state.log_fields.field_limits,
+    }
+    if state.log_fields.preset is not None:
+        d["preset"] = state.log_fields.preset
+    return load_log_format(d)
 
 
 def desired_logging_endpoints(state: FeatureState) -> list[LoggingEndpoint]:
@@ -399,7 +406,7 @@ def desired_logging_endpoints(state: FeatureState) -> list[LoggingEndpoint]:
                 name=state.rum_endpoint_name,
                 endpoint_type="fos",
                 path=log_paths.rum_log_path(),
-                period=state.rum_log_period if state.rum_log_period is not None else state.log_period,
+                period=(state.rum_log_period if state.rum_log_period is not None else DEFAULT_RUM_LOG_PERIOD_SECONDS),
                 response_condition="rum_log_condition",
                 format_string=generate_rum_log_format(),
                 placement=None,

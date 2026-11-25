@@ -115,10 +115,9 @@ def rum_beacon_health(
     source: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    if isinstance(source, dict) and (
-        (isinstance(source.get("rum"), dict) and source["rum"].get("enabled") is False)
-        or source.get("rum_enabled") is False
-    ):
+    from backend import config as svcconfig
+
+    if isinstance(source, dict) and not svcconfig.is_rum_enabled(source):
         return {
             "enabled": False,
             "has_data": False,

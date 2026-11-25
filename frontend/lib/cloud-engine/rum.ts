@@ -7,6 +7,7 @@ import {
 } from "./dashboard/duckdb";
 import type { FiltersPayload } from "@/types/api";
 import { parseEpochMs, roundTo } from "./engine-utils";
+import { fetchCloudMetadata } from "./metadata-cache";
 import { queryRumFromRollup, rumRollupEligible, type RumRollupSource } from "./rum-rollup";
 import { dashboardFiltersToSql, rangeServiceSql } from "./query-params";
 
@@ -565,13 +566,32 @@ export async function queryRumBeaconHealth(params: RumQueryParams = {}) {
   };
 }
 
-export async function queryRumStatus(serviceId = "default") {
+export async function queryRumStatus(serviceId = "default", signal?: AbortSignal) {
+  const response = await fetchCloudMetadata("/api/services", signal ?? new AbortController().signal);
+  if (!response.ok) throw new Error(`Cloud services listing failed (${response.status})`);
+  const { services = [] } = (await response.json()) as {
+    services?: Array<{
+      service_id?: string;
+      rum_enabled?: boolean;
+      faro_version?: string;
+      rum?: {
+        enabled?: boolean;
+        faro_version?: string;
+        sample_rate?: number;
+        endpoint_name?: string;
+      };
+    }>;
+  };
+  const service =
+    serviceId === "default"
+      ? services[0]
+      : services.find((item) => item.service_id === serviceId);
   return {
-    service_id: serviceId,
-    enabled: true,
-    version: "1.0.0",
-    sample_rate: 1.0,
-    endpoint: "/__fla_rum",
+    service_id: service?.service_id ?? serviceId,
+    enabled: service?.rum?.enabled === true || service?.rum_enabled === true,
+    version: service?.rum?.faro_version ?? service?.faro_version ?? "1.0.0",
+    sample_rate: typeof service?.rum?.sample_rate === "number" ? service.rum.sample_rate : 1.0,
+    endpoint: service?.rum?.endpoint_name ?? "/__fla_rum",
   };
 }
 
@@ -621,7 +641,7 @@ export async function handleRumRequest(
     return { status: "complete", service_id: params.service_id ?? "default" };
   }
   if (path.includes("rum/status")) {
-    return queryRumStatus(params.service_id ?? "default");
+    return queryRumStatus(params.service_id ?? "default", params.signal);
   }
   return queryRumAnalytics(params);
 }

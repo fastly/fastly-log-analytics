@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
 from backend.high_scale._common import visible_fact_clauses
@@ -812,9 +813,9 @@ def _base_sql(detection: Detection, insight_id: str) -> str:
     )
 
 
-def _detection_for(insight_id: str, present: set[str]) -> Detection | None:
+def _detection_for(insight_id: str, enabled_fields: AbstractSet[str]) -> Detection | None:
     """The ClickHouse query for ``insight_id``, or None when this service cannot compute it."""
-    fingerprint = _fingerprint_column(present)
+    fingerprint = _fingerprint_column(enabled_fields)
     if insight_id == "botnet_grouping":
         return botnet_grouping(fingerprint) if fingerprint else None
     if insight_id == "repeated_patterns_fp":
@@ -829,5 +830,5 @@ def _detection_for(insight_id: str, present: set[str]) -> Detection | None:
         }
         if not pops or not fingerprint:
             return None
-        return impossible_distance(pops, fingerprint, edge_only="edge" in present)
+        return impossible_distance(pops, fingerprint, edge_only="edge" in enabled_fields)
     return DETECTIONS.get(insight_id)

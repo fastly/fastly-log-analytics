@@ -124,7 +124,7 @@ export function buildHandleModalClose(deps: ModalCloseDeps) {
     if (deps.status === "streaming") return
     deps.onOpenChange(isOpen)
     if (!isOpen) {
-      if (deps.status === "done" || deps.isDone) {
+      if (deps.status === "done") {
         if (deps.selectedService?.id) deps.setActiveServiceId(deps.selectedService.id)
         deps.queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap() })
         clearDraft()

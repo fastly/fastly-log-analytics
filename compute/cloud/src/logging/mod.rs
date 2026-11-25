@@ -1472,9 +1472,10 @@ pub fn uncaptured_fields(state: &Value, existing_vcl: &[&str]) -> Result<Vec<Str
     Ok(reads
         .into_iter()
         .filter(|(_, vcl)| {
-            header_names(vcl, "req.http.")
-                .iter()
-                .any(|header| ours.contains(header) && !theirs.contains(header))
+            header_names(vcl, "req.http.").iter().any(|header| {
+                (ours.contains(header) || header.starts_with("x-edge-score:"))
+                    && !theirs.contains(header)
+            })
         })
         .map(|(name, _)| name)
         .collect())

@@ -32,7 +32,12 @@ def _dump(obj: dict) -> str:
     return json.dumps(obj, indent=2, sort_keys=True) + "\n"
 
 
-from backend.config import is_rum_enabled  # noqa: E402
+from backend.config import (  # noqa: E402
+    is_cmcd_enabled,
+    is_logging_enabled,
+    is_rum_enabled,
+    is_scoring_enabled,
+)
 from backend.core.catalog import validate_vcl_custom_condition  # noqa: E402
 from backend.core.fastly.client import (  # noqa: E402
     _assert_faro_version_safe,
@@ -107,7 +112,7 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
         except ValueError:
             period = DEFAULT_LOG_PERIOD_SECONDS
 
-    rum_period_val = cfg.get("rum_log_period") if cfg.get("rum_log_period") is not None else rum_dict.get("log_period")
+    rum_period_val = rum_dict.get("log_period") if rum_dict.get("log_period") is not None else cfg.get("rum_log_period")
     if rum_period_val is None or rum_period_val == "":
         rum_period = None
     elif isinstance(rum_period_val, bool) or not isinstance(rum_period_val, (int, str)):
@@ -156,7 +161,7 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
             raise ValueError(f"Invalid rum_custom_condition: {rum_cond_msg}")
     top_rum_cond = raw_top_rum_cond.strip()
     nested_rum_cond = raw_nested_rum_cond.strip()
-    rum_cond = top_rum_cond if cfg.get("rum_custom_condition") is not None else nested_rum_cond
+    rum_cond = nested_rum_cond if rum_dict.get("custom_condition") is not None else top_rum_cond
 
     nested_faro = _tf_str(rum_dict.get("faro_version"), "rum.faro_version")
     top_faro = _tf_str(cfg.get("faro_version"), "faro_version")
@@ -172,9 +177,7 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
     nested_cmcd_mode = _tf_str(cmcd_cfg.get("mode"), "cmcd.mode")
     cmcd_mode = top_cmcd_mode or nested_cmcd_mode or "query_string"
 
-    scoring_enabled = bool(
-        scoring_cfg["enabled"] if scoring_cfg.get("enabled") is not None else cfg.get("scoring_enabled", False)
-    )
+    scoring_enabled = is_scoring_enabled(cfg)
     dom_aliases = (
         _tf_str(scoring_cfg.get("domain"), "scoring.domain"),
         _tf_str(scoring_cfg.get("scoring_domain"), "scoring.scoring_domain"),
@@ -225,13 +228,11 @@ def generate_terraform(cfg: dict[str, Any], fos_access_key: str, fos_secret_key:
         "custom_condition": custom_condition,
         "fos_prefix": prefix,
         "cdn_shield": resolved_shield,
-        "logging_enabled": bool(cfg.get("logging_enabled", True)),
+        "logging_enabled": is_logging_enabled(cfg),
         "rum_enabled": is_rum_enabled(cfg),
         "rum": rum_for_fs,
         "cmcd": {
-            "enabled": bool(
-                cfg["cmcd_enabled"] if cfg.get("cmcd_enabled") is not None else cmcd_cfg.get("enabled", False)
-            ),
+            "enabled": is_cmcd_enabled(cfg),
             "mode": cmcd_mode,
             "version": cmcd_version,
         },

@@ -2300,7 +2300,7 @@ fn request_ingest_keeps_the_logging_cadence_after_consecutive_idles() {
     let fake = Fake::new(BASE + 3600);
     tick_runtime(&fake);
     let mut svc = service();
-    svc.log_period = 10;
+    svc.log_period = 60;
     fake.kv.borrow_mut().insert(
         format!("svc:{SID}"),
         (1, serde_json::to_value(svc).unwrap()),
@@ -2320,14 +2320,26 @@ fn request_ingest_keeps_the_logging_cadence_after_consecutive_idles() {
         record.mirror.jobs.ingest.idle_streak, 1,
         "the resumed snapshot is followed by one empty forward poll"
     );
-    assert!(tick_wake_at(&record) <= fake.now.get() + 10);
+    // Hold maintenance dispatch and straggler sweep past the 4-step 60s cadence window so
+    // consecutive pure request_ingest idle polls are exercised uninterrupted (matching
+    // steady_state_idle_dispatches_batch_kv_writes_and_reconcile_on_flush).
+    {
+        let mut kv = fake.kv.borrow_mut();
+        if let Some((_, cron_val)) = kv.get_mut("cron:state") {
+            cron_val["jobs"]["maint"]["retry_after"] = json!((BASE + 7200) as u64);
+        }
+        if let Some((_, wm_val)) = kv.get_mut(ingest::WATERMARK_KEY) {
+            wm_val["sweep"]["at"] = json!((BASE + 7200) as u64);
+        }
+    }
+    assert!(tick_wake_at(&record) <= fake.now.get() + 60);
     let total_ingest_runs = |fake: &Fake| {
         ingest_runs(fake) + peek(fake, SCHED_KEY).map_or(0, |s| s.deferred_idle.len())
     };
     for step in 0..4 {
         let next = next_ingest_at(&peek(&fake, SCHED_KEY).unwrap().mirror);
         let advance_s = next - fake.now.get();
-        assert!((1..=10).contains(&advance_s));
+        assert!((1..=60).contains(&advance_s));
         let before_ingest_runs = total_ingest_runs(&fake);
         for dt in 1..advance_s {
             fake.now.set(fake.now.get() + 1);
@@ -2347,7 +2359,7 @@ fn request_ingest_keeps_the_logging_cadence_after_consecutive_idles() {
         let record = peek(&fake, SCHED_KEY).unwrap();
         assert_eq!(record.mirror.jobs.ingest.idle_streak, step + 2);
         let now = fake.now.get();
-        assert!((now + 1..=now + 10).contains(&next_ingest_at(&record.mirror)));
+        assert!((now + 1..=now + 60).contains(&next_ingest_at(&record.mirror)));
     }
 
     put_raw(&fake, BASE + 120, "b", &[line(BASE + 120, "b")]);
@@ -2369,7 +2381,7 @@ fn request_ingest_keeps_the_logging_cadence_after_consecutive_idles() {
     assert_eq!(record.mirror.jobs.ingest.idle_streak, 1);
     assert_eq!(record.mirror.jobs.ingest.retry_after, 0);
     assert!(record.deferred_idle.is_empty());
-    assert!((fake.now.get() + 1..=fake.now.get() + 10).contains(&tick_wake_at(&record)));
+    assert!((fake.now.get() + 1..=fake.now.get() + 60).contains(&tick_wake_at(&record)));
 }
 
 #[test]

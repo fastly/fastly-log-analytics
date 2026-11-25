@@ -26,8 +26,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 import { useDebounce } from '@/hooks/useDashboardCards'
-import { useFieldValues, useLogFieldsCatalog } from '@/hooks/useBootstrap'
-import { useMaskIps } from '@/hooks/useBootstrap'
+import { useActiveLogFields, useFieldValues, useLogFieldsCatalog, useMaskIps } from '@/hooks/useBootstrap'
 import { useCopyToClipboard } from '@/hooks/useSSE'
 
 interface FieldSearchDialogProps {
@@ -207,6 +206,7 @@ type TopTenItem = DashboardTableData['top'][number]
 export const TopTenTable = React.memo(function TopTenTable({ title, icon, field, data, compareData, onRowClick, inActiveFormat = true }: TopTenTableProps) {
   const { copied, copy } = useCopyToClipboard(2000)
   const { data: catalog } = useLogFieldsCatalog()
+  const { ready: activeFieldsReady, isFieldActive } = useActiveLogFields()
   // PII: a masking analyst can't drill down by client IP (value is masked,
   // backend 403s the filter). Make the `ip` card's rows non-interactive and
   // hide its value-search dialog. Other cards (incl. `oip`) are unaffected.
@@ -323,12 +323,19 @@ export const TopTenTable = React.memo(function TopTenTable({ title, icon, field,
           }
         }
       } else if (field === '_ngwaf_bot_name' || field === 'waf_sig_ind') {
-        // Virtual fields are FORCE_VISIBLE — inActiveFormat doesn't reflect
-        // whether the underlying NGWAF fields are enabled, so the message
-        // is the only signal we can give the user.
-        requiredGroupMessage = `Requires NGWAF fields to be enabled in Fastly logging.`
+        // Virtual fields are FORCE_VISIBLE — inActiveFormat may stay true, so gate on
+        // active_log_field_ids (via useActiveLogFields) rather than empty data rows.
+        const ngwafActive = activeFieldsReady
+          ? isFieldActive('waf_sig') || isFieldActive('ngwaf_action') || isFieldActive('waf_req_id')
+          : inActiveFormat
+        if (!ngwafActive) {
+          requiredGroupMessage = `Requires NGWAF fields to be enabled in Fastly logging.`
+        }
       } else if (field === '_bot_name') {
-        requiredGroupMessage = `Requires User-Agent field to be enabled in Fastly logging.`
+        const uaActive = activeFieldsReady ? isFieldActive('ua') : inActiveFormat
+        if (!uaActive) {
+          requiredGroupMessage = `Requires User-Agent field to be enabled in Fastly logging.`
+        }
       }
     }
 

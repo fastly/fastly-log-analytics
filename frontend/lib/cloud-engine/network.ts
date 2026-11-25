@@ -24,6 +24,25 @@ export const TCP_FIELDS = [
   "client_tcpi_delta_retrans",
 ] as const;
 
+export const TCP_FIELD_CATALOG_IDS: Record<string, readonly string[]> = {
+  client_rtt_us: ["client_rtt_us", "tcp_rtt", "tcpi_rtt"],
+  client_tcpi_rtt: ["client_tcpi_rtt", "tcp_rtt", "tcpi_rtt"],
+  client_ploss: ["client_ploss", "ploss"],
+  client_cwnd: ["client_cwnd", "cwnd", "q_cwnd", "tcpi_snd_cwnd"],
+  client_tcpi_rttvar: ["client_tcpi_rttvar", "rtt_var", "q_rtt_var", "tcpi_rtt_var"],
+  client_tcpi_delta_retrans: ["client_tcpi_delta_retrans", "retrans", "tcpi_total_retrans"],
+  client_tcpi_rcv_space: ["client_tcpi_rcv_space", "tcpi_rcv_space"],
+  client_tcpi_snd_mss: ["client_tcpi_snd_mss", "tcpi_snd_mss"],
+};
+
+export function missingTcpFieldsFromActiveIds(enabled: ReadonlySet<string>): string[] {
+  return TCP_FIELDS.filter((f) => !(TCP_FIELD_CATALOG_IDS[f] ?? [f]).some((id) => enabled.has(id)));
+}
+
+export function hasTcpRttField(enabled: ReadonlySet<string>): boolean {
+  return (TCP_FIELD_CATALOG_IDS.client_rtt_us ?? ["client_rtt_us"]).some((id) => enabled.has(id));
+}
+
 export const PROTOCOL_BUCKETS = [
   "HTTP/3",
   "HTTP/2",
@@ -68,6 +87,7 @@ export interface NetworkQueryParams {
   network_residual?: boolean;
   engine?: Pick<DuckDBAnalyticalEngine, "executeSql" | "getPresentColumns"> & Partial<Pick<DuckDBReadContext, "getCustomColumnTypes">>;
   customColumnTypes?: ReturnType<DuckDBReadContext["getCustomColumnTypes"]>;
+  active_log_field_ids?: readonly string[];
   signal?: AbortSignal;
 }
 
@@ -612,21 +632,16 @@ async function queryNetworkShielding(
 }
 
 async function detectMissingTcpFields(
-  engine: Pick<DuckDBAnalyticalEngine, "getPresentColumns">,
-): Promise<string[]> {
-  const present = await engine.getPresentColumns();
-  if (present.size === 0) {
-    return [...TCP_FIELDS];
-  }
-  const aliases: Record<string, string[]> = {
-    client_rtt_us: ["tcp_rtt", "tcpi_rtt"],
-    client_tcpi_rtt: ["tcp_rtt", "tcpi_rtt"],
-    client_ploss: ["ploss"],
-    client_cwnd: ["cwnd", "tcpi_snd_cwnd"],
-    client_tcpi_rttvar: ["rtt_var", "tcpi_rtt_var"],
-    client_tcpi_delta_retrans: ["retrans", "tcpi_total_retrans"],
+  params: Pick<NetworkQueryParams, "service_id" | "signal">,
+): Promise<{ missingTcpFields: string[]; hasRtt: boolean }> {
+  const enabled = await cloudActiveLogFieldIds(
+    params.service_id,
+    params.signal ?? new AbortController().signal,
+  );
+  return {
+    missingTcpFields: missingTcpFieldsFromActiveIds(enabled),
+    hasRtt: hasTcpRttField(enabled),
   };
-  return TCP_FIELDS.filter((f) => ![f, ...(aliases[f] ?? [])].some((field) => present.has(field)));
 }
 
 // Same section gates as the backend, so a page's split requests don't repeat each other's scans.
@@ -650,7 +665,7 @@ async function queryNetworkHealthSections(params: NetworkQueryParams) {
 export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
   const engine = params.engine ?? getDuckDBEngine().readContext();
   params = { ...params, customColumnTypes: engine.getCustomColumnTypes?.() };
-  const missingTcpFields = await detectMissingTcpFields(engine);
+  const { missingTcpFields } = await detectMissingTcpFields(params);
   const where = buildWhereClause(params);
   if (mapOnly(params.sections)) {
     // The core tables' keys come back empty, as when there are no rows.
@@ -921,7 +936,7 @@ async function queryNetworkQualityParts(
 export async function queryNetworkQuality(params: NetworkQueryParams = {}) {
   const engine = params.engine ?? getDuckDBEngine().readContext();
   params = { ...params, customColumnTypes: engine.getCustomColumnTypes?.() };
-  const missingTcpFields = await detectMissingTcpFields(engine);
+  const { missingTcpFields, hasRtt } = await detectMissingTcpFields(params);
   const where = buildWhereClause(params);
 
   const regionCountrySql = duckSqlString(String(params.region_country ?? "US"));
@@ -980,7 +995,7 @@ export async function queryNetworkQuality(params: NetworkQueryParams = {}) {
 
   const totalRequests = Number(summaryRow?.requests ?? 0);
   if (totalRequests === 0) {
-    return emptyNetworkQuality(missingTcpFields);
+    return { ...emptyNetworkQuality(missingTcpFields), available: hasRtt };
   }
 
   await asnNamesReady;
@@ -1063,7 +1078,7 @@ export async function queryNetworkQuality(params: NetworkQueryParams = {}) {
   const byPopRows = qualitySet("pop").map((row) => ({ pop: row.pop_key, rtt_ms: row.rtt_ms, reqs: row.reqs }));
   const regionRows = qualitySet("region_country").map((row) => ({ value: row.region_key, rtt_ms: row.rtt_ms, reqs: row.reqs }));
   return {
-    available: s.avg_rtt_us != null,
+    available: hasRtt,
     by_country: by_region.map((row) => bar(row.region, resolveCountryName(row.region), row)),
     by_pop: byPopRows.map((row) => ({ ...row, value: String(row.pop ?? "Unknown"), label: String(row.pop ?? "Unknown") })),
     countries: by_region.map((row) => row.region),

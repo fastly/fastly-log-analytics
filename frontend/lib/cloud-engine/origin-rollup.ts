@@ -39,6 +39,8 @@ export type OriginRollupBody = {
   slow_urls_min_requests?: number;
   pop_latency_limit?: number;
   sections?: readonly string[] | null;
+  active_log_field_ids?: readonly string[];
+  edge_only?: boolean;
 };
 
 const PERCENTILES: Record<string, number> = { p50: 0.5, p95: 0.95, p99: 0.99 };
@@ -192,7 +194,10 @@ function popLatency(result: RollupResult, body: OriginRollupBody): OriginPopLate
     .map(([pop, agg]) => ({ pop, requests: agg.requests, p50_ms: ms(agg.hists.ttfb, 0.5), p95_ms: ms(agg.hists.ttfb, 0.95) }))
     .sort((a, b) => (b.p95_ms ?? -1) - (a.p95_ms ?? -1) || b.requests - a.requests || (a.pop < b.pop ? -1 : 1))
     .slice(0, clampLimit(body.pop_latency_limit, 30));
-  return shapeOriginPopLatencyRows(rows, { requiresGroupC: false });
+  const requiresGroupC = Array.isArray(body.active_log_field_ids)
+    ? !body.active_log_field_ids.includes("edge")
+    : false;
+  return shapeOriginPopLatencyRows(rows, { requiresGroupC });
 }
 
 /** Whether the series bucket needs the per-minute `series1` rows: it doesn't tile 5 minutes. */
@@ -353,7 +358,11 @@ export function originAggregatesFromRollup(
  * of edge `rid` to shield `prid`), ranked by requests desc and p50 desc.
  * Returns null when summaries predate `shield_routes`.
  */
-export function shieldingFromRollup(result: RollupResult, limit = 50) {
+export function shieldingFromRollup(
+  result: RollupResult,
+  limit = 50,
+  options?: { active_log_field_ids?: readonly string[]; edge_only?: boolean },
+) {
   const routes = rollupGroup(result.rollup, "shield_routes", "route");
   if (!routes) return null;
   const safeLimit = Math.max(1, Math.min(200, Math.trunc(limit)));
@@ -377,14 +386,19 @@ export function shieldingFromRollup(result: RollupResult, limit = 50) {
   const rows = byReqs.filter((r) => keep.has(r));
   const total_routes = routes.size;
   const truncated = total_routes > rows.length || result.rollup.truncated.has("shield_routes/route");
-  const totalReqs = [...(result.rollup.dims.get("country")?.values() ?? [])].reduce((sum, a) => sum + a.requests, 0);
+  const activeSet = Array.isArray(options?.active_log_field_ids)
+    ? new Set(options.active_log_field_ids)
+    : null;
+  const requiresFields = activeSet
+    ? ["edge", "rid", "prid", "pop"].filter((f) => !activeSet.has(f))
+    : ([] as string[]);
   return {
-    has_data: rows.length > 0,
-    requires_fields: [] as string[],
-    edge_only: rows.length === 0 && totalReqs > 0,
-    rows,
-    total_routes,
-    truncated,
+    has_data: rows.length > 0 && requiresFields.length === 0,
+    requires_fields: requiresFields,
+    edge_only: typeof options?.edge_only === "boolean" ? options.edge_only : false,
+    rows: requiresFields.length > 0 ? [] : rows,
+    total_routes: requiresFields.length > 0 ? 0 : total_routes,
+    truncated: requiresFields.length > 0 ? false : truncated,
     error: false,
     _approx: true as const,
     _approx_note: "≈ (window-local join)",
@@ -473,7 +487,10 @@ export async function originFromRollup(
     return filter ? filteredOriginSummary(result, filter) : null;
   }
   if (path === "/api/origin/shielding-analysis") {
-    const shielding = shieldingFromRollup(result, body.limit ?? 50);
+    const shielding = shieldingFromRollup(result, body.limit ?? 50, {
+      active_log_field_ids: body.active_log_field_ids,
+      edge_only: body.edge_only,
+    });
     if (!shielding) return null;
     return {
       ...shielding,

@@ -1181,6 +1181,12 @@ describe('Performance, Fastly-Value & Origin smoke tests', () => {
       }
       for (const txt of ['png', 'webp', '3.2x']) expect(screen.getByText(txt)).toBeTruthy()
     })
+
+    it('suppresses the not-enabled banner when ioFieldsEnabled is true even with zero IO transforms', () => {
+      render(<IOValueTab data={baseIOData} ioFieldsEnabled={true} />)
+      expect(screen.queryByText(/Image Optimizer is not enabled on this service/i)).toBeNull()
+      expect(screen.getByText(/Image Optimizer fields are enabled/i)).toBeTruthy()
+    })
   })
 
   const MOCK_ORIGIN_DATA = {

@@ -762,12 +762,28 @@ def value_summary(
             pre_p99_rows = None
 
         total_requests = sum(int(b.get("total", 0) or 0) for b in buckets)
-        has_waf = any(
-            int(b.get("waf_sample_cnt") or 0) > 0
-            or int(b.get("waf_inspected") or 0) > 0
-            or int(b.get("threats_cnt") or 0) > 0
-            for b in buckets
-        )
+        from backend import config as svcconfig
+
+        try:
+            svc_cfg = svcconfig.load_config(service.service_id)
+        except Exception:
+            svc_cfg = None
+        if svc_cfg is not None:
+            active_fields = set(svcconfig.active_log_field_ids(svc_cfg))
+            has_resp_bytes = "resp_bytes" in active_fields
+            has_shield = "edge" in active_fields
+            has_elapsed = "elapsed" in active_fields
+            has_waf = "waf" in active_fields
+        else:
+            has_resp_bytes = True
+            has_shield = True
+            has_elapsed = True
+            has_waf = any(
+                int(b.get("waf_sample_cnt") or 0) > 0
+                or int(b.get("waf_inspected") or 0) > 0
+                or int(b.get("threats_cnt") or 0) > 0
+                for b in buckets
+            )
         result: dict[str, Any] = {}
         shaped: dict[str, Any] = {}
 
@@ -775,10 +791,10 @@ def value_summary(
             shaped = _shape_caching_and_overview_buckets(
                 buckets,
                 include_overview="overview" in wanted,
-                has_resp_bytes=True,
-                has_shield=True,
+                has_resp_bytes=has_resp_bytes,
+                has_shield=has_shield,
                 has_waf=has_waf,
-                has_elapsed=True,
+                has_elapsed=has_elapsed,
                 include_performance="performance" in wanted,
             )
             if "caching" in wanted and "caching" in shaped:

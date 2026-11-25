@@ -26,8 +26,11 @@ class BootstrapService(WireSafeModel):
     service_id: str
     name: str | None = None
     cmcd_enabled: bool | None = None
+    scoring_enabled: bool | None = None
     rum_enabled: bool | None = None
+    logging_enabled: bool | None = None
     rum_log_period: int | None = None
+    active_log_field_ids: list[str] | None = None
 
 
 class BootstrapSettings(WireSafeModel):

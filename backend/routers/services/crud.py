@@ -90,8 +90,13 @@ def api_service_cron_settings(request: Request, service_id: str, body: ServiceCr
         try:
             yield _sse("progress", current=0, total=4)
             yield _sse("status", f"Applying configuration for {service_id}...")
-            if not svcconfig.load_config(service_id):
+            prev_cfg = svcconfig.load_config(service_id)
+            if not prev_cfg:
                 raise ValueError("Service not found")
+            baseline_raw = svcconfig.snapshot_config(service_id)
+            prev_rum_period = (prev_cfg.get("rum") or {}).get("log_period")
+            if prev_rum_period is None:
+                prev_rum_period = prev_cfg.get("rum_log_period")
             yield _sse("progress", current=1, total=4)
             yield _sse("status", "Updating sync and NGWAF schedules...")
 
@@ -122,8 +127,39 @@ def api_service_cron_settings(request: Request, service_id: str, body: ServiceCr
 
             yield _sse("progress", current=2, total=4)
             yield _sse("status", "Saving settings to local database...")
-            if svcconfig.mutate_config(service_id, _apply) is None:
+            updated_cfg = svcconfig.mutate_config(service_id, _apply)
+            if updated_cfg is None:
                 raise ValueError("Service not found")
+            rum_incoming = body_payload.get("rum")
+            new_rum_period = (updated_cfg.get("rum") or {}).get("log_period")
+            if new_rum_period is None:
+                new_rum_period = updated_cfg.get("rum_log_period")
+            rum_period_changed = (
+                isinstance(rum_incoming, dict)
+                and rum_incoming.get("log_period") is not None
+                and new_rum_period != prev_rum_period
+            )
+            token = stored_fastly_token(updated_cfg)
+            if rum_period_changed and token:
+                from backend.provision.declarative.reconciler import transactional_vcl_reconcile
+
+                yield _sse("status", "Reconciling RUM Fastly logging period...")
+                try:
+                    reconcile_res = transactional_vcl_reconcile(
+                        service_id,
+                        token,
+                        dry_run=False,
+                        activate=True,
+                        status_cb=None,
+                    )
+                    if getattr(reconcile_res, "error", None):
+                        raise RuntimeError(reconcile_res.error)
+                except Exception:
+                    if baseline_raw is not None:
+                        svcconfig.restore_config_snapshot(service_id, baseline_raw)
+                    raise
+            elif baseline_raw is not None:
+                svcconfig.record_deployed_config(service_id)
             yield _sse("progress", current=3, total=4)
             yield _sse("status", "Synchronizing APScheduler...")
             try:
@@ -268,7 +304,8 @@ def api_service_update_credentials(request: Request, service_id: str, body: Serv
     """Rotate or validate and update FOS credentials for a service."""
     import botocore.exceptions
 
-    from backend.core.fos_client import _get_fos_client
+    from backend import config as svcconfig
+    from backend.core.fos_client import _get_fos_client, clear_fos_client
 
     require_service_in_scope(request, service_id)
     cfg = load_service_config(service_id)
@@ -278,8 +315,13 @@ def api_service_update_credentials(request: Request, service_id: str, body: Serv
     api_token, access_key, secret_key = body.api_token.strip(), body.access_key.strip(), body.secret_key.strip()
     if api_token:
         from backend.core.fastly.client import fastly
+        from backend.provision.declarative.reconciler import (
+            reconcile_cdn_service_state,
+            transactional_vcl_reconcile,
+        )
         from backend.provision.opaque_names import generate_opaque_label
 
+        baseline_raw = svcconfig.snapshot_config(service_id)
         desc = f"fos-log-analysis-{generate_opaque_label('key')}"
         try:
             key = fastly(
@@ -290,16 +332,62 @@ def api_service_update_credentials(request: Request, service_id: str, body: Serv
             )
         except RuntimeError as e:
             raise_internal(logger, e, code="fos_key_create_failed", status=400)
-        old_key_id = cfg.get("provisioning", {}).get("fos_key_id")
-        if old_key_id and old_key_id != key["access_key"]:
+        new_key_id = key.get("id") or key["access_key"]
+        old_key_id = (cfg.get("provisioning") or {}).get("fos_key_id") or cfg.get("fos_access_key_id")
+        try:
+            updated_cfg = mutate_service_config(
+                service_id,
+                lambda c: _store_fos_credentials(c, key["access_key"], key["secret_key"]),
+            )
+            effective_cfg = updated_cfg if isinstance(updated_cfg, dict) else cfg
+            has_cdn = bool(
+                effective_cfg.get("cdn_url")
+                or (effective_cfg.get("fos_proxy") or {}).get("domain")
+                or effective_cfg.get("cdn_service_id")
+                or (effective_cfg.get("provisioning") or {}).get("cdn_service_id")
+            )
+            if has_cdn:
+                reconcile_cdn_service_state(service_id, api_token, activate=True)
+            if svcconfig.is_rum_enabled(effective_cfg):
+                vcl_res = transactional_vcl_reconcile(
+                    service_id,
+                    api_token,
+                    dry_run=False,
+                    activate=True,
+                )
+                if getattr(vcl_res, "error", None):
+                    raise RuntimeError(vcl_res.error)
+            if old_key_id and old_key_id not in (key["access_key"], new_key_id):
+                try:
+                    fastly(
+                        "DELETE",
+                        f"/resources/object-storage/access-keys/{old_key_id}",
+                        token=api_token,
+                        expect_empty=True,
+                    )
+                except RuntimeError:
+                    pass
+            if baseline_raw is not None:
+                svcconfig.record_deployed_config(service_id)
+            clear_fos_client(service_id)
+            return {"ok": True, "message": "Key rotated via Fastly API", "access_key_id": key["access_key"]}
+        except Exception as e:
+            if baseline_raw is not None:
+                svcconfig.restore_config_snapshot(service_id, baseline_raw)
+            else:
+                mutate_service_config(
+                    service_id,
+                    lambda c: _store_fos_credentials(
+                        c, cfg.get("fos_access_key_id", ""), cfg.get("fos_secret_access_key", "")
+                    ),
+                )
             try:
                 fastly(
-                    "DELETE", f"/resources/object-storage/access-keys/{old_key_id}", token=api_token, expect_empty=True
+                    "DELETE", f"/resources/object-storage/access-keys/{new_key_id}", token=api_token, expect_empty=True
                 )
-            except RuntimeError:
-                pass
-        mutate_service_config(service_id, lambda c: _store_fos_credentials(c, key["access_key"], key["secret_key"]))
-        return {"ok": True, "message": "Key rotated via Fastly API", "access_key_id": key["access_key"]}
+            except Exception as rollback_err:
+                logger.warning("rotate_fos_credentials rollback key cleanup failed (%s)", type(rollback_err).__name__)
+            raise_internal(logger, e, code="fos_credentials_rotate_failed")
     if not access_key or not secret_key:
         raise HTTPException(
             status_code=400,
@@ -328,6 +416,7 @@ def api_service_update_credentials(request: Request, service_id: str, body: Serv
     except Exception as e:
         raise_internal(logger, e, code="fos_credentials_failed", status=400)
     mutate_service_config(service_id, lambda c: _store_fos_credentials(c, access_key, secret_key))
+    clear_fos_client(service_id)
     return {"ok": True, "message": "Credentials updated successfully"}
 
 

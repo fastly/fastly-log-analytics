@@ -123,6 +123,29 @@ def _ensure_metadata_database() -> None:
     except Exception:
         pass
 
+    repo_root = str(Path(__file__).resolve().parents[1])
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+
+    try:
+        import contextlib
+
+        from backend import config as svcconfig
+        from backend.core.metadata.base import ensure_pg_schema
+        from backend.core.metadata.pg_pool import get_pg_readonly_connection
+
+        ensure_pg_schema()
+        configs_dir = os.environ.get("CONTRACT_CONFIGS_DIR")
+        if configs_dir:
+            with contextlib.closing(get_pg_readonly_connection()) as conn:
+                conn.execute("DELETE FROM service_configs")
+                if hasattr(conn, "commit"):
+                    conn.commit()
+            svcconfig.invalidate_config_cache()
+            svcconfig.migrate_legacy_file_configs_once(Path(configs_dir).resolve())
+    except Exception:
+        pass
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()

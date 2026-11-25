@@ -173,9 +173,11 @@ def _resolve_fastly_token(token_override: str | None) -> str:
 
 @sharing_domain_router.post("/deploy-frontend", response_model=SharingDeployResponse)
 def deploy_frontend(payload: SharingDeployRequest):
+    from backend import config as svcconfig
     from backend.utils.router_utils import mutate_service_config, raise_internal
 
     token = _resolve_fastly_token(payload.token_override)
+    baseline_raw = svcconfig.snapshot_config(payload.service_id) if payload.service_id else None
     try:
         res = deploy_remote_frontend(
             service_name=payload.service_name,
@@ -186,6 +188,7 @@ def deploy_frontend(payload: SharingDeployRequest):
             token=token,
             override_host=payload.override_host,
         )
+        saved_remote = False
         if payload.service_id:
             remote_frontend_spec = {
                 "service_id": res["service_id"],
@@ -197,34 +200,46 @@ def deploy_frontend(payload: SharingDeployRequest):
                 mutate_service_config(
                     payload.service_id, lambda c: c.__setitem__("remote_frontend", remote_frontend_spec)
                 )
+                saved_remote = True
             except Exception as e:
                 logger.warning(f"Could not save remote_frontend to config of service {payload.service_id}: {e}")
         try:
             get_tunnel_manager().start_sharing(public_endpoint=f"https://{res['domain_name']}")
         except Exception as e:
             logger.warning(f"Could not automatically activate sharing for {res['domain_name']}: {e}")
+        if payload.service_id and saved_remote and baseline_raw is not None:
+            svcconfig.record_deployed_config(payload.service_id)
         return res
     except Exception as exc:
+        if payload.service_id and baseline_raw is not None:
+            svcconfig.restore_config_snapshot(payload.service_id, baseline_raw)
         raise_internal(logger, exc)
 
 
 @sharing_domain_router.post("/teardown-frontend", response_model=OkMessageResponse, response_model_exclude_unset=True)
 def teardown_frontend(payload: SharingTeardownRequest):
+    from backend import config as svcconfig
     from backend.utils.router_utils import load_service_config, mutate_service_config, raise_internal
 
     token = _resolve_fastly_token(payload.token_override)
+    baseline_raw: str | None = None
     try:
         cfg = load_service_config(payload.service_id)
+        baseline_raw = svcconfig.snapshot_config(payload.service_id)
         remote_frontend = cfg.get("remote_frontend")
         if not remote_frontend or not remote_frontend.get("service_id"):
             return {"ok": True, "message": "No remote frontend configured or already torn down"}
         remote_service_id = remote_frontend["service_id"]
         delete_remote_frontend(remote_service_id=remote_service_id, token=token)
         mutate_service_config(payload.service_id, lambda c: c.pop("remote_frontend", None))
+        if baseline_raw is not None:
+            svcconfig.record_deployed_config(payload.service_id)
         return {"ok": True, "message": f"Successfully deleted remote frontend service {remote_service_id}"}
     except HTTPException:
         raise
     except Exception as exc:
+        if baseline_raw is not None:
+            svcconfig.restore_config_snapshot(payload.service_id, baseline_raw)
         raise_internal(logger, exc)
 
 

@@ -29,6 +29,8 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { client } from '@/lib/api'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
+import { invalidateCloudConfigMetadata } from '@/lib/cloud-engine/metadata-cache'
+import { invalidateLogFieldQueries, queryKeys } from '@/lib/api'
 import { formatLocalDateTime } from '@/lib/utils'
 import type { components } from '@/types/api'
 import { StatusPanelHelp } from './help-content'
@@ -167,6 +169,7 @@ function CloudScoringJobButton({
   trigger: React.ReactNode
   onComplete: () => void
 }) {
+  const queryClient = useQueryClient()
   const [open, setOpen] = React.useState(false)
   const [running, setRunning] = React.useState(false)
   const [stepText, setStepText] = React.useState('')
@@ -174,6 +177,14 @@ function CloudScoringJobButton({
   const [needsToken, setNeedsToken] = React.useState(false)
   const [token, setToken] = React.useState('')
   const [confirmSid, setConfirmSid] = React.useState('')
+
+  const invalidateScoringAndMetadata = () => {
+    if (isCloudMode()) invalidateCloudConfigMetadata()
+    invalidateLogFieldQueries(queryClient, serviceId)
+    void queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap() })
+    void queryClient.invalidateQueries({ queryKey: queryKeys.services() })
+    invalidateServiceScoringQueries(queryClient, serviceId)
+  }
 
   const runCloudJob = async () => {
     setRunning(true)
@@ -192,7 +203,7 @@ function CloudScoringJobButton({
         body: JSON.stringify(payload),
       })
       const startBody = (await res.json()) as {
-        job?: { id: string; status: string; step: string; error?: string | null }
+        job?: { id: string; status: string; step: string; error?: string | null; retry?: { at?: number } | null }
         error?: string
         detail?: { error?: string }
       }
@@ -204,28 +215,56 @@ function CloudScoringJobButton({
         return
       }
       let job = startBody.job
-      while (job && job.status !== 'complete' && job.status !== 'failed') {
+      let transientErrors = 0
+      const TRANSIENT_STATUSES = new Set([409, 429, 502, 503, 504])
+      for (let iter = 0; iter < 180 && job && job.status !== 'complete' && job.status !== 'failed'; iter++) {
+        if (iter > 0) {
+          const delayMs = job.retry?.at ? 1000 : 250
+          await new Promise((r) => setTimeout(r, delayMs))
+        }
         setStepText(`Running step: ${job.step}...`)
-        const stepRes = await fetch(`/api/admin/jobs/${encodeURIComponent(job.id)}/step`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: '{}',
-        })
-        const stepBody = (await stepRes.json()) as {
-          job?: { id: string; status: string; step: string; error?: string | null }
+        let stepRes: Response
+        try {
+          stepRes = await fetch(`/api/admin/jobs/${encodeURIComponent(job.id)}/step`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: '{}',
+          })
+        } catch (netErr) {
+          transientErrors += 1
+          if (transientErrors > 5) throw netErr
+          await new Promise((r) => setTimeout(r, 400 * transientErrors))
+          continue
+        }
+        const stepBody = (await stepRes.json().catch(() => ({}))) as {
+          job?: { id: string; status: string; step: string; error?: string | null; retry?: { at?: number } | null }
           error?: string
+          detail?: { error?: string }
         }
         if (!stepRes.ok) {
-          setErrorText(stepBody.error || `Step failed (${stepRes.status})`)
+          const errCode = stepBody.detail?.error || stepBody.error || ''
+          const isTransient = TRANSIENT_STATUSES.has(stepRes.status) || errCode === 'job_leased' || errCode === 'backend_budget'
+          if (isTransient && transientErrors < 5) {
+            transientErrors += 1
+            await new Promise((r) => setTimeout(r, 400 * transientErrors))
+            continue
+          }
+          setErrorText(errCode || `Step failed (${stepRes.status})`)
           setRunning(false)
           return
         }
+        transientErrors = 0
         job = stepBody.job
       }
       if (job?.status === 'failed') {
         const err = job.error || 'Job failed'
         if (err === 'fastly_token_scope_insufficient') setNeedsToken(true)
         setErrorText(err)
+        setRunning(false)
+        return
+      }
+      if (job && job.status !== 'complete') {
+        setErrorText('Job did not finish within step limit')
         setRunning(false)
         return
       }
@@ -236,6 +275,8 @@ function CloudScoringJobButton({
     } catch (e) {
       setErrorText(e instanceof Error ? e.message : String(e))
       setRunning(false)
+    } finally {
+      invalidateScoringAndMetadata()
     }
   }
 

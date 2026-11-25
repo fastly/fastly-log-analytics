@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import uuid
 from collections.abc import Callable
@@ -98,31 +99,36 @@ def run_backfill_cli(
     pub_cls = getattr(mod, "ClickHousePublication", ClickHousePublication)
     default_adapter_cls = getattr(mod, "AggregateBatchAdapter", AggregateBatchAdapter)
 
-    settings = cfg.load_clickhouse_config()
-    if settings is None:
-        raise RuntimeError("ClickHouse configuration is required")
-    client = ch_cls(settings)
-    try:
-        registry = get_registry()
-        register_env(registry, client=client)
-        service = registry.resolve(args.service_id)
-        if service is None or service.manifest_catalog is None or service.archive is None:
-            raise RuntimeError("service is not registered with its archive dependencies")
-        control = control_cls()
-        adapter_cls = select_adapter(args, mod) if select_adapter is not None else default_adapter_cls
-        publication = pub_cls(
-            manifest_store_cls(control),
-            adapter_cls(cast(ClickHouseClient, service.client)),
-        )
-        report = rebuild_fn(args=args, service=service, publication=publication, capacity=capacity, module=mod)
-        print(json.dumps(asdict(report), sort_keys=True))
-        if not report.full_rebuild_complete:
-            return 1
-        if getattr(report, "recovery_claim_valid", None) is False:
-            return 3
-        return 0
-    finally:
-        client.close()
+    from backend.core.metadata.base import closing_pg_pool, ensure_pg_schema
+
+    with closing_pg_pool():
+        if os.getenv("METADATA_DSN"):
+            ensure_pg_schema()
+        settings = cfg.load_clickhouse_config()
+        if settings is None:
+            raise RuntimeError("ClickHouse configuration is required")
+        client = ch_cls(settings)
+        try:
+            registry = get_registry()
+            register_env(registry, client=client)
+            service = registry.resolve(args.service_id)
+            if service is None or service.manifest_catalog is None or service.archive is None:
+                raise RuntimeError("service is not registered with its archive dependencies")
+            control = control_cls()
+            adapter_cls = select_adapter(args, mod) if select_adapter is not None else default_adapter_cls
+            publication = pub_cls(
+                manifest_store_cls(control),
+                adapter_cls(cast(ClickHouseClient, service.client)),
+            )
+            report = rebuild_fn(args=args, service=service, publication=publication, capacity=capacity, module=mod)
+            print(json.dumps(asdict(report), sort_keys=True))
+            if not report.full_rebuild_complete:
+                return 1
+            if getattr(report, "recovery_claim_valid", None) is False:
+                return 3
+            return 0
+        finally:
+            client.close()
 
 
 def _select(projection: str):

@@ -360,8 +360,18 @@ def _cmcd_aggregates_compute(
         source="projected_fact",
         activity="overhead",
     )[0]
+    from backend import config as svcconfig
+
+    try:
+        svc_cfg = svcconfig.load_config(service.service_id)
+    except Exception:
+        svc_cfg = None
+    if svc_cfg is not None:
+        cmcd_available = svcconfig.is_cmcd_enabled(svc_cfg) or ("cmcd_sid" in svcconfig.active_log_field_ids(svc_cfg))
+    else:
+        cmcd_available = True
     if not int(probe["events"] or 0):
-        return empty_cmcd_aggregates(available=True, section_timings=trace.timings())
+        return empty_cmcd_aggregates(available=cmcd_available, section_timings=trace.timings())
     has = {
         key: bool(int(probe.get(f"has_{key}") or 0))
         for key in ("bl", "br", "bs", "mtp", "ot", "sf", "st", "su", "tb", "cid")
@@ -373,7 +383,7 @@ def _cmcd_aggregates_compute(
     has_asn = bool(int(probe["has_asn"] or 0))
     has_video_filter = has["ot"]
     video = _VIDEO if has_video_filter else "1"
-    result: dict[str, Any] = {"available": True, "has_data": True}
+    result: dict[str, Any] = {"available": cmcd_available, "has_data": True}
     tasks: list[tuple[str, Callable[[], dict[str, Any]]]] = []
     want_ts = {
         "sessions_ts": wanted("sessions_ts"),

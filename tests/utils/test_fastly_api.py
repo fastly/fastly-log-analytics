@@ -615,11 +615,13 @@ def _run_reconciled_endpoint_update(
     active_version: int | None = 10,
     stored_cfg: dict | None = None,
 ):
+    sid = cfg_in["logging_service_id"]
     if stored_cfg is None:
-        stored_cfg = {"logging_enabled": True, "log_fields": {}}
+        stored_cfg = {"service_id": sid, "logging_enabled": True, "log_fields": {}}
+    else:
+        stored_cfg = {"service_id": sid, **stored_cfg}
+    svcconfig.save_config(sid, stored_cfg)
     with (
-        patch("backend.config.load_config", return_value=stored_cfg),
-        patch("backend.config.save_config"),
         patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=None),
         patch("backend.core.fastly.client.get_active_version", return_value=active_version),
         patch("backend.provision.declarative.reconciler.reconcile_vcl_state", return_value=reconcile_result),
@@ -724,7 +726,9 @@ def _run_update_logging_endpoint(cfg_in, stored_cfg):
     ):
         events, exc = _drain(fastly_api.update_logging_endpoint(cfg_in, "tok"))
     assert exc is None, f"generator raised: {exc}"
-    return json.loads(svcconfig.config_path("svc-id").read_text()), events
+    cfg = svcconfig._read_config_fresh("svc-id")
+    assert cfg is not None
+    return cfg, events
 
 
 @pytest.mark.usefixtures("_isolate_configs_dir")
@@ -779,18 +783,23 @@ def test_update_logging_endpoint_cmcd_and_custom_fields_convergence():
 
 @pytest.mark.usefixtures("_isolate_configs_dir")
 def test_update_logging_endpoint_rate_limiting_flag_refresh_and_skip():
-    """Refreshes rate_limiting flag when service config exists; skips probe when load_config returns None."""
+    """Refreshes rate_limiting flag (rolled back if VCL reconcile fails); skips probe when load_config returns None."""
     svcconfig.save_config("svc", {"provisioning": {"rate_limiting": True}, "log_fields": {"groups": ["A"]}})
     with (
         patch("backend.provision.fastly_api.account_has_rate_limiting", return_value=False),
-        patch("backend.provision.fastly_api.get_active_version", return_value=None),
+        patch(
+            "backend.provision.declarative.reconciler.transactional_vcl_reconcile",
+            side_effect=RuntimeError("no active version"),
+        ),
     ):
         events, exc = _drain(
             fastly_api.update_logging_endpoint(
                 {"logging_service_id": "svc", "endpoint_name": "ep", "log_period": 60}, "tok"
             )
         )
-    assert json.loads(svcconfig.config_path("svc").read_text())["provisioning"]["rate_limiting"] is False
+    # Transactional rollback restores prior rate_limiting flag on failed VCL reconcile.
+    cfg_after = svcconfig._read_config_fresh("svc")
+    assert cfg_after is not None and cfg_after["provisioning"]["rate_limiting"] is True
     assert any(e.get("type") == "status" and "rate limiting" in e.get("message", "").lower() for e in events)
     assert isinstance(exc, RuntimeError)
 

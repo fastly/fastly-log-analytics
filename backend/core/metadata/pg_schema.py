@@ -271,6 +271,15 @@ _SCHEMA = [
         quarantined_at TEXT NOT NULL DEFAULT (datetime('now'))
     )""",
     "CREATE INDEX IF NOT EXISTS idx_quarantine_evidence_fifo ON quarantine_evidence(service_id, quarantined_at, id)",
+    """CREATE TABLE IF NOT EXISTS service_configs (
+        service_id TEXT PRIMARY KEY,
+        config_json TEXT NOT NULL,
+        deployed_config_json TEXT,
+        previous_deployed_config_json TEXT,
+        previous_activated_version INTEGER,
+        revision INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )""",
 ]
 
 # No ``_init_schema`` here anymore: nothing calls ``get_con`` against a raw
@@ -650,6 +659,7 @@ _STATS_TABLES = (
     ("audit_logs", "audit_log"),
     ("slow_queries", "slow_queries"),
     ("quarantined_files", "quarantined_files"),
+    ("service_configs", "service_configs"),
 )
 
 _CLEANUP_TABLES = (
@@ -669,7 +679,9 @@ def _retention_timestamp_expr(ts_col: str) -> str:
 
 
 _STATS_SOURCE_NAME_TABLES = frozenset({"ingested_files", "audit_logs"})
-_STATS_SERVICE_ID_TABLES = frozenset({"cron_runs", "alerts", "views", "slow_queries", "quarantined_files"})
+_STATS_SERVICE_ID_TABLES = frozenset(
+    {"cron_runs", "alerts", "views", "slow_queries", "quarantined_files", "service_configs"}
+)
 
 
 def _stats_table_count_query(sql_table: str, service_id: str) -> tuple[str, tuple[Any, ...]]:

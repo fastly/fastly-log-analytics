@@ -462,7 +462,8 @@ def test_w1_2_remaining_sse_and_http_error_paths_are_redacted() -> None:
             return_value={"fos_bucket": "b", "fos_region": "us-east-1", "provisioning": {}},
         ),
         patch("backend.core.vcl_generator.validate_destructive_token"),
-        patch("backend.config.config_path", return_value="/nonexistent-cfg-path"),
+        patch("backend.config.snapshot_config", return_value=None),
+        patch("backend.config.delete_config", return_value=False),
         patch("backend.provision._sync_crontab", side_effect=RuntimeError("cron /etc/crontab failed")),
         patch.object(provision_mod, "_invalidate_service_credentials"),
         patch(
@@ -844,15 +845,14 @@ def test_w2_4a_orchestrate_cdn_and_infra_reconcile_redact_status_cb(tmp_path) ->
 
     # 1) reconcile_cdn_service_state rollback_err
     cdn_cb: list[str] = []
-    cfg_file = tmp_path / "svc-log.json"
-    cfg_file.write_text(json.dumps({"fos_proxy": {"service_id": "cdn-1", "domain": "https://cdn.example.com"}}))
+    fake_cfg = {"fos_proxy": {"service_id": "cdn-1", "domain": "https://cdn.example.com"}}
     fake_lock = MagicMock()
     fake_lock.__enter__ = MagicMock(return_value=None)
     fake_lock.__exit__ = MagicMock(return_value=False)
     fake_diff = MagicMock()
     fake_diff.is_empty.return_value = False
     with (
-        patch("backend.config.config_path", return_value=cfg_file),
+        patch("backend.config.load_config", return_value=fake_cfg),
         patch.object(orch_mod, "acquire_vcl_lock", return_value=fake_lock),
         patch.object(orch_mod.fastly_integration, "fetch_active_version", return_value=1),
         patch.object(orch_mod, "fastly", return_value={"content": ""}),
@@ -989,7 +989,8 @@ def test_w2_4d_provision_router_defensively_redacts_stream_and_reconcile_result(
             return_value={"fos_bucket": "b", "fos_region": "us-east-1", "provisioning": {}},
         ),
         patch("backend.core.vcl_generator.validate_destructive_token"),
-        patch("backend.config.config_path", return_value="/nonexistent-cfg-path"),
+        patch("backend.config.snapshot_config", return_value=None),
+        patch("backend.config.delete_config", return_value=False),
         patch("backend.provision._sync_crontab"),
         patch.object(provision_mod, "_invalidate_service_credentials"),
         patch(

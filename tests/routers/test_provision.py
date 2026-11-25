@@ -130,7 +130,7 @@ def test_teardown_no_service_id_returns_404(isolated_configs_dir):
 def test_teardown_emits_done_and_removes_config(isolated_configs_dir, tmp_path, monkeypatch):
     sid = "svc-teardown-1"
     _seed_cfg(sid, fos_bucket="td-test-bucket", fastly_api_key="fastly-test-token")
-    assert os.path.exists(svcconfig.config_path(sid)), "precondition: config seeded"
+    assert svcconfig.load_config(sid) is not None, "precondition: config seeded"
 
     with _teardown_patches(sid), TestClient(app) as client:
         r = client.post(
@@ -142,7 +142,7 @@ def test_teardown_emits_done_and_removes_config(isolated_configs_dir, tmp_path, 
     events = _parse_sse_events(r.text)
     assert events, f"expected SSE events, got: {r.text[:300]!r}"
     assert "done" in [e.get("type") for e in events]
-    assert not os.path.exists(svcconfig.config_path(sid)), "config should have been removed"
+    assert svcconfig.load_config(sid) is None, "config should have been removed"
 
 
 def test_teardown_remove_cache_clears_service_metadata(isolated_configs_dir):
@@ -182,7 +182,7 @@ def test_teardown_skips_perform_teardown_when_no_logging_service(isolated_config
             json={"service_id": sid, "token": "test-tok", "remove_cache": False},
         )
     assert r.status_code == 200
-    assert not os.path.exists(svcconfig.config_path(sid))
+    assert svcconfig.load_config(sid) is None
 
 
 def test_execute_delegates_to_provision_with_query_args(isolated_configs_dir):
@@ -415,7 +415,7 @@ def test_teardown_is_idempotent_second_call_is_404(isolated_configs_dir):
         )
         assert r1.status_code == 200
         assert any(e.get("type") == "done" for e in _parse_sse_events(r1.text))
-        assert not os.path.exists(svcconfig.config_path(sid))
+        assert svcconfig.load_config(sid) is None
 
         r2 = client.post(
             "/api/provision/teardown",
@@ -453,7 +453,7 @@ def test_teardown_preserves_cache_when_remove_cache_false(isolated_configs_dir, 
         )
 
     assert r.status_code == 200
-    assert not os.path.exists(svcconfig.config_path(sid))
+    assert svcconfig.load_config(sid) is None
     assert os.path.exists(sentinel)
 
 
@@ -477,7 +477,7 @@ def test_teardown_partial_failure_in_perform_teardown_still_succeeds(isolated_co
 
     assert r.status_code == 200
     assert "error" in [e.get("type") for e in _parse_sse_events(r.text)]
-    assert not os.path.exists(svcconfig.config_path(sid))
+    assert svcconfig.load_config(sid) is None
 
     with TestClient(app) as client:
         r2 = client.post(
@@ -603,9 +603,8 @@ def test_wizard_execute_runs_orchestrator_and_bootstrap_sees_service(isolated_co
     for n in range(1, 9):
         assert f"Step {n}/8" in status_msgs
 
-    cfg_path = svcconfig.config_path(sid)
-    assert os.path.exists(cfg_path)
-    written = json.loads(cfg_path.read_text())
+    written = svcconfig.load_config(sid)
+    assert written is not None
     assert written["service_id"] == sid
     assert written["fos_bucket"] == "wizard-e2e-bucket"
     assert written["fos_region"] == "us-east-1"
@@ -650,7 +649,7 @@ def test_wizard_execute_e2e_storage_init_success(isolated_configs_dir, tmp_path,
     status_msgs = " | ".join(e.get("message", "") for e in events if e.get("type") == "status")
     for n in range(1, 9):
         assert f"Step {n}/8" in status_msgs
-    assert svcconfig.config_path(sid).exists()
+    assert svcconfig.load_config(sid) is not None
 
     with TestClient(app) as client:
         boot = client.get("/api/bootstrap")
@@ -692,7 +691,7 @@ def test_wizard_execute_rolls_back_on_helper_failure(isolated_configs_dir, tmp_p
 
     status_msgs = " | ".join(e.get("message", "") for e in events if e.get("type") == "status")
     assert "Step 3/8" in status_msgs and "Step 8/8" not in status_msgs
-    assert not os.path.exists(svcconfig.config_path(sid))
+    assert svcconfig.load_config(sid) is None
 
 
 def test_wizard_execute_rollback_actually_invokes_resource_deletion(isolated_configs_dir, tmp_path, monkeypatch):
@@ -743,7 +742,7 @@ def test_wizard_execute_rollback_actually_invokes_resource_deletion(isolated_con
     for expected in ("delete_cdn_service", "delete_fos_bucket", "delete_fos_access_key"):
         assert expected in called_names, f"expected {expected} in {called_names}"
     assert "remove_logging_endpoint" not in called_names
-    assert not os.path.exists(svcconfig.config_path(sid))
+    assert svcconfig.load_config(sid) is None
 
 
 # ── Merged from tests/routers/test_provision.py ──
@@ -1512,7 +1511,8 @@ def test_teardown_endpoint_flows():
     fake_scheduler = MagicMock()
     with (
         patch("backend.config.load_config", return_value=fake_cfg),
-        patch("backend.config.config_path", return_value="/tmp/nonexistent-config.json"),
+        patch("backend.config.snapshot_config", return_value=json.dumps(fake_cfg)),
+        patch("backend.config.delete_config", return_value=True),
         patch("backend.provision._sync_crontab", side_effect=lambda: sync_calls.append(True)),
         patch("backend.cron.scheduler.get_scheduler", return_value=fake_scheduler),
         patch(
@@ -1537,7 +1537,8 @@ def test_teardown_endpoint_flows():
 
     with (
         patch("backend.config.load_config", return_value=fake_cfg),
-        patch("backend.config.config_path", return_value="/tmp/nonexistent.json"),
+        patch("backend.config.snapshot_config", return_value=json.dumps(fake_cfg)),
+        patch("backend.config.delete_config", return_value=True),
         patch("backend.provision._sync_crontab"),
         patch("backend.cron.scheduler.get_scheduler", return_value=MagicMock()),
         patch("backend.provision.perform_teardown", side_effect=_boom),
@@ -1772,7 +1773,6 @@ def test_sec13_routers_require_admin_blocks_analyst_sessions():
 
 
 @pytest.mark.security_regression
-@pytest.mark.no_postgres
 def test_sec15_provision_and_vcl_routers_reject_malicious_vcl_inputs(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path / "cfgs")
     (tmp_path / "cfgs").mkdir(parents=True, exist_ok=True)
@@ -1902,7 +1902,6 @@ def test_sec15_provision_and_vcl_routers_reject_malicious_vcl_inputs(tmp_path, m
     assert res_cf.status_code == 422
 
 
-@pytest.mark.no_postgres
 @pytest.mark.security_regression
 def test_sec13_execute_normalizes_trailing_slash_cdn_url_and_rejects_malformed_cdn_url(isolated_configs_dir):
     captured: dict = {}
@@ -2002,7 +2001,6 @@ def test_sec13_execute_normalizes_trailing_slash_cdn_url_and_rejects_malformed_c
         assert "cfg" not in captured
 
 
-@pytest.mark.no_postgres
 @pytest.mark.security_regression
 def test_sec15_provision_routers_reject_exclude_url_regex_and_cdn_shield_breakouts(tmp_path, monkeypatch):
     """SEC-15 Wave 5: /terraform/{preview,export}, /ingest, /execute, and /reconcile reject scoring & shield breakouts."""
@@ -2117,7 +2115,6 @@ def test_sec15_provision_routers_reject_exclude_url_regex_and_cdn_shield_breakou
     assert r_valid_tf.status_code == 200, r_valid_tf.text
 
 
-@pytest.mark.no_postgres
 @pytest.mark.security_regression
 def test_sec15_sec13_wave6_ingest_and_terraform_type_confusion_and_alias_hardening(tmp_path, monkeypatch):
     """SEC-15 & SEC-13 Wave 6: /terraform/* null-coalescing & type safety + /ingest unmocked defaults, alias shadow & cdn_url."""
@@ -2242,7 +2239,6 @@ def test_sec15_sec13_wave6_ingest_and_terraform_type_confusion_and_alias_hardeni
         assert svcconfig.load_config("svc_bad") is None
 
 
-@pytest.mark.no_postgres
 @pytest.mark.security_regression
 def test_sec15_wave7_all_seven_routes_null_description_empty_sid_and_log_fields_schema(tmp_path, monkeypatch):
     """SEC-15 Wave 7: description=None returns 200 OK across all 7 routes, empty logging_service_id never 500s, and bad custom_fields/log_fields return 400/422."""
@@ -2324,10 +2320,10 @@ def test_sec15_wave7_all_seven_routes_null_description_empty_sid_and_log_fields_
         )
         assert r_exec.status_code == 200, f"Expected 200 on /execute, got {r_exec.status_code}: {r_exec.text}"
 
-        # Force raw description: null on disk to prove /reconcile + GET /custom-fields never 500
-        raw_disk = json.loads((cfg_dir / "svc_w7.json").read_text())
+        # Force raw description: null in PG config to prove /reconcile + GET /custom-fields never 500
+        raw_disk = config.load_config("svc_w7") or {}
         raw_disk["log_fields"] = {"groups": ["A"], "custom_fields": [valid_cf_null_desc]}
-        (cfg_dir / "svc_w7.json").write_text(json.dumps(raw_disk))
+        config.save_config("svc_w7", raw_disk)
 
         r_rec = tc.post("/api/provision/reconcile", json={"service_id": "svc_w7", "token": "tok"})
         assert r_rec.status_code == 200, f"Expected 200 on /reconcile, got {r_rec.status_code}: {r_rec.text}"

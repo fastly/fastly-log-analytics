@@ -155,6 +155,15 @@ def list_service_alerts(
     return _alert_list(alerts)
 
 
+def _reload_scheduler_best_effort() -> None:
+    try:
+        from backend.cron.scheduler import get_scheduler
+
+        get_scheduler().reload()
+    except Exception:
+        logger.debug("alerts: scheduler reload failed (ignored)", exc_info=True)
+
+
 @alerts_router.post("/", response_model=AlertResponse, status_code=201)
 @alerts_router.post("", response_model=AlertResponse, status_code=201, include_in_schema=False)
 def create_alert(alert: Alert, request: Request) -> AlertResponse:
@@ -164,6 +173,7 @@ def create_alert(alert: Alert, request: Request) -> AlertResponse:
     _validate_alert_urls(alert)
     res = repo.save_alert(alert)
     sync_admin_state(alert.service_id)
+    _reload_scheduler_best_effort()
     resp: AlertResponse = AlertResponse.with_telemetry(data=res)
     return resp
 
@@ -223,6 +233,24 @@ def _ch_scope_clause(eval_scope: str) -> str:
     return ""
 
 
+_METRIC_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
+    "p95_latency": ("elapsed",),
+    "latency_p95": ("elapsed",),
+    "hit_rate": ("cache",),
+    "throughput": ("resp_bytes",),
+    "bandwidth": ("resp_bytes",),
+    "ttfb": ("ottfb",),
+    "req_size": ("req_bytes", "req_header_bytes"),
+}
+
+
+def _required_fields_for_alert(metric: str, eval_scope: str) -> tuple[str, ...]:
+    req_fields = list(_METRIC_REQUIRED_FIELDS.get(metric, ()))
+    if eval_scope in ("edge", "origin"):
+        req_fields.append("edge")
+    return tuple(req_fields)
+
+
 def _evaluate_alert(
     service_id: str,
     src: dict[str, Any],
@@ -238,6 +266,25 @@ def _evaluate_alert(
     eval_scope = str(alert.get("evaluation_scope") or "all")
     comp_period = alert.get("comparison_period_min")
     status_codes = alert.get("status_codes")
+
+    required_fields = _required_fields_for_alert(metric, eval_scope)
+    if required_fields:
+        try:
+            cfg = svcconfig.load_config(service_id)
+        except Exception:
+            cfg = None
+        if cfg is not None:
+            active_fields = set(svcconfig.active_log_field_ids(cfg))
+            missing_fields = [f for f in required_fields if f not in active_fields]
+            if missing_fields:
+                logger.info(
+                    "Skipping alert %s (%s) for %s: required log field(s) %s not enabled",
+                    alert.get("id"),
+                    metric,
+                    service_id,
+                    missing_fields,
+                )
+                return False, None, None, None
 
     try:
         client = _resolve_ch_client(service_id)
@@ -674,6 +721,7 @@ def update_alert(
     res = repo.save_alert(updated_alert)
     res.setdefault("service_id", sid)
     sync_admin_state(sid)
+    _reload_scheduler_best_effort()
     resp: AlertResponse = AlertResponse.with_telemetry(data=res)
     return resp
 
@@ -691,6 +739,7 @@ def toggle_alert_enabled(
     res = repo.toggle_alert(alert_id, body.enabled, resolved_id)
     res.setdefault("service_id", resolved_id)
     sync_admin_state(res.get("service_id"))
+    _reload_scheduler_best_effort()
     resp: AlertResponse = AlertResponse.with_telemetry(data=res)
     return resp
 
@@ -706,6 +755,7 @@ def delete_alert(
     _require_admin_mutation(request)
     res = repo.delete_alert(alert_id, resolved_id)
     sync_admin_state(res.get("service_id") or resolved_id)
+    _reload_scheduler_best_effort()
     return Response(status_code=204)
 
 

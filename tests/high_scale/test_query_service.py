@@ -3057,13 +3057,22 @@ def test_insufficient_history_and_missing_fields_or_pop_coords(monkeypatch: pyte
         assert omitted not in cards_no_lat and omitted not in client_no_lat.queries()
     assert "error_spikes" in cards_no_lat
 
-    # Omitted TLS fingerprint vs JA3 fallback
-    client_no_fp = _InsightsClient(fields=[n for n in ALL_FIELDS if n != "ja4"])
-    assert not (FINGERPRINT_DETECTIONS & set(_insight_cards(_run_insights(client_no_fp))))
+    # Omitted TLS fingerprint vs JA3 fallback (SSOT via active_log_field_ids)
+    with monkeypatch.context() as m:
+        m.setattr(
+            "backend.config.active_log_field_ids",
+            lambda _cfg: [f["id"] for f in LOG_FIELD_CATALOG if f["id"] not in {"ja4", "ja3"}],
+        )
+        assert not (FINGERPRINT_DETECTIONS & set(_insight_cards(_run_insights(_InsightsClient()))))
     no_lat_queries = client_no_lat.queries()
     assert "ja4 != ''" in no_lat_queries[_query_key_for("botnet_grouping", no_lat_queries)][0]
-    client_ja3 = _InsightsClient(fields=[n for n in ALL_FIELDS if n != "ja4"] + ["ja3"])
-    _run_insights(client_ja3)
+    with monkeypatch.context() as m:
+        m.setattr(
+            "backend.config.active_log_field_ids",
+            lambda _cfg: [f["id"] for f in LOG_FIELD_CATALOG if f["id"] != "ja4"],
+        )
+        client_ja3 = _InsightsClient()
+        _run_insights(client_ja3)
     ja3_queries = client_ja3.queries()
     assert "ja3 != ''" in ja3_queries[_query_key_for("botnet_grouping", ja3_queries)][0]
 

@@ -1448,8 +1448,9 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       expect(loads.map((load) => load.release.mock.calls.length)).toEqual([1, 1, 1]);
     });
 
-    it("takes the response's column flags from the files a widened read found when the newest window had none", async () => {
-      rangeOf((hours) => hours <= 1 ? 0 : 100, SESSIONS_SCAN_COLUMNS.filter((column) => column !== "tcp_rtt"));
+    it("derives session column flags from active_log_field_ids rather than Parquet columns", async () => {
+      rangeOf((hours) => hours <= 1 ? 0 : 100, SESSIONS_SCAN_COLUMNS);
+      vi.mocked(cloudActiveLogFieldIds).mockResolvedValueOnce(new Set(["ja4"]));
       const body = await (await list())!.json() as { has_rtt: boolean; has_ja4: boolean };
       expect(body).toMatchObject({ has_rtt: false, has_ja4: true });
     });

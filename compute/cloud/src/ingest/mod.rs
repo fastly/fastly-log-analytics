@@ -684,7 +684,17 @@ pub(crate) fn finish_legacy<R: Runtime>(
         .ok_or("cdn_key_missing")?;
     report.resumed = true;
     let raw_prefix = raw_prefix(store.service);
-    let schema = convert::RequestSchema::for_fields(&store.service.log_fields);
+    let active_fields = if store.service.pending_job_id.is_some() {
+        store
+            .service
+            .deployed_snapshot
+            .as_ref()
+            .and_then(|snap| snap.get("log_fields"))
+            .unwrap_or(&store.service.log_fields)
+    } else {
+        &store.service.log_fields
+    };
+    let schema = convert::RequestSchema::for_fields(active_fields);
     let mut loaded = Vec::new();
     for key in &plan.raw_keys {
         loaded.push(load(

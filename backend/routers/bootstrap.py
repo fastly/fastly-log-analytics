@@ -142,7 +142,17 @@ async def _bootstrap_compute_and_cache(request: Request, service_id: str | None,
 
 
 _ANALYST_BOOTSTRAP_SERVICE_KEYS: frozenset[str] = frozenset(
-    {"service_id", "name", "is_active", "cmcd_enabled", "rum_enabled", "rum_log_period"}
+    {
+        "service_id",
+        "name",
+        "is_active",
+        "cmcd_enabled",
+        "scoring_enabled",
+        "rum_enabled",
+        "logging_enabled",
+        "rum_log_period",
+        "active_log_field_ids",
+    }
 )
 
 

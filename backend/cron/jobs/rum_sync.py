@@ -114,6 +114,9 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> bool:
         pinned_version = (rum_cfg if isinstance(rum_cfg, dict) else {}).get("faro_version")
         if not pinned_version:
             # Self-heal: adopt the default rather than leave /js/faro-sdk.js 404ing.
+            import copy
+
+            prev_rum = copy.deepcopy(rum_cfg) if isinstance(rum_cfg, dict) else None
             report(f"RUM enabled with no pinned Faro version; adopting default v{DEFAULT_FARO_VERSION}")
             if not _upload_and_purge(
                 DEFAULT_FARO_VERSION,
@@ -139,10 +142,19 @@ def _reconcile_faro_bundle(service_id: str, run_id: int | None) -> bool:
             except Exception:
                 logger.warning(
                     "Faro default-version VCL reconcile failed for %s "
-                    "(bundle uploaded to FOS, but /js/faro-sdk.js may still 404 until the next successful reconcile)",
+                    "(bundle uploaded to FOS; restoring Faro pin in config so next tick retries VCL reconcile)",
                     service_id,
                     exc_info=True,
                 )
+
+                def _restore_faro_pin(c: dict) -> None:
+                    if prev_rum is None:
+                        c.pop("rum", None)
+                    else:
+                        c["rum"] = copy.deepcopy(prev_rum)
+
+                svcconfig.mutate_config(service_id, _restore_faro_pin)
+                return False
 
         # 1. Cheap integrity check — every tick.
         if not faro_bundle_intact(cfg, pinned_version):

@@ -522,6 +522,16 @@ impl Runtime for Platform {
             self.adapter.api(request).map(Into::into)
         }
     }
+    fn admin_api_raw(
+        &self,
+        request: fastly_log_analytics::admin::ApiRawRequest<'_>,
+    ) -> Result<admin::ApiResponse, String> {
+        charge()?;
+        self.adapter.api_raw(request).map(Into::into)
+    }
+    fn scorer_package(&self) -> Option<Vec<u8>> {
+        Some(b"fixture-session-scorer-wasm-tar-gz".to_vec())
+    }
     fn admin_fos(&self, request: FosRequest<'_>) -> Result<FosResponse, String> {
         if let Some(value) = self.cron_during_extents.lock().unwrap().take() {
             let old = self.adapter.get("cron:state")?;

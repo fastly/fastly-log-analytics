@@ -18171,12 +18171,169 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/LoggingSettingsUpdateBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{service_id}/rollback": {
+      "post": {
+        "tags": [
+          "services"
+        ],
+        "summary": "Api Service Rollback",
+        "description": "Roll back a service's Fastly active version and persisted deployed config snapshot.",
+        "operationId": "api_service_rollback_api_services__service_id__rollback_post",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Service Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ServiceRollbackBody"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceRollbackResponse"
+                }
               }
             }
           },
@@ -21339,9 +21496,10 @@
           {
             "name": "cdn_service_id",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string",
+              "default": "",
               "title": "Cdn Service Id"
             }
           },
@@ -39193,7 +39351,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Enforce Threshold Get",
-        "description": "Read the live enforce_threshold value from the scoring_config ConfigStore (None = disabled).",
+        "description": "Read the enforce_threshold value from service config, falling back to Fastly ConfigStore.",
         "operationId": "scoring_enforce_threshold_get_api_services__service_id__scoring_enforce_threshold_get",
         "parameters": [
           {
@@ -39325,7 +39483,7 @@
           "session-scoring"
         ],
         "summary": "Scoring Enforce Threshold Put",
-        "description": "Write the live enforce_threshold to the scoring_config ConfigStore (null disables enforcement).",
+        "description": "Write the live enforce_threshold to service config and scoring_config ConfigStore.",
         "operationId": "scoring_enforce_threshold_put_api_services__service_id__scoring_enforce_threshold_put",
         "parameters": [
           {
@@ -39481,7 +39639,7 @@
           "session-scoring"
         ],
         "summary": "Scoring L2 Enforce Get",
-        "description": "Read the live L2-enforcement opt-in + fade-in state from the scoring_config ConfigStore.",
+        "description": "Read the live L2-enforcement opt-in + fade-in state from service config or ConfigStore.",
         "operationId": "scoring_l2_enforce_get_api_services__service_id__scoring_l2_enforce_get",
         "parameters": [
           {
@@ -39613,7 +39771,7 @@
           "session-scoring"
         ],
         "summary": "Scoring L2 Enforce Put",
-        "description": "Opt edge Layer-2 in/out of the enforced combined score via scoring_config ConfigStore.",
+        "description": "Opt edge Layer-2 in/out of the enforced combined score via service config + ConfigStore.",
         "operationId": "scoring_l2_enforce_put_api_services__service_id__scoring_l2_enforce_put",
         "parameters": [
           {
@@ -49227,6 +49385,17 @@
             ],
             "title": "Cmcd Enabled"
           },
+          "scoring_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scoring Enabled"
+          },
           "rum_enabled": {
             "anyOf": [
               {
@@ -49238,6 +49407,17 @@
             ],
             "title": "Rum Enabled"
           },
+          "logging_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Logging Enabled"
+          },
           "rum_log_period": {
             "anyOf": [
               {
@@ -49248,6 +49428,20 @@
               }
             ],
             "title": "Rum Log Period"
+          },
+          "active_log_field_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Log Field Ids"
           }
         },
         "additionalProperties": true,
@@ -65754,6 +65948,17 @@
       },
       "LogFieldsConfig": {
         "properties": {
+          "preset": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preset"
+          },
           "groups": {
             "items": {
               "type": "string"
@@ -66253,6 +66458,23 @@
           "edge_only"
         ],
         "title": "LoggingSettingsResponse"
+      },
+      "LoggingSettingsUpdateBody": {
+        "properties": {
+          "log_fields": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LogFieldsConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "title": "LoggingSettingsUpdateBody",
+        "description": "Optional JSON body for ``POST /api/services/{service_id}/logging-settings/update``."
       },
       "LowAndSlowInsightCard": {
         "properties": {
@@ -74960,6 +75182,17 @@
             "type": "boolean",
             "title": "Cdn Domain Generated",
             "default": false
+          },
+          "ngwaf_workspace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ngwaf Workspace Id"
           }
         },
         "type": "object",
@@ -83194,6 +83427,42 @@
               }
             ],
             "title": "Rum Log Period"
+          },
+          "cmcd_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cmcd Enabled"
+          },
+          "scoring_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scoring Enabled"
+          },
+          "active_log_field_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Log Field Ids"
           }
         },
         "type": "object",
@@ -83456,6 +83725,98 @@
           "enabled"
         ],
         "title": "ServiceCronSync"
+      },
+      "ServiceRollbackBody": {
+        "properties": {
+          "token": {
+            "type": "string",
+            "title": "Token",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "ServiceRollbackBody",
+        "description": "Optional JSON body for ``POST /api/services/{service_id}/rollback``."
+      },
+      "ServiceRollbackResponse": {
+        "properties": {
+          "_debug_queries": {
+            "items": {
+              "$ref": "#/components/schemas/DebugQuery"
+            },
+            "type": "array",
+            "title": "Debug Queries"
+          },
+          "_debug_calls": {
+            "items": {
+              "$ref": "#/components/schemas/DebugCall"
+            },
+            "type": "array",
+            "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
+          "_is_cached": {
+            "type": "boolean",
+            "title": "Is Cached",
+            "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "_section_timings": {
+            "items": {
+              "$ref": "#/components/schemas/SectionTimingEntry"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
+          "ok": {
+            "type": "boolean",
+            "title": "Ok",
+            "default": true
+          },
+          "activated_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Activated Version"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "ServiceRollbackResponse",
+        "description": "Response for ``POST /api/services/{service_id}/rollback``."
       },
       "ServiceScopePayload": {
         "properties": {

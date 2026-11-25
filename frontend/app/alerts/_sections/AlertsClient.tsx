@@ -18,6 +18,7 @@ import {
 } from 'lucide-react'
 import { client, extractApiError, unwrapClient } from '@/lib/api'
 import {
+  useBootstrapCacheSelector,
   useEffectiveServiceId,
   useBootstrapResolved,
   useIsAnalyst,
@@ -83,7 +84,18 @@ export default function AlertsClient() {
     enabled: !!activeServiceId && !isAnalyst && isFormOpen,
     staleTime: 5 * 60_000,
   })
-  const logPeriodSeconds = loggingSettings?.period || SERVICE_DEFAULTS.logPeriodSeconds
+  const bootstrapLogPeriod = useBootstrapCacheSelector(
+    React.useCallback(
+      (data) => {
+        const services = (data?.services as Array<{ service_id?: string; log_period?: number }> | undefined) ?? []
+        const svc = services.find((s) => s.service_id === activeServiceId)
+        return typeof svc?.log_period === 'number' && svc.log_period > 0 ? svc.log_period : undefined
+      },
+      [activeServiceId],
+    ),
+    undefined,
+  )
+  const logPeriodSeconds = loggingSettings?.period || bootstrapLogPeriod || SERVICE_DEFAULTS.logPeriodSeconds
 
   const {
     data: alertsRes,

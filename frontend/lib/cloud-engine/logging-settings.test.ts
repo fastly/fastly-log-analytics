@@ -94,7 +94,7 @@ describe("Cloud Log Settings bridge", () => {
     expect(api.fetch).not.toHaveBeenCalled();
   });
 
-  it("applies the modal's update query through PATCH then a reconcile job stream", async () => {
+  it("applies the modal's update query through a single atomic reconcile job stream without PATCH", async () => {
     const api = nativeApi();
     const response = await cloudStreamFetch(
       "http://localhost/api/services/svc-1/logging-settings/update?update_format=true&period=10&sample_rate=50&edge_only=false"
@@ -102,11 +102,44 @@ describe("Cloud Log Settings bridge", () => {
     );
     expect(response.headers.get("content-type")).toContain("text/event-stream");
     expect(await response.text()).toContain('"type":"done"');
-    expect(api.body("/api/admin/services/svc-1", "PATCH")).toEqual({
-      generation: "generation-7", log_period: 10, sample_rate: 50, edge_only: false,
-      custom_condition: 'req.url !~ "^/health"', cmcd: { enabled: true, mode: "headers", version: 2 },
+    expect(api.body("/api/admin/services/svc-1", "PATCH")).toBeUndefined();
+    expect(api.body("/api/admin/services/svc-1/reconcile", "POST")).toEqual({
+      generation: "generation-7",
+      log_period: 10,
+      sample_rate: 50,
+      edge_only: false,
+      custom_condition: 'req.url !~ "^/health"',
+      cmcd: { enabled: true, mode: "headers", version: 2 },
+      activate: true,
+      dry_run: false,
     });
-    expect(api.body("/api/admin/services/svc-1/reconcile", "POST")).toEqual({ generation: "generation-8", activate: true, dry_run: false });
+  });
+
+  it("applies POST /logging-settings/update with log_fields atomically in one reconcile call", async () => {
+    const api = nativeApi();
+    const logFields = { groups: ["A", "B"], field_overrides: { ua: true }, custom_fields: [] };
+    const response = await cloudStreamFetch(
+      "http://localhost/api/services/svc-1/logging-settings/update?update_format=true&period=30&sample_rate=75&edge_only=true&custom_condition=",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ log_fields: logFields }),
+      },
+    );
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    expect(await response.text()).toContain('"type":"done"');
+    expect(api.body("/api/admin/services/svc-1", "PATCH")).toBeUndefined();
+    expect(api.body("/api/admin/services/svc-1/reconcile", "POST")).toEqual({
+      generation: "generation-7",
+      log_fields: logFields,
+      log_period: 30,
+      sample_rate: 75,
+      edge_only: true,
+      custom_condition: "",
+      cmcd: { enabled: false, mode: "query_string", version: 1 },
+      activate: true,
+      dry_run: false,
+    });
   });
 
   it("streams the native failure when activation fails", async () => {

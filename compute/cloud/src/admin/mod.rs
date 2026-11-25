@@ -84,6 +84,9 @@ fn admin_audit(request: &Request) -> Option<(&'static str, String)> {
         ("POST", ["api", "admin", "services", sid, "delete-data", "cancel"]) => {
             Some(("delete_data_cancelled", (*sid).to_owned()))
         }
+        ("POST", ["api", "admin", "services", sid, "rollback"]) => {
+            Some(("service_rolled_back", (*sid).to_owned()))
+        }
         (
             "POST",
             ["api", "services", sid, "scoring", "enable"]
@@ -162,6 +165,18 @@ fn load_service(
     load_service_from(context, sid, false)
 }
 
+fn normalize_service_runtime_fields(service: &mut Service) {
+    if service.compression_codec.is_empty() {
+        service.compression_codec = "zstd".into();
+    }
+    if matches!(service.wire_format.as_str(), "" | "json") {
+        service.wire_format = "array".into();
+    }
+    let min = crate::logging::MIN_LOG_PERIOD as u32;
+    service.log_period = service.log_period.max(min);
+    service.rum.log_period = service.rum.log_period.max(min);
+}
+
 fn load_service_from(
     context: &Context<'_, impl Runtime>,
     sid: &str,
@@ -178,15 +193,7 @@ fn load_service_from(
     }
     .ok_or_else(|| Error::new(404, "service_not_found"))?;
     let mut service: Service = decode(record.value.clone())?;
-    if service.compression_codec.is_empty() {
-        service.compression_codec = "zstd".into();
-    }
-    if matches!(service.wire_format.as_str(), "" | "json") {
-        service.wire_format = "array".into();
-    }
-    let min = crate::logging::MIN_LOG_PERIOD as u32;
-    service.log_period = service.log_period.max(min);
-    service.rum.log_period = service.rum.log_period.max(min);
+    normalize_service_runtime_fields(&mut service);
     if service.owner != owner(context.runtime)? {
         return Err(Error::new(403, "service_not_owned"));
     }
@@ -227,55 +234,10 @@ fn route(
             patch_service(context, actor, sid, body(request)?)
         }
         ("POST", ["api", "admin", "services", sid, "reconcile"]) => {
-            let input: Value = body(request)?;
-            let (record, mut service) = load_service(context, sid)?;
-            check_generation(&record, &input)?;
-            if service.status == "torn_down" {
-                return Err(Error::new(409, "service_torn_down"));
-            }
-            if service.data_reset.is_some() {
-                return Err(Error::new(409, "data_reset_in_progress"));
-            }
-            if input.get("cmcd").is_some() || input.get("rum").is_some() {
-                let previous = service.clone();
-                if let Some(cmcd) = input.get("cmcd") {
-                    service.cmcd = decode(cmcd.clone())?;
-                }
-                if let Some(rum) = input.get("rum") {
-                    service.rum = decode(rum.clone())?;
-                }
-                reconcile_system_fields(&mut service, Some(&previous))?;
-                validate_service(
-                    &service,
-                    Some(&previous),
-                    crate::ingest::window_seconds(context.runtime),
-                )?;
-                service.config_version += 1;
-                service.updated_at = context.runtime.now();
-            } else {
-                if crate::logging::validate_vcl_condition(&service.custom_condition).is_err() {
-                    return Err(Error::new(400, "invalid_logging_settings"));
-                }
-                if crate::logging::rum::validate_custom_condition(&service.rum.custom_condition)
-                    .is_err()
-                {
-                    return Err(Error::new(400, "invalid_rum_settings"));
-                }
-                if let Some(ref sc) = service.scoring {
-                    if sc.enabled && !scoring::valid_scoring_domain(&sc.scoring_domain) {
-                        return Err(Error::new(400, "invalid_scoring_domain"));
-                    }
-                }
-            }
-            let job = new_job(
-                context,
-                actor,
-                &service,
-                "reconcile",
-                input["dry_run"].as_bool().unwrap_or(false),
-                input["activate"].as_bool().unwrap_or(true),
-            )?;
-            start_job(context, &record, &mut service, job)
+            reconcile_service(context, actor, sid, body(request)?)
+        }
+        ("POST", ["api", "admin", "services", sid, "rollback"]) => {
+            rollback_service(context, actor, sid, body(request)?)
         }
         ("POST", ["api", "admin", "provision", "services"] | ["api", "provision", "services"]) => {
             let input: Value = body(request)?;
@@ -297,13 +259,14 @@ fn route(
                 value => serde_json::from_value(value.clone())
                     .map_err(|_| Error::new(400, "invalid_capture"))?,
             };
-            let (service, snippets, conditions, token_info, endpoint_cmcd) = preflight(
-                context,
-                token,
-                sid,
-                input["logging_endpoint_name"].as_str(),
-                capture,
-            )?;
+            let (service, snippets, conditions, token_info, endpoint_cmcd, endpoint_scoring) =
+                preflight(
+                    context,
+                    token,
+                    sid,
+                    input["logging_endpoint_name"].as_str(),
+                    capture,
+                )?;
             if let Some(bucket) = input["fos_bucket"].as_str() {
                 if !valid_bucket(bucket) {
                     return Err(Error::new(400, "invalid_bucket"));
@@ -362,11 +325,24 @@ fn route(
                     .any(|b| b.to_ascii_lowercase().contains("req.http.x-cmcd:"))
                     || snippets.iter().any(|v| v["name"] == "CMCD Extraction")
                     || endpoint_cmcd;
+                let scoring_present = bodies.iter().any(|b| {
+                    b.lines().any(|line| {
+                        let lower = line.trim_start().to_ascii_lowercase();
+                        !lower.starts_with("unset ")
+                            && (lower.contains("set req.http.x-edge-score:")
+                                || lower.contains("req.http.x-edge-score:score"))
+                    })
+                }) || snippets.iter().any(|v| {
+                    v["name"]
+                        .as_str()
+                        .is_some_and(scoring::is_scoring_snippet_name)
+                }) || endpoint_scoring;
                 result["capture"] = json!({
                     "mode": "attached",
                     "missing_fields": missing,
                     "rum_present": rum_present,
                     "cmcd_present": cmcd_present,
+                    "scoring_present": scoring_present,
                 });
             }
             Ok(result)
@@ -444,7 +420,8 @@ fn route(
             validate_fields(
                 &fields,
                 None,
-                input["scoring"]["enabled"].as_bool().unwrap_or(false),
+                input["scoring"]["enabled"].as_bool().unwrap_or(false)
+                    || input["capture"].as_str() == Some("attached"),
             )?;
             let format = crate::logging::generate_log_format(&fields)
                 .map_err(|_| Error::new(400, "invalid_log_format"))?;
@@ -606,7 +583,7 @@ fn validate_token_with_info(
     Ok((customer, token_info))
 }
 
-type PreflightResult = (Value, Vec<Value>, Vec<Value>, Value, bool);
+type PreflightResult = (Value, Vec<Value>, Vec<Value>, Value, bool, bool);
 
 fn preflight(
     context: &Context<'_, impl Runtime>,
@@ -654,6 +631,7 @@ fn preflight(
     let mut snippets = Vec::new();
     let mut conditions = Vec::new();
     let mut endpoint_cmcd = false;
+    let mut endpoint_scoring = false;
     for resource in ["snippet", "logging/fos", "condition"] {
         let current = context.api(
             "GET",
@@ -662,12 +640,23 @@ fn preflight(
             None,
         )?;
         if resource == "logging/fos" {
-            endpoint_cmcd = endpoint_cmcd
-                || list(&current)?.iter().any(|value| {
-                    value["format"]
-                        .as_str()
-                        .is_some_and(|format| format.to_ascii_lowercase().contains("\"cmcd_"))
-                });
+            for value in list(&current)? {
+                let name = value["name"].as_str().unwrap_or("");
+                let is_own_ep =
+                    owned_endpoints.is_some_and(|names| names.iter().any(|v| v == name));
+                if let Some(format) = value["format"].as_str() {
+                    let lower = format.to_ascii_lowercase();
+                    if lower.contains("\"cmcd_") {
+                        endpoint_cmcd = true;
+                    }
+                    if !is_own_ep
+                        && (lower.contains("\"edge_score")
+                            || lower.contains("req.http.x-edge-score:"))
+                    {
+                        endpoint_scoring = true;
+                    }
+                }
+            }
         }
         for value in list(&current)? {
             let name = value["name"].as_str().unwrap_or("");
@@ -698,7 +687,14 @@ fn preflight(
     if attached {
         reconcile::attach_condition_statement(&conditions, "")?;
     }
-    Ok((service, snippets, conditions, token_info, endpoint_cmcd))
+    Ok((
+        service,
+        snippets,
+        conditions,
+        token_info,
+        endpoint_cmcd,
+        endpoint_scoring,
+    ))
 }
 
 fn check_generation(record: &Record, input: &Value) -> Result<(), Error> {
@@ -711,7 +707,7 @@ fn check_generation(record: &Record, input: &Value) -> Result<(), Error> {
 fn validate_fields(
     fields: &Value,
     previous: Option<&Value>,
-    scoring_enabled: bool,
+    allow_scoring_fields: bool,
 ) -> Result<(), Error> {
     if !fields.is_object() || fields["groups"].as_array().is_none_or(|v| v.len() > 32) {
         return Err(Error::new(400, "invalid_log_fields"));
@@ -741,8 +737,20 @@ fn validate_fields(
     if custom.len() > 64 {
         return Err(Error::new(400, "too_many_custom_fields"));
     }
+    let previously_committed_scoring = |v: &Value| {
+        scoring::managed_field(v)
+            && previous.is_some_and(|prev| {
+                prev["custom_fields"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|old| old["name"] == v["name"] && old["committed"] == true)
+            })
+    };
     let is_managed = |v: &Value| {
-        crate::logging::cmcd::managed_field(v) || (scoring_enabled && scoring::managed_field(v))
+        crate::logging::cmcd::managed_field(v)
+            || ((allow_scoring_fields || previously_committed_scoring(v))
+                && scoring::managed_field(v))
     };
     let mut names = Vec::new();
     for field in custom {
@@ -922,27 +930,19 @@ fn validate_service(
     validate_fields(
         &service.log_fields,
         previous.map(|s| &s.log_fields),
-        service.scoring.as_ref().is_some_and(|s| s.enabled),
+        service.scoring.as_ref().is_some_and(|s| s.enabled) || service.capture == Capture::Attached,
     )
 }
 
-fn patch_service(
-    context: &Context<'_, impl Runtime>,
-    actor: &str,
-    sid: &str,
-    input: Value,
-) -> Result<Value, Error> {
-    let (record, previous) = load_service(context, sid)?;
-    check_generation(&record, &input)?;
-    if previous.status == "torn_down" {
-        return Err(Error::new(409, "service_torn_down"));
-    }
-    reject_blocking_job(context, &previous)?;
-    check_unlocked(context, sid)?;
-    if previous.data_reset.is_some() {
-        return Err(Error::new(409, "data_reset_in_progress"));
-    }
-    let mut value = serialize(&previous)?;
+fn apply_service_patch(
+    previous: &Service,
+    input: &Value,
+    window_s: i64,
+) -> Result<(Service, bool), Error> {
+    let input_obj = input
+        .as_object()
+        .ok_or_else(|| Error::new(400, "invalid_input"))?;
+    let mut value = serialize(previous)?;
     let allowed = [
         "logging_enabled",
         "logging_endpoint_name",
@@ -973,13 +973,14 @@ fn patch_service(
         "wire_format",
         "generation",
     ];
+    let mut has_patch = false;
     let mut rum_obj = value["rum"].as_object().cloned().unwrap_or_default();
-    for (key, next) in input
-        .as_object()
-        .ok_or_else(|| Error::new(400, "invalid_input"))?
-    {
+    for (key, next) in input_obj {
         if !allowed.contains(&key.as_str()) {
             return Err(Error::new(400, "unknown_setting"));
+        }
+        if key != "generation" {
+            has_patch = true;
         }
         match key.as_str() {
             "generation" => (),
@@ -1023,6 +1024,9 @@ fn patch_service(
             }
         }
     }
+    if !has_patch {
+        return Ok((previous.clone(), false));
+    }
     let explicit_rum_ep = input
         .get("rum_endpoint_name")
         .or_else(|| input.get("rum").and_then(|r| r.get("endpoint_name")));
@@ -1049,17 +1053,198 @@ fn patch_service(
     } else {
         service.log_fields["field_limits"] = service.field_limits.clone();
     }
-    reconcile_system_fields(&mut service, Some(&previous))?;
-    validate_service(
-        &service,
-        Some(&previous),
-        crate::ingest::window_seconds(context.runtime),
-    )?;
+    reconcile_system_fields(&mut service, Some(previous))?;
+    validate_service(&service, Some(previous), window_s)?;
+    Ok((service, true))
+}
+
+fn patch_service(
+    context: &Context<'_, impl Runtime>,
+    actor: &str,
+    sid: &str,
+    input: Value,
+) -> Result<Value, Error> {
+    let (record, previous) = load_service(context, sid)?;
+    check_generation(&record, &input)?;
+    if previous.status == "torn_down" {
+        return Err(Error::new(409, "service_torn_down"));
+    }
+    reject_blocking_job(context, &previous)?;
+    check_unlocked(context, sid)?;
+    if previous.data_reset.is_some() {
+        return Err(Error::new(409, "data_reset_in_progress"));
+    }
+    let window_s = crate::ingest::window_seconds(context.runtime);
+    let (mut service, changed) = apply_service_patch(&previous, &input, window_s)?;
+    if !changed {
+        validate_service(&service, Some(&previous), window_s)?;
+    }
     service.config_version += 1;
     service.updated_at = context.runtime.now();
     save_service(context, &record, &service, actor, "config.updated")?;
     let (record, service) = load_service(context, sid)?;
     Ok(json!({"service":service_value(&service,&record.generation),"generation":record.generation}))
+}
+
+fn reconcile_service(
+    context: &Context<'_, impl Runtime>,
+    actor: &str,
+    sid: &str,
+    input: Value,
+) -> Result<Value, Error> {
+    let (record, mut service) = load_service(context, sid)?;
+    check_generation(&record, &input)?;
+    if service.status == "torn_down" {
+        return Err(Error::new(409, "service_torn_down"));
+    }
+    if service.data_reset.is_some() {
+        return Err(Error::new(409, "data_reset_in_progress"));
+    }
+    let dry_run = match input.get("dry_run") {
+        None | Some(Value::Null) => false,
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| Error::new(400, "invalid_input"))?,
+    };
+    let activate = match input.get("activate") {
+        None | Some(Value::Null) => true,
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| Error::new(400, "invalid_input"))?,
+    };
+    let mut patch_input = input.clone();
+    if let Some(obj) = patch_input.as_object_mut() {
+        obj.remove("dry_run");
+        obj.remove("activate");
+    }
+    let previous = service.clone();
+    let window_s = crate::ingest::window_seconds(context.runtime);
+    let (mut candidate, changed) = apply_service_patch(&previous, &patch_input, window_s)?;
+    if !changed {
+        if crate::logging::validate_vcl_condition(&candidate.custom_condition).is_err() {
+            return Err(Error::new(400, "invalid_logging_settings"));
+        }
+        if crate::logging::rum::validate_custom_condition(&candidate.rum.custom_condition).is_err()
+        {
+            return Err(Error::new(400, "invalid_rum_settings"));
+        }
+    }
+    if let Some(ref sc) = candidate.scoring {
+        if sc.enabled && !scoring::valid_scoring_domain(&sc.scoring_domain) {
+            return Err(Error::new(400, "invalid_scoring_domain"));
+        }
+    }
+    if changed {
+        candidate.config_version += 1;
+        candidate.updated_at = context.runtime.now();
+    }
+    let mut job = new_job(
+        context,
+        actor,
+        if dry_run { &previous } else { &candidate },
+        "reconcile",
+        dry_run,
+        activate,
+    )?;
+    if dry_run {
+        if changed {
+            job.desired_service = Some(service_snapshot_value(&candidate)?);
+        }
+        start_job(context, &record, &mut service, job)
+    } else {
+        let baseline = previous
+            .deployed_snapshot
+            .clone()
+            .map(decode)
+            .transpose()?
+            .unwrap_or_else(|| {
+                let mut s = previous.clone();
+                s.pending_job_id = None;
+                s
+            });
+        job.service_snapshot = Some(baseline);
+        service = candidate;
+        start_job(context, &record, &mut service, job)
+    }
+}
+
+fn rollback_service(
+    context: &Context<'_, impl Runtime>,
+    actor: &str,
+    sid: &str,
+    input: Value,
+) -> Result<Value, Error> {
+    let (record, current) = load_service(context, sid)?;
+    check_generation(&record, &input)?;
+    if current.status == "torn_down" {
+        return Err(Error::new(409, "service_torn_down"));
+    }
+    if current.data_reset.is_some() {
+        return Err(Error::new(409, "data_reset_in_progress"));
+    }
+    reject_blocking_job(context, &current)?;
+    check_unlocked(context, sid)?;
+    if audit_outbox_len(&record) >= AUDIT_OUTBOX_LIMIT {
+        return Err(Error::new(409, "audit_archive_required"));
+    }
+    let (Some(ver), Some(prev_snap)) = (
+        current.previous_activated_version,
+        current.previous_deployed_snapshot.clone(),
+    ) else {
+        return Err(Error::new(409, "rollback_unavailable"));
+    };
+    let mut restored: Service = decode(prev_snap.clone())?;
+    let token = scoring::resolve_brokered_token(context, &current, input["token"].as_str())?;
+    context.confirm_with_token(&token);
+
+    let lease_key = format!("reconcile_lock:{sid}");
+    let lease_record = context.get(&lease_key)?;
+    let old: Lease = lease_record
+        .as_ref()
+        .map(|r| decode(r.value.clone()))
+        .transpose()?
+        .unwrap_or_default();
+    let now = context.runtime.now();
+    if old.expires_at > now {
+        return Err(Error::new(409, "service_locked"));
+    }
+    let lease = Lease {
+        job_id: format!("rollback:{now}"),
+        fence: old.fence + 1,
+        expires_at: now + 60,
+    };
+    context.cas(
+        &lease_key,
+        lease_record.as_ref().map(|r| r.generation.as_str()),
+        &serialize(&lease)?,
+    )?;
+
+    let res = (|| -> Result<Value, Error> {
+        context.api(
+            "PUT",
+            &format!("/service/{sid}/version/{ver}/activate"),
+            &token,
+            None,
+        )?;
+        restored.last_activated_version = Some(ver);
+        restored.deployed_snapshot = Some(prev_snap);
+        restored.previous_deployed_snapshot = None;
+        restored.previous_activated_version = None;
+        restored.pending_job_id = None;
+        restored.config_version = current.config_version + 1;
+        restored.updated_at = context.runtime.now();
+        save_service(context, &record, &restored, actor, "config.rolled_back")?;
+        let _ = purge_status_cache(context.runtime, sid);
+        let (updated_record, updated_service) = load_service_from(context, sid, true)?;
+        Ok(json!({
+            "service": service_value(&updated_service, &updated_record.generation),
+            "generation": updated_record.generation,
+            "activated_version": ver,
+        }))
+    })();
+
+    release_lease(context, &lease_key, &lease);
+    res
 }
 
 fn new_job(
@@ -1119,6 +1304,7 @@ fn new_job(
         delete_matrices: false,
         scorer_ownership_verified: false,
         pending_failure: None,
+        desired_service: None,
     })
 }
 // A failed reconcile or scoring job is superseded by the next mutation/job: it can fail for good,
@@ -1198,6 +1384,25 @@ fn save_service(
         event,
         AUDIT_OUTBOX_LIMIT,
         false,
+        !event.starts_with("data_reset."),
+    )
+}
+fn save_service_no_dr(
+    context: &Context<'_, impl Runtime>,
+    record: &Record,
+    service: &Service,
+    actor: &str,
+    event: &str,
+) -> Result<(), Error> {
+    save_service_with_limit(
+        context,
+        record,
+        service,
+        actor,
+        event,
+        AUDIT_OUTBOX_LIMIT,
+        false,
+        false,
     )
 }
 fn save_service_recovery_capped(
@@ -1215,8 +1420,10 @@ fn save_service_recovery_capped(
         event,
         JOB_RECOVERY_OUTBOX_LIMIT,
         true,
+        !event.starts_with("data_reset."),
     )
 }
+#[allow(clippy::too_many_arguments)]
 fn save_service_with_limit(
     context: &Context<'_, impl Runtime>,
     record: &Record,
@@ -1225,6 +1432,7 @@ fn save_service_with_limit(
     event: &str,
     max_outbox: usize,
     cap_instead_of_fail: bool,
+    sync_dr: bool,
 ) -> Result<(), Error> {
     context.confirm_with_secret(&service.fastly_token_ref);
     let mut value = serialize_service(service)?;
@@ -1245,7 +1453,7 @@ fn save_service_with_limit(
         Some(&record.generation),
         &value,
     )?;
-    if !event.starts_with("data_reset.") {
+    if sync_dr {
         dr::sync_best_effort(context.runtime, service);
     }
     Ok(())
@@ -1327,7 +1535,7 @@ fn provision(
         return Err(Error::new(400, "invalid_logging_settings"));
     }
     let logging_endpoint_name = input.endpoint_name();
-    let (target, _, _, _, _) = preflight(
+    let (target, _, _, _, _, _) = preflight(
         context,
         &input.token,
         &input.service_id,
@@ -1423,6 +1631,9 @@ fn provision(
         scoring: None,
         cdn_shield: input.cdn_shield.trim().to_owned(),
         stored_log_field_ids: None,
+        deployed_snapshot: None,
+        previous_deployed_snapshot: None,
+        previous_activated_version: None,
     };
     reconcile_system_fields(&mut service, previous.as_ref())?;
     validate_service(
@@ -1841,7 +2052,10 @@ fn step(context: &Context<'_, impl Runtime>, id: &str, retry: bool) -> Result<Va
             job.pending_failure = None;
             job.status = "failed".into();
             job.error = Some(failure.code.into());
-        } else if previous_step == "scoring_rollback" {
+        } else if matches!(
+            previous_step.as_str(),
+            "scoring_rollback" | "reconcile_rollback"
+        ) {
             let orig_error = job
                 .pending_failure
                 .take()
@@ -1871,6 +2085,35 @@ fn step(context: &Context<'_, impl Runtime>, id: &str, retry: bool) -> Result<Va
                 job.pending_failure
                     .get_or_insert_with(|| failure.code.into());
                 job.step = "scoring_rollback".into();
+                job.status = "pending".into();
+                job.error = None;
+            }
+        } else if job.kind == "reconcile"
+            && !job.dry_run
+            && job.service_snapshot.is_some()
+            && context.uncertain_operations().is_empty()
+        {
+            let rolled_back = if context.remaining_calls() < 7 {
+                false
+            } else if let Some((svc_rec, mut svc)) = cached_service {
+                rollback_failed_reconcile(context, &mut svc, &svc_rec, &mut job).is_ok()
+            } else if let Ok((svc_rec, mut svc)) = load_service_from(context, &job.service_id, true)
+            {
+                rollback_failed_reconcile(context, &mut svc, &svc_rec, &mut job).is_ok()
+            } else {
+                false
+            };
+            if rolled_back {
+                let orig_error = job
+                    .pending_failure
+                    .take()
+                    .unwrap_or_else(|| failure.code.into());
+                job.status = "failed".into();
+                job.error = Some(orig_error);
+            } else {
+                job.pending_failure
+                    .get_or_insert_with(|| failure.code.into());
+                job.step = "reconcile_rollback".into();
                 job.status = "pending".into();
                 job.error = None;
             }
@@ -1978,7 +2221,11 @@ fn bind_service(job: &mut Job, record: &Record, service: &Service) -> Result<(),
                 .as_str()
                 .ok_or_else(|| Error::new(409, "invalid_job_checkpoint"))?;
             if job.pending_failure.is_some() {
-                job.step = "scoring_rollback".into();
+                job.step = if job.kind == "reconcile" {
+                    "reconcile_rollback".into()
+                } else {
+                    "scoring_rollback".into()
+                };
             } else {
                 job.step = next.into();
             }
@@ -2004,6 +2251,75 @@ fn bind_service(job: &mut Job, record: &Record, service: &Service) -> Result<(),
     Ok(())
 }
 
+fn rollback_failed_reconcile(
+    context: &Context<'_, impl Runtime>,
+    service: &mut Service,
+    record: &Record,
+    job: &mut Job,
+) -> Result<(), Error> {
+    if context.remaining_calls() < 7 {
+        return Err(Error::new(503, "backend_budget"));
+    }
+    let fresh_rec;
+    let rec: &Record = if record.generation != job.expected_generation {
+        let (loaded_rec, loaded_svc) = load_service_from(context, &job.service_id, true)?;
+        *service = loaded_svc;
+        fresh_rec = loaded_rec;
+        &fresh_rec
+    } else {
+        record
+    };
+    if service.pending_job_id.as_deref() != Some(job.id.as_str()) {
+        return Err(Error::new(409, "service_changed_rerun"));
+    }
+    if let (Some(source), Some(draft)) = (job.source_version, job.draft_version) {
+        let token = context.secret(&service.fastly_token_ref)?;
+        context.confirm_with_token(&token);
+        let active = reconcile::active_version(context, &service.service_id, &token)?;
+        if active == draft {
+            context.api(
+                "PUT",
+                &format!("/service/{}/version/{source}/activate", service.service_id),
+                &token,
+                None,
+            )?;
+        }
+    }
+    if let (Some(front_source), Some(front_draft)) =
+        (job.front_source_version, job.front_draft_version)
+    {
+        if let Ok(front_sid) = config(context.runtime, "front_service_id") {
+            let install_token = context.secret("fastly_token")?;
+            let active = reconcile::active_version(context, &front_sid, &install_token)?;
+            if active == front_draft {
+                context.api(
+                    "PUT",
+                    &format!("/service/{front_sid}/version/{front_source}/activate"),
+                    &install_token,
+                    None,
+                )?;
+            }
+        }
+    }
+    if let Some(mut restored) = job.service_snapshot.clone() {
+        restored.pending_job_id = None;
+        restored.updated_at = context.runtime.now();
+        restored.config_version = service.config_version.max(restored.config_version) + 1;
+        restored.deployed_snapshot = service.deployed_snapshot.clone();
+        restored.previous_deployed_snapshot = service.previous_deployed_snapshot.clone();
+        restored.previous_activated_version = service.previous_activated_version;
+        save_service_recovery_capped(
+            context,
+            rec,
+            &restored,
+            &job.actor,
+            "job.reconcile_rolled_back",
+        )?;
+        let _ = purge_status_cache(context.runtime, &service.service_id);
+    }
+    Ok(())
+}
+
 fn run_step(
     context: &Context<'_, impl Runtime>,
     job: &mut Job,
@@ -2019,6 +2335,15 @@ fn run_step(
     if scoring::run_step(context, job, &record, &mut service, &token)? {
         return Ok(());
     }
+    let dry_run_target = if job.dry_run {
+        job.desired_service
+            .as_ref()
+            .map(|val| decode::<Service>(val.clone()))
+            .transpose()?
+    } else {
+        None
+    };
+    let reconcile_service = dry_run_target.as_ref().unwrap_or(&service);
     match job.step.as_str() {
         "bucket" | "bucket_probe" | "bucket_create" => {
             fos::bucket(context, job, &mut service, &record, &token)
@@ -2039,10 +2364,21 @@ fn run_step(
         // The front service belongs to the install, whose token may differ from the logged service's.
         "front_clock" => {
             let install = context.secret("fastly_token")?;
-            reconcile::front(context, job, &service, &install, false, true)
+            reconcile::front(context, job, reconcile_service, &install, false, true)
         }
         "discover" | "clone" | "apply" | "validate" | "activate" | "sync_rum" => {
-            reconcile::run(context, job, &service, &token)
+            reconcile::run(context, job, reconcile_service, &token)
+        }
+        "reconcile_rollback" => {
+            rollback_failed_reconcile(context, &mut service, &record, job)?;
+            let code = job
+                .pending_failure
+                .take()
+                .unwrap_or_else(|| "reconcile_rollback_failed".into());
+            job.status = "failed".into();
+            job.error = Some(code);
+            job.retry = None;
+            Ok(())
         }
         "remove_front" => reconcile::front(context, job, &service, &token, true, false),
         "delete_objects" | "delete_page" | "delete_bucket" => {
@@ -2092,13 +2428,27 @@ fn run_step(
                 }
                 names
             };
-            if job.activate && !job.dry_run {
-                service.last_activated_version =
-                    job.draft_version.or(service.last_activated_version);
-            }
             service.last_reconcile = Some(
                 json!({"at":context.runtime.now(),"outcome":"complete","dry_run":job.dry_run,"activated":job.activate,"changes":public_job(job)["changes"]}),
             );
+            if job.activate && !job.dry_run {
+                service.last_activated_version =
+                    job.draft_version.or(service.last_activated_version);
+                if matches!(job.kind.as_str(), "provision" | "reconcile") {
+                    service.previous_deployed_snapshot = service.deployed_snapshot.take();
+                    service.previous_activated_version = job
+                        .source_version
+                        .filter(|v| Some(*v) != service.last_activated_version);
+                    service.deployed_snapshot = Some(service_snapshot_value(&service)?);
+                } else if matches!(
+                    job.kind.as_str(),
+                    "scoring_enable" | "scoring_disable" | "scoring_teardown"
+                ) {
+                    service.previous_deployed_snapshot = None;
+                    service.previous_activated_version = None;
+                    service.deployed_snapshot = Some(service_snapshot_value(&service)?);
+                }
+            }
             save_job_service(context, &record, &service, job, "job.completed", "finalize")?;
             if job.kind != "teardown" && !job.dry_run {
                 dr::sync_best_effort(context.runtime, &service);
@@ -2208,7 +2558,11 @@ fn load_installed_service(
     };
     let active_service = serde_json::from_value::<Service>(svc_rec.value.clone())
         .ok()
-        .filter(|svc| svc.status != "torn_down");
+        .filter(|svc| svc.status != "torn_down" && svc.status != "provisioning")
+        .map(|mut svc| {
+            normalize_service_runtime_fields(&mut svc);
+            svc
+        });
     Ok((Some(svc_rec), active_service, requests))
 }
 

@@ -667,7 +667,8 @@ async function cmcdFromFiles(
   }
 
   const totalRequests = overall.reqs;
-  if (totalRequests === 0) return emptyCmcdAggregates();
+  const available = typeof params.available === "boolean" ? params.available : true;
+  if (totalRequests === 0) return emptyCmcdAggregates(available);
 
   const activeSessions = Math.round(overall.sidHll.count());
   const rebufferSessions = Math.round(overall.rebufferSidHll.count());
@@ -928,7 +929,7 @@ async function cmcdFromFiles(
     .sort((a, b) => b.session_count - a.session_count || a.format.localeCompare(b.format));
 
   return {
-    available: true,
+    available,
     has_data: true,
     overview: {
       active_sessions: activeSessions,

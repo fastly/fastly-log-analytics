@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import sys
@@ -45,6 +44,60 @@ def upload_rum_tracker_js(*args: Any, **kwargs: Any) -> dict[str, Any]:
     return _orch_mod.upload_rum_tracker_js(*args, **kwargs)
 
 
+_vcl_lock_state = threading.local()
+
+
+class _VclLockBusy(Exception):
+    """Internal retry signal when another worker holds the VCL lock."""
+
+
+class _ReentrantVclLock:
+    """No-op inner lock handle for re-entrant acquisitions on the same thread."""
+
+    def __init__(self, service_id: str) -> None:
+        self._service_id = service_id
+
+    def __enter__(self) -> _ReentrantVclLock:
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        held: dict[str, int] = getattr(_vcl_lock_state, "held", {})
+        depth = held.get(self._service_id, 1)
+        if depth <= 1:
+            held.pop(self._service_id, None)
+        else:
+            held[self._service_id] = depth - 1
+
+
+class PgAdvisoryLock:
+    """PostgreSQL session advisory lock for cross-pod VCL reconciliation."""
+
+    def __init__(self, service_id: str, conn: Any) -> None:
+        self._service_id = service_id
+        self._conn = conn
+
+    def __enter__(self) -> PgAdvisoryLock:
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        from contextlib import suppress
+
+        held: dict[str, int] = getattr(_vcl_lock_state, "held", {})
+        depth = held.get(self._service_id, 1)
+        if depth <= 1:
+            held.pop(self._service_id, None)
+        else:
+            held[self._service_id] = depth - 1
+            return
+        with suppress(Exception):
+            self._conn.execute(
+                "SELECT pg_advisory_unlock(hashtextextended('vcl_lock:' || ?, 0))",
+                (self._service_id,),
+            )
+        with suppress(Exception):
+            self._conn.close()
+
+
 class FileLock:
     """File-based lock for concurrency control backed by ``filelock.SoftFileLock``."""
 
@@ -55,6 +108,7 @@ class FileLock:
         *,
         heartbeat_interval: float | None = None,
         owner: str | None = None,
+        service_id: str | None = None,
     ) -> None:
         self.lock_path = lock_path
         self._lock = _lock
@@ -62,6 +116,7 @@ class FileLock:
         self._heartbeat: threading.Thread | None = None
         self._heartbeat_interval = heartbeat_interval
         self._owner = owner
+        self._service_id = service_id
 
     def start_heartbeat(self) -> None:
         if self._heartbeat_interval is None or self._owner is None:
@@ -84,6 +139,14 @@ class FileLock:
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         from contextlib import suppress
 
+        if self._service_id:
+            held: dict[str, int] = getattr(_vcl_lock_state, "held", {})
+            depth = held.get(self._service_id, 1)
+            if depth <= 1:
+                held.pop(self._service_id, None)
+            else:
+                held[self._service_id] = depth - 1
+                return
         self._heartbeat_stop.set()
         if self._heartbeat is not None:
             self._heartbeat.join(timeout=1)
@@ -92,19 +155,55 @@ class FileLock:
                 self._lock.release()
 
 
-def acquire_vcl_lock(service_id: str, timeout_sec: int = 300) -> FileLock:
-    """Acquire a file-based lock for reconciliation."""
+def acquire_vcl_lock(service_id: str, timeout_sec: int = 300) -> FileLock | PgAdvisoryLock | _ReentrantVclLock:
+    """Acquire a distributed (PostgreSQL advisory) or local file lock for reconciliation."""
     from contextlib import suppress
 
     from filelock import SoftFileLock
     from filelock import Timeout as _FileLockTimeout
     from tenacity import Retrying, retry_if_exception_type, wait_exponential
 
+    from backend.core.metadata import pg_pool
+
+    held: dict[str, int] = _vcl_lock_state.__dict__.setdefault("held", {})
+    if held.get(service_id, 0) > 0:
+        held[service_id] += 1
+        return _ReentrantVclLock(service_id)
+
+    start = time.time()
+    if pg_pool.is_postgres():
+        conn = pg_pool.get_pg_readonly_connection()
+        if isinstance(conn, pg_pool.PgConnectionWrapper):
+            try:
+                for attempt in Retrying(
+                    wait=wait_exponential(multiplier=0.1, exp_base=1.5, min=0.1, max=1.0),
+                    retry=retry_if_exception_type(_VclLockBusy),
+                    sleep=lambda s: time.sleep(s),
+                    reraise=True,
+                ):
+                    with attempt:
+                        row = conn.execute(
+                            "SELECT pg_try_advisory_lock(hashtextextended('vcl_lock:' || ?, 0))",
+                            (service_id,),
+                        ).fetchone()
+                        if row and bool(row[0]):
+                            held[service_id] = 1
+                            return PgAdvisoryLock(service_id, conn)
+                        if (elapsed := time.time() - start) > timeout_sec:
+                            raise LockAcquisitionTimeout(service_id, elapsed)
+                        raise _VclLockBusy()
+            except BaseException:
+                with suppress(Exception):
+                    conn.close()
+                raise
+        else:
+            with suppress(Exception):
+                conn.close()
+
     lock_path = Path(f"data/services/{service_id}.vcl.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     stale_seconds = float(os.getenv("FASTLY_VCL_LOCK_STALE_SECONDS", "300"))
     flock = SoftFileLock(str(lock_path), thread_local=False)
-    start = time.time()
     for attempt in Retrying(
         wait=wait_exponential(multiplier=0.1, exp_base=1.5, min=0.1, max=1.0),
         retry=retry_if_exception_type(_FileLockTimeout),
@@ -120,14 +219,16 @@ def acquire_vcl_lock(service_id: str, timeout_sec: int = 300) -> FileLock:
                 owner = f"{os.getpid()} {time.time_ns()}"
                 with suppress(OSError):
                     lock_path.write_text(owner)
-                held = FileLock(
+                held[service_id] = 1
+                held_lock = FileLock(
                     lock_path,
                     _lock=flock,
                     heartbeat_interval=max(0.01, min(30.0, stale_seconds / 3)),
                     owner=owner,
+                    service_id=service_id,
                 )
-                held.start_heartbeat()
-                return held
+                held_lock.start_heartbeat()
+                return held_lock
             except _FileLockTimeout:
                 if (elapsed := time.time() - start) > timeout_sec:
                     raise LockAcquisitionTimeout(service_id, elapsed) from None
@@ -594,7 +695,7 @@ def _apply_diff(
     current_endpoints: list[LoggingEndpoint] | None = None,
 ) -> None:
     """Apply diff mutations on the draft version (Step 6)."""
-    from backend.config import config_path as _config_path
+    from backend import config as svcconfig
     from backend.core.fastly.client import ensure_condition
 
     desired_endpoints = desired_endpoints or []
@@ -630,14 +731,13 @@ def _apply_diff(
                 )
         snippet.body = body
     bucket_name = region = None
-    config_path = _config_path(service_id)
-    if config_path.exists():
-        try:
-            cfg = json.loads(config_path.read_text())
-            bucket_name = cfg.get("fos_bucket") or cfg.get("fos_bucket_name")
-            region = cfg.get("fos_region") or "us-east-1"
-        except Exception:
-            pass
+    try:
+        cfg = svcconfig.load_config(service_id)
+    except Exception:
+        cfg = None
+    if cfg:
+        bucket_name = cfg.get("fos_bucket") or cfg.get("fos_bucket_name")
+        region = cfg.get("fos_region") or "us-east-1"
 
     def _purge_outdated(
         names: list[str],
@@ -659,8 +759,10 @@ def _apply_diff(
                 status_cb(f"🧹 Removing outdated {label} '{name}'...")
             try:
                 deleter(service_id, draft_version, name, token)
-            except Exception:
-                pass
+            except RuntimeError as exc:
+                err_text = str(exc)
+                if "404" not in err_text and "not found" not in err_text.lower():
+                    raise
 
     _purge_outdated(
         diff.snippets_to_remove,
@@ -745,13 +847,15 @@ def _apply_diff(
             fastly_integration.create_or_update_dictionary(service_id, draft_version, dictionary, token)
         except Exception as e:
             logger.warning("Failed to install/update edge dictionary '%s': %s", dictionary.name, e)
+            raise
     for snippet in diff.snippets_to_add + diff.snippets_to_update:
         if status_cb:
             status_cb(f"➕ Installing VCL snippet '{snippet.name}'...")
         try:
             fastly_integration.create_or_update_snippet(service_id, draft_version, snippet, token)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to install/update VCL snippet '%s': %s", snippet.name, e)
+            raise
     for endpoint in diff.endpoints_to_add + diff.endpoints_to_update:
         if status_cb:
             status_cb(f"➕ Installing logging endpoint '{endpoint.name}'...")
@@ -763,6 +867,7 @@ def _apply_diff(
             logger.exception(f"Failed to install/update logging endpoint '{endpoint.name}': {e}")
             if status_cb:
                 status_cb(f"❌ Failed to install logging endpoint '{endpoint.name}': {redact_error_text(e)}")
+            raise
 
 
 def _validate_draft(service_id: str, token: str, draft_version: int) -> str:

@@ -32,7 +32,6 @@ def test_cli_main_closes_the_metadata_pool_a_command_opened(
     assert pg_pool._pool is None
 
 
-@pytest.mark.no_postgres
 def test_cli_set_snapshot_interval_updates_config():
     from typer.testing import CliRunner
 
@@ -56,7 +55,6 @@ def test_cli_set_snapshot_interval_updates_config():
     assert updated["provisioning"]["cron_sync"]["snapshot_interval_minutes"] == 60
 
 
-@pytest.mark.no_postgres
 def test_cli_set_snapshot_interval_rejects_invalid_and_missing_service():
     from typer.testing import CliRunner
 
@@ -79,7 +77,6 @@ def test_cli_provision_rejects_invalid_snapshot_interval():
     assert bad.exit_code == 2
 
 
-@pytest.mark.no_postgres
 @pytest.mark.parametrize(
     ("sid", "initial_cfg"),
     [
@@ -103,7 +100,6 @@ def test_cli_set_snapshot_interval_recovers_null_or_non_dict_blocks(sid: str, in
     assert reloaded["provisioning"]["cron_sync"]["snapshot_interval_minutes"] == 30
 
 
-@pytest.mark.no_postgres
 @pytest.mark.parametrize("bad_val", [True, False, 15.9, float("inf"), float("nan")])
 def test_validate_snapshot_interval_minutes_rejects_bool_and_float(bad_val) -> None:
     import typer

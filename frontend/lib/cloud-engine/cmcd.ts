@@ -6,6 +6,8 @@ import {
 } from "./dashboard/duckdb";
 import type { FiltersPayload } from "@/types/api";
 import { parseEpochMs, roundTo } from "./engine-utils";
+import { cloudActiveLogFieldIds } from "./active-log-fields";
+import { fetchCloudMetadata } from "./metadata-cache";
 import { cmcdFromRollup, cmcdRollupEligible, type CmcdRollupSource } from "./cmcd-rollup";
 import { analyticsFiltersToSql, rangeServiceSql } from "./query-params";
 import { formatAsnDisplayLabel, loadAsnNames } from "./asn-names";
@@ -74,6 +76,7 @@ export interface CmcdQueryParams {
   engine?: Pick<DuckDBAnalyticalEngine, "executeSql" | "getPresentColumns"> & Partial<Pick<DuckDBReadContext, "getCustomColumnTypes">>;
   rollupSource?: CmcdRollupSource;
   customColumnTypes?: ReturnType<DuckDBReadContext["getCustomColumnTypes"]>;
+  available?: boolean;
   signal?: AbortSignal;
 }
 
@@ -181,9 +184,9 @@ export function padCmcdTimeseries(
   };
 }
 
-export function emptyCmcdAggregates() {
+export function emptyCmcdAggregates(available = true) {
   return {
-    available: true,
+    available,
     has_data: false,
     overview: {
       active_sessions: 0, peak_viewers: 0, avg_session_duration: null as number | null,
@@ -305,9 +308,42 @@ export function cmcdScanColumns(
   return [...new Set([...base, ...Object.keys(filters).filter((key) => key !== "filter_mode")])];
 }
 
+async function resolveCmcdServiceEnabled(
+  serviceId: string | undefined,
+  signal: AbortSignal,
+): Promise<{ serviceId: string; enabled: boolean }> {
+  const activeIds = await cloudActiveLogFieldIds(serviceId, signal);
+  if (activeIds.has("cmcd_sid")) {
+    return { serviceId: serviceId ?? "default", enabled: true };
+  }
+  if (serviceId && serviceId !== "default") {
+    const response = await fetchCloudMetadata("/api/services", signal).catch(() => null);
+    if (response?.ok) {
+      const { services = [] } = (await response.json().catch(() => ({}))) as {
+        services?: Array<{
+          service_id?: string;
+          cmcd?: { enabled?: boolean };
+        }>;
+      };
+      const service = services.find((item) => item.service_id === serviceId);
+      if (service) {
+        return {
+          serviceId: service.service_id ?? serviceId,
+          enabled: Boolean(service.cmcd?.enabled),
+        };
+      }
+    }
+  }
+  return { serviceId: serviceId ?? "default", enabled: false };
+}
+
 export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
+  const available =
+    typeof params.available === "boolean"
+      ? params.available
+      : (await resolveCmcdServiceEnabled(params.service_id, params.signal ?? new AbortController().signal)).enabled;
   if (params.rollupSource && cmcdRollupEligible(params)) {
-    const rollup = await cmcdFromRollup(params, params.rollupSource, params.signal);
+    const rollup = await cmcdFromRollup({ ...params, available }, params.rollupSource, params.signal);
     if (rollup) return rollup;
   }
   const sectionSet = params.sections?.length ? new Set(params.sections) : null;
@@ -396,7 +432,7 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
   const s = coreRows.find((r) => Number(r.grp) === 7);
   const totalRequests = Number(s?.total_requests ?? 0);
   if (!s || totalRequests === 0) {
-    return emptyCmcdAggregates();
+    return emptyCmcdAggregates(available);
   }
 
   const activeSessions = Number(s.active_sessions ?? 0);
@@ -719,7 +755,7 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
         });
 
   return {
-    available: true,
+    available,
     has_data: true,
     overview: {
       active_sessions: activeSessions,
@@ -832,10 +868,11 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
   };
 }
 
-export async function queryCmcdStatus(serviceId = "default") {
+export async function queryCmcdStatus(serviceId = "default", signal?: AbortSignal) {
+  const resolved = await resolveCmcdServiceEnabled(serviceId, signal ?? new AbortController().signal);
   return {
-    service_id: serviceId,
-    enabled: true,
+    service_id: resolved.serviceId,
+    enabled: resolved.enabled,
     fields: [...CMCD_COLUMNS],
   };
 }
@@ -848,7 +885,7 @@ export async function handleCmcdRequest(
     return queryCmcdAggregates(params);
   }
   if (path.includes("/cmcd/status")) {
-    return queryCmcdStatus(params.service_id ?? "default");
+    return queryCmcdStatus(params.service_id ?? "default", params.signal);
   }
   if (path.includes("/cmcd/enable") || path.includes("/cmcd/disable")) {
     return { status: "complete", service_id: params.service_id ?? "default" };

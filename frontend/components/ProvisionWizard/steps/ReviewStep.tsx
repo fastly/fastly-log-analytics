@@ -53,7 +53,10 @@ export function ExecuteStep({ s }: { s: WizardState }) {
       if (override !== undefined) return override
       return f.group === null || enabledGroups.has(f.group)
     }
-    const enabledTotal = fields.filter(isFieldEnabled).length
+    const customEnabledCount = (config.log_fields?.custom_fields ?? []).filter(
+      (cf) => (cf as { enabled?: unknown })?.enabled !== false,
+    ).length
+    const enabledTotal = fields.filter(isFieldEnabled).length + customEnabledCount
     const groups = catalog?.groups ?? []
     const breakdown = groups
       .map((g) => {
@@ -86,7 +89,7 @@ export function ExecuteStep({ s }: { s: WizardState }) {
       groupBreakdown: breakdown,
       disabledGroupCount: disabled,
     }
-  }, [catalog, config.log_fields?.field_overrides, enabledGroups])
+  }, [catalog, config.log_fields?.custom_fields, config.log_fields?.field_overrides, enabledGroups])
   // Cloud ingests on its own edge clock; cron sync, CDN prefix and shield are self-hosted settings.
   const cloud = isCloudMode()
   const syncEnabled = cloud || config.enable_cron_sync

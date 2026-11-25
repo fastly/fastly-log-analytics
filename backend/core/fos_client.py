@@ -89,10 +89,7 @@ def _source_from_config(cfg: dict) -> dict:
     return svcconfig.config_to_source(cfg)
 
 
-def _build_default_source() -> dict:
-    cfgs = svcconfig.list_configs()
-    if cfgs:
-        return _source_from_config(cfgs[0])
+def _empty_default_source() -> dict:
     return {
         "name": "default",
         "endpoint": "",
@@ -109,7 +106,14 @@ def _build_default_source() -> dict:
     }
 
 
-_DEFAULT_SOURCE = _build_default_source()
+def _build_default_source() -> dict:
+    cfgs = svcconfig.list_configs()
+    if cfgs:
+        return _source_from_config(cfgs[0])
+    return _empty_default_source()
+
+
+_DEFAULT_SOURCE = _empty_default_source()
 
 
 def get_source_for_service(service_id: str) -> dict | None:
@@ -121,6 +125,7 @@ def get_source_for_service(service_id: str) -> dict | None:
 
 
 def reload_default_source() -> None:
+    _DEFAULT_SOURCE.clear()
     _DEFAULT_SOURCE.update(_build_default_source())
 
 

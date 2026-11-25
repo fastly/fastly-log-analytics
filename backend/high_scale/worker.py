@@ -133,7 +133,7 @@ class HighScaleWorkerLoop:
         coordinator: HighScaleWorkerCoordinator | None = None,
         coordinators: tuple[tuple[str, HighScaleWorkerCoordinator], ...] | None = None,
         service_ids: tuple[str, ...] = (),
-        domains: tuple[str, ...] = ("request", "rum", "cmcd"),
+        domains: tuple[str, ...] = ("request", "rum_vitals", "rum_errors"),
         interval_seconds: float = 5.0,
         stop_event: Event | None = None,
         sleeper: Any = time.sleep,
@@ -146,6 +146,16 @@ class HighScaleWorkerLoop:
         publication_retry_limit: int = 4,
         snapshot_interval_loader: Callable[[str], int] | None = None,
         archive_flush_check_interval_seconds: float = 10.0,
+        refresh_fn: Callable[
+            [],
+            tuple[
+                tuple[tuple[str, HighScaleWorkerCoordinator], ...],
+                tuple[tuple[str, HighScaleDeletionSweeper | None], ...],
+            ]
+            | None,
+        ]
+        | None = None,
+        refresh_interval_seconds: float = 30.0,
     ) -> None:
         if coordinators is not None:
             resolved_coordinators = coordinators
@@ -187,6 +197,11 @@ class HighScaleWorkerLoop:
         self._snapshot_interval_loader = snapshot_interval_loader or self._default_snapshot_interval_minutes
         self._archive_flush_check_interval_seconds = max(0.0, float(archive_flush_check_interval_seconds))
         self._last_archive_flush_check: float | None = None
+        self._pages_per_tick = pages_per_tick
+        self._service_weights = service_weights
+        self._refresh_fn = refresh_fn
+        self._refresh_interval_seconds = max(0.0, float(refresh_interval_seconds))
+        self._last_refresh = time.monotonic()
         pair_list = tuple((service_id, domain) for service_id in resolved_service_ids for domain in domains)
         self._selector = FairPageSelector(
             pair_list,
@@ -194,10 +209,57 @@ class HighScaleWorkerLoop:
             weights=service_weights,
         )
 
+    @staticmethod
+    def _load_service_config(service_id: str) -> dict[str, Any] | None:
+        try:
+            return app_config.load_config(service_id)
+        except Exception:
+            return None
+
+    def _maybe_refresh(self) -> None:
+        if self._refresh_fn is None:
+            return
+        now = time.monotonic()
+        if now - self._last_refresh < self._refresh_interval_seconds:
+            return
+        self._last_refresh = now
+        try:
+            updated = self._refresh_fn()
+        except Exception:
+            _worker_logger.exception("high-scale worker config refresh failed")
+            return
+        if updated is None:
+            return
+        new_coordinators, new_sweepers = updated
+        if not new_coordinators:
+            return
+        new_service_ids = tuple(service_id for service_id, _ in new_coordinators)
+        self._coordinators = new_coordinators
+        self._deletion_sweepers = new_sweepers
+        if new_service_ids != self._service_ids:
+            self._service_ids = new_service_ids
+            pair_list = tuple((service_id, domain) for service_id in new_service_ids for domain in self._domains)
+            capacity = max(self._pages_per_tick, len(new_service_ids)) if self._pages_per_tick is not None else None
+            self._selector = FairPageSelector(
+                pair_list,
+                capacity=capacity,
+                weights=self._service_weights,
+            )
+
     def run_once(self) -> tuple[WorkerPageResult, ...]:
+        self._maybe_refresh()
         results: list[WorkerPageResult] = []
         coordinators = dict(self._coordinators)
+        cfg_cache: dict[str, dict[str, Any] | None] = {}
         for service_id, domain in self._selector.select():
+            if service_id not in cfg_cache:
+                cfg_cache[service_id] = self._load_service_config(service_id)
+            cfg = cfg_cache[service_id]
+            if cfg is not None:
+                if domain == "request" and not app_config.is_logging_enabled(cfg):
+                    continue
+                if domain in ("rum_vitals", "rum_errors", "rum") and not app_config.is_rum_enabled(cfg):
+                    continue
             try:
                 page = coordinators[service_id].run_page(service_id=service_id, domain=domain)
             except Exception as exc:
@@ -342,9 +404,25 @@ class HighScaleWorkerLoop:
         self._stop_event.set()
 
 
+def _credential_signature(cfg: Mapping[str, Any] | None) -> tuple[str, str, str, str, str]:
+    if not isinstance(cfg, Mapping):
+        return ("", "", "", "", "")
+    prefix_val = cfg.get("fos_prefix")
+    if prefix_val is None:
+        prefix_val = cfg.get("prefix")
+    return (
+        str(cfg.get("fos_access_key_id") or ""),
+        str(cfg.get("fos_secret_access_key") or ""),
+        str(cfg.get("fos_bucket") or ""),
+        str(prefix_val or ""),
+        str(cfg.get("fos_region") or ""),
+    )
+
+
 def build_worker_from_environment(worker_suffix: str = "") -> HighScaleWorkerLoop:
     """Build the durable FOS → archive → ClickHouse worker from process config."""
-    from backend.core.fos_client import _get_fos_client, get_source_for_service
+    from backend.core.fos_client import _get_fos_client, clear_fos_client, get_source_for_service
+    from backend.core.metadata.base import ensure_pg_schema
     from backend.high_scale.ingest_controller import (
         AggregateBatchAdapter,
         HighScaleIngestController,
@@ -367,7 +445,9 @@ def build_worker_from_environment(worker_suffix: str = "") -> HighScaleWorkerLoo
             "shard_count": topology.shard_count,
         },
     )
-    service_ids = _csv_env("HIGH_SCALE_SERVICE_IDS")
+    ensure_pg_schema()
+    explicit_service_ids = _csv_env("HIGH_SCALE_SERVICE_IDS")
+    service_ids = explicit_service_ids
     if not service_ids:
         service_ids = tuple(
             cfg["service_id"] for cfg in app_config.list_configs() if isinstance(cfg, dict) and cfg.get("service_id")
@@ -410,13 +490,11 @@ def build_worker_from_environment(worker_suffix: str = "") -> HighScaleWorkerLoo
         "on",
     }
     archive_prefix = os.getenv("HIGH_SCALE_ARCHIVE_PREFIX", "high-scale/archive")
-    coordinators: list[HighScaleWorkerCoordinator] = []
-    sweepers: list[HighScaleDeletionSweeper | None] = []
-    for service_id in service_ids:
-        source = get_source_for_service(service_id)
-        if source is None:
-            raise ValueError(f"no configured FOS source for high-scale service {service_id}")
-        fos_client = _get_fos_client(source)
+
+    def _build_service_bindings(
+        service_id: str, source: Mapping[str, Any]
+    ) -> tuple[HighScaleWorkerCoordinator, HighScaleDeletionSweeper | None]:
+        fos_client = _get_fos_client(dict(source))
         bucket = source.get("bucket")
         if not isinstance(bucket, str) or not bucket:
             raise ValueError(f"FOS bucket is missing for high-scale service {service_id}")
@@ -433,38 +511,105 @@ def build_worker_from_environment(worker_suffix: str = "") -> HighScaleWorkerLoo
             deletion_grace_seconds=deletion_grace,
             defer_archive_flush=defer_archive_flush,
         )
-        coordinators.append(
-            HighScaleWorkerCoordinator(
-                lister=S3SourceObjectLister(fos_client, bucket=bucket, prefix=str(source.get("prefix") or "")),
-                reader=S3SourceObjectReader(fos_client, bucket=bucket),
-                controller=controller,
-                ownership=control,
-                ledger=control,
-                worker_id=worker_id,
-                control_plane=control,
-                page_size=page_size,
-                lease_seconds=lease_seconds,
-                object_concurrency=object_concurrency,
-            )
+        coordinator_obj = HighScaleWorkerCoordinator(
+            lister=S3SourceObjectLister(fos_client, bucket=bucket, prefix=str(source.get("prefix") or "")),
+            reader=S3SourceObjectReader(fos_client, bucket=bucket),
+            controller=controller,
+            ownership=control,
+            ledger=control,
+            worker_id=worker_id,
+            control_plane=control,
+            page_size=page_size,
+            lease_seconds=lease_seconds,
+            object_concurrency=object_concurrency,
         )
+        sweeper_obj: HighScaleDeletionSweeper | None = None
         if deletion_enabled:
             deletion_ledger = PostgresDeletionLedger(control)
             deletion_controller = DeletionController(
                 S3ObjectStore(fos_client, bucket=bucket), archive, deletion_ledger, ownership=deletion_ledger
             )
-            sweepers.append(
-                HighScaleDeletionSweeper(
-                    control=control,
-                    controller=deletion_controller,
-                    archive_expirer=HighScaleArchiveExpirer(control=control, archive=archive),
-                    publication_reaper=reaper_from_environment(control, clickhouse),
-                )
+            sweeper_obj = HighScaleDeletionSweeper(
+                control=control,
+                controller=deletion_controller,
+                archive_expirer=HighScaleArchiveExpirer(control=control, archive=archive),
+                publication_reaper=reaper_from_environment(control, clickhouse),
             )
+        return coordinator_obj, sweeper_obj
+
+    bindings_by_service: dict[
+        str, tuple[tuple[str, str, str, str, str], HighScaleWorkerCoordinator, HighScaleDeletionSweeper | None]
+    ] = {}
+    coordinators: list[HighScaleWorkerCoordinator] = []
+    sweepers: list[HighScaleDeletionSweeper | None] = []
+    for service_id in service_ids:
+        source = get_source_for_service(service_id)
+        if source is None:
+            raise ValueError(f"no configured FOS source for high-scale service {service_id}")
+        try:
+            cfg = app_config.load_config(service_id)
+        except Exception:
+            cfg = None
+        coord_obj, sweeper_obj = _build_service_bindings(service_id, source)
+        bindings_by_service[service_id] = (_credential_signature(cfg), coord_obj, sweeper_obj)
+        coordinators.append(coord_obj)
+        sweepers.append(sweeper_obj)
+
+    def _refresh_bindings() -> (
+        tuple[
+            tuple[tuple[str, HighScaleWorkerCoordinator], ...],
+            tuple[tuple[str, HighScaleDeletionSweeper | None], ...],
+        ]
+        | None
+    ):
+        if explicit_service_ids:
+            target_cfgs: dict[str, dict[str, Any] | None] = {
+                sid: app_config.load_config(sid) for sid in explicit_service_ids
+            }
+            target_ids = explicit_service_ids
         else:
-            sweepers.append(None)
+            all_cfgs = [cfg for cfg in app_config.list_configs() if isinstance(cfg, dict) and cfg.get("service_id")]
+            target_cfgs = {str(cfg["service_id"]): cfg for cfg in all_cfgs}
+            target_ids = tuple(target_cfgs.keys())
+        if not target_ids:
+            return None
+
+        changed = set(target_ids) != set(bindings_by_service)
+        new_bindings: dict[
+            str, tuple[tuple[str, str, str, str, str], HighScaleWorkerCoordinator, HighScaleDeletionSweeper | None]
+        ] = {}
+        for sid in target_ids:
+            cfg = target_cfgs.get(sid)
+            sig = _credential_signature(cfg)
+            existing = bindings_by_service.get(sid)
+            if existing is not None and existing[0] == sig:
+                new_bindings[sid] = existing
+                continue
+            clear_fos_client(sid)
+            source = app_config.config_to_source(cfg) if cfg is not None else get_source_for_service(sid)
+            if source is None or not source.get("bucket"):
+                if existing is not None:
+                    new_bindings[sid] = existing
+                continue
+            if existing is None:
+                control.initialize_owner(sid, owner="high_scale", source_cursor=initial_cursor)
+            coord_obj, sweeper_obj = _build_service_bindings(sid, source)
+            new_bindings[sid] = (sig, coord_obj, sweeper_obj)
+            changed = True
+
+        if not changed:
+            return None
+        bindings_by_service.clear()
+        bindings_by_service.update(new_bindings)
+        return (
+            tuple((sid, bindings_by_service[sid][1]) for sid in bindings_by_service),
+            tuple((sid, bindings_by_service[sid][2]) for sid in bindings_by_service),
+        )
+
     pages_per_tick = int(os.getenv("HIGH_SCALE_PAGES_PER_TICK", "0") or "0") or None
     publication_retry_interval = float(os.getenv("HIGH_SCALE_PUBLICATION_RETRY_INTERVAL_SECONDS", "30"))
     publication_retry_limit = int(os.getenv("HIGH_SCALE_PUBLICATION_RETRY_LIMIT", "4"))
+    refresh_interval_seconds = float(os.getenv("HIGH_SCALE_CONFIG_REFRESH_SECONDS", "30"))
     return _MultiServiceWorkerLoop(
         coordinators=tuple(zip(service_ids, coordinators, strict=True)),
         deletion_sweepers=tuple(zip(service_ids, sweepers, strict=True)),
@@ -475,6 +620,8 @@ def build_worker_from_environment(worker_suffix: str = "") -> HighScaleWorkerLoo
         service_weights=_weights_from_env(),
         publication_retry_interval_seconds=publication_retry_interval,
         publication_retry_limit=publication_retry_limit,
+        refresh_fn=_refresh_bindings,
+        refresh_interval_seconds=refresh_interval_seconds,
     )
 
 

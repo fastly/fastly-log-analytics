@@ -15,7 +15,12 @@ import httpx
 import pytest
 import vcr
 
-pytestmark = pytest.mark.no_postgres
+
+def _read_svc_cfg(service_id: str) -> dict:
+    cfg = svcconfig._read_config_fresh(service_id)
+    assert cfg is not None
+    return cfg
+
 
 from backend import config as svcconfig
 from backend.core.fastly.client import fastly as real_fastly
@@ -65,17 +70,12 @@ def _make_state(**overrides) -> dict:
 
 
 def _write_cfg(tmp_path: Path, state: dict, *, existing_cfg: object = ...):
-    saved_cfgs: list[tuple[str, dict]] = []
-    patches = [
-        patch("backend.config.save_config", side_effect=lambda sid, cfg: saved_cfgs.append((sid, cfg))),
-    ]
-    if existing_cfg is not ...:
-        patches.append(patch("backend.config.load_config", return_value=existing_cfg))
-    with contextlib.ExitStack() as stack:
-        for p in patches:
-            stack.enter_context(p)
-        orchestrator.write_service_config(state)
-    return saved_cfgs[0][1]
+    sid = state.get("logging_service_id") or state.get("service_id") or "svc-test"
+    svcconfig.delete_config(sid)
+    if existing_cfg is not ... and isinstance(existing_cfg, dict):
+        svcconfig.save_config(sid, existing_cfg)
+    orchestrator.write_service_config(state)
+    return svcconfig.load_config(sid) or {}
 
 
 def _provision_cfg(**overrides) -> dict:
@@ -328,10 +328,12 @@ def test_resume_state_is_persisted_without_credentials(tmp_path, monkeypatch):
 
 @pytest.mark.no_postgres
 def test_vcl_lock_heartbeats_while_held(tmp_path, monkeypatch):
+    from backend.core.metadata import pg_pool
     from backend.provision.declarative.fastly_ops import acquire_vcl_lock
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("FASTLY_VCL_LOCK_STALE_SECONDS", "0.05")
+    monkeypatch.setattr(pg_pool, "is_postgres", lambda: False)
 
     with acquire_vcl_lock("svc", timeout_sec=1) as lock:
         first_mtime = lock.lock_path.stat().st_mtime
@@ -343,17 +345,13 @@ def test_vcl_lock_heartbeats_while_held(tmp_path, monkeypatch):
 
 
 def test_cleanup_local_data_variants(tmp_path, monkeypatch):
-    cfg_file = tmp_path / "svc.json"
-    cfg_file.write_text("{}")
-    with (
-        patch("backend.config.config_path", return_value=str(cfg_file)),
-        patch("backend.provision.orchestrator._sync_crontab"),
-    ):
+    svcconfig.save_config("svc", {"service_id": "svc"})
+    with patch("backend.provision.orchestrator._sync_crontab"):
         orchestrator.cleanup_local_data("svc", remove_data=False)
-    assert not cfg_file.exists()
+    assert svcconfig.load_config("svc") is None
 
     with (
-        patch("backend.config.config_path", return_value=str(tmp_path / "no.json")),
+        patch("backend.config.delete_config", return_value=False),
         patch("backend.core.metadata.teardown", side_effect=RuntimeError("locked")),
         patch("backend.provision.orchestrator._sync_crontab"),
     ):
@@ -364,7 +362,7 @@ def test_cleanup_local_data_variants(tmp_path, monkeypatch):
     cache_dir.mkdir(parents=True)
     (cache_dir / "stale.parquet").write_text("data")
     with (
-        patch("backend.config.config_path", return_value=str(tmp_path / "no.json")),
+        patch("backend.config.delete_config", return_value=False),
         patch("backend.core.metadata.teardown"),
         patch("backend.provision.orchestrator._sync_crontab"),
     ):
@@ -488,7 +486,7 @@ def test_provision_satisfies_faro_route_and_object_invariant_end_to_end(tmp_path
         )
 
     assert exc is None and events[-1]["type"] == "done" and uploaded["bundle"] == sample_bundle
-    written_cfg = json.loads((config_dir / "svc-prov-test.json").read_text())
+    written_cfg = svcconfig.load_config("svc-prov-test") or {}
     assert written_cfg["rum"]["faro_version"] == chosen_version
     assert '"/js/faro-sdk.js"' in generate_consolidated_snippet(FeatureState.from_config(written_cfg), "vcl_recv")
 
@@ -515,7 +513,7 @@ def test_provision_faro_upload_failure_and_hash_persistence(tmp_path, monkeypatc
 
     assert exc is None and teardown_called == [] and events[-1]["type"] == "done"
     assert any("Faro Web SDK upload failed" in e["message"] for e in events if e["type"] == "status")
-    assert json.loads((config_dir / "svc-prov-test.json").read_text())["rum"]["faro_version"] == "1.2.3"
+    assert (svcconfig.load_config("svc-prov-test") or {})["rum"]["faro_version"] == "1.2.3"
 
     def fake_upload(service_id, version, token, *, status_cb=None):
         cfg = svcconfig.load_config(service_id) or {}
@@ -533,7 +531,7 @@ def test_provision_faro_upload_failure_and_hash_persistence(tmp_path, monkeypatc
             orchestrator.provision(_provision_cfg(rum_enabled=True, rum={"enabled": True, "faro_version": "1.2.3"}))
         )
     assert exc is None and events[-1]["type"] == "done"
-    written_cfg = json.loads((config_dir / "svc-prov-test.json").read_text())
+    written_cfg = svcconfig.load_config("svc-prov-test") or {}
     assert (
         written_cfg["rum"]["faro_version"],
         written_cfg["rum"]["faro_content_hash"],
@@ -541,7 +539,6 @@ def test_provision_faro_upload_failure_and_hash_persistence(tmp_path, monkeypatc
     ) == ("1.2.3", "sha256-fake-content-hash", "fake-etag-md5")
 
 
-@pytest.mark.no_postgres
 def test_provision_rollback_resume_and_storage_warnings(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     teardown_called = []
@@ -554,7 +551,8 @@ def test_provision_rollback_resume_and_storage_warnings(tmp_path, monkeypatch):
         _mocked_provision_steps(
             bucket_side_effect=RuntimeError("BucketAlreadyExists"), teardown_side_effect=fake_teardown
         ),
-        patch("backend.config.config_path", return_value=str(tmp_path / "no.json")),
+        patch("backend.config.snapshot_config", return_value=None),
+        patch("backend.config.delete_config", return_value=False),
     ):
         events, exc = _consume(orchestrator.provision(_provision_cfg()))
     assert isinstance(exc, RuntimeError) and "BucketAlreadyExists" in str(exc)
@@ -587,7 +585,8 @@ def test_provision_rollback_resume_and_storage_warnings(tmp_path, monkeypatch):
         ),
         patch("backend.provision.orchestrator.ensure_fos_bucket", side_effect=RuntimeError("abort early")),
         patch("backend.provision.orchestrator.perform_teardown", return_value=iter([])),
-        patch("backend.config.config_path", return_value=str(tmp_path / "no.json")),
+        patch("backend.config.snapshot_config", return_value=None),
+        patch("backend.config.delete_config", return_value=False),
     ):
         _consume(orchestrator.provision(_provision_cfg(), _resume_from_state=True))
     assert captured_state["state"]["temp_admin_key_id"] == "PREV_ID"
@@ -681,7 +680,6 @@ def test_perform_teardown_variants(caplog):
 
 
 def test_write_service_config_preserves_scoring_and_ngwaf(tmp_path, monkeypatch):
-    saved_cfgs = []
     existing_cfg = {
         "service_id": "svc-test",
         "scoring": {
@@ -699,15 +697,10 @@ def test_write_service_config_preserves_scoring_and_ngwaf(tmp_path, monkeypatch)
             ],
         },
     }
-    with (
-        patch("backend.config.load_config", return_value=existing_cfg),
-        patch(
-            "backend.config._save_config_unlocked", side_effect=lambda sid, cfg, **_kw: saved_cfgs.append((sid, cfg))
-        ),
-    ):
-        orchestrator.write_service_config(_make_state())
+    svcconfig.save_config("svc-test", existing_cfg)
+    orchestrator.write_service_config(_make_state())
 
-    _, cfg = saved_cfgs[0]
+    cfg = svcconfig.load_config("svc-test") or {}
     assert cfg.get("scoring", {}).get("enabled") is True and cfg["scoring"]["scoring_service_id"] == "scorer-svc"
     assert cfg.get("ngwaf_workspace_id") == "ngwaf-abc"
     custom_names = {cf["name"] for cf in cfg["log_fields"]["custom_fields"]}
@@ -837,21 +830,17 @@ def test_fos_path_safety_and_reconciler_edge_cases(tmp_path, monkeypatch):
         assert orchestrator.ensure_logging_via_reconciler({"logging_service_id": "svc-test"}, "tok") == 42
 
     monkeypatch.chdir(tmp_path)
-    cfg_file = tmp_path / "svc.json"
-    cfg_file.write_text("{}")
+    svcconfig.save_config("svc", {"service_id": "svc"})
     cache_dir, external_dir = tmp_path / "cache", tmp_path / "external"
     cache_dir.mkdir()
     external_dir.mkdir()
     symlink = cache_dir / "bucket_symlink"
     symlink.symlink_to(external_dir)
-    with (
-        patch("backend.config.config_path", return_value=str(cfg_file)),
-        patch("backend.provision.orchestrator._sync_crontab"),
-    ):
+    with patch("backend.provision.orchestrator._sync_crontab"):
         orchestrator.cleanup_local_data("svc", bucket="../../../tmp", remove_data=True)
         orchestrator.cleanup_local_data("svc", bucket="a/b", remove_data=True)
         orchestrator.cleanup_local_data("svc", bucket="bucket_symlink", remove_data=True)
-    assert not cfg_file.exists() and symlink.exists()
+    assert svcconfig.load_config("svc") is None and symlink.exists()
 
 
 # ── Fastly failure & retry cassette tests ──
@@ -913,7 +902,8 @@ def test_provision_partial_failure_at_step_7_and_early_config_persist(tmp_path, 
             write_side_effect=raising_write,
             teardown_side_effect=fake_teardown,
         ),
-        patch("backend.config.config_path", return_value=str(tmp_path / "no.json")),
+        patch("backend.config.snapshot_config", return_value=None),
+        patch("backend.config.delete_config", return_value=False),
         patch("backend.core.fastly.client.fastly", return_value={}),
     ):
         events, exc = _consume(orchestrator.provision(_provision_cfg_provision_fastly_failures()))
@@ -942,13 +932,12 @@ def test_provision_partial_failure_at_step_7_and_early_config_persist(tmp_path, 
     assert calls_before_cdn is not None and calls_before_cdn >= 1
 
 
-@pytest.mark.no_postgres
 def test_provision_failure_after_activation_restores_vcl_and_config_before_cleanup(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     service_id = "SU3xxxxxxxxxxxxxx0000"
-    config_file = tmp_path / f"{service_id}.json"
     original = {"service_id": service_id, "rum_enabled": True, "marker": "preexisting"}
-    config_file.write_text(json.dumps(original))
+    svcconfig.save_config(service_id, dict(original))
+    original_saved = _read_svc_cfg(service_id)
     calls: list[str] = []
     writes = 0
 
@@ -969,7 +958,7 @@ def test_provision_failure_after_activation_restores_vcl_and_config_before_clean
 
     def fake_teardown(state, _token, opts=None):
         calls.append("teardown")
-        assert json.loads(config_file.read_text()) == original
+        assert _read_svc_cfg(service_id)["marker"] == original_saved["marker"]
         yield {"type": "status", "message": "cleanup"}
 
     with (
@@ -978,23 +967,21 @@ def test_provision_failure_after_activation_restores_vcl_and_config_before_clean
             write_side_effect=write_and_fail,
             teardown_side_effect=fake_teardown,
         ),
-        patch("backend.config.config_path", return_value=config_file),
         patch("backend.core.fastly.client.fastly", side_effect=fastly_call),
     ):
         _, exc = _consume(orchestrator.provision(_provision_cfg_provision_fastly_failures()))
 
     assert isinstance(exc, RuntimeError) and "finalize failed" in str(exc)
     assert calls == [f"PUT /service/{service_id}/version/5/activate", "teardown"]
-    assert json.loads(config_file.read_text()) == original
+    assert _read_svc_cfg(service_id)["marker"] == original_saved["marker"]
 
 
-@pytest.mark.no_postgres
 def test_provision_reconciler_failure_after_activation_still_restores_vcl(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     service_id = "SU3xxxxxxxxxxxxxx0000"
-    config_file = tmp_path / f"{service_id}.json"
     original = {"service_id": service_id, "marker": "preexisting"}
-    config_file.write_text(json.dumps(original))
+    svcconfig.save_config(service_id, dict(original))
+    original_saved = _read_svc_cfg(service_id)
     calls: list[str] = []
 
     def activate_then_fail(state, _token, **_kwargs):
@@ -1007,7 +994,7 @@ def test_provision_reconciler_failure_after_activation_still_restores_vcl(tmp_pa
 
     def fake_teardown(state, _token, opts=None):
         calls.append("teardown")
-        assert json.loads(config_file.read_text()) == original
+        assert _read_svc_cfg(service_id)["marker"] == original_saved["marker"]
         yield {"type": "status", "message": "cleanup"}
 
     with (
@@ -1015,22 +1002,19 @@ def test_provision_reconciler_failure_after_activation_still_restores_vcl(tmp_pa
             logging_side_effect=activate_then_fail,
             teardown_side_effect=fake_teardown,
         ),
-        patch("backend.config.config_path", return_value=config_file),
         patch("backend.core.fastly.client.fastly", side_effect=fastly_call),
     ):
         _, exc = _consume(orchestrator.provision(_provision_cfg_provision_fastly_failures()))
 
     assert isinstance(exc, RuntimeError) and "reconciler finalization failed" in str(exc)
     assert calls == [f"PUT /service/{service_id}/version/5/activate", "teardown"]
-    assert json.loads(config_file.read_text()) == original
+    assert _read_svc_cfg(service_id)["marker"] == original_saved["marker"]
 
 
-@pytest.mark.no_postgres
 def test_provision_keeps_created_resources_when_active_vcl_rollback_fails(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     service_id = "SU3xxxxxxxxxxxxxx0000"
-    config_file = tmp_path / f"{service_id}.json"
-    config_file.write_text(json.dumps({"service_id": service_id, "marker": "preexisting"}))
+    svcconfig.save_config(service_id, {"service_id": service_id, "marker": "preexisting"})
     teardown = MagicMock(return_value=iter([]))
     writes = 0
 
@@ -1050,7 +1034,6 @@ def test_provision_keeps_created_resources_when_active_vcl_rollback_fails(tmp_pa
             write_side_effect=fail_finalize,
             teardown_side_effect=teardown,
         ),
-        patch("backend.config.config_path", return_value=config_file),
         patch("backend.core.fastly.client.fastly", side_effect=RuntimeError("activation denied")),
     ):
         _, exc = _consume(orchestrator.provision(_provision_cfg_provision_fastly_failures()))
@@ -1471,7 +1454,9 @@ def _seed(cfg: dict) -> None:
 
 
 def _disk(service_id: str = "srv_test") -> dict:
-    return json.loads(svcconfig.config_path(service_id).read_text())
+    cfg = svcconfig._read_config_fresh(service_id)
+    assert cfg is not None
+    return cfg
 
 
 async def test_download_and_upload_faro_flows(monkeypatch, mock_fos, mock_fetch_bundle):
@@ -1810,17 +1795,15 @@ def temp_config_dir(tmp_path, monkeypatch):
 
 def test_faro_self_hosting_end_to_end_flows(monkeypatch, temp_config_dir, mock_fos, mock_fetch_bundle):
     service_id = "test_service_id"
-    config_path = temp_config_dir / f"{service_id}.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "service_id": service_id,
-                "service_name": "Test Service",
-                "rum_enabled": False,
-                "last_activated_version": 1,
-                **_FOS_CFG,
-            }
-        )
+    svcconfig.save_config(
+        service_id,
+        {
+            "service_id": service_id,
+            "service_name": "Test Service",
+            "rum_enabled": False,
+            "last_activated_version": 1,
+            **_FOS_CFG,
+        },
     )
     chosen_version = "2.8.5"
     mock_fetch_bundle(SAMPLE_BUNDLE)
@@ -1849,7 +1832,7 @@ def test_faro_self_hosting_end_to_end_flows(monkeypatch, temp_config_dir, mock_f
     ) as mock_reconcile:
         result = enable_rum(service_id, "test_token", status_cb=status_messages.append, faro_version=chosen_version)
 
-    cfg = json.loads(config_path.read_text())
+    cfg = _read_svc_cfg(service_id)
     assert cfg["rum_enabled"] is True and "rum_enabled_at" in cfg and cfg["rum"]["faro_version"] == chosen_version
     assert uploads["bundle"] == SAMPLE_BUNDLE
     tracker_js = uploads["tracker"].decode()
@@ -1870,7 +1853,7 @@ def test_faro_self_hosting_end_to_end_flows(monkeypatch, temp_config_dir, mock_f
     ):
         up_res = upgrade_faro_version(service_id, "2.9.0", "test_token")
     assert up_res["previous_version"] == chosen_version and up_res["version"] == "2.9.0"
-    assert json.loads(config_path.read_text())["rum"]["faro_version"] == "2.9.0"
+    assert _read_svc_cfg(service_id)["rum"]["faro_version"] == "2.9.0"
     mock_clean.assert_called_once_with(service_id, keep_current=True)
 
     with (
@@ -1882,7 +1865,7 @@ def test_faro_self_hosting_end_to_end_flows(monkeypatch, temp_config_dir, mock_f
     ):
         dis_res = disable_rum(service_id, "test_token")
     assert dis_res["deactivated"] is True and dis_res["logging_service_active_version"] == 6
-    assert json.loads(config_path.read_text())["rum_enabled"] is False
+    assert _read_svc_cfg(service_id)["rum_enabled"] is False
     mock_del.assert_called_once()
 
 
@@ -1890,20 +1873,18 @@ def test_reconcile_cron_self_heals_unpinned_service_without_thrashing(
     monkeypatch, temp_config_dir, mock_fos, mock_fetch_bundle
 ):
     service_id = "self_heal_service"
-    config_path = temp_config_dir / f"{service_id}.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "service_id": service_id,
-                "service_name": "Self Heal Service",
-                "rum_enabled": True,
-                "log_period": 60,
-                "fastly_api_key": "test_token",
-                "last_activated_version": 2,
-                "rum": {},
-                **_FOS_CFG,
-            }
-        )
+    svcconfig.save_config(
+        service_id,
+        {
+            "service_id": service_id,
+            "service_name": "Self Heal Service",
+            "rum_enabled": True,
+            "log_period": 60,
+            "fastly_api_key": "test_token",
+            "last_activated_version": 2,
+            "rum": {},
+            **_FOS_CFG,
+        },
     )
     mock_fetch_bundle(SAMPLE_BUNDLE)
     expected_etag = hashlib.md5(SAMPLE_BUNDLE, usedforsecurity=False).hexdigest()
@@ -1935,7 +1916,7 @@ def test_reconcile_cron_self_heals_unpinned_service_without_thrashing(
     )
 
     rum_sync_mod._reconcile_faro_bundle(service_id, None)
-    cfg = json.loads(config_path.read_text())
+    cfg = _read_svc_cfg(service_id)
     assert cfg["rum"]["faro_version"] == DEFAULT_FARO_VERSION and counts == {"put": 1, "head": 1}
     assert reconcile_calls == [(service_id, "test_token")]
     assert purge_calls == [("POST", f"/service/{service_id}/purge/rum-faro-sdk", "test_token")]
@@ -1943,6 +1924,47 @@ def test_reconcile_cron_self_heals_unpinned_service_without_thrashing(
 
     rum_sync_mod._reconcile_faro_bundle(service_id, None)
     assert counts["put"] == 1 and reconcile_calls == [(service_id, "test_token")]
+
+
+def test_enable_and_disable_rum_wire_claim_and_release_feature_fields(mock_fos, mock_fetch_bundle):
+    service_id = "svc_rum_fields"
+    svcconfig.save_config(
+        service_id,
+        {
+            "service_id": service_id,
+            "rum_enabled": False,
+            "last_activated_version": 1,
+            "log_fields": {"groups": ["A"], "field_overrides": {}},
+            **_FOS_CFG,
+        },
+    )
+    mock_fetch_bundle(SAMPLE_BUNDLE)
+    mock_fos(lambda req: httpx.Response(200, headers={"ETag": '"etag"'}))
+
+    with patch(
+        "backend.provision.rum_orchestrator.reconcile_vcl_state",
+        return_value=MagicMock(activated_version=2, draft_version=None, changes_applied={}),
+    ):
+        enable_rum(service_id, "tok", faro_version="2.8.5")
+
+    enabled_cfg = _read_svc_cfg(service_id)
+    assert enabled_cfg["log_fields"]["field_overrides"].get("rid") is True
+    assert "rid" in enabled_cfg.get("feature_enabled_fields", {}).get("rum", [])
+    assert "rid" in enabled_cfg.get("active_log_field_ids", [])
+
+    with (
+        patch("backend.provision.rum_assets.delete_rum_tracker_js"),
+        patch(
+            "backend.provision.rum_orchestrator.reconcile_vcl_state",
+            return_value=MagicMock(activated_version=3, draft_version=None, changes_applied={}),
+        ),
+    ):
+        disable_rum(service_id, "tok")
+
+    disabled_cfg = _read_svc_cfg(service_id)
+    assert "rid" not in disabled_cfg["log_fields"]["field_overrides"]
+    assert "rid" not in disabled_cfg.get("feature_enabled_fields", {}).get("rum", [])
+    assert "rid" not in disabled_cfg.get("active_log_field_ids", [])
 
 
 def test_enable_and_disable_rum_early_return_and_missing_config():
@@ -2094,9 +2116,8 @@ def test_upgrade_faro_version_orchestration():
         **_FOS_CFG,
     }
     call_order: list[str] = []
+    svcconfig.save_config("srv_test", dict(base_cfg))
     with (
-        patch("backend.config.load_config", return_value=dict(base_cfg)),
-        patch("backend.config.save_config"),
         patch(
             "backend.provision.rum_orchestrator.download_and_upload_faro",
             side_effect=AsyncMock(side_effect=lambda *a, **k: (call_order.append("upload"), {"version": "2.0.0"})[1]),
@@ -2119,9 +2140,8 @@ def test_upgrade_faro_version_orchestration():
     assert call_order == ["upload", "reconcile", "cleanup"] and not mock_tracker.called
     assert res["previous_version"] == "1.0.0" and res["version"] == "2.0.0" and res["activated"] is True
 
+    svcconfig.save_config("srv_test", dict(base_cfg))
     with (
-        patch("backend.config.load_config", return_value=dict(base_cfg)),
-        patch("backend.config.save_config") as mock_save,
         patch("backend.provision.rum_orchestrator.download_and_upload_faro", new_callable=AsyncMock),
         patch(
             "backend.provision.rum_orchestrator.reconcile_vcl_state",
@@ -2131,7 +2151,11 @@ def test_upgrade_faro_version_orchestration():
         patch("backend.provision.rum_orchestrator.cleanup_old_faro_versions", new_callable=AsyncMock) as mock_clean,
     ):
         res_draft = upgrade_faro_version("srv_test", "2.0.0", "tok", activate=False)
-    assert not mock_clean.called and mock_purge.call_count == 1 and not mock_save.called
+    assert (
+        not mock_clean.called
+        and mock_purge.call_count == 1
+        and "rum_vcl_sha" not in (svcconfig.load_config("srv_test") or {})
+    )
     assert res_draft["activated"] is False and res_draft["logging_service_active_version"] == 8
 
 
@@ -2214,7 +2238,6 @@ def stubs():
         yield MagicMock(upload=upload, reconcile=reconcile, tracker=tracker, delete_js=delete_js)
 
 
-@pytest.mark.no_postgres
 def test_enable_and_disable_persist_owned_keys_without_holding_lock(disabled_cfg, stubs):
     salt = disabled_cfg["rum"]["cid_salt"]
     held: list[bool] = []
@@ -2249,7 +2272,6 @@ def test_enable_and_disable_persist_owned_keys_without_holding_lock(disabled_cfg
     assert saved_dis["rum_enabled"] is False and "rum_vcl_sha" not in saved_dis and saved_dis["keep_me"] == 1
 
 
-@pytest.mark.no_postgres
 @pytest.mark.parametrize("fail_stage", ["upload", "reconcile"])
 def test_enable_rollback_keeps_concurrent_writes_and_restores_pin(disabled_cfg, stubs, fail_stage):
     salt = disabled_cfg["rum"]["cid_salt"]
@@ -2288,7 +2310,6 @@ def test_enable_rollback_keeps_concurrent_writes_and_restores_pin(disabled_cfg, 
     assert _persisted()["rum"]["faro_version"] == OLD_VERSION
 
 
-@pytest.mark.no_postgres
 def test_upgrade_and_disable_concurrent_write_preservation(enabled_cfg, stubs):
     stubs.upload.side_effect = AsyncMock(
         side_effect=lambda *_a, **_kw: svcconfig.mutate_config(

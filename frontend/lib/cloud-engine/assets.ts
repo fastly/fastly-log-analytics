@@ -6,6 +6,7 @@ import {
 } from "./dashboard/duckdb";
 import type { FiltersPayload } from "@/types/api";
 import type { AssetsSection } from "./rollup-sections";
+import { cloudActiveLogFieldIds } from "./active-log-fields";
 import { roundTo } from "./engine-utils";
 import { analyticsFiltersToSql, rangeServiceSql } from "./query-params";
 
@@ -458,12 +459,18 @@ export async function queryAssetsAggregates(params: AssetsQueryParams = {}) {
     params.signal,
   );
 
-  const present = want("summary") ? await engine.getPresentColumns() : new Set<string>();
+  const activeFields = want("summary")
+    ? await cloudActiveLogFieldIds(params.service_id, params.signal ?? new AbortController().signal)
+    : null;
   return selectAssetsSections({
-    missing_fields: [
-      ...(!present.has("ttl") ? ["ttl"] : []),
-      ...(!present.has("content_encoding") && !present.has("resp_header_content_encoding") ? ["resp_header_content_encoding"] : []),
-    ],
+    missing_fields: activeFields
+      ? [
+          ...(!activeFields.has("ttl") ? ["ttl"] : []),
+          ...(!activeFields.has("resp_header_content_encoding") && !activeFields.has("content_encoding")
+            ? ["resp_header_content_encoding"]
+            : []),
+        ]
+      : [],
     summary: {
       total_requests: computed.total_requests,
       total_bytes: computed.total_bytes,

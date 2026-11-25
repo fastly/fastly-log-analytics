@@ -17,6 +17,8 @@ import { useSSE, type SSELine } from '@/hooks/useSSE'
 import { useOpenGeneration } from '@/hooks/useSSE'
 import { SSEActionDialogShell, SSEExecutionSection } from '@/components/SSEModal'
 import { adminFetch, queryKeys } from "@/lib/api";
+import { invalidateCloudConfigMetadata } from '@/lib/cloud-engine/metadata-cache'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { useRumStatus } from '@/hooks/useDashboardCards'
 
 export {
@@ -180,19 +182,28 @@ function RumSettingsDialogBody({
 
   const { lines: sseLines, status: sseStatus, error: sseError, start: sseStart, stop: sseStop } = useSSE()
 
-  // Invalidate queries when done
+  const invalidateRumCaches = React.useCallback((sid: string) => {
+    void queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap() })
+    void queryClient.invalidateQueries({ queryKey: queryKeys.services() })
+    void queryClient.invalidateQueries({ queryKey: queryKeys.rumStatus(sid) })
+    void queryClient.invalidateQueries({ queryKey: queryKeys.rumVersions(sid) })
+    if (isCloudMode()) invalidateCloudConfigMetadata()
+  }, [queryClient])
+
+  // Invalidate queries on completion or error
   useEffect(() => {
-    const isDone = sseStatus === 'done' || syncStatus === 'done'
-    if (isDone && !completedRef.current) {
+    const cloud = isCloudMode()
+    const terminalDone = cloud ? syncStatus === 'done' : (sseStatus === 'done' || syncStatus === 'done')
+    const terminalError = sseStatus === 'error' || syncStatus === 'error'
+    if ((terminalDone || terminalError) && !completedRef.current) {
       completedRef.current = true
-      onComplete?.()
-      queryClient.invalidateQueries({ queryKey: queryKeys.rumStatus(serviceId) })
-      queryClient.invalidateQueries({ queryKey: queryKeys.rumVersions(serviceId) })
+      if (terminalDone) onComplete?.()
+      if (serviceId) invalidateRumCaches(serviceId)
     }
-    if (!isDone) {
+    if (!terminalDone && !terminalError) {
       completedRef.current = false
     }
-  }, [sseStatus, syncStatus, onComplete, serviceId, queryClient])
+  }, [sseStatus, syncStatus, onComplete, serviceId, invalidateRumCaches])
 
   if (!serviceId) return null
 
@@ -201,6 +212,8 @@ function RumSettingsDialogBody({
     (percent) => Number.isFinite(percent) && percent >= 1 && percent <= 100,
   )
   const isNoOp = !selectedVersion
+  const cloud = isCloudMode()
+  const versionChanged = selectedVersion !== currentVersion
 
   const handleExecute = async () => {
     if (noVersions || isNoOp || isExecuting) return
@@ -210,8 +223,7 @@ function RumSettingsDialogBody({
     setSyncStatus('streaming')
 
     try {
-      // 1. Save settings toggles synchronously first
-      const payload = {
+      const payload: Record<string, unknown> = {
         capture_vitals: captureVitals,
         capture_performance: capturePerformance,
         capture_errors: captureErrors,
@@ -221,6 +233,7 @@ function RumSettingsDialogBody({
         error_sample_rate: errorSamplePercent / 100,
         resource_sample_rate: resourceSamplePercent / 100,
         custom_condition: customCondition,
+        ...(cloud && versionChanged ? { faro_version: selectedVersion } : {}),
       }
       const settingsRes = await adminFetch(`/api/services/${serviceId}/rum/settings`, {
         method: 'POST',
@@ -245,16 +258,14 @@ function RumSettingsDialogBody({
         '✅ Fastly Edge VCL reconciled and deployed successfully.',
       ])
 
-      // 2. Check if version needs to be upgraded/changed too
-      if (selectedVersion !== currentVersion) {
+      // In Cloud mode, faro_version is included in the single reconcile above.
+      if (!cloud && versionChanged) {
         setLocalLogs((prev) => [...prev, `⏳ Version change detected (${currentVersion || 'unpinned'} ➔ ${selectedVersion}). Starting streamed bundle upgrade...`])
-        // Trigger the SSE streamed version upgrade
         sseStart(`/api/services/${serviceId}/rum/upgrade`, {
           version: selectedVersion,
           activate: true,
         })
       } else {
-        // No version change, we are done!
         setSyncStatus('done')
       }
     } catch (err) {
@@ -263,6 +274,11 @@ function RumSettingsDialogBody({
       setSyncError(errorMsg || 'An error occurred while updating settings')
       setLocalLogs((prev) => [...prev, `❌ Error: ${errorMsg || 'An error occurred'}`])
     }
+  }
+
+  const handleStop = () => {
+    sseStop()
+    invalidateRumCaches(serviceId)
   }
 
   // Combine local sync logs with SSE upgrade log streams
@@ -274,8 +290,8 @@ function RumSettingsDialogBody({
     })),
     ...sseLines
   ]
-  const currentStatus = selectedVersion !== currentVersion ? (sseStatus === 'idle' ? syncStatus : sseStatus) : syncStatus
-  const currentError = selectedVersion !== currentVersion ? (sseError || syncError) : syncError
+  const currentStatus = !cloud && versionChanged ? (sseStatus === 'idle' ? syncStatus : sseStatus) : syncStatus
+  const currentError = !cloud && versionChanged ? (sseError || syncError) : syncError
 
   return (
     <SSEActionDialogShell
@@ -283,8 +299,8 @@ function RumSettingsDialogBody({
       onOpenChange={onOpenChange}
       reloadOnDone={false}
       status={currentStatus}
-      onStop={selectedVersion !== currentVersion ? sseStop : undefined}
-      stopDisabled={selectedVersion === currentVersion}
+      onStop={!cloud && versionChanged ? handleStop : undefined}
+      stopDisabled={cloud || !versionChanged}
       isExecuting={isExecuting}
       titleClassName="text-primary"
       title={

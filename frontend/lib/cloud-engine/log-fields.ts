@@ -46,8 +46,15 @@ export function cloudLogFieldsCatalog(
   };
 }
 
-export function cloudSchema(catalog: Catalog) {
-  const physical = (catalog.fields ?? []).filter((field) => field.group !== "METRICS");
+export function cloudSchema(
+  catalog: Catalog,
+  activeFieldIds?: ReadonlySet<string>,
+) {
+  const physical = (catalog.fields ?? []).filter(
+    (field) =>
+      field.group !== "METRICS" &&
+      (!activeFieldIds || field.id === "timestamp" || activeFieldIds.has(field.id)),
+  );
   const columns = parquetColumns({
     fields: physical.map((field) => ({
       ...field,

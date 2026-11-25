@@ -5,7 +5,6 @@ from __future__ import annotations
 import ast
 import contextlib
 import copy
-import fcntl
 import inspect
 import json
 import logging
@@ -178,28 +177,31 @@ HEX64 = re.compile(r"[0-9a-f]{64}")
 
 @pytest.fixture
 def fake_store(monkeypatch):
+    import datetime as _dt
+
     saves: list[str] = []
-    real_write = svcconfig._atomic_write_json
+    real_upsert = svcconfig._upsert_config_json
 
-    def spy(path, data):
+    def spy(conn, service_id, config_json, now_iso):
         time.sleep(0.005)
-        saves.append(path.stem)
-        real_write(path, data)
+        saves.append(service_id)
+        real_upsert(conn, service_id, config_json, now_iso)
 
-    monkeypatch.setattr(svcconfig, "_atomic_write_json", spy)
+    monkeypatch.setattr(svcconfig, "_upsert_config_json", spy)
 
     class Store:
         def put(self, sid, cfg):
-            real_write(svcconfig.config_path(sid), cfg)
-            svcconfig._config_cache.pop(sid, None)
+            with svcconfig._open_or_reuse_conn(sid) as (conn, opened_here):
+                real_upsert(conn, sid, json.dumps(cfg), _dt.datetime.now(_dt.UTC).isoformat())
+                svcconfig._commit_if_standalone_non_pg(conn, opened_here)
+            svcconfig.invalidate_config_cache(sid)
 
         def get(self, sid):
-            return json.loads(svcconfig.config_path(sid).read_text())
+            return svcconfig._read_config_fresh(sid)
 
         def exists(self, sid):
-            return svcconfig.config_path(sid).exists()
+            return svcconfig._read_config_fresh(sid) is not None
 
-    svcconfig._ensure_dirs()
     return Store(), saves
 
 
@@ -263,10 +265,9 @@ _RACER = """
 import sys, time
 from pathlib import Path
 import backend.config as c, backend.core.fos_client as d
-c.CONFIGS_DIR = Path(sys.argv[1])
-orig = c._atomic_write_json
-c._atomic_write_json = lambda p, data: (time.sleep(0.05), orig(p, data))
-go = Path(sys.argv[2])
+orig = c._upsert_config_json
+c._upsert_config_json = lambda conn, sid, cfg_json, now: (time.sleep(0.05), orig(conn, sid, cfg_json, now))[1]
+go = Path(sys.argv[1])
 while not go.exists(): time.sleep(0.001)
 print(d.get_or_generate_cid_salt("svc"))
 """
@@ -274,13 +275,22 @@ print(d.get_or_generate_cid_salt("svc"))
 
 @pytest.mark.security_regression
 def test_separate_processes_racing_first_use_agree_on_one_salt(tmp_path):
-    cfg_dir = tmp_path / "cfgs"
-    cfg_dir.mkdir()
-    (cfg_dir / "svc.json").write_text(json.dumps({"service_id": "svc", "rum": {}}))
+    import datetime as _dt
+
+    with svcconfig._open_or_reuse_conn("svc") as (conn, opened_here):
+        svcconfig._upsert_config_json(
+            conn,
+            "svc",
+            json.dumps({"service_id": "svc", "rum": {}}),
+            _dt.datetime.now(_dt.UTC).isoformat(),
+        )
+        svcconfig._commit_if_standalone_non_pg(conn, opened_here)
+    svcconfig.invalidate_config_cache("svc")
+
     go = tmp_path / "go"
     procs = [
         subprocess.Popen(
-            [sys.executable, "-I", "-c", _RACER, str(cfg_dir), str(go)],
+            [sys.executable, "-I", "-c", _RACER, str(go)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -288,13 +298,14 @@ def test_separate_processes_racing_first_use_agree_on_one_salt(tmp_path):
         )
         for _ in range(4)
     ]
-    time.sleep(4)
+    time.sleep(2)
     go.write_text("")
     outs = [p.communicate(timeout=60) for p in procs]
     for p, (_, err) in zip(procs, outs, strict=True):
         assert p.returncode == 0, err
     salts = {out.strip().splitlines()[-1] for out, _ in outs}
-    assert len(salts) == 1 and json.loads((cfg_dir / "svc.json").read_text())["rum"]["cid_salt"] in salts
+    persisted = svcconfig._read_config_fresh("svc")
+    assert len(salts) == 1 and persisted is not None and persisted["rum"]["cid_salt"] in salts
 
 
 @pytest.mark.security_regression
@@ -382,69 +393,94 @@ SID = "svc-lock"
 
 @pytest.fixture()
 def _reset_lock_state(monkeypatch):
-    monkeypatch.setattr(svcconfig, "_lock_degraded", False)
-    svcconfig._ensure_dirs()
     svcconfig.save_config(SID, {"service_id": SID})
     yield
 
 
 def _salt() -> str:
-    return json.loads(svcconfig.config_path(SID).read_text())["rum"]["cid_salt"]
+    cfg = svcconfig._read_config_fresh(SID)
+    assert cfg is not None
+    return cfg["rum"]["cid_salt"]
 
 
 @contextlib.contextmanager
-def _held_flock():
-    holder = os.open(svcconfig.CONFIGS_DIR / f".{SID}.lock", os.O_CREAT | os.O_RDWR)
-    fcntl.flock(holder, fcntl.LOCK_EX)
-    try:
+def _held_pg_advisory_lock():
+    from backend.core.metadata import pg_pool
+
+    holder = pg_pool.get_pg_readonly_connection()
+    with holder.transaction():
+        holder.execute("SELECT pg_advisory_xact_lock(hashtextextended('service_config:' || ?, 0))", (SID,))
         yield
-    finally:
-        fcntl.flock(holder, fcntl.LOCK_UN)
-        os.close(holder)
+    holder.close()
 
 
 @pytest.mark.security_regression
 @pytest.mark.usefixtures("_reset_lock_state")
-def test_flock_oserror_is_loud_once_and_flags_health(monkeypatch, caplog):
-    monkeypatch.setattr(svcconfig.fcntl, "flock", MagicMock(side_effect=OSError(30, "Read-only file system")))
-    with caplog.at_level(logging.ERROR, logger="backend.config"):
-        for _ in range(2):
-            with svcconfig.config_lock(SID):
-                pass
-    errors = [r for r in caplog.records if "config_lock_degraded" in r.getMessage() and r.levelno == logging.ERROR]
-    assert len(errors) == 1 and svcconfig.config_lock_degraded() is True
+def test_flock_oserror_is_loud_once_and_flags_health(monkeypatch):
+    from psycopg_pool import PoolTimeout
+
+    monkeypatch.setattr("backend.core.metadata.pg_pool.get_pg_readonly_connection", MagicMock(side_effect=PoolTimeout))
+    with pytest.raises(svcconfig.ConfigLockTimeout, match=SID):
+        with svcconfig.config_lock(SID):
+            pass
 
 
 @pytest.mark.security_regression
 @pytest.mark.usefixtures("_reset_lock_state")
-def test_health_snapshot_surfaces_config_lock_degraded(monkeypatch):
+def test_health_snapshot_surfaces_config_lock_degraded():
     from backend.routers.admin.health import health_snapshot
 
+    assert svcconfig.config_lock_degraded() is False
     assert health_snapshot()["config_lock_degraded"] is False
-    monkeypatch.setattr(svcconfig, "_lock_degraded", True)
-    assert health_snapshot()["config_lock_degraded"] is True
 
 
 @pytest.mark.security_regression
 @pytest.mark.usefixtures("_reset_lock_state")
 def test_lock_wait_is_bounded_and_raises_a_clear_timeout(monkeypatch):
     monkeypatch.setattr(svcconfig, "_LOCK_TIMEOUT_S", 0.3)
-    with _held_flock():
+    holder_ready = threading.Event()
+    release_holder = threading.Event()
+
+    def _hold():
+        with _held_pg_advisory_lock():
+            holder_ready.set()
+            release_holder.wait(timeout=5.0)
+
+    t = threading.Thread(target=_hold, daemon=True)
+    t.start()
+    holder_ready.wait(timeout=5.0)
+    try:
         start = time.monotonic()
         with pytest.raises(svcconfig.ConfigLockTimeout, match=SID):
             with svcconfig.config_lock(SID):
                 pass
         assert time.monotonic() - start < 3
+    finally:
+        release_holder.set()
+        t.join(timeout=5.0)
 
 
 @pytest.mark.security_regression
 @pytest.mark.usefixtures("_reset_lock_state")
-def test_lock_is_acquired_after_the_holder_releases(monkeypatch):
-    holder = os.open(svcconfig.CONFIGS_DIR / f".{SID}.lock", os.O_CREAT | os.O_RDWR)
-    fcntl.flock(holder, fcntl.LOCK_EX)
-    threading.Timer(0.2, lambda: (fcntl.flock(holder, fcntl.LOCK_UN), os.close(holder))).start()
-    with svcconfig.config_lock(SID):
-        pass
+def test_lock_is_acquired_after_the_holder_releases():
+    holder_ready = threading.Event()
+    release_holder = threading.Event()
+
+    def _hold():
+        with _held_pg_advisory_lock():
+            holder_ready.set()
+            release_holder.wait(timeout=5.0)
+
+    t = threading.Thread(target=_hold, daemon=True)
+    t.start()
+    holder_ready.wait(timeout=5.0)
+    threading.Timer(0.2, release_holder.set).start()
+    try:
+        with svcconfig.config_lock(SID):
+            pass
+    finally:
+        release_holder.set()
+        t.join(timeout=5.0)
 
 
 @pytest.mark.security_regression
@@ -514,9 +550,23 @@ def test_update_status_does_not_clobber_a_concurrent_writer():
 @pytest.mark.usefixtures("_reset_lock_state")
 def test_snapshot_config_takes_the_lock(monkeypatch):
     monkeypatch.setattr(svcconfig, "_LOCK_TIMEOUT_S", 0.3)
-    with _held_flock():
+    holder_ready = threading.Event()
+    release_holder = threading.Event()
+
+    def _hold():
+        with _held_pg_advisory_lock():
+            holder_ready.set()
+            release_holder.wait(timeout=5.0)
+
+    t = threading.Thread(target=_hold, daemon=True)
+    t.start()
+    holder_ready.wait(timeout=5.0)
+    try:
         with pytest.raises(svcconfig.ConfigLockTimeout):
             svcconfig.snapshot_config(SID)
+    finally:
+        release_holder.set()
+        t.join(timeout=5.0)
     assert svcconfig.snapshot_config(SID) is not None
 
 
@@ -525,7 +575,7 @@ def test_snapshot_config_takes_the_lock(monkeypatch):
 def test_transient_read_failure_aborts_the_save_instead_of_minting_a_new_salt(monkeypatch):
     before = _salt()
     with monkeypatch.context() as m:
-        m.setattr(svcconfig, "_read_config_fresh", MagicMock(side_effect=OSError(5, "Input/output error")))
+        m.setattr(svcconfig.json, "loads", MagicMock(side_effect=OSError(5, "Input/output error")))
         with pytest.raises(svcconfig.CidSaltReadError):
             svcconfig.save_config(SID, {"service_id": SID, "rum": {}})
     assert _salt() == before
@@ -533,9 +583,10 @@ def test_transient_read_failure_aborts_the_save_instead_of_minting_a_new_salt(mo
 
 @pytest.mark.security_regression
 @pytest.mark.usefixtures("_reset_lock_state")
-def test_unreadable_missing_file_still_mints_a_salt_for_a_new_config(monkeypatch):
+def test_unreadable_missing_file_still_mints_a_salt_for_a_new_config():
     svcconfig.save_config("svc-new", {"service_id": "svc-new"})
-    assert json.loads(svcconfig.config_path("svc-new").read_text())["rum"]["cid_salt"]
+    cfg = svcconfig._read_config_fresh("svc-new")
+    assert cfg is not None and cfg["rum"]["cid_salt"]
 
 
 @pytest.mark.security_regression
@@ -1444,8 +1495,7 @@ def test_log_line_budget_bands_and_clamp():
     assert caps and sum(caps) <= lf.FASTLY_LOG_LINE_DELIVER_MAX
 
 
-def test_log_fields_endpoints_surface_warning_and_noop(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "CONFIGS_DIR", tmp_path)
+def test_log_fields_endpoints_surface_warning_and_noop():
     client = TestClient(_fastapi_app)
 
     svc_get = "test_svc_log_budget_get"

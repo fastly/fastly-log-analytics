@@ -543,16 +543,16 @@ fn logging_period_changes_resume_both_streams_after_a_successful_ten_second_sche
         assert_eq!(
             fake.kv.borrow()["cron:state"].1["jobs"][kind]["last_success_period"],
             if kind == "rum" {
-                ready_rum_period(fake.now.get(), 10)
+                ready_rum_period(fake.now.get(), 60)
             } else {
-                ready_period(fake.now.get(), 10)
+                ready_period(fake.now.get(), 60)
             },
-            "initial successful 10s {kind} schedule"
+            "initial successful clamped 60s {kind} schedule"
         );
     }
 
     for (index, (request_period, rum_period)) in
-        [(60, 300), (300, 60), (10, 10)].into_iter().enumerate()
+        [(120, 300), (300, 120), (60, 60)].into_iter().enumerate()
     {
         svc.log_period = request_period;
         svc.rum.log_period = rum_period;
@@ -676,8 +676,8 @@ fn legacy_scheduler_state_migrates_after_cache_eviction_and_a_cas_conflict() {
     for kind in ["ingest", "rum"] {
         assert_eq!(
             fake.kv.borrow()["cron:state"].1["jobs"][kind]["last_success_period_s"],
-            10,
-            "{kind} must persist its cadence even after a CAS retry"
+            60,
+            "{kind} must persist its clamped cadence even after a CAS retry"
         );
     }
     fake.now.set(fake.now.get() + 1);

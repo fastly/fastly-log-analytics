@@ -7,7 +7,9 @@ import {
   emptyNetworkHealth,
   emptyNetworkQuality,
   emptyPopHealth,
+  hasTcpRttField,
   isUnknownCity,
+  missingTcpFieldsFromActiveIds,
   networkBundle,
   normalizeProtocolBucket,
   normalizeProtocolDistribution,
@@ -135,8 +137,11 @@ function ranked(values: Map<string, RollupAgg> | undefined, limit: number): [str
   return [...values ?? []].sort((a, b) => b[1].requests - a[1].requests).slice(0, limit);
 }
 
-/** TCP fields the summaries saw no value for; fields they don't count are not reported. */
-function missingTcpFields(all: RollupAgg): string[] {
+/** TCP fields missing from active log field settings, falling back to summary observation in isolated tests. */
+function missingTcpFields(all: RollupAgg, activeLogFieldIds?: readonly string[]): string[] {
+  if (Array.isArray(activeLogFieldIds)) {
+    return missingTcpFieldsFromActiveIds(new Set(activeLogFieldIds));
+  }
   const seen: Record<string, boolean> = {
     client_rtt_us: all.rttCount > 0,
     client_tcpi_rtt: all.rttCount > 0,
@@ -156,7 +161,7 @@ function missingTcpFields(all: RollupAgg): string[] {
  */
 export function networkHealthFromRollup(
   result: RollupResult,
-  params: Pick<NetworkQueryParams, "bucket_seconds" | "top_n">,
+  params: Pick<NetworkQueryParams, "bucket_seconds" | "top_n" | "active_log_field_ids">,
 ) {
   const { rollup } = result;
   const bucketMs = Math.max(1, Math.min(14400, Math.floor(params.bucket_seconds ?? 300))) * 1000;
@@ -165,7 +170,7 @@ export function networkHealthFromRollup(
   const asnSeries = rebucketSeries(rollup, "asn", bucketMs);
   if (!overall || !asnSeries) return null;
   const rollupMeta = meta(result, HEALTH_APPROXIMATE, lowerBounds(rollup));
-  const missing = missingTcpFields(sumAggs(rollup.dims.get("country")?.values() ?? []));
+  const missing = missingTcpFields(sumAggs(rollup.dims.get("country")?.values() ?? []), params.active_log_field_ids);
   const total = stats(sumAggs(overall.get("")?.values() ?? []));
   if (total.reqs === 0) return { ...emptyNetworkHealth(missing), rollup: rollupMeta };
 
@@ -325,7 +330,7 @@ function healthFromRollup(result: RollupResult, params: NetworkQueryParams) {
   const shieldingLb = wantsShielding && result.rollup.truncated.has("shield_routes/route")
     ? ["shielding_analysis.total_routes"] : [];
   if (!wantsCore) {
-    const missing = missingTcpFields(sumAggs(result.rollup.dims.get("country")?.values() ?? []));
+    const missing = missingTcpFields(sumAggs(result.rollup.dims.get("country")?.values() ?? []), params.active_log_field_ids);
     const approx = [
       ...(map ? HEALTH_APPROXIMATE : []),
       ...(wantsShielding ? ["shielding_analysis"] : []),
@@ -380,11 +385,16 @@ const avg = (sum: number, count: number) => (count ? sum / count : null);
 type QualityAnswer = NonNullable<ReturnType<typeof qualityAnswer>>["answer"];
 
 /** Null when the summaries hold no rows. */
-function qualityAnswer(result: RollupResult, regionCountry: string, rollupMeta: NetworkRollupMeta) {
+function qualityAnswer(
+  result: RollupResult,
+  regionCountry: string,
+  rollupMeta: NetworkRollupMeta,
+  activeLogFieldIds?: readonly string[],
+) {
   const { rollup } = result;
   const total = sumAggs(rollup.series.get("overall")?.get("")?.values() ?? []);
   const all = sumAggs(rollup.dims.get("country")?.values() ?? []);
-  const missing = missingTcpFields(all);
+  const missing = missingTcpFields(all, activeLogFieldIds);
   const overall = rollupGroup(rollup, "quality", "overall");
   const regions = rollupGroup(rollup, "quality", "region");
   const asnClient = rollupGroup(rollup, "quality", "asn");
@@ -465,9 +475,12 @@ function qualityAnswer(result: RollupResult, regionCountry: string, rollupMeta: 
     .map((sample) => ({ rtt_ms: sample.rttUs! / 1000, ttfb_ms: sample.ttfbS * 1000, cache: sample.cache }));
 
   const tp = overall?.get("");
+  const available = Array.isArray(activeLogFieldIds)
+    ? hasTcpRttField(new Set(activeLogFieldIds))
+    : total.rttCount > 0;
   return {
     answer: {
-      available: total.rttCount > 0,
+      available,
       by_country,
       by_pop,
       countries: by_country.map((row) => row.value),
@@ -510,10 +523,13 @@ export function qualityFromRollup(result: RollupResult, params: NetworkQueryPara
   const lowerBound = lowerBounds(rollup).filter((field) => ["by_asn", "by_country", "by_region"].includes(field));
   if (rollup.truncated.has("dims/pop")) lowerBound.push("by_pop");
   const rollupMeta = meta(result, QUALITY_APPROXIMATE, lowerBound);
-  const quality = qualityAnswer(result, String(params.region_country ?? "US"), rollupMeta);
+  const quality = qualityAnswer(result, String(params.region_country ?? "US"), rollupMeta, params.active_log_field_ids);
   if (!quality) {
-    const missing = missingTcpFields(sumAggs(rollup.dims.get("country")?.values() ?? []));
-    return { ...emptyNetworkQuality(missing), rollup: rollupMeta };
+    const missing = missingTcpFields(sumAggs(rollup.dims.get("country")?.values() ?? []), params.active_log_field_ids);
+    const available = Array.isArray(params.active_log_field_ids)
+      ? hasTcpRttField(new Set(params.active_log_field_ids))
+      : false;
+    return { ...emptyNetworkQuality(missing), available, rollup: rollupMeta };
   }
   const { answer, missingParts } = quality;
   if (!missingParts.length) return answer;
@@ -687,7 +703,11 @@ function networkSingleFilter(params: NetworkQueryParams): FilteredRollupFilter |
   return null;
 }
 
-function filteredNetworkHealthSummary(result: RollupResult, filter: FilteredRollupFilter) {
+function filteredNetworkHealthSummary(
+  result: RollupResult,
+  filter: FilteredRollupFilter,
+  activeLogFieldIds?: readonly string[],
+) {
   const group = rollupGroup(result.rollup, "filtered_rollups", filter.field);
   if (!group) return null;
   const isTruncated = result.rollup.truncated.has(`filtered_rollups/${filter.field}`);
@@ -695,7 +715,7 @@ function filteredNetworkHealthSummary(result: RollupResult, filter: FilteredRoll
   if (!found && isTruncated) return null;
   const agg = found ?? emptyAgg();
   const rollupMeta = meta(result, HEALTH_APPROXIMATE, isTruncated ? ["summary"] : []);
-  const missing = missingTcpFields(agg);
+  const missing = missingTcpFields(agg, activeLogFieldIds);
   const total = stats(agg);
   if (total.reqs === 0) return { ...emptyNetworkHealth(missing), rollup: rollupMeta };
   const medRttUs = total.medRttUs ?? 0;
@@ -818,7 +838,7 @@ export async function networkFromRollup(
   if (filtered) {
     const filter = networkSingleFilter(params);
     if (!filter) return null;
-    const core = filteredNetworkHealthSummary(result, filter);
+    const core = filteredNetworkHealthSummary(result, filter, params.active_log_field_ids);
     if (!core) return null;
     return path === "/api/network/bundle" ? networkBundle(core, null, null, null) : core;
   }

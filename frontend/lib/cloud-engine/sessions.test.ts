@@ -1,5 +1,8 @@
 // @vitest-environment node
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+vi.mock("./active-log-fields", () => ({
+  cloudActiveLogFieldIds: async () => new Set(["tcp_rtt", "ja4", "edge", "edge_sid", "cmcd_sid"]),
+}));
 import { DuckDBAnalyticalEngine } from "./dashboard/test-fixtures";
 import {
   SESSIONS_INACTIVITY_GAP_SECONDS,

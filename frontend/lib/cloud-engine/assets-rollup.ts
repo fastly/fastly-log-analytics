@@ -11,6 +11,7 @@ export type AssetsRollupBody = {
   end_time?: string | number | null;
   filters?: unknown;
   sections?: readonly string[] | null;
+  active_log_field_ids?: readonly string[];
 };
 
 const ASCII = /^[\x00-\x7f]*$/;
@@ -84,9 +85,19 @@ export function assetsAggregatesFromRollup(result: RollupResult, body: AssetsRol
   rows.sort((a, b) => [a.asset_type!, a.cache_status!, a.content_encoding!].join("\0")
     .localeCompare([b.asset_type!, b.cache_status!, b.content_encoding!].join("\0")));
   const computed = computeSummaryFromDims(rows);
-  // Cloud reads the fixed log schema, which always has `ttl` and `resp_header_content_encoding`.
+  const activeSet = Array.isArray(body.active_log_field_ids)
+    ? new Set(body.active_log_field_ids)
+    : null;
+  const missingFields = activeSet
+    ? [
+        ...(!activeSet.has("ttl") ? ["ttl"] : []),
+        ...(!activeSet.has("resp_header_content_encoding") && !activeSet.has("content_encoding")
+          ? ["resp_header_content_encoding"]
+          : []),
+      ]
+    : ([] as string[]);
   return {
-    missing_fields: [] as string[],
+    missing_fields: missingFields,
     summary: {
       total_requests: computed.total_requests,
       total_bytes: computed.total_bytes,

@@ -1,5 +1,8 @@
 // @vitest-environment node
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+vi.mock("./active-log-fields", () => ({
+  cloudActiveLogFieldIds: async () => new Set(["client_rtt_us", "client_ploss", "client_tcpi_rtt", "client_tcpi_rttvar"]),
+}));
 import { parquetWriteBuffer } from "hyparquet-writer";
 import { Histogram } from "./dashboard/histogram";
 import { DuckDBAnalyticalEngine as ParquetEngine } from "./dashboard/duckdb";

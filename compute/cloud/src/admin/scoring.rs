@@ -616,14 +616,18 @@ pub fn desired_scoring_backend(scoring_domain: &str) -> Value {
     })
 }
 
-pub fn scorer_vcl_fingerprint(logging_service_id: &str) -> String {
+pub fn scorer_vcl_fingerprint(
+    logging_service_id: &str,
+    exclude_url_regex: Option<&str>,
+    enforce_status_code: Option<u16>,
+) -> String {
     let snippets = serde_json::json!({
-        SCORING_RECV_NAME: recv_snippet(None).unwrap_or_default(),
+        SCORING_RECV_NAME: recv_snippet(exclude_url_regex).unwrap_or_default(),
         SCORING_PASS_NAME: pass_snippet(logging_service_id, "drift-fingerprint").unwrap_or_default(),
         SCORING_FETCH_NAME: fetch_snippet(),
         SCORING_DELIVER_NAME: deliver_snippet(),
         SCORING_MISS_NAME: miss_snippet(),
-        SCORING_ENFORCE_NAME: enforce_snippet(None),
+        SCORING_ENFORCE_NAME: enforce_snippet(enforce_status_code),
     });
     hex::encode(Sha256::digest(snippets.to_string().as_bytes()))
 }
@@ -811,7 +815,7 @@ pub(super) fn load_or_recover_request_secret(
     Ok(None)
 }
 
-fn resolve_brokered_token(
+pub(super) fn resolve_brokered_token(
     context: &Context<'_, impl Runtime>,
     service: &Service,
     optional_token: Option<&str>,
@@ -1260,10 +1264,11 @@ fn scoring_fos_prefix(service: &Service) -> String {
 fn save_scoring_service(
     context: &Context<'_, impl Runtime>,
     record: &Record,
-    service: &Service,
+    service: &mut Service,
     actor: &str,
     event: &str,
 ) -> Result<String, Error> {
+    service.deployed_snapshot = Some(service_snapshot_value(service)?);
     save_service(context, record, service, actor, event)?;
     let updated = context
         .get(&format!("svc:{}", service.service_id))?
@@ -2174,10 +2179,14 @@ fn logging_reconcile_step(
         .ok_or_else(|| Error::new(409, "scoring_config_missing"))?;
     sc.enabled = true;
     sc.enabled_at = rfc3339_from_secs(context.runtime.now());
-    sc.deployed_vcl_sha = scorer_vcl_fingerprint(&service.service_id);
     if sc.exclude_url_regex.is_empty() {
         sc.exclude_url_regex = DEFAULT_ASSET_EXT_REGEX.to_owned();
     }
+    sc.deployed_vcl_sha = scorer_vcl_fingerprint(
+        &service.service_id,
+        Some(&sc.exclude_url_regex),
+        sc.enforce_status_code,
+    );
     service.scoring = Some(sc);
     merge_scoring_custom_fields(&mut service.log_fields);
     service.config_version += 1;
@@ -3048,7 +3057,12 @@ fn status_payload(
     generation: &str,
 ) -> Value {
     let sid = &service.service_id;
-    let current_vcl_sha = scorer_vcl_fingerprint(sid);
+    let current_vcl_sha = match &service.scoring {
+        Some(sc) => {
+            scorer_vcl_fingerprint(sid, Some(&sc.exclude_url_regex), sc.enforce_status_code)
+        }
+        None => scorer_vcl_fingerprint(sid, None, None),
+    };
     let embedded_pkg_sha = context
         .runtime
         .scorer_package()
@@ -3077,15 +3091,19 @@ fn status_payload(
             )
         }
         None => {
-            let ready = context
-                .secret(&service.fastly_token_ref)
-                .ok()
-                .and_then(|tok| service_has_scoring_pragmas(context, sid, &tok));
+            let ready = if service.capture == Capture::Attached {
+                None
+            } else {
+                context
+                    .secret(&service.fastly_token_ref)
+                    .ok()
+                    .and_then(|tok| service_has_scoring_pragmas(context, sid, &tok))
+            };
             (false, None, false, None, ready)
         }
     };
 
-    json!({
+    let mut payload = json!({
         "service_id": sid,
         "generation": generation,
         "enabled": enabled,
@@ -3104,7 +3122,15 @@ fn status_payload(
             "matrix_versions": true,
             "audit": true,
         },
-    })
+    });
+    if service.capture == Capture::Attached {
+        payload["capture"] = json!("attached");
+        payload["scoring_fields_enabled"] = json!(service
+            .active_log_field_ids()
+            .iter()
+            .any(|id| id == "edge_score"));
+    }
+    payload
 }
 
 fn require_scoring_enabled(service: &Service) -> Result<&ScoringConfig, Error> {
@@ -3197,6 +3223,13 @@ pub fn route(
                 "capabilities": status["capabilities"],
                 "threshold": {
                     "threshold": sc.and_then(|s| s.threshold),
+                },
+                "enforce_threshold": {
+                    "enforce_threshold": sc.and_then(|s| s.enforce_threshold),
+                },
+                "l2_enforce": {
+                    "enabled": sc.and_then(|s| s.l2_enforce_enabled).unwrap_or(false),
+                    "l2_enabled_at": sc.and_then(|s| s.l2_enabled_at),
                 },
                 "exclude_regex": {
                     "exclude_url_regex": sc.map(|s| s.exclude_url_regex.as_str()).unwrap_or(""),
@@ -3309,7 +3342,7 @@ pub fn route(
             service.scoring = Some(sc);
             service.updated_at = context.runtime.now();
             let generation =
-                save_scoring_service(context, &record, &service, actor, "scoring.threshold")?;
+                save_scoring_service(context, &record, &mut service, actor, "scoring.threshold")?;
             append_scoring_audit(
                 context,
                 sid,
@@ -3336,28 +3369,41 @@ pub fn route(
         ("PUT", ["enforce-threshold"]) => {
             require_confirm(query)?;
             let input: Value = body(request)?;
-            let val = match &input["enforce_threshold"] {
-                Value::Null => String::new(),
+            let (threshold_opt, val) = match &input["enforce_threshold"] {
+                Value::Null => (None, String::new()),
                 v => {
                     let n = v
                         .as_u64()
                         .filter(|&n| n <= 100)
                         .ok_or_else(|| Error::new(400, "invalid_threshold"))?;
-                    n.to_string()
+                    (Some(n as u8), n.to_string())
                 }
             };
-            let (_, service) = load_service(context, sid)?;
+            let (record, mut service) = load_service(context, sid)?;
             require_scoring_mutable(context, sid, &service)?;
-            let sc = require_scoring_enabled(&service)?;
+            let mut sc = require_scoring_enabled(&service)?.clone();
+            if super::audit_outbox_len(&record) >= super::AUDIT_OUTBOX_LIMIT {
+                return Err(Error::new(409, "audit_archive_required"));
+            }
             let token = resolve_brokered_token(context, &service, None)?;
             reconcile::verify_managed_customer_vcl_ownership(context, &service, &token)?;
-            verify_scoring_resources(context, &service.service_id, sc, &token)?;
+            verify_scoring_resources(context, &service.service_id, &sc, &token)?;
             config_store_upsert_item(
                 context,
                 &sc.scoring_config_store_id,
                 ENFORCE_THRESHOLD_KEY,
                 &val,
                 &token,
+            )?;
+            sc.enforce_threshold = threshold_opt;
+            service.scoring = Some(sc);
+            service.updated_at = context.runtime.now();
+            let generation = save_scoring_service(
+                context,
+                &record,
+                &mut service,
+                actor,
+                "scoring.enforce_threshold",
             )?;
             append_scoring_audit(
                 context,
@@ -3366,7 +3412,11 @@ pub fn route(
                 "enforce_threshold_updated",
                 json!({"enforce_threshold": input["enforce_threshold"]}),
             );
-            Ok(json!({"ok": true, "enforce_threshold": input["enforce_threshold"]}))
+            Ok(json!({
+                "ok": true,
+                "enforce_threshold": input["enforce_threshold"],
+                "generation": generation,
+            }))
         }
         ("GET", ["l2-enforce"]) => {
             let (_, service) = load_service(context, sid)?;
@@ -3404,13 +3454,17 @@ pub fn route(
             let enabled = input["enabled"]
                 .as_bool()
                 .ok_or_else(|| Error::new(400, "invalid_input"))?;
-            let (_, service) = load_service(context, sid)?;
+            let (record, mut service) = load_service(context, sid)?;
             require_scoring_mutable(context, sid, &service)?;
-            let sc = require_scoring_enabled(&service)?;
+            let mut sc = require_scoring_enabled(&service)?.clone();
+            if super::audit_outbox_len(&record) >= super::AUDIT_OUTBOX_LIMIT {
+                return Err(Error::new(409, "audit_archive_required"));
+            }
             let token = resolve_brokered_token(context, &service, None)?;
             reconcile::verify_managed_customer_vcl_ownership(context, &service, &token)?;
-            verify_scoring_resources(context, &service.service_id, sc, &token)?;
-            let now_s = context.runtime.now().to_string();
+            verify_scoring_resources(context, &service.service_id, &sc, &token)?;
+            let now = context.runtime.now();
+            let now_s = now.to_string();
             config_store_upsert_item(
                 context,
                 &sc.scoring_config_store_id,
@@ -3418,23 +3472,28 @@ pub fn route(
                 if enabled { "1" } else { "0" },
                 &token,
             )?;
-            if enabled {
-                let existing = config_store_get_item(
+            let mut l2_at = config_store_get_item(
+                context,
+                &sc.scoring_config_store_id,
+                L2_ENABLED_AT_KEY,
+                &token,
+            )?;
+            if enabled && l2_at.is_empty() {
+                config_store_upsert_item(
                     context,
                     &sc.scoring_config_store_id,
                     L2_ENABLED_AT_KEY,
+                    &now_s,
                     &token,
                 )?;
-                if existing.is_empty() {
-                    config_store_upsert_item(
-                        context,
-                        &sc.scoring_config_store_id,
-                        L2_ENABLED_AT_KEY,
-                        &now_s,
-                        &token,
-                    )?;
-                }
+                l2_at = now_s;
             }
+            sc.l2_enforce_enabled = Some(enabled);
+            sc.l2_enabled_at = l2_at.trim().parse().ok().or(sc.l2_enabled_at);
+            service.scoring = Some(sc.clone());
+            service.updated_at = now;
+            let _generation =
+                save_scoring_service(context, &record, &mut service, actor, "scoring.l2_enforce")?;
             append_scoring_audit(
                 context,
                 sid,
@@ -3452,17 +3511,11 @@ pub fn route(
                 SCORING_ENABLED_AT_KEY,
                 &token,
             )?;
-            let l2_at = config_store_get_item(
-                context,
-                &sc.scoring_config_store_id,
-                L2_ENABLED_AT_KEY,
-                &token,
-            )?;
             Ok(build_l2_enforce_block(
                 &enabled_at,
                 if enabled { "1" } else { "0" },
                 &l2_at,
-                context.runtime.now(),
+                now,
             ))
         }
         ("GET", ["exclude-regex"]) => {
@@ -3496,29 +3549,16 @@ pub fn route(
             let raw = input["exclude_url_regex"].as_str().unwrap_or("");
             let cleaned = validate_exclude_url_regex(raw)
                 .map_err(|_| Error::new(400, "invalid_exclude_regex"))?;
-            let (record, mut service) = load_service(context, sid)?;
-            require_scoring_mutable(context, sid, &service)?;
-            let mut sc = require_scoring_enabled(&service)?.clone();
-            if super::audit_outbox_len(&record) >= super::AUDIT_OUTBOX_LIMIT {
-                return Err(Error::new(409, "audit_archive_required"));
-            }
-            let token = resolve_brokered_token(context, &service, None)?;
-            context.confirm_with_token(&token);
             let snippet_body = recv_snippet(Some(&cleaned))?;
-            update_single_snippet_and_activate(
+            let generation = apply_scoring_snippet_change(
                 context,
-                &service,
-                &token,
+                actor,
+                sid,
                 SCORING_RECV_NAME,
-                "recv",
-                SCORING_SNIPPET_PRIORITY,
                 &snippet_body,
+                "scoring.exclude_regex",
+                |sc| sc.exclude_url_regex = cleaned.clone(),
             )?;
-            sc.exclude_url_regex = cleaned.clone();
-            service.scoring = Some(sc);
-            service.updated_at = context.runtime.now();
-            let generation =
-                save_scoring_service(context, &record, &service, actor, "scoring.exclude_regex")?;
             append_scoring_audit(
                 context,
                 sid,
@@ -3548,33 +3588,15 @@ pub fn route(
                 .and_then(|v| u16::try_from(v).ok())
                 .filter(|&c| (400..=599).contains(&c))
                 .ok_or_else(|| Error::new(400, "invalid_status_code"))?;
-            let (record, mut service) = load_service(context, sid)?;
-            require_scoring_mutable(context, sid, &service)?;
-            let mut sc = require_scoring_enabled(&service)?.clone();
-            if super::audit_outbox_len(&record) >= super::AUDIT_OUTBOX_LIMIT {
-                return Err(Error::new(409, "audit_archive_required"));
-            }
-            let token = resolve_brokered_token(context, &service, None)?;
-            context.confirm_with_token(&token);
             let snippet_body = enforce_snippet(Some(code));
-            update_single_snippet_and_activate(
+            let generation = apply_scoring_snippet_change(
                 context,
-                &service,
-                &token,
-                SCORING_ENFORCE_NAME,
-                "recv",
-                SCORING_SNIPPET_PRIORITY,
-                &snippet_body,
-            )?;
-            sc.enforce_status_code = Some(code);
-            service.scoring = Some(sc);
-            service.updated_at = context.runtime.now();
-            let generation = save_scoring_service(
-                context,
-                &record,
-                &service,
                 actor,
+                sid,
+                SCORING_ENFORCE_NAME,
+                &snippet_body,
                 "scoring.enforce_status_code",
+                |sc| sc.enforce_status_code = Some(code),
             )?;
             append_scoring_audit(
                 context,
@@ -3701,7 +3723,7 @@ pub fn route(
             service.scoring = Some(sc);
             service.updated_at = context.runtime.now();
             let generation =
-                save_scoring_service(context, &record, &service, actor, "scoring.retrain")?;
+                save_scoring_service(context, &record, &mut service, actor, "scoring.retrain")?;
             append_scoring_audit(
                 context,
                 sid,
@@ -3771,8 +3793,13 @@ pub fn route(
             sc.matrix_version = Some(version.clone());
             service.scoring = Some(sc);
             service.updated_at = context.runtime.now();
-            let generation =
-                save_scoring_service(context, &record, &service, actor, "scoring.matrix_restored")?;
+            let generation = save_scoring_service(
+                context,
+                &record,
+                &mut service,
+                actor,
+                "scoring.matrix_restored",
+            )?;
             append_scoring_audit(
                 context,
                 sid,
@@ -3894,17 +3921,133 @@ pub fn route(
     }
 }
 
-fn update_single_snippet_and_activate(
+fn apply_scoring_snippet_change(
     context: &Context<'_, impl Runtime>,
-    service: &Service,
+    actor: &str,
+    sid: &str,
+    snippet_name: &str,
+    snippet_body: &str,
+    event: &str,
+    mutate_sc: impl FnOnce(&mut ScoringConfig),
+) -> Result<String, Error> {
+    let (record, mut service) = load_service(context, sid)?;
+    require_scoring_mutable(context, sid, &service)?;
+    let mut sc = require_scoring_enabled(&service)?.clone();
+    if super::audit_outbox_len(&record) >= super::AUDIT_OUTBOX_LIMIT {
+        return Err(Error::new(409, "audit_archive_required"));
+    }
+    let token = resolve_brokered_token(context, &service, None)?;
+    context.confirm_with_token(&token);
+    let previous_active_version =
+        reconcile::verify_managed_customer_vcl_ownership(context, &service, &token)?;
+
+    let lease_key = format!("reconcile_lock:{sid}");
+    let lease_record = context.get(&lease_key)?;
+    let old_lease: Lease = lease_record
+        .as_ref()
+        .map(|r| decode(r.value.clone()))
+        .transpose()?
+        .unwrap_or_default();
+    let now = context.runtime.now();
+    if old_lease.expires_at > now {
+        return Err(Error::new(409, "service_locked"));
+    }
+    let lease = Lease {
+        job_id: format!("scoring_config:{now}"),
+        fence: old_lease.fence + 1,
+        expires_at: now + 60,
+    };
+    context.cas(
+        &lease_key,
+        lease_record.as_ref().map(|r| r.generation.as_str()),
+        &serialize(&lease)?,
+    )?;
+
+    let result = (|| -> Result<String, Error> {
+        let previous_service = service.clone();
+        mutate_sc(&mut sc);
+        sc.deployed_vcl_sha =
+            scorer_vcl_fingerprint(sid, Some(&sc.exclude_url_regex), sc.enforce_status_code);
+        service.scoring = Some(sc);
+        service.updated_at = context.runtime.now();
+        save_service_no_dr(context, &record, &service, actor, event)?;
+        let mid_record = context
+            .get(&format!("svc:{sid}"))?
+            .ok_or_else(|| Error::new(503, "state_unavailable"))?;
+
+        let activated_draft = match update_single_snippet_at_version_and_activate(
+            context,
+            sid,
+            previous_active_version,
+            &token,
+            snippet_name,
+            "recv",
+            SCORING_SNIPPET_PRIORITY,
+            snippet_body,
+        ) {
+            Ok(draft) => draft,
+            Err(err) => {
+                if let Ok(active) = reconcile::active_version(context, sid, &token) {
+                    if active != previous_active_version {
+                        let _ = context.api(
+                            "PUT",
+                            &format!("/service/{sid}/version/{previous_active_version}/activate"),
+                            &token,
+                            None,
+                        );
+                    }
+                }
+                let _ = save_service_recovery_capped(
+                    context,
+                    &mid_record,
+                    &previous_service,
+                    actor,
+                    "scoring.snippet_rolled_back",
+                );
+                return Err(err);
+            }
+        };
+
+        service.last_activated_version = Some(activated_draft);
+        service.deployed_snapshot = Some(service_snapshot_value(&service)?);
+        if let Err(err) = save_service_recovery_capped(context, &mid_record, &service, actor, event)
+        {
+            let _ = context.api(
+                "PUT",
+                &format!("/service/{sid}/version/{previous_active_version}/activate"),
+                &token,
+                None,
+            );
+            let _ = save_service_recovery_capped(
+                context,
+                &mid_record,
+                &previous_service,
+                actor,
+                "scoring.snippet_rolled_back",
+            );
+            return Err(err);
+        }
+        let updated = context
+            .get(&format!("svc:{sid}"))?
+            .ok_or_else(|| Error::new(503, "state_unavailable"))?;
+        Ok(updated.generation)
+    })();
+
+    release_lease(context, &lease_key, &lease);
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn update_single_snippet_at_version_and_activate(
+    context: &Context<'_, impl Runtime>,
+    sid: &str,
+    active: u64,
     token: &str,
     snippet_name: &str,
     snippet_type: &str,
     priority: i64,
     content: &str,
-) -> Result<(), Error> {
-    let sid = &service.service_id;
-    let active = reconcile::verify_managed_customer_vcl_ownership(context, service, token)?;
+) -> Result<u64, Error> {
     let cloned = context.api(
         "PUT",
         &format!("/service/{sid}/version/{active}/clone"),
@@ -3953,5 +4096,5 @@ fn update_single_snippet_and_activate(
         token,
         None,
     )?;
-    Ok(())
+    Ok(draft)
 }

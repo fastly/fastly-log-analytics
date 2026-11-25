@@ -275,8 +275,17 @@ def rum_vcl_fingerprint(logging_service_id: str, cfg: dict[str, Any] | None = No
     rum_raw = cfg.get("rum")
     rum_cfg = rum_raw if isinstance(rum_raw, dict) else {}
     faro_version = rum_cfg.get("faro_version")
+    prov_raw = cfg.get("provisioning")
+    prov_cfg = prov_raw if isinstance(prov_raw, dict) else {}
+    fos_proxy_raw = cfg.get("fos_proxy")
+    fos_proxy_cfg = fos_proxy_raw if isinstance(fos_proxy_raw, dict) else {}
 
-    shield_pop = cfg.get("cdn_shield") or SHIELD_MAP.get(cfg.get("fos_region", "us-east-1"), "iad-va-us")
+    shield_pop = (
+        cfg.get("cdn_shield")
+        or prov_cfg.get("cdn_shield")
+        or fos_proxy_cfg.get("shield")
+        or SHIELD_MAP.get(cfg.get("fos_region", "us-east-1"), "iad-va-us")
+    )
     snippets = {
         **generate_rum_vcl(logging_service_id, faro_version, timing_allow_origins=rum_cfg.get("timing_allow_origins")),
         **generate_rum_asset_fetch_vcl(shield_pop, faro_version),
@@ -418,11 +427,11 @@ def enable_rum(
 
     # Step 1: Idempotency check — see the "already enabled" Note above:
     # faro_version is deliberately not consulted here.
-    if cfg.get("rum_enabled", False):
+    if svcconfig.is_rum_enabled(cfg):
         ok("RUM already enabled")
         return {
             "logging_service_active_version": cfg.get("last_activated_version", 1),
-            "enabled_at": cfg.get("rum_enabled_at", ""),
+            "enabled_at": cfg.get("rum_enabled_at") or (cfg.get("rum") or {}).get("enabled_at", ""),
             "activated": False,
         }
 
@@ -455,7 +464,7 @@ def enable_rum(
     # The upload pins the asset version; this mutation enables the VCL only
     # after the object has been written successfully.
     def _apply_enable(target: dict[str, Any]) -> None:
-        target["rum_enabled"] = True
+        svcconfig.set_rum_enabled(target, True)
         target["rum_enabled_at"] = enabled_at
         # Client timings are matched to request logs by `rid`, so RUM turns that field on.
         claim_feature_fields(target, "rum")
@@ -470,7 +479,7 @@ def enable_rum(
         # (download_and_upload_faro) or a concurrent writer may have changed other
         # keys, which a whole-config restore would erase.
         def _undo(target: dict[str, Any]) -> None:
-            target["rum_enabled"] = False
+            svcconfig.set_rum_enabled(target, False)
             target.pop("rum_vcl_sha", None)
             release_feature_fields(target, "rum")
             _restore_faro_pin(target, previous_rum_cfg)
@@ -530,6 +539,8 @@ def enable_rum(
     # post-activation) already covers most cases — this call exists so
     # enable_rum doesn't depend on that internal behavior alone.
     if result.activated_version is not None:
+        if svcconfig.snapshot_config(logging_service_id) is not None:
+            svcconfig.record_deployed_config(logging_service_id, result.activated_version)
         try:
             if status_cb:
                 status_cb("⏳ Uploading RUM tracker JS...")
@@ -603,7 +614,7 @@ def upgrade_faro_version(
     if not cfg:
         raise RuntimeError(f"No config found for logging service {logging_service_id}")
 
-    if not cfg.get("rum_enabled", False):
+    if not svcconfig.is_rum_enabled(cfg):
         raise RuntimeError(f"RUM is not enabled for {logging_service_id}; enable RUM before upgrading Faro version")
 
     previous_rum_cfg = dict(cfg.get("rum") or {})
@@ -667,6 +678,8 @@ def upgrade_faro_version(
 
         if svcconfig.mutate_config(logging_service_id, _refresh_sha) is None:
             raise RuntimeError(f"No config found while persisting RUM fingerprint for {logging_service_id}")
+        if svcconfig.snapshot_config(logging_service_id) is not None:
+            svcconfig.record_deployed_config(logging_service_id, result.activated_version)
 
     # Step 3: Best-effort purge of the cached bundle so the edge stops
     # serving the old version. A purge failure is a warning, never an
@@ -737,7 +750,7 @@ def disable_rum(
         status_cb(f"⏳ Disabling RUM for {logging_service_id}...")
 
     # Step 1: Check if already disabled
-    if not cfg.get("rum_enabled", False):
+    if not svcconfig.is_rum_enabled(cfg):
         ok("RUM already disabled")
         return {
             "logging_service_active_version": cfg.get("last_activated_version", 1),
@@ -746,7 +759,7 @@ def disable_rum(
 
     # Step 2: Update config to disable RUM
     def _apply_disable(target: dict[str, Any]) -> None:
-        target["rum_enabled"] = False
+        svcconfig.set_rum_enabled(target, False)
         target.pop("rum_vcl_sha", None)
         # Only fields RUM itself turned on, and only if no other enabled feature needs them.
         release_feature_fields(target, "rum")
@@ -765,7 +778,7 @@ def disable_rum(
     except Exception as e:
         # Rollback only the keys _apply_disable wrote
         def _undo_disable(target: dict[str, Any]) -> None:
-            target["rum_enabled"] = True
+            svcconfig.set_rum_enabled(target, True)
             claim_feature_fields(target, "rum")
             target["rum_vcl_sha"] = rum_vcl_fingerprint(logging_service_id, target)
 
@@ -778,7 +791,7 @@ def disable_rum(
     if not activated:
 
         def _restore_live_state(target: dict[str, Any]) -> None:
-            target["rum_enabled"] = True
+            svcconfig.set_rum_enabled(target, True)
             claim_feature_fields(target, "rum")
             if cfg.get("rum_vcl_sha") is not None:
                 target["rum_vcl_sha"] = cfg["rum_vcl_sha"]
@@ -790,6 +803,8 @@ def disable_rum(
 
     # Remove the object only after the active VCL no longer references it.
     if activated:
+        if svcconfig.snapshot_config(logging_service_id) is not None:
+            svcconfig.record_deployed_config(logging_service_id, result.activated_version)
         if status_cb:
             status_cb("⏳ Deleting RUM tracker JS…")
         from backend.provision.rum_assets import delete_rum_tracker_js
@@ -837,7 +852,7 @@ def disable_rum(
                 status_cb(f"⚠️ Warning: Failed to delete RUM cloud files: {e}")
 
     if activated and remove_bucket and fos_bucket and fos_access_key and fos_secret_key:
-        if cfg.get("logging_enabled", False):
+        if svcconfig.is_logging_enabled(cfg):
             warn("Cannot delete FOS bucket while request logging is still enabled (bucket is shared)")
             if status_cb:
                 status_cb("⚠️ Cannot delete bucket: request logging is still active")

@@ -1,6 +1,9 @@
 // @vitest-environment node
 import { parquetWriteBuffer } from "hyparquet-writer";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+vi.mock("./active-log-fields", () => ({
+  cloudActiveLogFieldIds: async () => new Set(["tcp_rtt", "ja4", "edge", "edge_sid", "cmcd_sid"]),
+}));
 import { getDuckDBEngine } from "./dashboard/duckdb";
 import { handleSessionsDetail, handleSessionsList, sessionsListColumns, type SessionsListRequest } from "./sessions";
 import { sessionsEnrichSpans, sessionsLoadFrom } from "./sessions-window";

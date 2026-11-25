@@ -27,7 +27,7 @@ from backend.utils.auth import require_service_in_scope
 from backend.utils.router_utils import load_service_config, mutate_service_config
 
 from .storage import _check_storage_type_lock, _locked_storage_field_names
-from .vcl import _persist_log_fields, _validate_log_format_version
+from .vcl import _logging_settings_cache, _persist_log_fields, _validate_log_format_version
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
@@ -38,6 +38,7 @@ def _persist_custom_fields_change(
     new_lf = _persist_log_fields(lf, new_custom, candidate_lf, now, full=full)
     cfg["log_fields"] = new_lf
     mutate_service_config(service_id, lambda c: c.__setitem__("log_fields", new_lf))
+    _logging_settings_cache.pop(service_id, None)
 
 
 def _load_modifiable_custom_fields(

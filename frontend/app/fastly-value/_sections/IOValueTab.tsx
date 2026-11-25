@@ -1,6 +1,8 @@
 'use client'
 
 import React from 'react'
+import { QueryClientContext } from '@tanstack/react-query'
+import { useActiveLogFields } from '@/hooks/useBootstrap'
 import { ImageIcon, TrendingDown, Zap, Activity, DollarSign, Sparkles, ArrowRight } from 'lucide-react'
 import type { ColumnDef } from '@/lib/table'
 import { DataTableReadonly, FilterValueCell } from '@/components/DataTable'
@@ -161,17 +163,25 @@ function OpportunitiesTable({ opps }: { opps: IOOpportunity[] }) {
   )
 }
 
-function IOUpsellView({ data }: { data: IOData }) {
+function IOUpsellView({ data, ioNotEnabled }: { data: IOData; ioNotEnabled: boolean }) {
   const opps = data.optimization_opportunities ?? []
   return (
     <div className="space-y-6 pt-4">
-      <div className="rounded-lg border border-purple-500/20 bg-purple-500/5 p-4">
-        <p className="text-sm text-muted-foreground">
-          <strong className="text-foreground">Image Optimizer is not enabled on this service.</strong> Fastly IO
-          automatically converts images to modern formats (WebP, AVIF) and resizes on the fly, reducing bandwidth by up
-          to 40%.
-        </p>
-      </div>
+      {ioNotEnabled ? (
+        <div className="rounded-lg border border-purple-500/20 bg-purple-500/5 p-4">
+          <p className="text-sm text-muted-foreground">
+            <strong className="text-foreground">Image Optimizer is not enabled on this service.</strong> Fastly IO
+            automatically converts images to modern formats (WebP, AVIF) and resizes on the fly, reducing bandwidth by up
+            to 40%.
+          </p>
+        </div>
+      ) : (
+        <div className="rounded-lg border bg-muted/30 p-4">
+          <p className="text-sm text-muted-foreground">
+            Image Optimizer fields are enabled in Fastly logging, with no IO transforms observed in this window.
+          </p>
+        </div>
+      )}
       <div className="grid gap-4 grid-cols-2 lg:grid-cols-4">
         <StatCard
           title="Image Requests"
@@ -387,7 +397,34 @@ function IOEnabledView({ data, rollup }: { data: IOData; rollup?: NetworkRollupM
   )
 }
 
-export function IOValueTab({ data, loading, rollup }: { data?: IOData | null; loading?: boolean; rollup?: NetworkRollupMeta }) {
+function IOValueTabWithActiveFields({
+  data,
+  rollup,
+}: {
+  data: IOData
+  rollup?: NetworkRollupMeta
+}) {
+  const { ready, isFieldActive } = useActiveLogFields()
+  const ioActive = isFieldActive('io_input_format') || isFieldActive('io_output_format')
+  const ioNotEnabled = ready ? !ioActive : true
+  if (data.io_transforms != null) {
+    return <IOEnabledView data={data} rollup={rollup} />
+  }
+  return <IOUpsellView data={data} ioNotEnabled={ioNotEnabled} />
+}
+
+export function IOValueTab({
+  data,
+  loading,
+  rollup,
+  ioFieldsEnabled,
+}: {
+  data?: IOData | null
+  loading?: boolean
+  rollup?: NetworkRollupMeta
+  ioFieldsEnabled?: boolean
+}) {
+  const queryClient = React.useContext(QueryClientContext)
   if (loading) {
     return (
       <div className="space-y-6 pt-4">
@@ -407,5 +444,11 @@ export function IOValueTab({ data, loading, rollup }: { data?: IOData | null; lo
   if (data.io_transforms != null) {
     return <IOEnabledView data={data} rollup={rollup} />
   }
-  return <IOUpsellView data={data} />
+  if (ioFieldsEnabled !== undefined) {
+    return <IOUpsellView data={data} ioNotEnabled={!ioFieldsEnabled} />
+  }
+  if (queryClient) {
+    return <IOValueTabWithActiveFields data={data} rollup={rollup} />
+  }
+  return <IOUpsellView data={data} ioNotEnabled={true} />
 }

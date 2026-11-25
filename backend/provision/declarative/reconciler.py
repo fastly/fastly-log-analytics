@@ -108,6 +108,7 @@ from backend.provision.declarative.orchestrate import (
     reconcile_cdn_service_state,
     reconcile_infrastructure,
     reconcile_vcl_state,
+    transactional_vcl_reconcile,
     verify_compute_scorer_readiness,
 )
 from backend.provision.declarative.vcl_builder import (
@@ -308,6 +309,7 @@ __all__ = [
     "scorer_vcl_fingerprint",
     "sys",
     "time",
+    "transactional_vcl_reconcile",
     "upload_rum_tracker_js",
     "urllib",
     "validate_version",

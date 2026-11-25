@@ -210,9 +210,10 @@ def scoring_enable(
             return sse_response(
                 iter([json.dumps({"type": "error", "code": "missing_scoring_pragmas", "message": msg})])
             )
-    svcconfig.mutate_config(
-        service_id, lambda c: c.__setitem__("scoring", {**(c.get("scoring") or {}), "enabled": True})
-    )
+
+    def _pre_mutate(c: dict) -> None:
+        c["scoring"] = {**(c.get("scoring") or {}), "enabled": True}
+
     safe_scoring_state: dict = {}
 
     def _done_event() -> dict:
@@ -241,6 +242,7 @@ def scoring_enable(
     return stream_iac_reconcile(
         service_id,
         resolved_token,
+        pre_mutate=_pre_mutate,
         start_message=f"Enabling session scoring for {service_id}...",
         done_event=_done_event,
         after_done=_after_done,
@@ -257,12 +259,10 @@ def scoring_disable(
 ):
     """Disable session scoring. Reverse of enable_scoring."""
     resolved_token = _require_fastly_token(service_id, body)
-    from backend import config as svcconfig
 
-    svcconfig.mutate_config(
-        service_id, lambda c: c["scoring"].__setitem__("enabled", False) if "scoring" in c else None
-    )
-    invalidate_scoring_status_cache(service_id)
+    def _pre_mutate(c: dict) -> None:
+        if "scoring" in c and isinstance(c["scoring"], dict):
+            c["scoring"]["enabled"] = False
 
     def _after_done() -> None:
         invalidate_scoring_status_cache(service_id)
@@ -271,6 +271,7 @@ def scoring_disable(
     return stream_iac_reconcile(
         service_id,
         resolved_token,
+        pre_mutate=_pre_mutate,
         start_message=f"Disabling session scoring for {service_id}...",
         done_event={"type": "done", "message": "Session scoring disabled."},
         after_done=_after_done,

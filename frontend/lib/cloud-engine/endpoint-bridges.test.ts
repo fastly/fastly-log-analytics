@@ -606,4 +606,118 @@ describe("Cloud RUM status and versions services lookup", () => {
     expect(response?.status).toBe(400);
     expect(fetcher).not.toHaveBeenCalled();
   });
+
+  it("bridges custom-fields CRUD, validate-vcl, export and import via native service config", async () => {
+    let customFields: Array<Record<string, unknown>> = [
+      { name: "edge_score", label: "Edge Score", sql_type: "INTEGER", enabled: true },
+    ];
+    let generation = "gen-1";
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const u = new URL(input instanceof Request ? input.url : String(input), "http://localhost");
+      const reqMethod = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+      if (u.pathname === "/api/admin/services/svc-1" && reqMethod === "GET") {
+        return Response.json({ service: { log_fields: { groups: ["A"], custom_fields: customFields } }, generation });
+      }
+      if (u.pathname === "/api/admin/services/svc-1" && reqMethod === "PATCH") {
+        const raw = input instanceof Request ? await input.text() : String(init?.body ?? "{}");
+        const body = JSON.parse(raw) as { log_fields?: { custom_fields?: Array<Record<string, unknown>> } };
+        customFields = body.log_fields?.custom_fields ?? customFields;
+        generation = "gen-2";
+        return Response.json({ service: { log_fields: { groups: ["A"], custom_fields: customFields } }, generation });
+      }
+      if (u.pathname === "/api/admin/log-fields/custom/validate") {
+        return Response.json({ valid: true, errors: [] });
+      }
+      if (u.pathname === "/api/admin/log-fields/preview") {
+        return Response.json({ format_length: 512, max_length: 12288 });
+      }
+      throw new Error(`Unexpected: ${reqMethod} ${u.pathname}`);
+    }));
+
+    const created = await (await handleCloudAnalyticalRequest(
+      request("/api/services/svc-1/custom-fields", "POST", {
+        name: "x_tenant",
+        label: "Tenant",
+        vcl_log_expression: "req.http.X-Tenant",
+        collection_stage: "deliver",
+        sql_type: "VARCHAR",
+        value_type: "string",
+        bytes_estimate: 16,
+        enabled: true,
+      }),
+    ))!.json();
+    expect(created).toMatchObject({ ok: true, field: { name: "x_tenant" } });
+    // System field edge_score stays preserved while GET filters to user custom fields
+    const listed = await (await handleCloudAnalyticalRequest(request("/api/services/svc-1/custom-fields")))!.json();
+    expect(listed.fields.map((f: { name: string }) => f.name)).toEqual(["x_tenant"]);
+    expect(customFields.some((f) => f.name === "edge_score")).toBe(true);
+
+    const vclRes = await (await handleCloudAnalyticalRequest(
+      request("/api/services/svc-1/custom-fields/validate-vcl", "POST", {
+        vcl_log_expression: "req.http.X-Tenant",
+        collection_stage: "deliver",
+      }),
+    ))!.json();
+    expect(vclRes).toMatchObject({ valid: true, format_length: 512, format_length_limit: 12288 });
+
+    const delRes = await (await handleCloudAnalyticalRequest(
+      request("/api/services/svc-1/custom-fields/x_tenant", "DELETE"),
+    ))!.json();
+    expect(delRes.ok).toBe(true);
+    expect(customFields.map((f) => f.name)).toEqual(["edge_score"]);
+  });
+
+  it("bridges scoring/matrix-versions and restore to native matrix/versions endpoints", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const u = new URL(input instanceof Request ? input.url : String(input), "http://localhost");
+      const reqMethod = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+      if (u.pathname === "/api/services/svc-1/scoring/matrix/versions") {
+        return Response.json({ versions: ["2026-11-20-aa", { version: "2026-11-21-bb" }], active_version: "2026-11-21-bb" });
+      }
+      if (u.pathname === "/api/services/svc-1/scoring/matrix/versions/restore" && u.searchParams.get("confirm") === "true") {
+        const raw = input instanceof Request ? await input.text() : String(init?.body ?? "{}");
+        const body = JSON.parse(raw) as { version?: string };
+        return Response.json({ ok: true, version: body.version, generation: "gen-9" });
+      }
+      throw new Error(`Unexpected: ${reqMethod} ${u.pathname}${u.search}`);
+    }));
+
+    const list = await (await handleCloudAnalyticalRequest(request("/api/services/svc-1/scoring/matrix-versions")))!.json();
+    expect(list).toEqual({
+      versions: [{ version: "2026-11-20-aa" }, { version: "2026-11-21-bb" }],
+      current_version: "2026-11-21-bb",
+    });
+
+    const restored = await (await handleCloudAnalyticalRequest(
+      request("/api/services/svc-1/scoring/matrix-versions/2026-11-20-aa/restore", "POST", {}),
+    ))!.json();
+    expect(restored).toMatchObject({
+      ok: true,
+      restored_version: "2026-11-20-aa",
+      current_version: "2026-11-20-aa",
+      generation: "gen-9",
+    });
+  });
+
+  it("filters /api/schema physical columns by active_log_field_ids", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const u = new URL(input instanceof Request ? input.url : String(input), "http://localhost");
+      if (u.pathname === "/api/services") {
+        return Response.json({
+          services: [{ service_id: "fixture-a", active_log_field_ids: ["status"], log_fields: {} }],
+        });
+      }
+      return Response.json({
+        groups: [],
+        fields: [
+          { id: "timestamp", label: "Timestamp", group: null, duckdb_type: "TIMESTAMP" },
+          { id: "status", label: "Status", group: null, duckdb_type: "BIGINT" },
+          { id: "ua", label: "User Agent", group: "C", duckdb_type: "VARCHAR" },
+        ],
+      });
+    }));
+
+    const schema = await (await handleCloudAnalyticalRequest(request("/api/schema", "GET", undefined, "fixture-a")))!.json();
+    expect(schema.columns.map((c: { name: string }) => c.name)).toEqual(["timestamp", "status"]);
+  });
 });

@@ -1,38 +1,18 @@
 """Service configuration management for multi-service support.
 
-Each service is stored as a JSON file in the configs/ directory.
-The filename is the Fastly logging service ID (e.g. abcdefg12345abcdef1234.json).
-
-Config file schema:
-{
-    "service_id": "abcdefg12345abcdef1234",   # Fastly logging service ID (matches filename)
-    "name": "My Production Site",               # Human-readable label (from Fastly API)
-    "fos_endpoint": "us-east-1.object.fastlystorage.app",
-    "fos_access_key_id": "...",
-    "fos_secret_access_key": "...",
-    "fos_bucket": "...",
-    "fos_prefix": "",
-    "raw_layout_version": 3,
-    "fos_region": "us-east-1",
-    "cdn_url": "https://...",
-    "cdn_secret": "...",
-    "cdn_service_id": "...",                    # The CDN VCL service fronting FOS
-    "fastly_api_key": "...",                    # Account-wide Fastly API key
-    "provisioning": {                           # Embedded provisioning state for teardown
-        "endpoint_name": "Fastly Object Storage Logs",
-        "temp_admin_key_id": null
-    }
-}
+Each service configuration is persisted in PostgreSQL (``service_configs`` table).
 """
 
 import contextlib
 import copy
 import dataclasses
+import datetime as _dt
 import json
 import logging
 import math
 import os
 import re
+import secrets
 import sys
 import threading
 import time
@@ -43,19 +23,11 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from cachetools import LRUCache
-from filelock import FileLock
-from filelock import Timeout as _FileLockTimeout
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
-from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait_fixed
 
 from backend.core.service_defaults import DEFAULT_LOG_PERIOD_SECONDS
-from backend.utils.bounded_cache import BoundedLRUCache
+from backend.utils.bounded_cache import BoundedLRUCache, CacheRegistry
 from backend.utils.telemetry import atomic_write_json
-
-try:
-    import fcntl
-except ImportError:  # non-POSIX
-    fcntl = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -191,32 +163,129 @@ _name_cache_lock = threading.Lock()
 _name_refresh_in_flight: set[str] = set()
 _name_refresh_lock = threading.Lock()
 
-# Cache for parsed configs: {service_id: (mtime_ns, parsed_dict)}.
-# Revalidated by stat() on each load_config call AND explicitly invalidated
-# by save_config — mtime alone is not enough because Linux ext4/tmpfs can
-# produce identical st_mtime_ns for two writes within the same microsecond.
-# Hot paths (sync-status polls, every cron tick, every dashboard request)
-# hit this enough that skipping the open+read on the no-change path adds up.
+# Cache for parsed configs: {service_id: (revision, parsed_dict)}.
+# Snapshot-cached across the table for `_DEFAULT_CONFIG_SNAPSHOT_TTL_S` seconds
+# (optional sub-second Valkey epoch invalidation when CELERY_BROKER_URL is set),
+# revision-revalidated on refresh, and immediately invalidated on every write.
+_DEFAULT_CONFIG_SNAPSHOT_TTL_S = 5.0
+_VALKEY_EPOCH_KEY = "fla:service_configs:epoch"
+_VALKEY_EPOCH_CHECK_INTERVAL_S = 0.5
+
+
+@dataclass(frozen=True)
+class _ConfigTableSnapshot:
+    fetched_mono: float
+    epoch_checked_mono: float
+    epoch: int | None
+    pool_token: Any
+    by_id: dict[str, tuple[int, dict]]
+    service_ids: tuple[str, ...]
+    cdn_map: dict[str, str]
+
+
 _config_cache: LRUCache[str, tuple[int, dict]] = LRUCache(maxsize=256)
 _config_cache_lock = threading.Lock()
+_snapshot_refresh_lock = threading.Lock()
+_snapshot_refresh_tls = threading.local()
+_EMPTY_TABLE_SNAPSHOT = _ConfigTableSnapshot(
+    fetched_mono=0.0,
+    epoch_checked_mono=0.0,
+    epoch=None,
+    pool_token=None,
+    by_id={},
+    service_ids=(),
+    cdn_map={},
+)
+_table_snapshot: _ConfigTableSnapshot | None = None
+_valkey_client_lock = threading.Lock()
+_valkey_client: Any = None
+_valkey_backoff_until = 0.0
 
-# Path-keyed memo for _ensure_dirs(). Called from every list_configs /
-# save_config / save_usage_logging_config so the mkdir(exist_ok=True)
-# syscall storm shows up under load. Tests that monkeypatch CONFIGS_DIR
-# get fresh entries because the tmp_path is a different Path object.
+# Path-keyed memo for _ensure_dirs().
 _ensured_dirs: set[Path] = set()
 
-# Cache for list_service_ids(). The configs directory's st_mtime_ns bumps on
-# every file create/delete/rename — exactly the set-of-configs change this
-# cares about (file *content* edits don't matter here) — so one stat()
-# revalidates a cached result and skips the full glob + pathlib stem-parse.
-# telemetry_middleware runs list_service_ids() on the event loop for every
-# request via get_active_service_id(); under shared-host disk contention that
-# glob stalled the loop for seconds (batch-drained health timeouts). Also
-# explicitly invalidated in save_config as a backstop for
-# same-microsecond mtime_ns collisions.
+# Retained for test/cache-reset compatibility.
 _service_ids_cache: tuple[Path, int, list[str]] | None = None
 _service_ids_cache_lock = threading.Lock()
+
+
+def _snapshot_ttl_seconds() -> float:
+    raw = os.getenv("FLA_CONFIG_CACHE_TTL_S")
+    if raw is None or not raw.strip():
+        return _DEFAULT_CONFIG_SNAPSHOT_TTL_S
+    try:
+        val = float(raw)
+    except ValueError:
+        return _DEFAULT_CONFIG_SNAPSHOT_TTL_S
+    return val if math.isfinite(val) and val >= 0 else _DEFAULT_CONFIG_SNAPSHOT_TTL_S
+
+
+def _snapshot_pool_token() -> Any:
+    from backend.core.metadata import pg_pool
+
+    pool_obj = getattr(pg_pool, "_pool", None)
+    sqlite_obj = getattr(pg_pool, "_sqlite_shim_conn", None)
+    return (
+        id(pg_pool),
+        id(pool_obj) if pool_obj is not None else None,
+        id(sqlite_obj) if sqlite_obj is not None else None,
+        os.getenv("METADATA_DSN", ""),
+        id(pg_pool.get_pg_readonly_connection),
+    )
+
+
+def _get_valkey_epoch_client() -> Any | None:
+    global _valkey_client, _valkey_backoff_until
+    if "pytest" in sys.modules:
+        return None
+    broker_url = os.getenv("CELERY_BROKER_URL", "").strip()
+    if not broker_url:
+        return None
+    now = time.monotonic()
+    if now < _valkey_backoff_until:
+        return None
+    with _valkey_client_lock:
+        if time.monotonic() < _valkey_backoff_until:
+            return None
+        if _valkey_client is None:
+            try:
+                from redis import Redis as SyncRedis
+
+                _valkey_client = SyncRedis.from_url(
+                    broker_url,
+                    socket_connect_timeout=0.2,
+                    socket_timeout=0.2,
+                    decode_responses=True,
+                )
+            except Exception:
+                _valkey_backoff_until = time.monotonic() + 10.0
+                return None
+        return _valkey_client
+
+
+def _read_valkey_epoch() -> int | None:
+    global _valkey_backoff_until
+    client = _get_valkey_epoch_client()
+    if client is None:
+        return None
+    try:
+        raw = client.get(_VALKEY_EPOCH_KEY)
+        return int(raw) if raw is not None else 0
+    except Exception:
+        _valkey_backoff_until = time.monotonic() + 10.0
+        return None
+
+
+def _bump_valkey_epoch() -> int | None:
+    global _valkey_backoff_until
+    client = _get_valkey_epoch_client()
+    if client is None:
+        return None
+    try:
+        return int(client.incr(_VALKEY_EPOCH_KEY))
+    except Exception:
+        _valkey_backoff_until = time.monotonic() + 10.0
+        return None
 
 
 def _invalidate_service_ids_cache() -> None:
@@ -225,20 +294,25 @@ def _invalidate_service_ids_cache() -> None:
         _service_ids_cache = None
 
 
-def _seed_configs_if_needed():
-    seed_dir_str = os.getenv("CONFIGS_SEED_DIR", "/app/seed_configs")
-    seed_dir = Path(seed_dir_str)
-    if seed_dir.is_dir() and CONFIGS_DIR.is_dir():
-        import shutil
-
-        for f in seed_dir.glob("*.json"):
-            dest = CONFIGS_DIR / f.name
-            if not dest.exists():
-                try:
-                    shutil.copy2(f, dest)
-                    logger.info("Seeded service config %s into %s", f.name, dest)
-                except Exception as e:
-                    logger.warning("Could not seed config %s: %s", f.name, e)
+def invalidate_config_cache(service_id: str | None = None) -> None:
+    """Invalidate in-process (and optional Valkey epoch) config caches."""
+    global _cdn_service_id_map, _table_snapshot
+    with _config_cache_lock:
+        _table_snapshot = None
+        if service_id is None:
+            _config_cache.clear()
+        else:
+            _config_cache.pop(service_id, None)
+    _cdn_service_id_map = None
+    _invalidate_service_ids_cache()
+    _bump_valkey_epoch()
+    for cache_name in (
+        "routers.bootstrap._bootstrap_cache",
+        "services.vcl._logging_settings_cache",
+        "services.core._cron_schedule_cache",
+    ):
+        with contextlib.suppress(Exception):
+            CacheRegistry.clear(cache_name)
 
 
 def _ensure_dirs():
@@ -248,7 +322,6 @@ def _ensure_dirs():
         for d in missing:
             d.mkdir(exist_ok=True)
             _ensured_dirs.add(d)
-    _seed_configs_if_needed()
 
 
 # Alphabet shared with backend.deps.ServiceId. Public so the FastAPI
@@ -292,62 +365,6 @@ def config_path(service_id: str) -> Path:
     return CONFIGS_DIR / f"{service_id}.json"
 
 
-def load_config(service_id: str | None) -> dict | None:
-    """Load a single service config by ID. Returns None if not found.
-
-    Returns a freshly-parsed dict on every call — callers that mutate the
-    result (e.g. update_status) won't poison the cache. The on-disk file is
-    revalidated via st_mtime_ns, so external edits and save_config writes
-    are picked up on the next call without explicit invalidation.
-
-    Returns ``None`` (not a raised exception) for invalid service IDs,
-    including ``None`` itself — several call sites in the core/storage/
-    package pass ``src.get("name")`` (typed as ``Any | None``) and
-    rely on the None response to mean "no config". Security's validation
-    in ``config_path`` is still what blocks path-traversal; this just
-    makes the helper friendlier at call sites that don't pre-validate.
-    """
-    if service_id is None:
-        return None
-    try:
-        path = config_path(service_id)
-    except ValueError:
-        return None
-    try:
-        mtime_ns = path.stat().st_mtime_ns
-    except FileNotFoundError:
-        return None
-
-    with _config_cache_lock:
-        cached = _config_cache.get(service_id)
-        if cached is not None and cached[0] == mtime_ns:
-            return copy.deepcopy(cached[1])
-
-    # Robust VirtioFS mid-write desynchronization retry loop
-    parsed = None
-    for attempt in Retrying(
-        stop=stop_after_attempt(5),
-        wait=wait_fixed(0.05),
-        retry=retry_if_exception_type((json.JSONDecodeError, PermissionError, OSError)),
-        sleep=lambda s: time.sleep(s),
-        reraise=True,
-    ):
-        with attempt:
-            parsed = json.loads(path.read_bytes())
-
-    if parsed is None:
-        raise ValueError(f"Config file must contain a JSON object: {path}")
-
-    with _config_cache_lock:
-        _config_cache[service_id] = (mtime_ns, parsed)
-    return copy.deepcopy(parsed)
-
-
-def _atomic_write_json(path, data: dict) -> None:
-    """Write ``data`` to ``path`` atomically (unique tmp file + os.replace)."""
-    atomic_write_json(path, data, indent=2, fallback_in_place_errnos={13, 16})
-
-
 class ConfigLockTimeout(TimeoutError):
     """The per-service config lock could not be acquired within ``_LOCK_TIMEOUT_S``."""
 
@@ -357,101 +374,329 @@ class CidSaltReadError(RuntimeError):
 
 
 _LOCK_TIMEOUT_S = 5.0
-_LOCK_BACKOFF_START_S = 0.005
 
 _lock_state = threading.local()
-_lock_degraded = False
-_lock_degraded_lock = threading.Lock()
+_shim_locks: dict[str, threading.RLock] = {}
+_shim_locks_guard = threading.Lock()
+
+
+def _get_shim_lock(service_id: str) -> threading.RLock:
+    with _shim_locks_guard:
+        lock = _shim_locks.get(service_id)
+        if lock is None:
+            lock = threading.RLock()
+            _shim_locks[service_id] = lock
+        return lock
+
+
+def _get_held_lock_conn(service_id: str) -> Any | None:
+    held = getattr(_lock_state, "held", None)
+    if not isinstance(held, dict):
+        return None
+    entry = held.get(service_id)
+    if entry is None:
+        return None
+    return entry[0]
+
+
+@contextlib.contextmanager
+def _open_or_reuse_conn(service_id: str):
+    """Yield the current thread's held lock connection if active, else checkout and close one."""
+    held_conn = _get_held_lock_conn(service_id)
+    if held_conn is not None:
+        yield held_conn, False
+        return
+    from backend.core.metadata import pg_pool
+
+    with contextlib.closing(pg_pool.get_pg_readonly_connection()) as conn:
+        yield conn, True
 
 
 def config_lock_degraded() -> bool:
-    """True once this process has had to run a config write without the cross-process lock."""
-    return _lock_degraded
-
-
-def _mark_lock_degraded(service_id: str, err: BaseException) -> None:
-    global _lock_degraded
-    with _lock_degraded_lock:
-        first = not _lock_degraded
-        _lock_degraded = True
-    if first:
-        logger.error(
-            "config_lock_degraded service_id=%s: cross-process config locking is unavailable (%s); config "
-            "read-modify-write is NOT serialized across processes until this is fixed",
-            service_id,
-            err,
-        )
+    """PostgreSQL advisory locking is never degraded in-process."""
+    return False
 
 
 @contextlib.contextmanager
 def config_lock(service_id: str):
-    """Cross-process exclusive lock for read-modify-write of one service config."""
-    _ensure_dirs()
+    """Cross-pod exclusive lock for read-modify-write of one service config."""
+    from psycopg.errors import LockNotAvailable
+    from psycopg_pool import PoolTimeout
+
+    from backend.core.metadata import pg_pool
+
     sid = _validate_service_id(service_id)
-    held: dict[str, int] = _lock_state.__dict__.setdefault("held", {})
-    if held.get(sid, 0) > 0:
-        held[sid] += 1
+    held: dict[str, tuple[Any, int]] = _lock_state.__dict__.setdefault("held", {})
+    existing = held.get(sid)
+    if existing is not None:
+        conn, depth = existing
+        held[sid] = (conn, depth + 1)
         try:
             yield
         finally:
-            held[sid] -= 1
+            held[sid] = (conn, depth)
         return
 
-    lock_path = CONFIGS_DIR / f".{sid}.lock"
-    flock = FileLock(str(lock_path), thread_local=False)
-    acquired = False
-    if fcntl is None:
-        _mark_lock_degraded(service_id, RuntimeError("fcntl unavailable"))
-    else:
-        try:
-            flock.acquire(timeout=_LOCK_TIMEOUT_S, poll_interval=_LOCK_BACKOFF_START_S)
-            acquired = True
-        except _FileLockTimeout:
-            raise ConfigLockTimeout(
-                f"timed out after {_LOCK_TIMEOUT_S:.0f}s waiting for the config lock of service {service_id}"
-            ) from None
-        except OSError as e:
-            _mark_lock_degraded(service_id, e)
-    held[sid] = 1
     try:
-        yield
-    finally:
-        held.pop(sid, None)
-        if acquired:
-            flock.release()
+        conn = pg_pool.get_pg_readonly_connection()
+    except PoolTimeout:
+        raise ConfigLockTimeout(
+            f"timed out after {_LOCK_TIMEOUT_S:.0f}s waiting for the config lock of service {service_id}"
+        ) from None
+
+    with contextlib.closing(conn):
+        if isinstance(conn, pg_pool.PgConnectionWrapper):
+            try:
+                with conn.transaction():
+                    conn.execute(f"SET LOCAL lock_timeout = '{int(_LOCK_TIMEOUT_S * 1000)}ms'")
+                    conn.execute(
+                        "SELECT pg_advisory_xact_lock(hashtextextended('service_config:' || ?, 0))",
+                        (sid,),
+                    )
+                    held[sid] = (conn, 1)
+                    try:
+                        yield
+                    finally:
+                        held.pop(sid, None)
+            except LockNotAvailable:
+                raise ConfigLockTimeout(
+                    f"timed out after {_LOCK_TIMEOUT_S:.0f}s waiting for the config lock of service {service_id}"
+                ) from None
+        else:
+            shim_lock = _get_shim_lock(sid)
+            if not shim_lock.acquire(timeout=_LOCK_TIMEOUT_S):
+                raise ConfigLockTimeout(
+                    f"timed out after {_LOCK_TIMEOUT_S:.0f}s waiting for the config lock of service {service_id}"
+                )
+            try:
+                held[sid] = (conn, 1)
+                try:
+                    yield
+                    if hasattr(conn, "commit"):
+                        conn.commit()
+                except BaseException:
+                    if hasattr(conn, "rollback"):
+                        conn.rollback()
+                    raise
+                finally:
+                    held.pop(sid, None)
+            finally:
+                shim_lock.release()
+
+
+def _parse_config_row(service_id: str, row: Any, *, use_cache: bool) -> dict:
+    rev = int(row["revision"])
+    if use_cache:
+        with _config_cache_lock:
+            cached = _config_cache.get(service_id)
+            if cached is not None and cached[0] == rev:
+                return copy.deepcopy(cached[1])
+    parsed = json.loads(row["config_json"])
+    if not isinstance(parsed, dict):
+        raise ValueError(f"Config for {service_id!r} must be a JSON object")
+    with _config_cache_lock:
+        _config_cache[service_id] = (rev, parsed)
+    return copy.deepcopy(parsed)
+
+
+def _get_valid_table_snapshot() -> _ConfigTableSnapshot | None:
+    global _table_snapshot
+    ttl = _snapshot_ttl_seconds()
+    if ttl <= 0:
+        return None
+    pool_token = _snapshot_pool_token()
+    now = time.monotonic()
+    with _config_cache_lock:
+        snap = _table_snapshot
+    if snap is None or snap.pool_token != pool_token or (now - snap.fetched_mono) >= ttl:
+        return None
+    if (now - snap.epoch_checked_mono) >= _VALKEY_EPOCH_CHECK_INTERVAL_S:
+        remote_epoch = _read_valkey_epoch()
+        if remote_epoch is not None and snap.epoch is not None and remote_epoch != snap.epoch:
+            with _config_cache_lock:
+                if _table_snapshot is snap:
+                    _table_snapshot = None
+            return None
+        updated = dataclasses.replace(
+            snap,
+            epoch_checked_mono=now,
+            epoch=remote_epoch if remote_epoch is not None else snap.epoch,
+        )
+        with _config_cache_lock:
+            if _table_snapshot is snap:
+                _table_snapshot = updated
+        return updated
+    return snap
+
+
+def _refresh_table_snapshot_locked() -> _ConfigTableSnapshot:
+    global _cdn_service_id_map, _table_snapshot
+    from backend.core.metadata import pg_pool
+
+    pool_token = _snapshot_pool_token()
+    with contextlib.closing(pg_pool.get_pg_readonly_connection()) as conn:
+        rev_rows = conn.execute("SELECT service_id, revision FROM service_configs ORDER BY service_id").fetchall()
+        revisions = [(str(r["service_id"]), int(r["revision"])) for r in rev_rows]
+
+        by_id: dict[str, tuple[int, dict]] = {}
+        missing_ids: list[str] = []
+        with _config_cache_lock:
+            for sid, rev in revisions:
+                hit = _config_cache.get(sid)
+                if hit is not None and hit[0] == rev:
+                    by_id[sid] = hit
+                else:
+                    missing_ids.append(sid)
+
+        if missing_ids:
+            placeholders = ", ".join("?" for _ in missing_ids)
+            full_rows = conn.execute(
+                f"SELECT service_id, revision, config_json FROM service_configs "  # nosec B608
+                f"WHERE service_id IN ({placeholders}) ORDER BY service_id",
+                tuple(missing_ids),
+            ).fetchall()
+            for r in full_rows:
+                sid = str(r["service_id"])
+                rev = int(r["revision"])
+                parsed = json.loads(r["config_json"])
+                if not isinstance(parsed, dict):
+                    raise ValueError(f"Config for {sid!r} must be a JSON object")
+                by_id[sid] = (rev, parsed)
+
+    ordered_ids = tuple(sid for sid, _ in revisions if sid in by_id)
+    cdn_map = {str(by_id[sid][1]["cdn_service_id"]): sid for sid in ordered_ids if by_id[sid][1].get("cdn_service_id")}
+    now = time.monotonic()
+    snap = _ConfigTableSnapshot(
+        fetched_mono=now,
+        epoch_checked_mono=now,
+        epoch=_read_valkey_epoch(),
+        pool_token=pool_token,
+        by_id={sid: by_id[sid] for sid in ordered_ids},
+        service_ids=ordered_ids,
+        cdn_map=cdn_map,
+    )
+    with _config_cache_lock:
+        present = set(ordered_ids)
+        for stale_sid in [k for k in list(_config_cache.keys()) if k not in present]:
+            _config_cache.pop(stale_sid, None)
+        for sid in ordered_ids:
+            _config_cache[sid] = snap.by_id[sid]
+        if _snapshot_ttl_seconds() > 0:
+            _table_snapshot = snap
+    _cdn_service_id_map = dict(cdn_map)
+    return snap
+
+
+def _refresh_table_snapshot() -> _ConfigTableSnapshot:
+    if getattr(_snapshot_refresh_tls, "active", False):
+        with _config_cache_lock:
+            return _table_snapshot if _table_snapshot is not None else _EMPTY_TABLE_SNAPSHOT
+
+    with _snapshot_refresh_lock:
+        cached = _get_valid_table_snapshot()
+        if cached is not None:
+            return cached
+
+        _snapshot_refresh_tls.active = True
+        try:
+            return _refresh_table_snapshot_locked()
+        finally:
+            _snapshot_refresh_tls.active = False
+
+
+def _get_or_refresh_snapshot() -> _ConfigTableSnapshot:
+    snap = _get_valid_table_snapshot()
+    if snap is not None:
+        return snap
+    if getattr(_snapshot_refresh_tls, "active", False):
+        with _config_cache_lock:
+            return _table_snapshot if _table_snapshot is not None else _EMPTY_TABLE_SNAPSHOT
+    return _refresh_table_snapshot()
+
+
+def load_config(service_id: str | None) -> dict | None:
+    """Load a single service config by ID from PostgreSQL (cached across pod hot paths)."""
+    if service_id is None:
+        return None
+    try:
+        sid = _validate_service_id(service_id)
+    except ValueError:
+        return None
+
+    held_conn = _get_held_lock_conn(sid)
+    if held_conn is not None:
+        row = held_conn.execute(
+            "SELECT revision, config_json FROM service_configs WHERE service_id = ?",
+            (sid,),
+        ).fetchone()
+        if row is None:
+            with _config_cache_lock:
+                _config_cache.pop(sid, None)
+            return None
+        return _parse_config_row(sid, row, use_cache=True)
+
+    snap = _get_or_refresh_snapshot()
+    entry = snap.by_id.get(sid)
+    if entry is None:
+        return None
+    return copy.deepcopy(entry[1])
 
 
 def _read_config_fresh(service_id: str) -> dict | None:
-    """``load_config`` that bypasses the in-process cache (another process may have written)."""
-    with _config_cache_lock:
-        _config_cache.pop(service_id, None)
-    return load_config(service_id)
-
-
-def _disk_cid_salt(service_id: str) -> str | None:
-    try:
-        disk = _read_config_fresh(service_id)
-    except (OSError, ValueError) as e:
-        if config_path(service_id).exists():
-            # A transient read failure must not look like "no salt yet": minting one would silently re-key every cid.
-            raise CidSaltReadError(f"cannot read existing config for {service_id}; refusing to save: {e}") from e
+    """``load_config`` that bypasses the in-process cache and updates it from DB."""
+    if service_id is None:
         return None
-    rum = disk.get("rum") if disk else None
+    try:
+        sid = _validate_service_id(service_id)
+    except ValueError:
+        return None
+
+    with _config_cache_lock:
+        _config_cache.pop(sid, None)
+
+    with _open_or_reuse_conn(sid) as (conn, _):
+        row = conn.execute(
+            "SELECT revision, config_json FROM service_configs WHERE service_id = ?",
+            (sid,),
+        ).fetchone()
+    if row is None:
+        return None
+    return _parse_config_row(sid, row, use_cache=False)
+
+
+def _extract_cid_salt(cfg: Any) -> str | None:
+    rum = cfg.get("rum") if isinstance(cfg, dict) else None
     salt = rum.get("cid_salt") if isinstance(rum, dict) else None
     return salt if isinstance(salt, str) and salt else None
 
 
-def _save_config_unlocked(service_id: str, cfg: dict, *, allow_cid_salt_change: bool = False):
-    global _cdn_service_id_map
-    _ensure_dirs()
-    if "created_at" not in cfg or not cfg["created_at"]:
-        import datetime as _dt
+def _db_cid_salt(service_id: str, conn: Any) -> str | None:
+    try:
+        row = conn.execute(
+            "SELECT config_json FROM service_configs WHERE service_id = ?",
+            (service_id,),
+        ).fetchone()
+    except Exception as e:
+        raise CidSaltReadError(f"cannot read existing config for {service_id}; refusing to save: {e}") from e
+    if row is None:
+        return None
+    try:
+        disk = json.loads(row["config_json"])
+    except Exception as e:
+        raise CidSaltReadError(f"cannot read existing config for {service_id}; refusing to save: {e}") from e
+    return _extract_cid_salt(disk)
 
-        cfg["created_at"] = _dt.datetime.now(_dt.UTC).isoformat()
-    # The cid salt is write-once: pseudonymous cids are keyed on it, so a stale
-    # writer replacing cfg["rum"] wholesale (or a racing first-save) must never
-    # re-key them. Adopt the persisted salt; mint one only when none exists yet.
-    existing_salt = None if allow_cid_salt_change else _disk_cid_salt(service_id)
+
+def _apply_write_once_cid_salt(
+    service_id: str,
+    cfg: dict,
+    conn: Any,
+    *,
+    allow_cid_salt_change: bool = False,
+    mint_if_missing: bool = True,
+) -> None:
+    """Preserve write-once ``rum.cid_salt`` from the DB row and optionally mint when absent."""
+    existing_salt = None if allow_cid_salt_change else _db_cid_salt(service_id, conn)
     rum = cfg.get("rum")
     if existing_salt:
         if not isinstance(rum, dict):
@@ -461,36 +706,57 @@ def _save_config_unlocked(service_id: str, cfg: dict, *, allow_cid_salt_change: 
             if rum.get("cid_salt"):
                 logger.warning("cid_salt_overwrite_blocked service_id=%s", service_id)
             rum["cid_salt"] = existing_salt
-    elif not (isinstance(rum, dict) and rum.get("cid_salt")):
-        import secrets
-
+    elif mint_if_missing and not (isinstance(rum, dict) and rum.get("cid_salt")):
         if not isinstance(rum, dict):
             rum = {}
             cfg["rum"] = rum
         rum["cid_salt"] = secrets.token_hex(32)
+
+
+def _upsert_config_json(conn: Any, service_id: str, config_json: str, now_iso: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO service_configs (service_id, config_json, revision, updated_at)
+        VALUES (?, ?, 1, ?)
+        ON CONFLICT (service_id) DO UPDATE SET
+            config_json = EXCLUDED.config_json,
+            revision = service_configs.revision + 1,
+            updated_at = EXCLUDED.updated_at
+        """,
+        (service_id, config_json, now_iso),
+    )
+
+
+def _commit_if_standalone_non_pg(conn: Any, opened_here: bool) -> None:
+    if not opened_here:
+        return
+    from backend.core.metadata import pg_pool
+
+    if not isinstance(conn, pg_pool.PgConnectionWrapper) and hasattr(conn, "commit"):
+        conn.commit()
+
+
+def _save_config_unlocked(service_id: str, cfg: dict, *, allow_cid_salt_change: bool = False):
+    sid = _validate_service_id(service_id)
+    if "created_at" not in cfg or not cfg["created_at"]:
+        cfg["created_at"] = _dt.datetime.now(_dt.UTC).isoformat()
+
     from backend.core import catalog
 
-    # Resolved here only, so the list matches the settings last saved (and deployed), even after
-    # a release changes the catalog.
-    cfg["active_log_field_ids"] = catalog.resolve_active_log_field_ids(catalog.get_lf_config(cfg))
-    try:
-        _atomic_write_json(config_path(service_id), cfg)
-    except (OSError, PermissionError) as e:
-        if getattr(e, "errno", None) == 30 or "read-only" in str(e).lower():
-            logger.warning("save_config_skipped_read_only_fs service_id=%s: %s", service_id, e)
-            return
-        raise
-    # Invalidate the load_config cache. The cache uses st_mtime_ns as its
-    # revalidation key, which is normally fine — but on Linux ext4/tmpfs two
-    # os.replace() calls within the same microsecond can produce identical
-    # mtime_ns values, so a cached (old_mtime, old_raw) entry can stay
-    # "fresh" after this write and serve stale bytes. update_status() does
-    # exactly that: load → mutate → save → and the next load can see the
-    # pre-mutation cached copy. Drop the entry so the next load re-reads.
-    with _config_cache_lock:
-        _config_cache.pop(service_id, None)
-    _cdn_service_id_map = None
-    _invalidate_service_ids_cache()
+    with _open_or_reuse_conn(sid) as (conn, opened_here):
+        _apply_write_once_cid_salt(
+            sid,
+            cfg,
+            conn,
+            allow_cid_salt_change=allow_cid_salt_change,
+            mint_if_missing=True,
+        )
+        cfg["active_log_field_ids"] = catalog.resolve_active_log_field_ids(catalog.get_lf_config(cfg))
+        now_iso = _dt.datetime.now(_dt.UTC).isoformat()
+        _upsert_config_json(conn, sid, json.dumps(cfg), now_iso)
+        _commit_if_standalone_non_pg(conn, opened_here)
+
+    invalidate_config_cache(sid)
 
 
 def active_log_field_ids(cfg: dict) -> list[str]:
@@ -504,7 +770,7 @@ def active_log_field_ids(cfg: dict) -> list[str]:
 
 
 def save_config(service_id: str, cfg: dict):
-    """Write a service config atomically. See :func:`_atomic_write_json`."""
+    """Write a service config atomically to PostgreSQL under per-service lock."""
     with config_lock(service_id):
         _save_config_unlocked(service_id, cfg)
 
@@ -528,26 +794,201 @@ def mutate_config(
         return cfg
 
 
-def snapshot_config(service_id: str) -> str | None:
-    """Raw persisted config text (``None`` when absent)."""
-    with config_lock(service_id):
-        try:
-            return config_path(service_id).read_text()
-        except FileNotFoundError:
-            return None
+def delete_config(service_id: str) -> bool:
+    """Delete a service config row from ``service_configs`` under per-service lock."""
+    sid = _validate_service_id(service_id)
+    with config_lock(sid), _open_or_reuse_conn(sid) as (conn, _):
+        cur = conn.execute("DELETE FROM service_configs WHERE service_id = ?", (sid,))
+        deleted = bool(cur.rowcount and cur.rowcount > 0)
+    invalidate_config_cache(sid)
+    return deleted
+
+
+def snapshot_config(service_id: str, *, prefer_deployed: bool = False) -> str | None:
+    """Raw persisted config JSON text (``None`` when absent)."""
+    sid = _validate_service_id(service_id)
+    with config_lock(sid), _open_or_reuse_conn(sid) as (conn, _):
+        row = conn.execute(
+            "SELECT config_json, deployed_config_json FROM service_configs WHERE service_id = ?",
+            (sid,),
+        ).fetchone()
+    if row is None:
+        return None
+    if prefer_deployed and row["deployed_config_json"] is not None:
+        return str(row["deployed_config_json"])
+    return str(row["config_json"]) if row["config_json"] is not None else None
 
 
 def restore_config_snapshot(service_id: str, raw: str) -> None:
     """Atomically restore a previously captured raw service config."""
-    global _cdn_service_id_map
-
+    sid = _validate_service_id(service_id)
     snapshot = json.loads(raw)
-    with config_lock(service_id):
-        _atomic_write_json(config_path(service_id), snapshot)
-    with _config_cache_lock:
-        _config_cache.pop(service_id, None)
-    _cdn_service_id_map = None
-    _invalidate_service_ids_cache()
+    if not isinstance(snapshot, dict):
+        raise ValueError(f"Snapshot for {service_id!r} must be a JSON object")
+
+    from backend.core import catalog
+
+    with config_lock(sid), _open_or_reuse_conn(sid) as (conn, _):
+        _apply_write_once_cid_salt(
+            sid,
+            snapshot,
+            conn,
+            allow_cid_salt_change=False,
+            mint_if_missing=False,
+        )
+        snapshot["active_log_field_ids"] = catalog.resolve_active_log_field_ids(catalog.get_lf_config(snapshot))
+        now_iso = _dt.datetime.now(_dt.UTC).isoformat()
+        _upsert_config_json(conn, sid, json.dumps(snapshot), now_iso)
+    invalidate_config_cache(sid)
+
+
+def record_deployed_config(
+    service_id: str,
+    activated_version: int | None = None,
+    *,
+    previous_version: int | None = None,
+) -> None:
+    """Record the currently-saved config as deployed, preserving the prior deployed snapshot."""
+    sid = _validate_service_id(service_id)
+    activated_version = (
+        activated_version if isinstance(activated_version, int) and not isinstance(activated_version, bool) else None
+    )
+    previous_version = (
+        previous_version if isinstance(previous_version, int) and not isinstance(previous_version, bool) else None
+    )
+    from backend.core import catalog
+
+    with config_lock(sid), _open_or_reuse_conn(sid) as (conn, _):
+        row = conn.execute(
+            """
+            SELECT config_json, deployed_config_json, previous_deployed_config_json, previous_activated_version
+            FROM service_configs
+            WHERE service_id = ?
+            """,
+            (sid,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(f"Cannot record deployed config: service {sid!r} not found")
+        cfg = json.loads(row["config_json"])
+        if activated_version is not None:
+            cfg["last_activated_version"] = activated_version
+        cfg["active_log_field_ids"] = catalog.resolve_active_log_field_ids(catalog.get_lf_config(cfg))
+        new_json = json.dumps(cfg)
+
+        cur_deployed = row["deployed_config_json"]
+        prev_deployed = row["previous_deployed_config_json"]
+        prev_ver = row["previous_activated_version"]
+
+        if cur_deployed is not None and (activated_version is not None or cur_deployed != new_json):
+            prev_deployed = cur_deployed
+        if previous_version is not None and previous_version != activated_version:
+            prev_ver = previous_version
+
+        now_iso = _dt.datetime.now(_dt.UTC).isoformat()
+        conn.execute(
+            """
+            UPDATE service_configs
+            SET config_json = ?,
+                deployed_config_json = ?,
+                previous_deployed_config_json = ?,
+                previous_activated_version = ?,
+                revision = revision + 1,
+                updated_at = ?
+            WHERE service_id = ?
+            """,
+            (new_json, new_json, prev_deployed, prev_ver, now_iso, sid),
+        )
+    invalidate_config_cache(sid)
+
+
+def rollback_deployed_config(service_id: str) -> tuple[dict, int | None]:
+    """Roll back both draft and deployed config to the previously deployed snapshot."""
+    sid = _validate_service_id(service_id)
+    from backend.core import catalog
+
+    with config_lock(sid), _open_or_reuse_conn(sid) as (conn, _):
+        row = conn.execute(
+            """
+            SELECT config_json, previous_deployed_config_json, previous_activated_version
+            FROM service_configs
+            WHERE service_id = ?
+            """,
+            (sid,),
+        ).fetchone()
+        if row is None or row["previous_deployed_config_json"] is None:
+            raise ValueError(f"No previous deployed config snapshot recorded for {service_id}")
+
+        restored = json.loads(row["previous_deployed_config_json"])
+        prev_ver: int | None = row["previous_activated_version"]
+
+        current_cfg = json.loads(row["config_json"]) if row["config_json"] is not None else {}
+        existing_salt = _extract_cid_salt(current_cfg)
+        if existing_salt:
+            rum = restored.get("rum")
+            if not isinstance(rum, dict):
+                rum = {}
+                restored["rum"] = rum
+            rum["cid_salt"] = existing_salt
+
+        if prev_ver is not None:
+            restored["last_activated_version"] = prev_ver
+        restored["active_log_field_ids"] = catalog.resolve_active_log_field_ids(catalog.get_lf_config(restored))
+        restored_json = json.dumps(restored)
+        now_iso = _dt.datetime.now(_dt.UTC).isoformat()
+
+        conn.execute(
+            """
+            UPDATE service_configs
+            SET config_json = ?,
+                deployed_config_json = ?,
+                previous_deployed_config_json = NULL,
+                previous_activated_version = NULL,
+                revision = revision + 1,
+                updated_at = ?
+            WHERE service_id = ?
+            """,
+            (restored_json, restored_json, now_iso, sid),
+        )
+    invalidate_config_cache(sid)
+    return (restored, prev_ver)
+
+
+def migrate_legacy_file_configs_once(configs_dir: Path | None = None) -> int:
+    """Import legacy ``configs/*.json`` files once if ``service_configs`` is empty."""
+    from backend.core.metadata import pg_pool
+
+    with contextlib.closing(pg_pool.get_pg_readonly_connection()) as conn:
+        if conn.execute("SELECT 1 FROM service_configs LIMIT 1").fetchone() is not None:
+            return 0
+
+    target_dir = configs_dir or CONFIGS_DIR
+    if not target_dir.is_dir():
+        return 0
+
+    imported = 0
+    for path in sorted(target_dir.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.warning("migrate_legacy_file_configs_once: skip unreadable %s: %s", path.name, e)
+            continue
+        if not isinstance(data, dict):
+            logger.warning("migrate_legacy_file_configs_once: skip non-object %s", path.name)
+            continue
+        raw_sid = data.get("service_id") or path.stem
+        try:
+            sid = _validate_service_id(raw_sid)
+        except ValueError as e:
+            logger.warning("migrate_legacy_file_configs_once: skip invalid service_id in %s: %s", path.name, e)
+            continue
+        data.setdefault("service_id", sid)
+        save_config(sid, data)
+        activated_ver = data.get("last_activated_version")
+        if not isinstance(activated_ver, int) or isinstance(activated_ver, bool):
+            activated_ver = None
+        record_deployed_config(sid, activated_ver)
+        imported += 1
+    return imported
 
 
 def update_status(service_id: str, status: dict):
@@ -570,50 +1011,30 @@ def get_status(service_id: str) -> dict:
     return cfg.get("status", {})
 
 
+def _atomic_write_json(path, data: dict) -> None:
+    """Write ``data`` to ``path`` atomically (unique tmp file + os.replace)."""
+    atomic_write_json(path, data, indent=2, fallback_in_place_errnos={13, 16})
+
+
 _cdn_service_id_map: dict[str, str] | None = None
 
 
 def get_cdn_service_id_map() -> dict[str, str]:
-    """Return a mapping of CDN service IDs to their logging service IDs. Memoized."""
-    global _cdn_service_id_map
-    if _cdn_service_id_map is not None:
-        return _cdn_service_id_map
-
-    m = {}
-    for c in list_configs():
-        cdn_sid = c.get("cdn_service_id")
-        if cdn_sid:
-            m[cdn_sid] = c["service_id"]
-    _cdn_service_id_map = m
-    return m
+    """Return a mapping of CDN service IDs to their logging service IDs."""
+    snap = _get_or_refresh_snapshot()
+    return dict(snap.cdn_map)
 
 
 def list_service_ids() -> list[str]:
-    """Return all configured service IDs (sorted).
-
-    Hot path: called per request by telemetry_middleware via
-    get_active_service_id(). Revalidated by the configs dir's mtime so the
-    steady-state call is a single stat() instead of a loop-blocking glob.
-    """
-    global _service_ids_cache
-    _ensure_dirs()
-    try:
-        dir_mtime = CONFIGS_DIR.stat().st_mtime_ns
-    except FileNotFoundError:
-        return []
-    with _service_ids_cache_lock:
-        cached = _service_ids_cache
-    if cached is not None and cached[0] == CONFIGS_DIR and cached[1] == dir_mtime:
-        return list(cached[2])
-    ids = sorted(p.stem for p in CONFIGS_DIR.glob("*.json"))
-    with _service_ids_cache_lock:
-        _service_ids_cache = (CONFIGS_DIR, dir_mtime, ids)
-    return list(ids)
+    """Return all configured service IDs (sorted)."""
+    snap = _get_or_refresh_snapshot()
+    return list(snap.service_ids)
 
 
 def list_configs() -> list[dict]:
     """Return all service configs as a list, sorted by service ID."""
-    return [c for sid in list_service_ids() if (c := load_config(sid)) is not None]
+    snap = _get_or_refresh_snapshot()
+    return [copy.deepcopy(snap.by_id[sid][1]) for sid in snap.service_ids]
 
 
 def get_active_service_id(fallback_to_first: bool = True) -> str | None:
@@ -724,8 +1145,12 @@ def refresh_service_name(service_id: str, api_key: str | None = None) -> str:
             # Persist to config if it has changed or was the ID
             cfg = load_config(service_id)
             if cfg and (cfg.get("name") != api_name or cfg.get("name") == service_id):
-                cfg["name"] = api_name
-                save_config(service_id, cfg)
+
+                def _update_name(c: dict) -> None:
+                    if c.get("name") != api_name or c.get("name") == service_id:
+                        c["name"] = api_name
+
+                mutate_config(service_id, _update_name)
             return api_name
 
     # Fall back to config
@@ -857,6 +1282,37 @@ def is_rum_enabled(cfg: dict | None) -> bool:
     return bool(cfg.get("rum_enabled", False))
 
 
+def set_rum_enabled(cfg: dict, enabled: bool) -> None:
+    """Set the canonical RUM enabled state on both ``rum_enabled`` and ``rum.enabled``."""
+    flag = bool(enabled)
+    cfg["rum_enabled"] = flag
+    rum = cfg.get("rum")
+    if not isinstance(rum, dict):
+        rum = {}
+        cfg["rum"] = rum
+    rum["enabled"] = flag
+
+
+def is_scoring_enabled(cfg: dict | None) -> bool:
+    """Whether edge session scoring is enabled for a service config."""
+    scoring = (cfg or {}).get("scoring")
+    val = scoring.get("enabled") if isinstance(scoring, dict) else None
+    return bool(val) if val is not None else bool((cfg or {}).get("scoring_enabled", False))
+
+
+def is_cmcd_enabled(cfg: dict | None) -> bool:
+    """Whether CMCD telemetry is enabled for a service config."""
+    cmcd = (cfg or {}).get("cmcd")
+    val = cmcd.get("enabled") if isinstance(cmcd, dict) else None
+    return bool(val) if val is not None else bool((cfg or {}).get("cmcd_enabled", False))
+
+
+def is_logging_enabled(cfg: dict | None) -> bool:
+    """Whether access logging is enabled for a service config (defaults to True)."""
+    val = (cfg or {}).get("logging_enabled")
+    return True if val is None else bool(val)
+
+
 def get_fastly_api_key(service_id: str | None = None) -> str:
     """Return the Fastly API key for a service (or the active service)."""
     return _get_cfg_field("fastly_api_key", service_id, "")
@@ -932,7 +1388,9 @@ from backend.utils.bounded_cache import CacheRegistry as _CacheRegistry  # noqa:
 class _ConfigScalarCaches:
     @staticmethod
     def clear() -> None:
-        global _cdn_service_id_map
+        global _cdn_service_id_map, _table_snapshot
+        with _config_cache_lock:
+            _table_snapshot = None
         _cdn_service_id_map = None
         _invalidate_service_ids_cache()
 

@@ -226,13 +226,12 @@ def reset_service_logs(
 
 
 def _pause_rum_flags(cfg: dict) -> tuple[bool | None, bool] | None:
-    rum_cfg = cfg.setdefault("rum", {})
-    original_rum = rum_cfg.get("enabled")
-    original_root = bool(cfg.get("rum_enabled", False))
-    if not (original_rum or original_root):
+    if not svcconfig.is_rum_enabled(cfg):
         return None
-    rum_cfg["enabled"] = False
-    cfg["rum_enabled"] = False
+    rum_cfg = cfg.get("rum")
+    original_rum = rum_cfg.get("enabled") if isinstance(rum_cfg, dict) else None
+    original_root = bool(cfg.get("rum_enabled", False))
+    svcconfig.set_rum_enabled(cfg, False)
     return original_rum, original_root
 
 

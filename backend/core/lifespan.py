@@ -425,6 +425,14 @@ async def _application_lifespan(app: FastAPI):
     from backend.core.metadata.base import ensure_pg_schema
 
     ensure_pg_schema()
+    try:
+        svcconfig.migrate_legacy_file_configs_once()
+    except Exception as e:
+        logging.warning("[fastapi] migrate_legacy_file_configs_once failed: %s", e)
+    try:
+        _fos.reload_default_source()
+    except Exception as e:
+        logging.warning("[fastapi] reload_default_source failed: %s", e)
 
     # Opt-in and fail explicitly; never claim a healthy ClickHouse dependency
     # or silently switch engines when this startup probe fails.

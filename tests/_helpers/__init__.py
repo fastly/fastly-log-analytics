@@ -327,29 +327,74 @@ def config_lock_held(service_id: str = "logsvc1") -> bool:
 
 
 def read_persisted_config(service_id: str = "logsvc1") -> dict[str, Any]:
-    """Read the raw persisted JSON config for ``service_id`` directly from ``CONFIGS_DIR``."""
+    """Read the persisted config for ``service_id`` directly from PostgreSQL."""
     from backend import config as svcconfig
 
-    return json.loads(svcconfig.config_path(service_id).read_text())
+    cfg = svcconfig._read_config_fresh(service_id)
+    assert cfg is not None, f"No persisted config for {service_id}"
+    return cfg
 
 
 @pytest.fixture
 def with_config(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Patch ``load_config``, ``mutate_config``, and ``get_active_service_id`` against an in-memory dict."""
+    """Patch ``svcconfig`` operations against an in-memory dict."""
     container: dict[str, Any] = {}
+    deployed: dict[str, str] = {}
 
-    def fake_load(svc_id: str) -> dict[str, Any] | None:
-        return container.get(svc_id)
+    def fake_load(svc_id: str | None) -> dict[str, Any] | None:
+        if not svc_id:
+            return None
+        cfg = container.get(svc_id)
+        return copy.deepcopy(cfg) if cfg is not None else None
 
     def fake_save(svc_id: str, cfg: dict[str, Any]) -> None:
-        container[svc_id] = cfg
+        container[svc_id] = copy.deepcopy(cfg)
+
+    def fake_delete(svc_id: str) -> bool:
+        deployed.pop(svc_id, None)
+        return container.pop(svc_id, None) is not None
+
+    def fake_list_ids() -> list[str]:
+        return sorted(container.keys())
+
+    def fake_list_configs() -> list[dict[str, Any]]:
+        return [copy.deepcopy(container[k]) for k in sorted(container.keys())]
 
     def fake_get_active(fallback_to_first: bool = True) -> str | None:
-        return next(iter(container), "TestRumAssetsSvc")
+        if not container:
+            return "TestRumAssetsSvc" if fallback_to_first else None
+        return next(iter(container)) if fallback_to_first else None
+
+    def fake_snapshot(svc_id: str, *, prefer_deployed: bool = False) -> str | None:
+        if prefer_deployed and svc_id in deployed:
+            return deployed[svc_id]
+        cfg = container.get(svc_id)
+        return json.dumps(cfg) if cfg is not None else None
+
+    def fake_restore(svc_id: str, raw: str) -> None:
+        container[svc_id] = json.loads(raw)
+
+    def fake_record_deployed(
+        svc_id: str, activated_version: int | None = None, *, previous_version: int | None = None
+    ) -> None:
+        cfg = container.get(svc_id)
+        if cfg is None:
+            return
+        if activated_version is not None:
+            cfg["last_activated_version"] = activated_version
+        deployed[svc_id] = json.dumps(cfg)
 
     monkeypatch.setattr("backend.config.load_config", fake_load)
+    monkeypatch.setattr("backend.config._read_config_fresh", fake_load)
+    monkeypatch.setattr("backend.config.save_config", fake_save)
     monkeypatch.setattr("backend.config.mutate_config", mutate_via_save(fake_save))
+    monkeypatch.setattr("backend.config.delete_config", fake_delete)
+    monkeypatch.setattr("backend.config.list_service_ids", fake_list_ids)
+    monkeypatch.setattr("backend.config.list_configs", fake_list_configs)
     monkeypatch.setattr("backend.config.get_active_service_id", fake_get_active)
+    monkeypatch.setattr("backend.config.snapshot_config", fake_snapshot)
+    monkeypatch.setattr("backend.config.restore_config_snapshot", fake_restore)
+    monkeypatch.setattr("backend.config.record_deployed_config", fake_record_deployed)
     return container
 
 

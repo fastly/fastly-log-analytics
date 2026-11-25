@@ -6,7 +6,7 @@ import { useForm, useWatch } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { Loader2 } from 'lucide-react'
 import { client, extractApiError, unwrapClient } from '@/lib/api'
-import { useIsAnalyst } from '@/hooks/useBootstrap'
+import { useActiveLogFields, useIsAnalyst } from '@/hooks/useBootstrap'
 import { useDebounce } from '@/hooks/useDashboardCards'
 import { useServiceStore } from '@/stores/filterStore'
 import { Button } from '@/components/ui/button'
@@ -49,6 +49,7 @@ export function CreateAlertForm({
 }) {
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
   const isAnalyst = useIsAnalyst()
+  const { ready: activeFieldsReady, isFieldActive } = useActiveLogFields(activeServiceId)
   const queryClient = useQueryClient()
 
   const {
@@ -92,6 +93,19 @@ export function CreateAlertForm({
     zscoreThreshold,
     baselinePeriodDays,
   } = useWatch({ control }) as AlertFormValues
+
+  const missingFields = React.useMemo(() => {
+    if (!activeFieldsReady) return []
+    const metricReqs: Record<string, string[]> = {
+      p95_latency: ['elapsed'],
+      hit_rate: ['cache'],
+      bandwidth: ['resp_bytes'],
+      ttfb: ['ottfb'],
+    }
+    const reqs = [...(metricReqs[metric] ?? [])]
+    if (evalScope === 'edge' || evalScope === 'origin') reqs.push('edge')
+    return reqs.filter((f) => !isFieldActive(f))
+  }, [activeFieldsReady, metric, evalScope, isFieldActive])
 
   const [channels, setChannels] = React.useState<AlertChannel[]>(initialAlert?.channels || [])
   const [newChannelType, setNewChannelType] = React.useState<ChannelType>('slack')
@@ -287,6 +301,13 @@ export function CreateAlertForm({
               options={METRICS_BY_CATEGORY[category]}
             />
           </div>
+
+          {missingFields.length > 0 && (
+            <p className="text-[11px] text-amber-600 dark:text-amber-400">
+              Disabled log field{missingFields.length > 1 ? 's' : ''}: {missingFields.join(', ')}. Enable{' '}
+              {missingFields.length > 1 ? 'them' : 'it'} in Log Settings so this alert can evaluate.
+            </p>
+          )}
 
           {(metric === 'specific_status' || metric === 'specific_status_rate') && (
             <div className="grid gap-2 p-3 bg-muted/30 rounded-md border border-border/50">

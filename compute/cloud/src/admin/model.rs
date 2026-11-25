@@ -81,15 +81,25 @@ pub struct Service {
     /// list matches the deployed format even after a release changes the catalog.
     #[serde(default, skip_serializing, rename = "active_log_field_ids")]
     pub stored_log_field_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployed_snapshot: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_deployed_snapshot: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_activated_version: Option<u64>,
 }
 
 impl Service {
-    /// The enabled log field ids stored with the record; records saved before they were stored
-    /// resolve their `log_fields`.
+    /// Resolves enabled log field ids from `log_fields` when it is an object, falling back to
+    /// `stored_log_field_ids` only if `log_fields` is not an object.
     pub fn active_log_field_ids(&self) -> Vec<String> {
-        self.stored_log_field_ids
-            .clone()
-            .unwrap_or_else(|| crate::catalog::active_log_field_ids(&self.log_fields))
+        if self.log_fields.is_object() {
+            crate::catalog::active_log_field_ids(&self.log_fields)
+        } else {
+            self.stored_log_field_ids
+                .clone()
+                .unwrap_or_else(|| crate::catalog::active_log_field_ids(&self.log_fields))
+        }
     }
 }
 
@@ -111,6 +121,12 @@ pub struct ScoringConfig {
     pub enforce_status_code: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threshold: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enforce_threshold: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub l2_enforce_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub l2_enabled_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matrix_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -272,6 +288,8 @@ pub struct Job {
     pub scorer_ownership_verified: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_failure: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desired_service: Option<Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -623,14 +641,30 @@ pub fn valid_prefix(value: &str) -> bool {
         && value.split('/').all(|part| part != "." && part != "..")
 }
 
+/// Serializes `service` as a snapshot without nested snapshot fields or `pending_job_id`.
+pub fn service_snapshot_value(service: &Service) -> Result<Value, super::Error> {
+    let mut value = serde_json::to_value(service)
+        .map_err(|_| super::Error::new(500, "state_encoding_failed"))?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("deployed_snapshot");
+        obj.remove("previous_deployed_snapshot");
+        obj.remove("previous_activated_version");
+        obj.remove("pending_job_id");
+    }
+    Ok(value)
+}
+
 pub fn service_value(service: &Service, generation: &str) -> Value {
     let mut value = serde_json::to_value(service).unwrap_or(Value::Null);
-    let cmcd_enabled = service.cmcd.enabled
-        || service
-            .active_log_field_ids()
-            .iter()
-            .any(|id| id.starts_with("cmcd_"));
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove("deployed_snapshot");
+        obj.remove("previous_deployed_snapshot");
+        obj.remove("previous_activated_version");
+    }
+    let active_ids = service.active_log_field_ids();
+    let cmcd_enabled = service.cmcd.enabled || active_ids.iter().any(|id| id.starts_with("cmcd_"));
     value["generation"] = generation.into();
+    value["active_log_field_ids"] = json!(active_ids);
     value["rum_enabled"] = json!(service.rum.enabled);
     value["rum_log_period"] = json!(service.rum.log_period);
     value["rum_custom_condition"] = json!(service.rum.custom_condition);
@@ -778,6 +812,9 @@ mod tests {
                     scoring: None,
                     cdn_shield: String::new(),
                     stored_log_field_ids: None,
+                    deployed_snapshot: None,
+                    previous_deployed_snapshot: None,
+                    previous_activated_version: None,
                 }
             })
             .unwrap();

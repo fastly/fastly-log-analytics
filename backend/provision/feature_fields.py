@@ -29,11 +29,11 @@ def _log_fields(cfg: dict[str, Any]) -> dict[str, Any]:
 
 def claim_feature_fields(cfg: dict[str, Any], feature: str) -> None:
     """Turn on ``feature``'s fields that are off, remembering which ones it turned on."""
-    log_fields = _log_fields(cfg)
-    enabled = resolve_enabled_fields(log_fields)
+    enabled = resolve_enabled_fields(get_lf_config(cfg))
     missing = [field for field in FEATURE_LOG_FIELDS[feature] if field not in enabled]
     if not missing:
         return
+    log_fields = _log_fields(cfg)
     owned = cfg.setdefault(_OWNED_KEY, {}).setdefault(feature, [])
     for field in missing:
         log_fields["field_overrides"][field] = True

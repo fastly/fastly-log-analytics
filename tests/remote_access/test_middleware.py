@@ -221,7 +221,6 @@ def test_analyst_read_only_blocks_writes_and_mutating_verbs(client):
 
 
 @pytest.mark.security_regression
-@pytest.mark.no_postgres
 def test_admin_attachment_analyst_scope_and_revocation_lifecycle(client, monkeypatch):
     class _Manager:
         state = SimpleNamespace(public_endpoint="https://testserver")

@@ -91,26 +91,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     secrets_to_hide = (fastly_api_key, fos_access_key, fos_secret_key)
     restore_serving_state = not args.skip_serving_rebuild
 
-    try:
-        result = restore_from_fos(
-            service_id=args.service_id,
-            bucket=args.bucket,
-            region=args.region,
-            prefix=args.prefix,
-            archive_prefix=args.archive_prefix,
-            fastly_api_key=fastly_api_key,
-            fos_access_key=fos_access_key,
-            fos_secret_key=fos_secret_key,
-            restore_serving_state=restore_serving_state,
-        )
-    except ValueError as exc:
-        safe_msg = scrub_secrets(str(exc), secrets_to_hide)
-        print(f"Error: {safe_msg}", file=sys.stderr)
-        return 2
-    except Exception as exc:
-        safe_msg = scrub_secrets(str(exc), secrets_to_hide)
-        print(f"Error ({type(exc).__name__}): {safe_msg}", file=sys.stderr)
-        return 1
+    from backend.core.metadata.base import closing_pg_pool, ensure_pg_schema
+
+    with closing_pg_pool():
+        if os.getenv("METADATA_DSN"):
+            ensure_pg_schema()
+        try:
+            result = restore_from_fos(
+                service_id=args.service_id,
+                bucket=args.bucket,
+                region=args.region,
+                prefix=args.prefix,
+                archive_prefix=args.archive_prefix,
+                fastly_api_key=fastly_api_key,
+                fos_access_key=fos_access_key,
+                fos_secret_key=fos_secret_key,
+                restore_serving_state=restore_serving_state,
+            )
+        except ValueError as exc:
+            safe_msg = scrub_secrets(str(exc), secrets_to_hide)
+            print(f"Error: {safe_msg}", file=sys.stderr)
+            return 2
+        except Exception as exc:
+            safe_msg = scrub_secrets(str(exc), secrets_to_hide)
+            print(f"Error ({type(exc).__name__}): {safe_msg}", file=sys.stderr)
+            return 1
 
     payload = asdict(result)
     if args.json_output:

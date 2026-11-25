@@ -98,18 +98,23 @@ export const client = createClient<paths>({
   baseUrl: getApiBase(),
   fetch: async (req) => {
     if (IS_CLOUD_MODE || isCloudMode()) {
-      const { handleCloudAnalyticalRequest } = await getCloudAdapter();
+      const { handleCloudAnalyticalRequest, isCloudConfigMutation } = await getCloudAdapter();
       const intercepted = await handleCloudAnalyticalRequest(req);
       if (intercepted) return intercepted;
       const { measureCloudQuery } = await import("@/lib/cloud-engine/readiness");
       const url = new URL(req.url);
       const serviceId = req.headers.get("x-service-id");
-      return measureCloudQuery(
+      const response = await measureCloudQuery(
         `api.${url.pathname}`,
         () => globalThis.fetch(req),
         undefined,
         serviceId,
       );
+      if (response.ok && isCloudConfigMutation(req.method.toUpperCase(), url.pathname)) {
+        const { invalidateCloudConfigMetadata } = await import("@/lib/cloud-engine/metadata-cache");
+        invalidateCloudConfigMetadata();
+      }
+      return response;
     }
     return globalThis.fetch(req);
   },
@@ -231,9 +236,15 @@ async function rawAdminFetch(input: string | URL | Request, init: RequestInit = 
   new Headers(initHeaders).forEach((value, key) => request.headers.set(key, value));
   stampClientContextHeaders(request.headers);
   if (IS_CLOUD_MODE || isCloudMode()) {
-    const { handleCloudAnalyticalRequest } = await getCloudAdapter();
+    const { handleCloudAnalyticalRequest, isCloudConfigMutation } = await getCloudAdapter();
     const intercepted = await handleCloudAnalyticalRequest(request);
     if (intercepted) return intercepted;
+    const response = await fetch(request);
+    if (response.ok && isCloudConfigMutation(request.method.toUpperCase(), new URL(request.url).pathname)) {
+      const { invalidateCloudConfigMetadata } = await import("@/lib/cloud-engine/metadata-cache");
+      invalidateCloudConfigMetadata();
+    }
+    return response;
   }
   return fetch(request);
 }

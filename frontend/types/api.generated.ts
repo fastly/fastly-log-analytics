@@ -1700,6 +1700,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/services/{service_id}/rollback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Api Service Rollback
+         * @description Roll back a service's Fastly active version and persisted deployed config snapshot.
+         */
+        post: operations["api_service_rollback_api_services__service_id__rollback_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/services/{service_id}/custom-fields": {
         parameters: {
             query?: never;
@@ -4036,12 +4056,12 @@ export interface paths {
         };
         /**
          * Scoring Enforce Threshold Get
-         * @description Read the live enforce_threshold value from the scoring_config ConfigStore (None = disabled).
+         * @description Read the enforce_threshold value from service config, falling back to Fastly ConfigStore.
          */
         get: operations["scoring_enforce_threshold_get_api_services__service_id__scoring_enforce_threshold_get"];
         /**
          * Scoring Enforce Threshold Put
-         * @description Write the live enforce_threshold to the scoring_config ConfigStore (null disables enforcement).
+         * @description Write the live enforce_threshold to service config and scoring_config ConfigStore.
          */
         put: operations["scoring_enforce_threshold_put_api_services__service_id__scoring_enforce_threshold_put"];
         post?: never;
@@ -4060,12 +4080,12 @@ export interface paths {
         };
         /**
          * Scoring L2 Enforce Get
-         * @description Read the live L2-enforcement opt-in + fade-in state from the scoring_config ConfigStore.
+         * @description Read the live L2-enforcement opt-in + fade-in state from service config or ConfigStore.
          */
         get: operations["scoring_l2_enforce_get_api_services__service_id__scoring_l2_enforce_get"];
         /**
          * Scoring L2 Enforce Put
-         * @description Opt edge Layer-2 in/out of the enforced combined score via scoring_config ConfigStore.
+         * @description Opt edge Layer-2 in/out of the enforced combined score via service config + ConfigStore.
          */
         put: operations["scoring_l2_enforce_put_api_services__service_id__scoring_l2_enforce_put"];
         post?: never;
@@ -5897,10 +5917,16 @@ export interface components {
             name?: string | null;
             /** Cmcd Enabled */
             cmcd_enabled?: boolean | null;
+            /** Scoring Enabled */
+            scoring_enabled?: boolean | null;
             /** Rum Enabled */
             rum_enabled?: boolean | null;
+            /** Logging Enabled */
+            logging_enabled?: boolean | null;
             /** Rum Log Period */
             rum_log_period?: number | null;
+            /** Active Log Field Ids */
+            active_log_field_ids?: string[] | null;
         } & {
             [key: string]: unknown;
         };
@@ -11478,6 +11504,8 @@ export interface components {
         };
         /** LogFieldsConfig */
         LogFieldsConfig: {
+            /** Preset */
+            preset?: string | null;
             /** Groups */
             groups?: string[];
             /** Field Overrides */
@@ -11622,6 +11650,13 @@ export interface components {
             /** Version */
             version?: number | string | null;
             cmcd?: components["schemas"]["CmcdSettingsResponse"] | null;
+        };
+        /**
+         * LoggingSettingsUpdateBody
+         * @description Optional JSON body for ``POST /api/services/{service_id}/logging-settings/update``.
+         */
+        LoggingSettingsUpdateBody: {
+            log_fields?: components["schemas"]["LogFieldsConfig"] | null;
         };
         /** LowAndSlowInsightCard */
         LowAndSlowInsightCard: {
@@ -14818,6 +14853,8 @@ export interface components {
              * @default false
              */
             cdn_domain_generated: boolean;
+            /** Ngwaf Workspace Id */
+            ngwaf_workspace_id?: string | null;
         };
         /** ProvisionIngestResponse */
         ProvisionIngestResponse: {
@@ -17420,6 +17457,12 @@ export interface components {
             rum?: components["schemas"]["RumConfigSection"] | null;
             /** Rum Log Period */
             rum_log_period?: number | null;
+            /** Cmcd Enabled */
+            cmcd_enabled?: boolean | null;
+            /** Scoring Enabled */
+            scoring_enabled?: boolean | null;
+            /** Active Log Field Ids */
+            active_log_field_ids?: string[] | null;
         };
         /**
          * ServiceCredentialsBody
@@ -17511,6 +17554,55 @@ export interface components {
              * @enum {integer}
              */
             snapshot_interval_minutes: 5 | 15 | 30 | 60 | 360 | 1440;
+        };
+        /**
+         * ServiceRollbackBody
+         * @description Optional JSON body for ``POST /api/services/{service_id}/rollback``.
+         */
+        ServiceRollbackBody: {
+            /**
+             * Token
+             * @default
+             */
+            token: string;
+        };
+        /**
+         * ServiceRollbackResponse
+         * @description Response for ``POST /api/services/{service_id}/rollback``.
+         */
+        ServiceRollbackResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
+            /** Section Timings */
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
+            /**
+             * Ok
+             * @default true
+             */
+            ok: boolean;
+            /** Activated Version */
+            activated_version?: number | null;
+            /**
+             * Message
+             * @default
+             */
+            message: string;
         };
         /**
          * ServiceScopePayload
@@ -30581,7 +30673,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["LoggingSettingsUpdateBody"] | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -30590,6 +30686,113 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    api_service_rollback_api_services__service_id__rollback_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ServiceRollbackBody"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ServiceRollbackResponse"];
                 };
             };
             /** @description Bad request */
@@ -32906,7 +33109,7 @@ export interface operations {
         parameters: {
             query: {
                 service_id?: string | null;
-                cdn_service_id: string;
+                cdn_service_id?: string;
                 bucket: string;
             };
             header?: {

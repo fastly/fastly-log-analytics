@@ -153,7 +153,10 @@
                         "missing_fields": {
                           "type": "array",
                           "items": { "type": "string" }
-                        }
+                        },
+                        "rum_present": { "type": "boolean" },
+                        "cmcd_present": { "type": "boolean" },
+                        "scoring_present": { "type": "boolean" }
                       }
                     }
                   }
@@ -297,7 +300,26 @@
                   "dry_run": { "type": "boolean" },
                   "activate": { "type": "boolean" },
                   "cmcd": { "$ref": "#/components/schemas/CmcdConfig" },
-                  "rum": { "$ref": "#/components/schemas/RumConfig" }
+                  "rum": { "$ref": "#/components/schemas/RumConfig" },
+                  "logging_enabled": { "type": "boolean" },
+                  "logging_endpoint_name": { "type": "string" },
+                  "log_period": { "type": "integer" },
+                  "sample_rate": { "type": "integer" },
+                  "edge_only": { "type": "boolean" },
+                  "custom_condition": { "type": "string" },
+                  "rum_enabled": { "type": "boolean" },
+                  "rum_log_period": { "type": "integer" },
+                  "faro_version": { "type": "string" },
+                  "rum_custom_condition": { "type": "string" },
+                  "capture_vitals": { "type": "boolean" },
+                  "capture_performance": { "type": "boolean" },
+                  "capture_errors": { "type": "boolean" },
+                  "capture_events": { "type": "boolean" },
+                  "delete_after": { "type": "boolean" },
+                  "log_retention_days": { "type": "integer", "minimum": 0, "maximum": 3650 },
+                  "rum_retention_days": { "type": "integer", "minimum": 0, "maximum": 3650 },
+                  "compaction": { "$ref": "#/components/schemas/CompactionSetting" },
+                  "log_fields": { "$ref": "#/components/schemas/CaptureFields" }
                 }
               }
             }
@@ -309,6 +331,51 @@
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/ControlJobResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/services/{service_id}/rollback": {
+      "parameters": [
+        {
+          "name": "service_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string" }
+        }
+      ],
+      "post": {
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["generation"],
+                "properties": {
+                  "generation": { "type": "string" },
+                  "token": { "type": "string", "writeOnly": true }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Rolled back service configuration and Fastly active version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["service", "generation", "activated_version"],
+                  "properties": {
+                    "service": { "$ref": "#/components/schemas/InstalledService" },
+                    "generation": { "type": "string" },
+                    "activated_version": { "type": "integer" }
+                  }
+                }
               }
             }
           }

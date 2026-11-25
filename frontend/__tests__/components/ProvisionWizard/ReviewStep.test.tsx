@@ -144,6 +144,27 @@ describe('ReviewStep (ExecuteStep)', () => {
     expect(screen.getByText('Cache Efficiency')).toBeInTheDocument()
   })
 
+  it('includes enabled custom_fields in enabled field count', () => {
+    renderWithQuery(
+      <ExecuteStep
+        s={makeReviewState({
+          config: {
+            ...INITIAL_CONFIG,
+            log_fields: {
+              ...INITIAL_CONFIG.log_fields,
+              groups: ['A', 'B'],
+              custom_fields: [
+                { name: 'edge_score', enabled: true, bytes_estimate: 4 } as never,
+                { name: 'edge_sid', enabled: false, bytes_estimate: 12 } as never,
+              ],
+            },
+          },
+        })}
+      />,
+    )
+    expect(screen.getByText(/6 fields/)).toBeInTheDocument()
+  })
+
   it('computes log line size from catalog even if s.estimatedBytes is 0', () => {
     renderWithQuery(<ExecuteStep s={makeReviewState({ estimatedBytes: 0 })} />)
     expect(screen.getByText(/~260 B \/ line/)).toBeInTheDocument()

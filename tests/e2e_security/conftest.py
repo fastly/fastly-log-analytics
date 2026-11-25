@@ -300,11 +300,9 @@ def isolated_e2e_security_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
         },
     }
     orig_get_active_service_id = svcconfig.get_active_service_id
-    svcconfig.CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
     for sid, cfg in configs.items():
-        (svcconfig.CONFIGS_DIR / f"{sid}.json").write_text(json.dumps(cfg), encoding="utf-8")
-    with svcconfig._config_cache_lock:
-        svcconfig._config_cache.clear()
+        svcconfig.save_config(sid, cfg)
+    svcconfig.invalidate_config_cache()
     monkeypatch.setattr("backend.config.get_active_service_id", lambda fallback_to_first=True: "svc-a")
     fos_client.reload_default_source()
 

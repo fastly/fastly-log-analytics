@@ -282,7 +282,8 @@ def _evaluate(
         meta_pool.shutdown(wait=False)
     present = set(_BASE_FIELDS)
     present.update(sample[0].get("fields") or [] if sample else [])
-    fingerprint = _fingerprint_column(present) or "ja3"
+    enabled_set = set(enabled_fields)
+    fingerprint = _fingerprint_column(enabled_set) or "ja3"
     make_investigate_url = _make_investigate_url(service.service_id, window_start, now)
 
     def _shape(definition: InsightDefinition, rows: list[tuple[Any, ...]]) -> dict[str, Any]:
@@ -293,7 +294,7 @@ def _evaluate(
             window_hours=window_hours,
             baseline_hours=baseline_hours,
             fp_col=fingerprint,
-            actual_cols=sorted(present),
+            actual_cols=sorted(enabled_set),
             mask_ips=mask_ips,
             investigate_url_builder=make_investigate_url,
         )
@@ -354,7 +355,7 @@ def _evaluate(
     def _prepare_batch(batch: DetectionBatch, members: list[tuple[InsightDefinition, Detection]]) -> _QueryUnit:
         active_ids = {definition.id for definition, _ in members}
         span = rollup_spans.get(batch.rollup_shape) if batch.rollup_shape else None
-        build_kwargs: dict[str, Any] = {"present": present, "rollup_span": span, "filter_clause": filter_clause}
+        build_kwargs: dict[str, Any] = {"present": enabled_set, "rollup_span": span, "filter_clause": filter_clause}
         if "baseline_hours" in inspect.signature(batch.build_sql).parameters:
             build_kwargs["baseline_hours"] = baseline_hours
         sql, source = batch.build_sql(active_ids, **build_kwargs)
@@ -435,7 +436,7 @@ def _evaluate(
 
     candidates: list[tuple[InsightDefinition, Detection]] = []
     for definition in registry.get_all():
-        detection = _detection_for(definition.id, present)
+        detection = _detection_for(definition.id, enabled_fields)
         if detection is not None and all(column in enabled_fields for column in definition.required_fields):
             candidates.append((definition, detection))
     if on_meta is not None:
@@ -489,7 +490,7 @@ def _evaluate(
             )
         else:
             eligible.append((definition, detection))
-    batches, standalone = plan_execution(eligible, present)
+    batches, standalone = plan_execution(eligible, enabled_set)
 
     def _group_name_for(unit_key: str) -> str:
         return next((name for name, members in _MULTIPLEX_GROUPS if unit_key in members), "group_raw_standalone")

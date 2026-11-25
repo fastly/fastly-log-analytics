@@ -5,7 +5,7 @@ import { type UseFormRegisterReturn } from 'react-hook-form'
 import { Loader2, Search } from 'lucide-react'
 import { cn, formatCount, isIpFamilyField } from '@/lib/utils'
 import { useDebounce } from '@/hooks/useDashboardCards'
-import { useFieldValues, useLogFieldsCatalog, useMaskIps } from '@/hooks/useBootstrap'
+import { useActiveLogFields, useFieldValues, useLogFieldsCatalog, useMaskIps } from '@/hooks/useBootstrap'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -26,15 +26,16 @@ export const COMMON_FIELD_IDS = [
 export function useCommonFilterFields() {
   const maskIps = useMaskIps()
   const { data: catalog } = useLogFieldsCatalog()
+  const { isFieldActive } = useActiveLogFields()
   const commonFields = React.useMemo(
     () =>
       COMMON_FIELD_IDS
-        .filter((id) => !(maskIps && isIpFamilyField(id)))
+        .filter((id) => isFieldActive(id) && !(maskIps && isIpFamilyField(id)))
         .map((id) => ({
           value: id,
           label: catalog?.fields?.find((f) => f.id === id)?.label ?? id,
         })),
-    [maskIps, catalog]
+    [maskIps, catalog, isFieldActive]
   )
   return { maskIps, commonFields }
 }

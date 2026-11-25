@@ -449,6 +449,7 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
     svc_cfg = svcconfig.load_config(service_id) if service_id else None
     if service_id and svc_cfg:
         prov = svc_cfg.get("provisioning", {})
+        fos_proxy = svc_cfg.get("fos_proxy") or {}
         state = {
             "logging_service_id": service_id,
             "fos_bucket_name": svc_cfg.get("fos_bucket", ""),
@@ -457,10 +458,17 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
             "fos_access_key": svc_cfg.get("fos_access_key_id", ""),
             "fos_secret_key": svc_cfg.get("fos_secret_access_key", ""),
             "endpoint_name": prov.get("endpoint_name", "Fastly Object Storage Logs"),
-            "cdn_service_id": prov.get("cdn_service_id", ""),
-            "cdn_service_name": prov.get("cdn_service_name") or f"Log Analysis CDN Service for {service_id}",
-            "cdn_url": prov.get("cdn_url", ""),
-            "cdn_secret": svc_cfg.get("cdn_secret", ""),
+            "cdn_service_id": (
+                svc_cfg.get("cdn_service_id") or prov.get("cdn_service_id") or fos_proxy.get("service_id") or ""
+            ),
+            "cdn_service_name": (
+                svc_cfg.get("cdn_service_name")
+                or prov.get("cdn_service_name")
+                or fos_proxy.get("service_name")
+                or f"Log Analysis CDN Service for {service_id}"
+            ),
+            "cdn_url": svc_cfg.get("cdn_url") or prov.get("cdn_url") or fos_proxy.get("domain") or "",
+            "cdn_secret": svc_cfg.get("cdn_secret") or fos_proxy.get("secret") or "",
             "scoring": svc_cfg.get("scoring") or {},
         }
 
@@ -482,14 +490,12 @@ def provision_teardown(req: Request, body: ProvisionTeardownRequest | None = Non
         sid = state.get("logging_service_id") or service_id
         try:
             if sid:
-                yield _sse("status", f"Stopping background sync for service {sid}...")
-                cfg_path = svcconfig.config_path(sid)
-                if os.path.exists(cfg_path):
-                    os.remove(cfg_path)
+                yield _sse("status", f"Stopping background sync and removing config for service {sid}...")
+                if svcconfig.delete_config(sid):
                     from backend.utils.bounded_cache import CacheRegistry
 
                     CacheRegistry.clear("routers.bootstrap._bootstrap_cache")
-                    yield _sse("status", f"Removed configs/{sid}.json")
+                    yield _sse("status", f"Removed service config for {sid}")
 
                 try:
                     _sync_crontab()
@@ -999,19 +1005,28 @@ def provision_execute(req: ProvisionExecuteRequest):
             "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
         }
 
+    ngwaf_ws = (getattr(req, "ngwaf_workspace_id", None) or "").strip()
+    if ngwaf_ws:
+        cfg["ngwaf_workspace_id"] = ngwaf_ws
+
     if getattr(req, "rum_enabled", False):
         from backend.core.faro_versions import DEFAULT_FARO_VERSION
+        from backend.provision.feature_fields import claim_feature_fields
 
         rum_cond = (getattr(req, "rum_custom_condition", None) or "").strip()
         cond_err = validate_rum_custom_condition(rum_cond)
         if cond_err:
             raise HTTPException(status_code=400, detail=make_error("invalid_rum_condition", cond_err))
-        cfg["rum"] = {
-            "enabled": True,
-            "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
-            "faro_version": req.faro_version or DEFAULT_FARO_VERSION,
-            "custom_condition": rum_cond,
-        }
+        svcconfig.set_rum_enabled(cfg, True)
+        cfg["rum"].update(
+            {
+                "enabled": True,
+                "enabled_at": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
+                "faro_version": req.faro_version or DEFAULT_FARO_VERSION,
+                "custom_condition": rum_cond,
+            }
+        )
+        claim_feature_fields(cfg, "rum")
         if getattr(req, "rum_log_period", None) is not None:
             try:
                 rum_period_val = parse_period(str(req.rum_log_period))
@@ -1068,11 +1083,14 @@ def provision_execute(req: ProvisionExecuteRequest):
                 yield json.dumps(event)
 
                 if event.get("type") == "done":
+                    sid = cfg.get("logging_service_id") or cfg.get("service_id") or ""
+                    if sid and svcconfig.load_config(sid) is not None:
+                        svcconfig.record_deployed_config(sid, event.get("activated_version"))
                     _db.reload_default_source()
                     from backend.utils.bounded_cache import CacheRegistry
 
                     CacheRegistry.clear("routers.bootstrap._bootstrap_cache")
-                    _invalidate_service_credentials(cfg.get("logging_service_id") or cfg.get("service_id") or "")
+                    _invalidate_service_credentials(sid)
 
                     try:
                         from backend.core import metadata as metadata_db
@@ -1539,12 +1557,19 @@ def provision_ingest(payload: ProvisionConfigRequest):
 def provision_check_config(
     authorization: str | None = Header(default=None),
     service_id: str | None = Query(default=None),
-    cdn_service_id: str = Query(...),
+    cdn_service_id: str = Query(default=""),
     bucket: str = Query(...),
 ):
     """Verify that both services are correctly configured for log analysis."""
     token = _require_bearer_token(authorization)
     service_id = require_service_id(service_id)
+    if not cdn_service_id:
+        from backend import config as svcconfig
+
+        cfg = svcconfig.load_config(service_id) or {}
+        prov = cfg.get("provisioning") or {}
+        fos_proxy = cfg.get("fos_proxy") or {}
+        cdn_service_id = cfg.get("cdn_service_id") or prov.get("cdn_service_id") or fos_proxy.get("service_id") or ""
     from backend.core.fastly.client import fastly
 
     results = {
@@ -1563,22 +1588,42 @@ def provision_check_config(
             else:
                 snippets = fastly("GET", f"/service/{service_id}/version/{active_ver}/snippet", token=token)
                 snip_names = {s.get("name") for s in snippets}
-                required_snippets = {
+                legacy_required = {
                     "Fastly Log Analysis Capture",
                     "Fastly Log Analysis Miss",
                     "Fastly Log Analysis Pass",
                 }
-                optional_snippets = {
+                legacy_optional = {
                     "Fastly Log Analysis Origin Fetch",
                     "Fastly Log Analysis Origin Error",
                     "Fastly Log Analysis Origin Deliver",
                 }
-                missing_required = required_snippets - snip_names
-                found_optional = optional_snippets & snip_names
+                declarative_required = {
+                    "Fastly Log Analytics - vcl_recv",
+                    "Fastly Log Analytics - vcl_miss",
+                    "Fastly Log Analytics - vcl_pass",
+                }
+                declarative_optional = {
+                    "Fastly Log Analytics - vcl_fetch",
+                    "Fastly Log Analytics - vcl_error",
+                    "Fastly Log Analytics - vcl_deliver",
+                }
+                if declarative_required <= snip_names:
+                    missing_required: set[str] = set()
+                    found_optional = declarative_optional & snip_names
+                elif legacy_required <= snip_names:
+                    missing_required = set()
+                    found_optional = legacy_optional & snip_names
+                elif any(isinstance(n, str) and n.startswith("Fastly Log Analytics - ") for n in snip_names):
+                    missing_required = declarative_required - snip_names
+                    found_optional = declarative_optional & snip_names
+                else:
+                    missing_required = legacy_required - snip_names
+                    found_optional = legacy_optional & snip_names
 
                 if missing_required:
                     results["logging_service"]["details"] = (
-                        f"Found endpoint '{endpoint.get('name')}', but missing CORE snippets: {', '.join(missing_required)}"
+                        f"Found endpoint '{endpoint.get('name')}', but missing CORE snippets: {', '.join(sorted(missing_required))}"
                     )
                 else:
                     msg = "Service has endpoint and core snippets"

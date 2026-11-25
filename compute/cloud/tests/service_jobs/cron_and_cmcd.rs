@@ -11,7 +11,7 @@ fn cron_schedule_projects_due_jobs_without_claiming_or_fabricating_stage_history
     let now = platform.now();
     let old = platform.adapter.get("svc:fixtureService").unwrap().unwrap();
     let mut service = old.value;
-    service["log_period"] = json!(5);
+    service["log_period"] = json!(60);
     service["rum"]["enabled"] = json!(true);
     service["rum"]["log_period"] = json!(300);
     assert!(platform
@@ -56,10 +56,10 @@ fn cron_schedule_projects_due_jobs_without_claiming_or_fabricating_stage_history
             .format(&time::format_description::well_known::Rfc3339)
             .unwrap()
     };
-    assert_eq!(find("request_ingest")["interval_s"], 5);
-    // The clock probes at half the 5 s log period (2.5 s); the schedule rounds up.
-    assert_eq!(snapshot.clock["probe_interval_s"], 2.5);
-    assert_eq!(find("cloud_ingest_clock")["interval_s"], 3);
+    assert_eq!(find("request_ingest")["interval_s"], 60);
+    // The clock probes at half the 60 s log period (30 s).
+    assert_eq!(snapshot.clock["probe_interval_s"], 30.0);
+    assert_eq!(find("cloud_ingest_clock")["interval_s"], 30);
     assert_eq!(find("request_ingest")["next_run_time"], time(now + 30));
     assert!(find("raw_delete")["next_run_time"].is_null());
     assert_eq!(

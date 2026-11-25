@@ -41,6 +41,10 @@ export async function cloudRumMutation(request: Request, runJob: RunJob): Promis
     ]) {
       if (key in input) rum[key] = input[key];
     }
+    const targetVersion = input.faro_version ?? input.version;
+    if (typeof targetVersion === "string" && targetVersion.trim() !== "") {
+      rum.faro_version = targetVersion;
+    }
   }
   const reconciled = await fetch(new Request(new URL(`${path}/reconcile`, request.url), {
     method: "POST",

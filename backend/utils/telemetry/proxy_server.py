@@ -132,11 +132,7 @@ def _load_config_cached(service_id: str) -> dict | None:
 def _bust_config_cache(service_id: str | None = None) -> None:
     from backend import config as _config
 
-    with _config._config_cache_lock:
-        if service_id is None:
-            _config._config_cache.clear()
-        else:
-            _config._config_cache.pop(service_id, None)
+    _config.invalidate_config_cache(service_id)
 
 
 def _scheme_host(value: str) -> str:

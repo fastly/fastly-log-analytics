@@ -9,7 +9,6 @@ import socket
 import time
 from datetime import UTC, datetime
 from io import BytesIO
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -756,13 +755,12 @@ def test_scenario_e5_malicious_tenant_provisioning_and_supply_chain_ssrf_contain
     # /api/download* traversal + metadata SSRF + redirecting-CDN SafeRedirectHandler blocked
     assert admin.get("/api/download-folder?root=../../etc&prefix=passwd").status_code == 400
     assert admin.get("/api/download?key=../../etc/passwd").status_code == 400
-    cfg_path = Path(svcconfig.CONFIGS_DIR) / "svc-a.json"
-    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-    cfg["cdn_url"] = "http://169.254.169.254/latest"
-    cfg["provisioning"]["cdn_url"] = "http://169.254.169.254/latest"
-    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
-    with svcconfig._config_cache_lock:
-        svcconfig._config_cache.clear()
+
+    def _set_ssrf_cdn(c: dict[str, Any]) -> None:
+        c["cdn_url"] = "http://169.254.169.254/latest"
+        c.setdefault("provisioning", {})["cdn_url"] = "http://169.254.169.254/latest"
+
+    svcconfig.mutate_config("svc-a", _set_ssrf_cdn)
     fos_client.reload_default_source()
     dl_calls: list[str] = []
     with patch("urllib.request.urlopen", side_effect=lambda r, *a, **k: dl_calls.append(str(r))):
@@ -771,11 +769,11 @@ def test_scenario_e5_malicious_tenant_provisioning_and_supply_chain_ssrf_contain
     assert dl_calls == []
 
     # Valid Fastly CDN host returning 302 -> metadata IP blocked by SafeRedirectHandler (urlopen UNPATCHED)
-    cfg["cdn_url"] = "https://cdn-svc-a.global.ssl.fastly.net"
-    cfg["provisioning"]["cdn_url"] = "https://cdn-svc-a.global.ssl.fastly.net"
-    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
-    with svcconfig._config_cache_lock:
-        svcconfig._config_cache.clear()
+    def _restore_fastly_cdn(c: dict[str, Any]) -> None:
+        c["cdn_url"] = "https://cdn-svc-a.global.ssl.fastly.net"
+        c.setdefault("provisioning", {})["cdn_url"] = "https://cdn-svc-a.global.ssl.fastly.net"
+
+    svcconfig.mutate_config("svc-a", _restore_fastly_cdn)
     fos_client.reload_default_source()
     redir_hosts: list[str] = []
     with (
