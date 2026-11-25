@@ -18,7 +18,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from backend.config import SSE_BACKPLANE
-from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
+from backend.utils.bounded_cache import CacheRegistry, SWRTTLCache
 
 logger = logging.getLogger(__name__)
 
@@ -122,31 +122,104 @@ else:
 
 
 # Admin pages poll status every few seconds; the ledger totals are the slow part
-# (one metadata scan per service) and move slowly, so reuse them briefly.
-_LEDGER_SUMMARY_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=1, ttl_seconds=30.0)
+# (one metadata scan per service) and move slowly, so reuse them with stale-while-revalidate.
+_LEDGER_SUMMARY_CACHE: SWRTTLCache = SWRTTLCache(maxsize=1, ttl_seconds=30.0, stale_ttl_seconds=300.0)
+_LEDGER_SUMMARY_LOCK = threading.Lock()
+_LEDGER_BG_GUARD = threading.Lock()
+_ledger_bg_refreshing = False
 CacheRegistry.register("celery_app._LEDGER_SUMMARY_CACHE", _LEDGER_SUMMARY_CACHE)
 
 
 def ingest_ledger_summary() -> dict[str, int]:
     """Aggregate ingest_ledger status counts across all configured services."""
+    global _ledger_bg_refreshing
     cached: dict[str, int] | None = _LEDGER_SUMMARY_CACHE.get("ledger")
     if cached is not None:
         return dict(cached)
-    ledger = _read_ingest_ledger_summary()
-    _LEDGER_SUMMARY_CACHE["ledger"] = dict(ledger)
-    return ledger
+
+    stale: dict[str, int] | None = (
+        _LEDGER_SUMMARY_CACHE.get_stale("ledger") if isinstance(_LEDGER_SUMMARY_CACHE, SWRTTLCache) else None
+    )
+    if stale is not None:
+        with _LEDGER_BG_GUARD:
+            should_spawn = not _ledger_bg_refreshing
+            if should_spawn:
+                _ledger_bg_refreshing = True
+        if should_spawn:
+
+            def _refresh_ledger() -> None:
+                global _ledger_bg_refreshing
+                try:
+                    with _LEDGER_SUMMARY_LOCK:
+                        fresh = _read_ingest_ledger_summary()
+                        _LEDGER_SUMMARY_CACHE["ledger"] = dict(fresh)
+                except Exception as e:
+                    logger.debug("[admin_status] background ledger refresh failed: %s", e)
+                finally:
+                    try:
+                        from backend.core.metadata import pg_pool
+
+                        pg_pool.release_thread_connection()
+                    except Exception:
+                        pass
+                    with _LEDGER_BG_GUARD:
+                        _ledger_bg_refreshing = False
+
+            threading.Thread(target=_refresh_ledger, name="celery-ledger-swr", daemon=True).start()
+        return dict(stale)
+
+    with _LEDGER_SUMMARY_LOCK:
+        cached = _LEDGER_SUMMARY_CACHE.get("ledger")
+        if cached is not None:
+            return dict(cached)
+        ledger = _read_ingest_ledger_summary()
+        _LEDGER_SUMMARY_CACHE["ledger"] = dict(ledger)
+        return dict(ledger)
+
+
+def prewarm_celery_status() -> None:
+    """Best-effort startup pre-warm of the ingest-ledger summary."""
+    try:
+        ingest_ledger_summary()
+    except Exception:
+        logger.debug("[admin_status] celery status pre-warm skipped", exc_info=True)
+    finally:
+        try:
+            from backend.core.metadata import pg_pool
+
+            pg_pool.release_thread_connection()
+        except Exception:
+            pass
 
 
 def _read_ingest_ledger_summary() -> dict[str, int]:
     ledger: dict[str, int] = {}
     try:
         from backend.config import list_configs
+        from backend.core.metadata import pg_pool
         from backend.core.metadata.base import get_con
 
+        sids: list[str] = []
         for svc in list_configs():
             sid = svc.get("service_id") or svc.get("name")
-            if not sid:
-                continue
+            if sid and sid not in sids:
+                sids.append(str(sid))
+        if not sids:
+            return ledger
+
+        if pg_pool.is_postgres() and len(sids) > 1:
+            con = get_con(sids[0])
+            cur = con.cursor()
+            placeholders = ", ".join("?" for _ in sids)
+            cur.execute(
+                f"SELECT status, count(*) FROM ingest_ledger WHERE service_id IN ({placeholders}) GROUP BY status",
+                tuple(sids),
+            )
+            for status, count in cur.fetchall():
+                ledger[status] = ledger.get(status, 0) + int(count)
+            return ledger
+
+        for sid in sids:
             try:
                 con = get_con(sid)
                 cur = con.cursor()

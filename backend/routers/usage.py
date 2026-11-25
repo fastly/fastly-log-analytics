@@ -826,32 +826,37 @@ def usage_current_storage(
                     logger.debug("usage_current_storage: cloud copy deletion records failed", exc_info=True)
                     return [], False
 
-            with ThreadPoolExecutor(max_workers=6, thread_name_prefix="usage-storage") as pool:
+            def _read_metadata_bundle() -> tuple[int, tuple[int, bool], tuple[list[dict[str, Any]], bool] | None]:
+                try:
+                    q_total = _read_quarantine() if cached_insp is None else 0
+                    cc_del = _read_cloud_copy_deleted()
+                    cc_int = _read_cloud_copy_intervals() if high_scale_service is not None else None
+                    return q_total, cc_del, cc_int
+                finally:
+                    try:
+                        from backend.core.metadata import pg_pool
+
+                        pg_pool.release_thread_connection()
+                    except Exception:
+                        pass
+
+            with ThreadPoolExecutor(max_workers=4, thread_name_prefix="usage-storage") as pool:
                 fut_stats = pool.submit(
                     contextvars.copy_context().run, _get_storage_stats, src, retention_start_str, retention_end_str
-                )
-                fut_quarantine = (
-                    pool.submit(contextvars.copy_context().run, _read_quarantine) if cached_insp is None else None
                 )
                 fut_archive = (
                     pool.submit(contextvars.copy_context().run, _read_archive)
                     if high_scale_service is not None
                     else None
                 )
-                fut_cc_deleted = pool.submit(contextvars.copy_context().run, _read_cloud_copy_deleted)
                 fut_pg_billing = (
                     pool.submit(contextvars.copy_context().run, _read_pg_billing)
                     if high_scale_service is not None
                     else None
                 )
-                fut_cc_intervals = (
-                    pool.submit(contextvars.copy_context().run, _read_cloud_copy_intervals)
-                    if high_scale_service is not None
-                    else None
-                )
+                fut_meta = pool.submit(contextvars.copy_context().run, _read_metadata_bundle)
 
                 stats = fut_stats.result()
-                quarantine_from_db = fut_quarantine.result() if fut_quarantine is not None else 0
                 if fut_archive is not None:
                     (
                         archive_bytes,
@@ -862,9 +867,10 @@ def usage_current_storage(
                     ) = fut_archive.result()
                 else:
                     archive_bytes = archive_objects = archive_expired_bytes = archive_rum_bytes = 0
-                cloud_copy_deleted_bytes, cloud_copy_deleted_bytes_complete = fut_cc_deleted.result()
                 pg_billing_res = fut_pg_billing.result() if fut_pg_billing is not None else None
-                cc_intervals_res = fut_cc_intervals.result() if fut_cc_intervals is not None else None
+                quarantine_from_db, (cloud_copy_deleted_bytes, cloud_copy_deleted_bytes_complete), cc_intervals_res = (
+                    fut_meta.result()
+                )
 
             total_files = stats["total_files"]
             total_bytes = stats["total_bytes"]

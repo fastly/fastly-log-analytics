@@ -1481,125 +1481,189 @@ class PostgresControlPlane:
         gb_hour_denom = 1_000_000_000.0 * 3600.0
 
         def _query_source_objects() -> Any:
+            live_expr = (
+                "GREATEST(size_bytes, 0)::double precision * GREATEST(0.0, EXTRACT(EPOCH FROM ("
+                "%s::timestamptz - GREATEST(COALESCE(discovered_at, %s::timestamptz), %s::timestamptz)"
+                "))) / %s"
+            )
+            del_expr = (
+                "CASE WHEN discovered_at IS NOT NULL AND updated_at IS NOT NULL AND updated_at > discovered_at THEN "
+                "GREATEST(size_bytes, 0)::double precision * GREATEST(0.0, EXTRACT(EPOCH FROM ("
+                "LEAST(updated_at, %s::timestamptz) - GREATEST(discovered_at, %s::timestamptz)"
+                "))) / %s ELSE 0.0 END"
+            )
+            min_expr = (
+                "CASE "
+                "WHEN updated_at IS NULL THEN "
+                "GREATEST(size_bytes, 0)::double precision * GREATEST(0.0, EXTRACT(EPOCH FROM ("
+                "%s::timestamptz - GREATEST(COALESCE(discovered_at, %s::timestamptz), %s::timestamptz)"
+                "))) / %s "
+                "WHEN discovered_at IS NULL THEN "
+                "GREATEST(size_bytes, 0)::double precision * GREATEST(0.0, EXTRACT(EPOCH FROM ("
+                "LEAST(updated_at + make_interval(days => %s), %s::timestamptz) - GREATEST(updated_at, %s::timestamptz)"
+                "))) / %s "
+                "WHEN discovered_at + make_interval(days => %s) > updated_at THEN "
+                "GREATEST(size_bytes, 0)::double precision * GREATEST(0.0, EXTRACT(EPOCH FROM ("
+                "LEAST(discovered_at + make_interval(days => %s), %s::timestamptz) - GREATEST(updated_at, %s::timestamptz)"
+                "))) / %s "
+                "ELSE 0.0 END"
+            )
+            del_inc_expr = (
+                "CASE WHEN discovered_at IS NULL OR status = 'source_missing' OR updated_at IS NULL THEN 1 ELSE 0 END"
+            )
+            del_params = (
+                end_utc,
+                start_utc,
+                gb_hour_denom,
+                end_utc,
+                start_utc,
+                start_utc,
+                gb_hour_denom,
+                min_days,
+                end_utc,
+                start_utc,
+                gb_hour_denom,
+                min_days,
+                min_days,
+                end_utc,
+                start_utc,
+                gb_hour_denom,
+            )
+            # Three disjoint, index-targeted branches avoid scanning historical source_deleted rows
+            # outside the billing window: (1) live statuses via claim_idx, (2) deleted/missing
+            # discovered in (min_cutoff, end_utc) via covering billing_idx, (3) older/null-discovered
+            # deleted/missing with recent updated_at via updated_idx.
             with self.transaction(read_only=True) as connection:
                 return connection.execute(
-                    "SELECT "
-                    "COALESCE(SUM(CASE WHEN status NOT IN ('source_deleted', 'source_missing') THEN "
-                    "GREATEST(size_bytes, 0)::double precision * GREATEST(0.0, EXTRACT(EPOCH FROM ("
-                    "%s::timestamptz - GREATEST(COALESCE(discovered_at, %s::timestamptz), %s::timestamptz)"
-                    "))) / %s ELSE 0.0 END), 0.0), "
-                    "COALESCE(SUM(CASE WHEN status IN ('source_deleted', 'source_missing') "
-                    "AND discovered_at IS NOT NULL AND updated_at IS NOT NULL AND updated_at > discovered_at THEN "
-                    "GREATEST(size_bytes, 0)::double precision * GREATEST(0.0, EXTRACT(EPOCH FROM ("
-                    "LEAST(updated_at, %s::timestamptz) - GREATEST(discovered_at, %s::timestamptz)"
-                    "))) / %s ELSE 0.0 END), 0.0), "
-                    "COALESCE(SUM(CASE "
-                    "WHEN status IN ('source_deleted', 'source_missing') AND updated_at IS NULL THEN "
-                    "GREATEST(size_bytes, 0)::double precision * GREATEST(0.0, EXTRACT(EPOCH FROM ("
-                    "%s::timestamptz - GREATEST(COALESCE(discovered_at, %s::timestamptz), %s::timestamptz)"
-                    "))) / %s "
-                    "WHEN status IN ('source_deleted', 'source_missing') AND discovered_at IS NULL THEN "
-                    "GREATEST(size_bytes, 0)::double precision * GREATEST(0.0, EXTRACT(EPOCH FROM ("
-                    "LEAST(updated_at + make_interval(days => %s), %s::timestamptz) - GREATEST(updated_at, %s::timestamptz)"
-                    "))) / %s "
-                    "WHEN status IN ('source_deleted', 'source_missing') "
-                    "AND discovered_at + make_interval(days => %s) > updated_at THEN "
-                    "GREATEST(size_bytes, 0)::double precision * GREATEST(0.0, EXTRACT(EPOCH FROM ("
-                    "LEAST(discovered_at + make_interval(days => %s), %s::timestamptz) - GREATEST(updated_at, %s::timestamptz)"
-                    "))) / %s "
-                    "ELSE 0.0 END), 0.0), "
-                    "COALESCE(SUM(CASE WHEN discovered_at IS NULL OR status = 'source_missing' "
-                    "OR (status IN ('source_deleted', 'source_missing') AND updated_at IS NULL) THEN 1 ELSE 0 END), 0) "
+                    "SELECT COALESCE(SUM(live_gbh), 0.0), COALESCE(SUM(del_gbh), 0.0), "
+                    "COALESCE(SUM(min_gbh), 0.0), COALESCE(SUM(incomplete_cnt), 0) FROM ("
+                    f"SELECT COALESCE(SUM({live_expr}), 0.0) AS live_gbh, "
+                    "0.0::double precision AS del_gbh, "
+                    "0.0::double precision AS min_gbh, "
+                    "COALESCE(SUM(CASE WHEN discovered_at IS NULL THEN 1 ELSE 0 END), 0) AS incomplete_cnt "
                     "FROM high_scale_source_objects "
                     "WHERE service_id = %s "
+                    "AND status = ANY(ARRAY['discovered', 'claimed', 'appended', 'archived', 'acknowledged']) "
                     "AND (discovered_at IS NULL OR discovered_at < %s) "
-                    "AND (status = ANY(ARRAY['discovered', 'claimed', 'appended', 'archived', 'acknowledged']) "
-                    "OR updated_at > %s OR discovered_at > %s "
-                    "OR (discovered_at IS NULL AND updated_at > %s))",
+                    "UNION ALL "
+                    f"SELECT 0.0::double precision, COALESCE(SUM({del_expr}), 0.0), "
+                    f"COALESCE(SUM({min_expr}), 0.0), COALESCE(SUM({del_inc_expr}), 0) "
+                    "FROM high_scale_source_objects "
+                    "WHERE service_id = %s "
+                    "AND status IN ('source_deleted', 'source_missing') "
+                    "AND discovered_at > %s AND discovered_at < %s "
+                    "UNION ALL "
+                    f"SELECT 0.0::double precision, COALESCE(SUM({del_expr}), 0.0), "
+                    f"COALESCE(SUM({min_expr}), 0.0), COALESCE(SUM({del_inc_expr}), 0) "
+                    "FROM high_scale_source_objects "
+                    "WHERE service_id = %s "
+                    "AND status IN ('source_deleted', 'source_missing') "
+                    "AND updated_at > %s "
+                    "AND ((discovered_at <= %s AND updated_at > %s) OR discovered_at IS NULL)"
+                    ") AS src_billing",
                     (
                         end_utc,
                         start_utc,
                         start_utc,
                         gb_hour_denom,
-                        end_utc,
-                        start_utc,
-                        gb_hour_denom,
-                        end_utc,
-                        start_utc,
-                        start_utc,
-                        gb_hour_denom,
-                        min_days,
-                        end_utc,
-                        start_utc,
-                        gb_hour_denom,
-                        min_days,
-                        min_days,
-                        end_utc,
-                        start_utc,
-                        gb_hour_denom,
                         service_id,
                         end_utc,
+                        *del_params,
+                        service_id,
+                        min_cutoff,
+                        end_utc,
+                        *del_params,
+                        service_id,
+                        min_cutoff,
+                        min_cutoff,
                         start_utc,
-                        min_cutoff,
-                        min_cutoff,
                     ),
                 ).fetchone()
 
         def _query_archive_manifests() -> Any:
+            live_expr = (
+                "GREATEST(artifact_size, 0)::double precision * GREATEST(0.0, EXTRACT(EPOCH FROM ("
+                "%s::timestamptz - GREATEST(COALESCE(created_at, %s::timestamptz), %s::timestamptz)"
+                "))) / %s"
+            )
+            del_expr = (
+                "CASE WHEN created_at IS NOT NULL AND archive_expired_at > created_at THEN "
+                "GREATEST(artifact_size, 0)::double precision * GREATEST(0.0, EXTRACT(EPOCH FROM ("
+                "LEAST(archive_expired_at, %s::timestamptz) - GREATEST(created_at, %s::timestamptz)"
+                "))) / %s ELSE 0.0 END"
+            )
+            min_expr = (
+                "CASE "
+                "WHEN created_at IS NULL THEN "
+                "GREATEST(artifact_size, 0)::double precision * GREATEST(0.0, EXTRACT(EPOCH FROM ("
+                "LEAST(archive_expired_at + make_interval(days => %s), %s::timestamptz) "
+                "- GREATEST(archive_expired_at, %s::timestamptz)"
+                "))) / %s "
+                "WHEN created_at + make_interval(days => %s) > archive_expired_at THEN "
+                "GREATEST(artifact_size, 0)::double precision * GREATEST(0.0, EXTRACT(EPOCH FROM ("
+                "LEAST(created_at + make_interval(days => %s), %s::timestamptz) "
+                "- GREATEST(archive_expired_at, %s::timestamptz)"
+                "))) / %s "
+                "ELSE 0.0 END"
+            )
+            exp_params = (
+                end_utc,
+                start_utc,
+                gb_hour_denom,
+                min_days,
+                end_utc,
+                start_utc,
+                gb_hour_denom,
+                min_days,
+                min_days,
+                end_utc,
+                start_utc,
+                gb_hour_denom,
+            )
             with self.transaction(read_only=True) as connection:
                 return connection.execute(
-                    "SELECT "
-                    "COALESCE(SUM(CASE WHEN archive_expired_at IS NULL THEN "
-                    "GREATEST(artifact_size, 0)::double precision * GREATEST(0.0, EXTRACT(EPOCH FROM ("
-                    "%s::timestamptz - GREATEST(COALESCE(created_at, %s::timestamptz), %s::timestamptz)"
-                    "))) / %s ELSE 0.0 END), 0.0), "
-                    "COALESCE(SUM(CASE WHEN archive_expired_at IS NOT NULL "
-                    "AND created_at IS NOT NULL AND archive_expired_at > created_at THEN "
-                    "GREATEST(artifact_size, 0)::double precision * GREATEST(0.0, EXTRACT(EPOCH FROM ("
-                    "LEAST(archive_expired_at, %s::timestamptz) - GREATEST(created_at, %s::timestamptz)"
-                    "))) / %s ELSE 0.0 END), 0.0), "
-                    "COALESCE(SUM(CASE "
-                    "WHEN archive_expired_at IS NOT NULL AND created_at IS NULL THEN "
-                    "GREATEST(artifact_size, 0)::double precision * GREATEST(0.0, EXTRACT(EPOCH FROM ("
-                    "LEAST(archive_expired_at + make_interval(days => %s), %s::timestamptz) "
-                    "- GREATEST(archive_expired_at, %s::timestamptz)"
-                    "))) / %s "
-                    "WHEN archive_expired_at IS NOT NULL "
-                    "AND created_at + make_interval(days => %s) > archive_expired_at THEN "
-                    "GREATEST(artifact_size, 0)::double precision * GREATEST(0.0, EXTRACT(EPOCH FROM ("
-                    "LEAST(created_at + make_interval(days => %s), %s::timestamptz) "
-                    "- GREATEST(archive_expired_at, %s::timestamptz)"
-                    "))) / %s "
-                    "ELSE 0.0 END), 0.0), "
+                    "SELECT COALESCE(SUM(live_gbh), 0.0), COALESCE(SUM(del_gbh), 0.0), "
+                    "COALESCE(SUM(min_gbh), 0.0), COALESCE(SUM(incomplete_cnt), 0) FROM ("
+                    f"SELECT COALESCE(SUM({live_expr}), 0.0) AS live_gbh, "
+                    "0.0::double precision AS del_gbh, "
+                    "0.0::double precision AS min_gbh, "
+                    "COALESCE(SUM(CASE WHEN created_at IS NULL THEN 1 ELSE 0 END), 0) AS incomplete_cnt "
+                    "FROM high_scale_archive_manifests "
+                    "WHERE service_id = %s AND state <> 'artifact_uploading' "
+                    "AND archive_expired_at IS NULL "
+                    "AND (created_at IS NULL OR created_at < %s) "
+                    "UNION ALL "
+                    f"SELECT 0.0::double precision, COALESCE(SUM({del_expr}), 0.0), "
+                    f"COALESCE(SUM({min_expr}), 0.0), 0 "
+                    "FROM high_scale_archive_manifests "
+                    "WHERE service_id = %s AND state <> 'artifact_uploading' "
+                    "AND archive_expired_at IS NOT NULL "
+                    "AND created_at > %s AND created_at < %s "
+                    "UNION ALL "
+                    f"SELECT 0.0::double precision, COALESCE(SUM({del_expr}), 0.0), "
+                    f"COALESCE(SUM({min_expr}), 0.0), "
                     "COALESCE(SUM(CASE WHEN created_at IS NULL THEN 1 ELSE 0 END), 0) "
                     "FROM high_scale_archive_manifests "
                     "WHERE service_id = %s AND state <> 'artifact_uploading' "
-                    "AND (created_at IS NULL OR created_at < %s) "
-                    "AND (archive_expired_at IS NULL "
-                    "OR archive_expired_at > %s OR created_at > %s "
-                    "OR (created_at IS NULL AND archive_expired_at > %s))",
+                    "AND archive_expired_at > %s "
+                    "AND ((created_at <= %s AND archive_expired_at > %s) OR created_at IS NULL)"
+                    ") AS arc_billing",
                     (
                         end_utc,
                         start_utc,
                         start_utc,
                         gb_hour_denom,
-                        end_utc,
-                        start_utc,
-                        gb_hour_denom,
-                        min_days,
-                        end_utc,
-                        start_utc,
-                        gb_hour_denom,
-                        min_days,
-                        min_days,
-                        end_utc,
-                        start_utc,
-                        gb_hour_denom,
                         service_id,
                         end_utc,
+                        *exp_params,
+                        service_id,
+                        min_cutoff,
+                        end_utc,
+                        *exp_params,
+                        service_id,
+                        min_cutoff,
+                        min_cutoff,
                         start_utc,
-                        min_cutoff,
-                        min_cutoff,
                     ),
                 ).fetchone()
 

@@ -47,9 +47,11 @@ from .scoring_vcl import (
     _record_scoring_audit,
     _require_confirm,
     _require_scoring_enabled_and_token,
+    _scoring_enforce_status_code_from_scoring,
+    _scoring_exclude_regex_from_scoring,
+    _scoring_status_from_cfg,
     scoring_enforce_status_code_get,
     scoring_exclude_regex_get,
-    scoring_status,
 )
 
 logger = logging.getLogger(__name__)
@@ -234,7 +236,8 @@ def _validate_threshold_0_100(threshold: int | None) -> int | None:
 )
 def scoring_config_composite(service_id: str = Path(..., description="Logging service ID")) -> dict:
     """Composite of the four token-free /scoring/* config endpoints."""
-    return {"status": scoring_status(service_id), **_build_scoring_config_bundle(service_id)}
+    cfg = load_service_config(service_id)
+    return {"status": _scoring_status_from_cfg(service_id, cfg), **_build_scoring_config_bundle(service_id, cfg=cfg)}
 
 
 @router.post(
@@ -682,7 +685,18 @@ def scoring_threshold_put(body: ScoringThresholdBody, service_id: ServiceId) -> 
     }
 
 
-def _build_scoring_config_bundle(service_id: str) -> dict:
+def _build_scoring_config_bundle(service_id: str, *, cfg: dict | None = None) -> dict:
+    if cfg is not None:
+        scoring = cfg.get("scoring") or {}
+        return {
+            "threshold": {
+                "threshold": scoring.get("operator_threshold"),
+                "set_at": scoring.get("operator_threshold_set_at"),
+                "enforced": False,
+            },
+            "exclude_regex": _scoring_exclude_regex_from_scoring(scoring),
+            "enforce_status_code": _scoring_enforce_status_code_from_scoring(scoring),
+        }
     return {
         "threshold": scoring_threshold_get(service_id),
         "exclude_regex": scoring_exclude_regex_get(service_id),

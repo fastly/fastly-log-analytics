@@ -118,6 +118,64 @@ class BoundedTTLCache[K, V](_BoundedCacheBase[K, V]):
             return f"BoundedTTLCache(maxsize={self.maxsize}, ttl_seconds={self.ttl_seconds}, size={len(self._cache)})"
 
 
+class SWRTTLCache[K, V](BoundedTTLCache[K, V]):
+    """BoundedTTLCache with a secondary stale window for stale-while-revalidate reads.
+
+    Explicit mutations (``clear``, ``pop``, ``delete``, ``__delitem__``) clear both
+    the fresh and stale layers so invalidations take effect immediately.
+    """
+
+    def __init__(
+        self,
+        maxsize: int | None = None,
+        ttl_seconds: float = 60.0,
+        *,
+        stale_ttl_seconds: float = 3600.0,
+        max_entries: int | None = None,
+        name: str | None = None,
+    ) -> None:
+        super().__init__(maxsize=maxsize, ttl_seconds=ttl_seconds, max_entries=max_entries, name=name)
+        if stale_ttl_seconds <= 0:
+            raise ValueError("stale_ttl_seconds must be positive")
+        self.stale_ttl_seconds = float(stale_ttl_seconds)
+        self._stale: cachetools.TTLCache[K, V] = cachetools.TTLCache(
+            maxsize=self.maxsize,
+            ttl=self.stale_ttl_seconds,
+            timer=lambda: time.monotonic(),
+        )
+
+    def __setitem__(self, key: K, value: V) -> None:
+        with self.lock:
+            self._cache[key] = value
+            self._stale[key] = value
+
+    def __delitem__(self, key: K) -> None:
+        with self.lock:
+            self._stale.pop(key, None)
+            del self._cache[key]
+
+    def delete(self, key: K) -> bool:
+        with self.lock:
+            self._stale.pop(key, None)
+            return self._cache.pop(key, _MISSING) is not _MISSING
+
+    def pop(self, key: K, default: Any = _MISSING) -> Any:
+        with self.lock:
+            self._stale.pop(key, None)
+            if default is _MISSING:
+                return self._cache.pop(key)
+            return self._cache.pop(key, default)
+
+    def clear(self) -> None:
+        with self.lock:
+            self._cache.clear()
+            self._stale.clear()
+
+    def get_stale(self, key: K, default: Any = None) -> Any:
+        with self.lock:
+            return self._stale.get(key, default)
+
+
 class BoundedLRUCache[K, V](_BoundedCacheBase[K, V]):
     """Thread-safe LRU bounded cache backed by ``cachetools.LRUCache``."""
 

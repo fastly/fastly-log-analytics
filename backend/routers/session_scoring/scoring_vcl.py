@@ -23,6 +23,7 @@ from backend.models.analytics import (
     ScoringTokenBody,
 )
 from backend.utils.bounded_cache import BoundedTTLCache as _BoundedTTLCache
+from backend.utils.bounded_cache import SWRTTLCache as _SWRTTLCache
 from backend.utils.router_utils import (
     load_service_config,
     raise_internal,
@@ -35,13 +36,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _SECRET_KEYS = frozenset({"aes_key_hex", "request_secret"})
-_scoring_svc_version_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=256, ttl_seconds=300.0)
-_scoring_pragma_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=256, ttl_seconds=300.0)
-# "Not ready" is kept briefly so one page load's status reads share a Fastly
-# probe, yet Fastly enabling the pragmas still shows up within the TTL.
-_scoring_pragma_missing_cache: _BoundedTTLCache = _BoundedTTLCache(maxsize=256, ttl_seconds=30.0)
+_scoring_svc_version_cache: _SWRTTLCache = _SWRTTLCache(maxsize=256, ttl_seconds=300.0, stale_ttl_seconds=3600.0)
+_scoring_pragma_cache: _SWRTTLCache = _SWRTTLCache(maxsize=256, ttl_seconds=300.0, stale_ttl_seconds=3600.0)
+# Kept for 300s (matching the positive cache) with stale-while-revalidate so
+# startup pre-warm survives deploy/load-test windows; enable/disable invalidates immediately.
+_scoring_pragma_missing_cache: _SWRTTLCache = _SWRTTLCache(maxsize=256, ttl_seconds=300.0, stale_ttl_seconds=3600.0)
 _probe_inflight_guard = threading.Lock()
 _probe_inflight_locks: dict[tuple[int, str], threading.Lock] = {}
+_probe_bg_inflight: set[tuple[int, str]] = set()
 
 
 def invalidate_scoring_status_cache(service_id: str, scoring_service_id: str | None = None) -> None:
@@ -109,7 +111,30 @@ def _cached_fastly_probe(cache: _BoundedTTLCache, key: str, fn, log_label: str, 
     val = cache.get(key)
     if val is not None:
         return val
+
     lock_key = (id(cache), key)
+    stale_val = cache.get_stale(key) if isinstance(cache, _SWRTTLCache) else None
+    if stale_val is not None:
+        with _probe_inflight_guard:
+            already_refreshing = lock_key in _probe_bg_inflight
+            if not already_refreshing:
+                _probe_bg_inflight.add(lock_key)
+        if not already_refreshing:
+
+            def _refresh() -> None:
+                try:
+                    fresh = fn()
+                    if cache_if(fresh):
+                        cache[key] = fresh
+                except Exception:  # pragma: no cover - defensive
+                    logger.warning("[scoring-status] background %s failed for %s", log_label, key, exc_info=True)
+                finally:
+                    with _probe_inflight_guard:
+                        _probe_bg_inflight.discard(lock_key)
+
+            threading.Thread(target=_refresh, name=f"scoring-swr-{log_label}", daemon=True).start()
+        return stale_val
+
     with _probe_inflight_guard:
         lock = _probe_inflight_locks.get(lock_key)
         if lock is None:
@@ -253,15 +278,7 @@ def scoring_disable(
     )
 
 
-@router.get(
-    "/{service_id}/scoring/status",
-    response_model=ScoringStatusResponse,
-    response_model_exclude_unset=True,
-    dependencies=[Depends(require_admin)],
-)
-def scoring_status(service_id: str = Path(..., description="Logging service ID")) -> dict:
-    """Return the scoring block from the service's config, or {"enabled": false}."""
-    cfg = load_service_config(service_id)
+def _scoring_status_from_cfg(service_id: str, cfg: dict) -> dict:
     scoring = cfg.get("scoring")
     token = stored_fastly_token(cfg)
     if not scoring or not scoring.get("enabled"):
@@ -271,15 +288,45 @@ def scoring_status(service_id: str = Path(..., description="Logging service ID")
 
             ready = _scoring_pragma_missing_cache.get(service_id)
             if ready is None:
-                ready = _cached_fastly_probe(
-                    _scoring_pragma_cache,
-                    service_id,
-                    lambda: service_has_scoring_pragmas(service_id, token),
-                    "pragma check",
-                    cache_if=lambda v: v is True,
-                )
-                if ready is False:
-                    _scoring_pragma_missing_cache[service_id] = False
+                stale_missing = _scoring_pragma_missing_cache.get_stale(service_id)
+                if stale_missing is not None:
+                    ready = stale_missing
+                    lock_key = (id(_scoring_pragma_missing_cache), service_id)
+                    with _probe_inflight_guard:
+                        already_refreshing = lock_key in _probe_bg_inflight
+                        if not already_refreshing:
+                            _probe_bg_inflight.add(lock_key)
+                    if not already_refreshing:
+
+                        def _refresh_pragma() -> None:
+                            try:
+                                fresh = service_has_scoring_pragmas(service_id, token)
+                                if fresh is True:
+                                    _scoring_pragma_cache[service_id] = True
+                                    _scoring_pragma_missing_cache.pop(service_id, None)
+                                elif fresh is False:
+                                    _scoring_pragma_missing_cache[service_id] = False
+                            except Exception:  # pragma: no cover - defensive
+                                logger.warning(
+                                    "[scoring-status] background pragma check failed for %s",
+                                    service_id,
+                                    exc_info=True,
+                                )
+                            finally:
+                                with _probe_inflight_guard:
+                                    _probe_bg_inflight.discard(lock_key)
+
+                        threading.Thread(target=_refresh_pragma, name="scoring-swr-pragma", daemon=True).start()
+                else:
+                    ready = _cached_fastly_probe(
+                        _scoring_pragma_cache,
+                        service_id,
+                        lambda: service_has_scoring_pragmas(service_id, token),
+                        "pragma check",
+                        cache_if=lambda v: v is True,
+                    )
+                    if ready is False:
+                        _scoring_pragma_missing_cache[service_id] = False
             if ready is not None:
                 result["preflight_pragmas_ready"] = ready
         return result
@@ -319,16 +366,19 @@ def scoring_status(service_id: str = Path(..., description="Logging service ID")
 
 
 @router.get(
-    "/{service_id}/scoring/exclude-regex",
-    response_model=ScoringExcludeRegexState,
+    "/{service_id}/scoring/status",
+    response_model=ScoringStatusResponse,
     response_model_exclude_unset=True,
     dependencies=[Depends(require_admin)],
 )
-def scoring_exclude_regex_get(service_id: ServiceId) -> dict:
-    """Return the operator-configured URL-exclusion regex for the recv snippet."""
+def scoring_status(service_id: str = Path(..., description="Logging service ID")) -> dict:
+    """Return the scoring block from the service's config, or {"enabled": false}."""
+    return _scoring_status_from_cfg(service_id, load_service_config(service_id))
+
+
+def _scoring_exclude_regex_from_scoring(scoring: dict) -> dict:
     from backend.provision.session_scoring_orchestrator import DEFAULT_ASSET_EXT_REGEX, resolve_exclude_url_regex
 
-    _cfg, scoring = _load_scoring_cfg(service_id)
     current = scoring.get("exclude_url_regex") or ""
     return {
         "current": current,
@@ -336,6 +386,18 @@ def scoring_exclude_regex_get(service_id: ServiceId) -> dict:
         "default": DEFAULT_ASSET_EXT_REGEX,
         "effective": resolve_exclude_url_regex(current or None),
     }
+
+
+@router.get(
+    "/{service_id}/scoring/exclude-regex",
+    response_model=ScoringExcludeRegexState,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+)
+def scoring_exclude_regex_get(service_id: ServiceId) -> dict:
+    """Return the operator-configured URL-exclusion regex for the recv snippet."""
+    _cfg, scoring = _load_scoring_cfg(service_id)
+    return _scoring_exclude_regex_from_scoring(scoring)
 
 
 @router.put(
@@ -399,14 +461,7 @@ def scoring_exclude_regex_validate(body: ScoringExcludeRegexBody, service_id: Se
     return {"ok": True, "lint_warnings": lint.warnings}
 
 
-@router.get(
-    "/{service_id}/scoring/enforce-status-code",
-    response_model=ScoringEnforceStatusCodeState,
-    response_model_exclude_unset=True,
-    dependencies=[Depends(require_admin)],
-)
-def scoring_enforce_status_code_get(service_id: ServiceId) -> dict:
-    """Return the operator-configured HTTP status code returned by the enforce snippet."""
+def _scoring_enforce_status_code_from_scoring(scoring: dict) -> dict:
     from backend.provision.session_scoring_orchestrator import (
         _ENFORCE_STATUS_CODE_MAX,
         _ENFORCE_STATUS_CODE_MIN,
@@ -414,7 +469,6 @@ def scoring_enforce_status_code_get(service_id: ServiceId) -> dict:
         resolve_enforce_status_code,
     )
 
-    _cfg, scoring = _load_scoring_cfg(service_id)
     current = scoring.get("enforce_status_code")
     effective = resolve_enforce_status_code(current)
     return {
@@ -425,6 +479,18 @@ def scoring_enforce_status_code_get(service_id: ServiceId) -> dict:
         "max": _ENFORCE_STATUS_CODE_MAX,
         "is_default": effective == DEFAULT_ENFORCE_STATUS_CODE,
     }
+
+
+@router.get(
+    "/{service_id}/scoring/enforce-status-code",
+    response_model=ScoringEnforceStatusCodeState,
+    response_model_exclude_unset=True,
+    dependencies=[Depends(require_admin)],
+)
+def scoring_enforce_status_code_get(service_id: ServiceId) -> dict:
+    """Return the operator-configured HTTP status code returned by the enforce snippet."""
+    _cfg, scoring = _load_scoring_cfg(service_id)
+    return _scoring_enforce_status_code_from_scoring(scoring)
 
 
 @router.put(

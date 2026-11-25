@@ -73,21 +73,26 @@ def _initialize_service(cfg: dict):
 
             src = _fos.get_source_for_service(sid)
             if src:
-                # Pre-warm compute_sync_status_cached so the very first
-                # /api/sync-status?skip_fos=true after restart is warm.
-                try:
-                    _admin_mod = importlib.import_module("backend.routers.admin")
-                    _admin_mod.compute_sync_status_cached(sid)
-                except Exception as e:
-                    logger.warning("[fastapi] Service %s: sync-status pre-warm failed: %s", sid, e)
 
-                # Pre-warm Fastly scoring status probes so the first /admin/session-scoring
-                # load does not block on synchronous Fastly API calls.
-                try:
-                    _scoring_vcl_mod = importlib.import_module("backend.routers.session_scoring.scoring_vcl")
-                    _scoring_vcl_mod.prewarm_scoring_status(sid)
-                except Exception as e:
-                    logger.warning("[fastapi] Service %s: scoring-status pre-warm failed: %s", sid, e)
+                def _warm_sync_status() -> None:
+                    try:
+                        _admin_mod = importlib.import_module("backend.routers.admin")
+                        _admin_mod.compute_sync_status_cached(sid)
+                    except Exception as e:
+                        logger.warning("[fastapi] Service %s: sync-status pre-warm failed: %s", sid, e)
+
+                def _warm_scoring_status() -> None:
+                    try:
+                        _scoring_vcl_mod = importlib.import_module("backend.routers.session_scoring.scoring_vcl")
+                        _scoring_vcl_mod.prewarm_scoring_status(sid)
+                    except Exception as e:
+                        logger.warning("[fastapi] Service %s: scoring-status pre-warm failed: %s", sid, e)
+
+                with ThreadPoolExecutor(max_workers=2, thread_name_prefix="startup-warm") as warm_pool:
+                    f_sync = warm_pool.submit(_warm_sync_status)
+                    f_scoring = warm_pool.submit(_warm_scoring_status)
+                    f_sync.result()
+                    f_scoring.result()
 
                 logger.info("[fastapi] Service %s initialised.", sid)
         except Exception as e:
@@ -219,6 +224,11 @@ def _background_startup():
 
                 executor = ThreadPoolExecutor(max_workers=4)
                 futures = [executor.submit(_initialize_service, cfg) for cfg in configs]
+                try:
+                    _celery_mod = importlib.import_module("backend.celery_app")
+                    futures.append(executor.submit(_celery_mod.prewarm_celery_status))
+                except Exception as e:
+                    logging.warning("[fastapi] Celery status pre-warm scheduling failed: %s", e)
                 from concurrent.futures import wait as _futures_wait
 
                 done, not_done = _futures_wait(futures, timeout=1.0)

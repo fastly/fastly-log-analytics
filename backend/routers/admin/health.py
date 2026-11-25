@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import re
+import threading
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -70,7 +71,8 @@ logger = logging.getLogger(__name__)
 _CACHE_TTL_SECONDS = 10.0
 _cache: BoundedTTLCache = BoundedTTLCache(maxsize=256, ttl_seconds=_CACHE_TTL_SECONDS)
 _HEALTH_SNAPSHOT_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=16, ttl_seconds=10.0)
-_CELERY_STATUS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=8, ttl_seconds=5.0)
+_CELERY_STATUS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=8, ttl_seconds=10.0)
+_CELERY_STATUS_LOCK = threading.Lock()
 _locks: dict[str | None, asyncio.Lock] = {}
 
 
@@ -482,9 +484,12 @@ def api_celery_status() -> dict[str, Any]:
     use_cache = "PYTEST_CURRENT_TEST" not in os.environ
     raw: dict[str, Any] | None = _CELERY_STATUS_CACHE.get("status") if use_cache else None
     if raw is None:
-        raw = dict(get_celery_status())
-        if use_cache:
-            _CELERY_STATUS_CACHE.set("status", dict(raw))
+        with _CELERY_STATUS_LOCK:
+            raw = _CELERY_STATUS_CACHE.get("status") if use_cache else None
+            if raw is None:
+                raw = dict(get_celery_status())
+                if use_cache:
+                    _CELERY_STATUS_CACHE.set("status", dict(raw))
     return attach_debug_db_snapshot(dict(raw))
 
 
