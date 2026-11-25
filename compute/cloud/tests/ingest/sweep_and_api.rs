@@ -1104,6 +1104,21 @@ fn logged_traffic_degrades_gracefully_when_fastly_stats_fail() {
 }
 
 #[test]
+fn service_stats_degrades_gracefully_when_fastly_stats_fail() {
+    let fake = Fake::new(BASE);
+    tick_runtime(&fake);
+    *fake.service_stats_error.borrow_mut() = Some("fastly_stats_403".into());
+    let from_ms = STATS_HOUR * 1000;
+    let to_ms = (STATS_HOUR + 2 * 3600) * 1000;
+    let path = format!("/api/admin/usage/service-stats?from={from_ms}&to={to_ms}");
+    let (status, body, _) = logs_call(&fake, "GET", &path, Value::Null);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["available"], json!(false));
+    assert_eq!(body["reason"], json!("fastly_stats_403"));
+    assert_eq!(body["hours"], json!([]));
+}
+
+#[test]
 fn service_stats_sums_the_logged_service_fields_per_whole_hour() {
     let fake = Fake::new(BASE);
     tick_runtime(&fake);

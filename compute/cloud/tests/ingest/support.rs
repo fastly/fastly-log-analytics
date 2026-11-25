@@ -92,6 +92,7 @@ pub(super) struct Fake {
     /// Status every Fastly API call answers with.
     pub(super) api_status: Cell<u16>,
     pub(super) logged_traffic_error: RefCell<Option<String>>,
+    pub(super) service_stats_error: RefCell<Option<String>>,
     pub(super) kv_reads: RefCell<Vec<String>>,
     pub(super) seq: std::cell::Cell<u64>,
     pub(super) cache: RefCell<BTreeMap<String, CoreCacheEntry>>,
@@ -237,6 +238,7 @@ impl Fake {
             config_overrides: Default::default(),
             api_status: Cell::new(200),
             logged_traffic_error: Default::default(),
+            service_stats_error: Default::default(),
             kv_reads: Default::default(),
             seq: Default::default(),
             cache: Default::default(),
@@ -1031,6 +1033,9 @@ impl Runtime for Fake {
         to: u64,
         fields: &[&str],
     ) -> Result<Value, String> {
+        if let Some(error) = self.service_stats_error.borrow().as_ref() {
+            return Err(error.clone());
+        }
         if service_id != SID {
             return Err("unknown_service".into());
         }

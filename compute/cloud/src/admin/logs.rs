@@ -629,7 +629,21 @@ fn service_stats(runtime: &impl Runtime, query: &str) -> Outcome {
             &[requests, body, header, hits],
         ) {
             Ok(rows) => rows,
-            Err(error) => return fail(502, &error),
+            Err(error) => {
+                return done(
+                    json!({
+                        "service_id": service.service_id,
+                        "from": from,
+                        "to": to,
+                        "sample_rate": service.sample_rate.clamp(1, 100),
+                        "edge_only": service.edge_only,
+                        "hours": [],
+                        "available": false,
+                        "reason": error,
+                    }),
+                    None,
+                );
+            }
         }
     } else {
         json!([])
