@@ -934,4 +934,36 @@ fn rum_beacon_caps_counts_and_field_lengths_without_panicking() {
         assert_col_max_bytes(b, "error_message", MAX_ERROR_BYTES);
         assert_col_max_bytes(b, "error_file", MAX_PATH_BYTES);
     }
+
+    // 4) Object-level amplification cap: 12 amplified ~1.8 KiB beacons (~22 KiB decompressed,
+    //    well below max_decompressed=1 MiB) would expand to >1.7 MiB of Arrow string buffers
+    //    and must be rejected with ConvertError::TooLarge before OOMing the 128 MiB Wasm heap.
+    let amp_path = format!("/{}", "p".repeat(511));
+    let amp_cid = "c".repeat(512);
+    let m_items: Vec<&str> = (0..64).map(|_| "a:1").collect();
+    let r_items: Vec<&str> = (0..64).map(|_| "1:/:1").collect();
+    let e_items: Vec<&str> = (0..16).map(|_| "e=x").collect();
+    let amp_line = json!({
+        "ts_ms": ts_ms,
+        "service_id": sid,
+        "url": format!(
+            "https://example.com/_rum?p={amp_path}&cid={amp_cid}&m={}&r={}&{}",
+            m_items.join(","),
+            r_items.join(","),
+            e_items.join("&")
+        ),
+    })
+    .to_string();
+    let amp_lines: Vec<String> = (0..12).map(|_| amp_line.clone()).collect();
+    let total_decompressed: usize = amp_lines.iter().map(|l| l.len() + 1).sum();
+    assert!(
+        total_decompressed < (1 << 20) / 10,
+        "amplification fixture must be tiny decompressed ({total_decompressed} B)"
+    );
+    let amp_res = ingest::rum::convert_object(&zstd_lines(&amp_lines), 60, base_s, 1 << 20, sid);
+    assert_eq!(
+        amp_res.err(),
+        Some(ingest::convert::ConvertError::TooLarge),
+        "amplified RUM object exceeding output byte budget must return ConvertError::TooLarge"
+    );
 }

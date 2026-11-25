@@ -499,6 +499,7 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
     }
 
     pub fn handle(&self, request: &Request) -> Response {
+        self.trace.take();
         if !self.front_authorized(request) {
             return error(403, "Front authentication required");
         }

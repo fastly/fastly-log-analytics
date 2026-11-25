@@ -29,6 +29,9 @@ pub const MAX_ERRORS_PER_BEACON: usize = 16;
 pub const MAX_BEACON_PATH_BYTES: usize = 512;
 pub const MAX_BEACON_FIELD_BYTES: usize = 512;
 pub const MAX_BEACON_ERROR_BYTES: usize = 1024;
+/// Upper bound on accumulated Arrow builder bytes across all rows emitted from a single
+/// RUM log object, capping multi-row amplification well below the 128 MiB Wasm heap limit.
+pub const MAX_OBJECT_OUTPUT_BYTES: u64 = 24 * 1024 * 1024;
 
 fn truncate_utf8(mut s: String, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
@@ -1029,6 +1032,17 @@ fn parse_line(bytes: &[u8], service_id: &str) -> Parsed {
     Parsed::Rows(ms, ttfb, rows)
 }
 
+fn row_output_bytes(metric: &Metric, tail: &[String; 13]) -> u64 {
+    let tail_bytes: usize = tail.iter().map(String::len).sum();
+    let head_bytes = if let Some((ref message, ref file, _, _)) = metric.error {
+        message.len() + file.len()
+    } else {
+        metric.name.as_deref().unwrap_or("unknown").len()
+            + metric.rating.as_deref().map_or(0, str::len)
+    };
+    (tail_bytes + head_bytes + 128) as u64
+}
+
 /// Converts one raw RUM object into `client_vitals` (`ObjectRows::windows`) and `client_errors`
 /// (`ObjectRows::errors`) rows by window. Beacons of another service, `OPTIONS` preflights and
 /// health checks are skipped; a line that is not a JSON object or has no time is a bad line,
@@ -1044,7 +1058,13 @@ pub fn convert_object(
     let mut errors: BTreeMap<i64, Errors> = BTreeMap::new();
     let (mut rows, mut lines_read, mut bad_lines) = (0u64, 0u64, 0u64);
     let mut bad_sample = None;
+    let max_output_bytes = max_decompressed.min(MAX_OBJECT_OUTPUT_BYTES);
+    let mut output_bytes: u64 = 0;
+    let mut output_too_large = false;
     let decompressed = convert::read_lines(gzip, max_decompressed, |line| {
+        if output_too_large {
+            return;
+        }
         lines_read += 1;
         let parsed = line
             .good()
@@ -1060,6 +1080,11 @@ pub fn convert_object(
         };
         let start = convert::window_of(convert::route(Some(ms), object_time_s), window_s);
         for Row { metric, tail } in parsed_rows {
+            output_bytes = output_bytes.saturating_add(row_output_bytes(&metric, &tail));
+            if output_bytes > max_output_bytes {
+                output_too_large = true;
+                break;
+            }
             rows += 1;
             if let Some((message, file, error_line, error_col)) = metric.error {
                 let e = errors.entry(start).or_insert_with(Errors::new);
@@ -1081,6 +1106,9 @@ pub fn convert_object(
             }
         }
     })?;
+    if output_too_large {
+        return Err(ConvertError::TooLarge);
+    }
     Ok(ObjectRows {
         windows: vitals
             .into_iter()
