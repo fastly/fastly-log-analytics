@@ -376,6 +376,60 @@ def test_postgres_control_plane_storage_billing_summary_aggregates_in_sql() -> N
     assert provenance == ["high-scale:archive_manifests", "high-scale:source_objects"]
 
 
+def test_postgres_control_plane_storage_billing_summary_runs_table_scans_concurrently_with_sargable_predicates() -> (
+    None
+):
+    """Source-object and archive-manifest billing queries run concurrently with index-friendly range predicates."""
+    import threading
+    from contextlib import contextmanager
+    from datetime import UTC, datetime, timedelta
+
+    from backend.high_scale.postgres_control import control_plane as cp_mod
+
+    t0 = datetime(2026, 11, 1, 0, 0, tzinfo=UTC)
+    window_start = t0 + timedelta(hours=10)
+    window_end = t0 + timedelta(hours=14)
+    barrier = threading.Barrier(2, timeout=2.0)
+    seen_sql: list[str] = []
+
+    class FakeCursor:
+        def __init__(self, row):
+            self._row = row
+
+        def fetchone(self):
+            return self._row
+
+    class FakeConnection:
+        def execute(self, sql: str, _params=()):
+            seen_sql.append(sql)
+            barrier.wait()
+            if "high_scale_source_objects" in sql:
+                return FakeCursor((1.0, 2.0, 3.0, 0))
+            if "high_scale_archive_manifests" in sql:
+                return FakeCursor((4.0, 5.0, 6.0, 0))
+            raise AssertionError(f"unexpected query: {sql}")
+
+    plane = object.__new__(cp_mod.PostgresControlPlane)
+
+    @contextmanager
+    def _fake_tx(*, read_only: bool = False):
+        assert read_only is True
+        yield FakeConnection()
+
+    plane.transaction = _fake_tx  # type: ignore[method-assign]
+
+    live_gb_h, deleted_gb_h, min_gb_h, complete, _ = plane.storage_billing_summary("svc-hs", window_start, window_end)
+    assert (live_gb_h, deleted_gb_h, min_gb_h, complete) == (5.0, 7.0, 9.0, True)
+    assert len(seen_sql) == 2
+    # WHERE predicates must be sargable (no GREATEST(... + make_interval(...)) in WHERE)
+    for sql in seen_sql:
+        where_clause = sql.split("WHERE ", 1)[1]
+        assert "GREATEST(" not in where_clause
+    assert "high_scale_source_objects_discovered_idx" in cp_mod.SCHEMA_DDL
+    assert "high_scale_source_objects_updated_idx" in cp_mod.SCHEMA_DDL
+    assert "high_scale_archive_manifests_expired_idx" in cp_mod.SCHEMA_DDL
+
+
 def test_python_matches_typescript_shared_storage_billing_fixtures() -> None:
     """Python and TypeScript calculators produce identical results on every shared fixture."""
     import json

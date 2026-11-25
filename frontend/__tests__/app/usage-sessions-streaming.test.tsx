@@ -529,7 +529,11 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
   })
 
   test('High-Scale does not call traffic unavailable before the below-the-fold estimator loads its measurements', async () => {
+    const observedOptions: Array<IntersectionObserverInit | undefined> = []
     vi.stubGlobal('IntersectionObserver', class {
+      constructor(_cb: IntersectionObserverCallback, options?: IntersectionObserverInit) {
+        observedOptions.push(options)
+      }
       observe() {}
       disconnect() {}
     })
@@ -542,6 +546,7 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
       await screen.findByTestId('cost-calculator')
       expect(mockGet).not.toHaveBeenCalledWith('/api/usage/prefill', expect.anything())
       expect(screen.queryByText(/Traffic measurements are unavailable/)).not.toBeInTheDocument()
+      expect(observedOptions).toContainEqual(expect.objectContaining({ rootMargin: '100px' }))
     } finally {
       vi.unstubAllGlobals()
     }

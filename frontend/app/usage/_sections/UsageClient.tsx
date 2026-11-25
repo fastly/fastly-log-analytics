@@ -94,7 +94,7 @@ export function UsagePageContent({
   const isReady = useIsDataReady()
   const activityBy = config.effectiveInterval.split(' ')[1] || 'hour'
   const estimatorRef = useRef<HTMLDivElement>(null)
-  const estimatorVisible = useInViewOnce(estimatorRef, { rootMargin: '600px' })
+  const estimatorVisible = useInViewOnce(estimatorRef, { rootMargin: '100px' })
   const cloudMode = isCloudMode()
 
   // The Cost Estimator lives below the fold; defer /api/usage/prefill until it nears

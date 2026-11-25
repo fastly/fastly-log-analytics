@@ -68,6 +68,7 @@ _STORAGE_INSPECTION_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=64, ttl_sec
 _PREFILL_META_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=64, ttl_seconds=60.0)
 _PREFILL_ENDPOINT_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=64, ttl_seconds=60.0)
 _EDGE_RATIO_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=64, ttl_seconds=60.0)
+_EDGE_RATIO_NONE = object()
 _RUM_BREAKDOWN_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=60.0)
 _USAGE_RESPONSE_MEMO = ResponseMemo(ttl=60.0, maxsize=256, prewarmer=False)
 _CacheRegistry.register("routers.usage._FASTLY_STATS_CACHE", _FASTLY_STATS_CACHE)
@@ -554,6 +555,8 @@ async def prefill(source: dict[str, Any] = Depends(get_source)) -> PrefillRespon
         def _edge_ratio_blocking() -> float | None:
             service_id = str(source.get("service_id") or source["name"])
             cached_ratio = _EDGE_RATIO_CACHE.get(service_id)
+            if cached_ratio is _EDGE_RATIO_NONE:
+                return None
             if cached_ratio is not None:
                 return float(cached_ratio)
             hs_service = get_high_scale_service_registry().resolve(service_id)
@@ -561,15 +564,18 @@ async def prefill(source: dict[str, Any] = Depends(get_source)) -> PrefillRespon
             if client is None:
                 return None
             fence = visible_publication_fence_sql("request", client=client, service_id=service_id)
+            start_time = now - timedelta(days=7)
             rows = client.execute(
                 f"SELECT countIf(lower(custom_fields['edge']) IN ('true', '1')) * 100.0 / nullIf(count(), 0) AS edge_ratio "
-                f"FROM request_facts WHERE service_id={{service_id:String}} AND {fence}",
-                {"service_id": service_id},
+                f"FROM request_facts WHERE service_id={{service_id:String}} "
+                f"AND event_timestamp >= {{start_time:DateTime64(3, 'UTC')}} AND {fence}",
+                {"service_id": service_id, "start_time": start_time},
             )
             if rows and rows[0].get("edge_ratio") is not None:
                 val = round(float(rows[0]["edge_ratio"]), 2)
                 _EDGE_RATIO_CACHE[service_id] = val
                 return val
+            _EDGE_RATIO_CACHE[service_id] = _EDGE_RATIO_NONE
             return None
 
         try:
@@ -942,9 +948,11 @@ def usage_current_storage(
             storage_billing_provenance: list[str] = []
             storage_intervals: list[StorageBillingInterval] = []
 
+            storage_reads_ok = False
             if high_scale_service is not None and pg_billing_res is not None and cc_intervals_res is not None:
                 pg_live, pg_deleted, pg_min, pg_complete, pg_provenance = pg_billing_res
                 cloud_copy_intervals, cloud_copy_intervals_ok = cc_intervals_res
+                pg_unavailable = "high-scale:postgres_unavailable" in pg_provenance
 
                 if end_ms >= start_ms:
                     cc_summary = calculate_storage_billing(cloud_copy_intervals, start_ms, end_ms)
@@ -952,20 +960,21 @@ def usage_current_storage(
                     deleted_billed_gb_hours = pg_deleted + cc_summary.deleted_gb_hours
                     minimum_billed_gb_hours = pg_min + cc_summary.minimum_billed_gb_hours
                     gb_hours = live_billed_gb_hours + deleted_billed_gb_hours + minimum_billed_gb_hours
-                    storage_billing_complete = (
-                        pg_complete
-                        and cc_summary.complete
+                    storage_reads_ok = (
+                        not pg_unavailable
                         and archive_storage_complete
                         and cloud_copy_deleted_bytes_complete
                         and cloud_copy_intervals_ok
                     )
+                    storage_billing_complete = pg_complete and cc_summary.complete and storage_reads_ok
                     storage_billing_provenance = sorted(set(pg_provenance) | set(cc_summary.provenance))
                 else:
                     gb_hours = 0.0
                     storage_billing_complete = False
                     storage_billing_provenance = sorted(set(pg_provenance))
             else:
-                storage_billing_complete = archive_storage_complete and cloud_copy_deleted_bytes_complete
+                storage_reads_ok = archive_storage_complete and cloud_copy_deleted_bytes_complete
+                storage_billing_complete = storage_reads_ok
                 storage_billing_provenance = (
                     ["metadata_ledgers"] if storage_billing_complete else ["metadata_ledgers_incomplete"]
                 )
@@ -1006,7 +1015,7 @@ def usage_current_storage(
                 "start": start_str,
                 "end": end_str,
             }
-            if storage_billing_complete:
+            if storage_reads_ok:
                 _USAGE_RESPONSE_MEMO.put(storage_memo_key, payload)
             return payload
 
@@ -1549,78 +1558,103 @@ def usage_rum_breakdown(
     global_rates = svcconfig.load_usage_logging_config()
     class_a_rate = float(global_rates.get("class_a_rate_per_1k", 0.0025))
 
-    beacons_by_date: dict[str, int]
     hs_service = get_high_scale_service_registry().resolve(service_id)
-    if hs_service is not None:
-        # High-scale ingest records RUM in ClickHouse facts only; it never writes ``ingested_files``.
-        from backend.high_scale.rum import rum_beacons_by_date
+    rum_digest = digest_cache_key(
+        {
+            "ep": "usage_rum_breakdown",
+            "mode": "high_scale" if hs_service is not None else "legacy",
+            "s": bucket_time_to_minute(start_str),
+            "e": bucket_time_to_minute(end_str),
+            "by": by,
+            "req_by": requested_by if clamped_from_sub_hour else by,
+            "rate": class_a_rate,
+        },
+        {"service_id": service_id},
+    )
+    rum_memo_key = f"{service_id}:{rum_digest}"
+    cached_rum = _USAGE_RESPONSE_MEMO.get_with_telemetry(rum_memo_key)
+    if cached_rum is not None:
+        return UsageRumBreakdownResponse.with_telemetry(**cached_rum)
 
-        hs_cache_key = ("high_scale", service_id, bucket_time_to_minute(start_str), bucket_time_to_minute(end_str))
-        cached_hs = _RUM_BREAKDOWN_CACHE.get(hs_cache_key)
-        if cached_hs is not None:
-            beacons_by_date = dict(cached_hs)
-        else:
+    def _compute_rum() -> dict[str, Any]:
+        if (cached_inner := _USAGE_RESPONSE_MEMO.get_with_telemetry(rum_memo_key)) is not None:
+            return dict(cached_inner)
+
+        beacons_by_date: dict[str, int]
+        cacheable = True
+        if hs_service is not None:
+            # High-scale ingest records RUM in ClickHouse facts only; it never writes ``ingested_files``.
+            from backend.high_scale.rum import rum_beacons_by_date
+
             beacons_by_date = rum_beacons_by_date(hs_service, start_str, end_str)
-            _RUM_BREAKDOWN_CACHE[hs_cache_key] = dict(beacons_by_date)
-    else:
-        try:
-            start_date = start_str.split("T")[0]
-            end_date = end_str.split("T")[0]
-            rum_cache_key = (service_id, start_date, end_date)
-            cached_beacons = _RUM_BREAKDOWN_CACHE.get(rum_cache_key)
-            if cached_beacons is not None:
-                beacons_by_date = dict(cached_beacons)
-            else:
-                beacons_by_date = metadata_db.get_rum_beacons_by_date(service_id, start_date, end_date)
-                if beacons_by_date:
-                    _RUM_BREAKDOWN_CACHE[rum_cache_key] = dict(beacons_by_date)
-        except Exception:
-            beacons_by_date = {}
+        else:
+            try:
+                start_date = start_str.split("T")[0]
+                end_date = end_str.split("T")[0]
+                rum_cache_key = (service_id, start_date, end_date)
+                cached_beacons = _RUM_BREAKDOWN_CACHE.get(rum_cache_key)
+                if cached_beacons is not None:
+                    beacons_by_date = dict(cached_beacons)
+                else:
+                    beacons_by_date = metadata_db.get_rum_beacons_by_date(service_id, start_date, end_date)
+                    if beacons_by_date:
+                        _RUM_BREAKDOWN_CACHE[rum_cache_key] = dict(beacons_by_date)
+                    else:
+                        cacheable = False
+            except Exception:
+                beacons_by_date = {}
+                cacheable = False
 
-    data: list[RumBreakdownPoint] = []
-    total_beacons = 0
-    total_class_a = 0
-    total_cost = 0.0
+        data: list[RumBreakdownPoint] = []
+        total_beacons = 0
+        total_class_a = 0
+        total_cost = 0.0
 
-    for date_str in sorted(beacons_by_date.keys()):
-        beacon_count = beacons_by_date[date_str]
-        class_a_ops = beacon_count
-        cost = (class_a_ops / 1000.0) * class_a_rate
+        for date_str in sorted(beacons_by_date.keys()):
+            beacon_count = beacons_by_date[date_str]
+            class_a_ops = beacon_count
+            cost = (class_a_ops / 1000.0) * class_a_rate
 
-        data.append(
-            RumBreakdownPoint(
-                date=date_str,
-                beacon_count=beacon_count,
-                estimated_class_a_ops=class_a_ops,
-                estimated_cost_usd=round(cost, 6),
+            data.append(
+                RumBreakdownPoint(
+                    date=date_str,
+                    beacon_count=beacon_count,
+                    estimated_class_a_ops=class_a_ops,
+                    estimated_cost_usd=round(cost, 6),
+                )
             )
+
+            total_beacons += beacon_count
+            total_class_a += class_a_ops
+            total_cost += cost
+
+        days = (to_ts - from_ts) / 86400.0
+        avg_beacons_per_day = total_beacons / days if days > 0 else 0
+
+        note = (
+            "RUM beacon volume is tracked separately. Each beacon is one FOS Class A operation. "
+            "This estimate assumes current beacon volume; actual costs depend on user traffic. "
+            "These operations are also included in the total FOS Class A operations shown elsewhere."
         )
+        if clamped_from_sub_hour:
+            note += (
+                f" The chart interval you selected ({requested_by}) was adjusted to daily granularity "
+                "for RUM data (FOS doesn't provide sub-daily beacon breakdown)."
+            )
 
-        total_beacons += beacon_count
-        total_class_a += class_a_ops
-        total_cost += cost
+        payload: dict[str, Any] = {
+            "data": data,
+            "total_beacons": total_beacons,
+            "total_estimated_class_a": total_class_a,
+            "total_estimated_cost_usd": round(total_cost, 6),
+            "class_a_rate_per_1k": class_a_rate,
+            "average_beacons_per_day": round(avg_beacons_per_day, 2),
+            "note": note,
+        }
+        if cacheable:
+            _USAGE_RESPONSE_MEMO.put(rum_memo_key, payload)
+        return payload
 
-    days = (to_ts - from_ts) / 86400.0
-    avg_beacons_per_day = total_beacons / days if days > 0 else 0
-
-    note = (
-        "RUM beacon volume is tracked separately. Each beacon is one FOS Class A operation. "
-        "This estimate assumes current beacon volume; actual costs depend on user traffic. "
-        "These operations are also included in the total FOS Class A operations shown elsewhere."
-    )
-    if clamped_from_sub_hour:
-        note += (
-            f" The chart interval you selected ({requested_by}) was adjusted to daily granularity "
-            "for RUM data (FOS doesn't provide sub-daily beacon breakdown)."
-        )
-
-    resp: UsageRumBreakdownResponse = UsageRumBreakdownResponse.with_telemetry(
-        data=data,
-        total_beacons=total_beacons,
-        total_estimated_class_a=total_class_a,
-        total_estimated_cost_usd=round(total_cost, 6),
-        class_a_rate_per_1k=class_a_rate,
-        average_beacons_per_day=round(avg_beacons_per_day, 2),
-        note=note,
-    )
+    rum_payload = _USAGE_RESPONSE_MEMO.coalesce(f"usage_rum_breakdown:{rum_memo_key}", _compute_rum)
+    resp: UsageRumBreakdownResponse = UsageRumBreakdownResponse.with_telemetry(**rum_payload)
     return resp

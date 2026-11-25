@@ -191,12 +191,31 @@ def test_usage_current_storage_warm_hit_service_isolation_time_range_and_invalid
     usage.usage_current_storage(start="2026-11-24T10:00:30Z", end="2026-11-24T11:00:30Z", source=src_b)
     assert pg_calls == {"storage": 4, "archive": 4, "billing": 4}
 
-    # Incomplete billing result must NOT be cached
+    # Authoritative ledger-incomplete billing (DB succeeded, e.g. source_missing or cloud_copy_deletions)
+    # MUST be cached while preserving storage_billing_complete=False verbatim.
     invalidate_service_cache("svc-a")
     billing_complete["value"] = False
-    usage.usage_current_storage(start="2026-11-24T10:00:05Z", end="2026-11-24T11:00:05Z", source=src_a)
-    usage.usage_current_storage(start="2026-11-24T10:00:30Z", end="2026-11-24T11:00:30Z", source=src_a)
-    assert pg_calls == {"storage": 6, "archive": 6, "billing": 6}
+    r_inc_1 = usage.usage_current_storage(start="2026-11-24T10:00:05Z", end="2026-11-24T11:00:05Z", source=src_a)
+    r_inc_2 = usage.usage_current_storage(start="2026-11-24T10:00:30Z", end="2026-11-24T11:00:30Z", source=src_a)
+    assert r_inc_1.storage_billing_complete is False
+    assert r_inc_2.storage_billing_complete is False
+    assert r_inc_2.is_cached is True
+    assert pg_calls == {"storage": 5, "archive": 5, "billing": 5}
+
+    # Transient Postgres unavailability must NOT be cached so the next request retries
+    class _FailingBillingPG(_FakePG):
+        def storage_billing_summary(self, sid: str, start: Any, end: Any, *, minimum_days: int = 30) -> Any:
+            pg_calls["billing"] += 1
+            raise RuntimeError("pg down")
+
+    invalidate_service_cache("svc-a")
+    monkeypatch.setattr(postgres_control, "PostgresControlPlane", _FailingBillingPG)
+    r_err_1 = usage.usage_current_storage(start="2026-11-24T10:00:05Z", end="2026-11-24T11:00:05Z", source=src_a)
+    r_err_2 = usage.usage_current_storage(start="2026-11-24T10:00:30Z", end="2026-11-24T11:00:30Z", source=src_a)
+    assert r_err_1.storage_billing_complete is False
+    assert r_err_2.storage_billing_complete is False
+    assert "high-scale:postgres_unavailable" in r_err_1.storage_billing_provenance
+    assert pg_calls == {"storage": 7, "archive": 7, "billing": 7}
 
 
 def test_usage_operations_and_log_activity_warm_cache_and_invalidation(monkeypatch):
@@ -462,3 +481,93 @@ def test_prefill_runs_metadata_fastly_and_edge_ratio_concurrently(monkeypatch):
     assert resp.rum_beacons_per_day == 250
     assert resp.requests_per_day == 1000
     assert resp.edge_ratio == 77.5
+
+
+def test_prefill_edge_ratio_bounds_clickhouse_window_and_negative_caches_none(monkeypatch):
+    source = svcconfig.config_to_source({"service_id": "svc-edge-none", "cdn_service_id": "cdn-edge-none"})
+    ch_queries: list[tuple[str, dict[str, Any] | None]] = []
+
+    class _EmptyEdgeCH:
+        def execute(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+            ch_queries.append((sql, params))
+            return [{"edge_ratio": None}]
+
+    class _FakePG:
+        def request_files_per_flush(self, sid: str) -> float:
+            return 2.0
+
+    monkeypatch.setattr(usage, "get_fastly_api_key", lambda _sid: None)
+    monkeypatch.setattr(usage, "api_key_or_mock", lambda k: k)
+    monkeypatch.setattr(
+        usage,
+        "get_high_scale_service_registry",
+        lambda: _hs_registry({"svc-edge-none"}, _EmptyEdgeCH()),
+    )
+    monkeypatch.setattr(usage, "visible_publication_fence_sql", lambda *a, **kw: "1=1")
+    monkeypatch.setattr(svcconfig, "load_config", lambda _n: {})
+    monkeypatch.setattr(svcconfig, "get_status", lambda _n: {})
+    monkeypatch.setattr(svcconfig, "load_usage_logging_config", lambda: {})
+    monkeypatch.setattr(postgres_control, "PostgresControlPlane", _FakePG)
+    monkeypatch.setattr(hs_rum, "rum_beacons_by_date", lambda *a, **kw: {})
+
+    first = asyncio.run(usage.prefill(source))
+    second = asyncio.run(usage.prefill(source))
+    assert first.edge_ratio is None
+    assert second.edge_ratio is None
+    assert len(ch_queries) == 1
+    sql, params = ch_queries[0]
+    assert "event_timestamp >=" in sql
+    assert params is not None and "start_time" in params
+
+
+def test_usage_rum_breakdown_coalesces_concurrent_requests_and_invalidates(monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    src = {"name": "svc-rum-sf", "service_id": "svc-rum-sf"}
+    entered = threading.Event()
+    release = threading.Event()
+    ch_calls = 0
+
+    def slow_beacons(hs_service: Any, start_str: str, end_str: str) -> dict[str, int]:
+        nonlocal ch_calls
+        ch_calls += 1
+        entered.set()
+        release.wait(timeout=2.0)
+        return {"2026-11-24": 333}
+
+    monkeypatch.setattr(usage, "get_high_scale_service_registry", lambda: _hs_registry({"svc-rum-sf"}))
+    monkeypatch.setattr(hs_rum, "rum_beacons_by_date", slow_beacons)
+    monkeypatch.setattr(svcconfig, "load_usage_logging_config", lambda: {"class_a_rate_per_1k": 0.0025})
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f1 = pool.submit(
+            usage.usage_rum_breakdown,
+            start="2026-11-24T10:00:05Z",
+            end="2026-11-24T11:00:05Z",
+            by="day",
+            source=src,
+        )
+        assert entered.wait(timeout=2.0)
+        f2 = pool.submit(
+            usage.usage_rum_breakdown,
+            start="2026-11-24T10:00:30Z",
+            end="2026-11-24T11:00:30Z",
+            by="day",
+            source=src,
+        )
+        release.set()
+        r1 = f1.result()
+        r2 = f2.result()
+
+    assert ch_calls == 1
+    assert r1.total_beacons == r2.total_beacons == 333
+
+    r3 = usage.usage_rum_breakdown(start="2026-11-24T10:00:45Z", end="2026-11-24T11:00:45Z", by="day", source=src)
+    assert ch_calls == 1
+    assert r3.is_cached is True
+
+    invalidate_service_cache("svc-rum-sf")
+    r4 = usage.usage_rum_breakdown(start="2026-11-24T10:00:45Z", end="2026-11-24T11:00:45Z", by="day", source=src)
+    assert ch_calls == 2
+    assert r4.total_beacons == 333
