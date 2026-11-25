@@ -36,6 +36,8 @@ export function resetUsageSettingsCache(
 ): void {
   const abortActive = options.abortActive ?? true;
   settledSettings = null;
+  settledInventory.clear();
+  settledUsageSummaries.clear();
   settingsResets += 1;
   if (abortActive) {
     for (const controller of activeSettingsControllers) {
@@ -66,6 +68,12 @@ export interface CloudStorageInventoryResult {
 
 const INITIAL_INVENTORY_LOOKBACK_DAYS = 2;
 const DEFAULT_INVENTORY_LOOKBACK_DAYS = 30;
+const INVENTORY_TTL_MS = 60_000;
+const sharedInventory = createSharedRequests<CloudStorageInventoryResult>();
+const settledInventory = new Map<
+  string,
+  { at: number; value: CloudStorageInventoryResult }
+>();
 
 export async function fetchCloudStorageInventory(
   options: {
@@ -82,9 +90,11 @@ export async function fetchCloudStorageInventory(
   const now = options.now ?? Date.now();
   const identity = options.identity ?? currentOpsIdentity();
   const read = options.read ?? readLogs;
+  const isDefaultRead = read === readLogs;
 
   const readInventoryWindow = async (
     lookbackDays: number,
+    signal: AbortSignal | undefined,
   ): Promise<CloudStorageInventoryResult> => {
     const result = await read(
       "storage_inventory",
@@ -92,9 +102,9 @@ export async function fetchCloudStorageInventory(
         from: new Date(now - lookbackDays * DAY_MS).toISOString(),
         to: new Date(now).toISOString(),
       },
-      { ...identity, signal: options.signal },
+      { ...identity, signal },
     );
-    assertOpsEpoch(startOpsEpoch, options.signal);
+    assertOpsEpoch(startOpsEpoch, signal);
     if (dashboardCacheIdentity() !== scope) {
       throw settingsAbortError();
     }
@@ -227,14 +237,57 @@ export async function fetchCloudStorageInventory(
     };
   };
 
-  if (options.lookbackDays !== undefined) {
-    return readInventoryWindow(options.lookbackDays);
+  const load = async (
+    signal: AbortSignal | undefined,
+  ): Promise<CloudStorageInventoryResult> => {
+    if (options.lookbackDays !== undefined) {
+      return readInventoryWindow(options.lookbackDays, signal);
+    }
+    const recent = await readInventoryWindow(
+      INITIAL_INVENTORY_LOOKBACK_DAYS,
+      signal,
+    );
+    if (recent.snapshotId !== null) {
+      return recent;
+    }
+    return readInventoryWindow(DEFAULT_INVENTORY_LOOKBACK_DAYS, signal);
+  };
+
+  if (!isDefaultRead) {
+    return load(options.signal);
   }
-  const recent = await readInventoryWindow(INITIAL_INVENTORY_LOOKBACK_DAYS);
-  if (recent.snapshotId !== null) {
-    return recent;
+
+  const cacheKey = JSON.stringify([
+    startOpsEpoch,
+    scope,
+    activeOpsUser(),
+    identity.user,
+    identity.role,
+    Math.floor(now / 60_000),
+    options.lookbackDays ?? "auto",
+  ]);
+  const wallNow = Date.now();
+  for (const [k, entry] of settledInventory) {
+    if (wallNow - entry.at >= INVENTORY_TTL_MS) settledInventory.delete(k);
   }
-  return readInventoryWindow(DEFAULT_INVENTORY_LOOKBACK_DAYS);
+  const cached = settledInventory.get(cacheKey);
+  if (cached) return cached.value;
+
+  return sharedInventory(
+    cacheKey,
+    async (sharedSignal) => {
+      const value = await load(sharedSignal);
+      if (
+        value.complete &&
+        startOpsEpoch === currentOpsCacheEpoch() &&
+        dashboardCacheIdentity() === scope
+      ) {
+        settledInventory.set(cacheKey, { at: Date.now(), value });
+      }
+      return value;
+    },
+    { signal: options.signal },
+  );
 }
 
 /** Two of the server's 6-hour snapshot intervals (`retention::RECONCILE_INTERVAL_S`). */
@@ -1847,10 +1900,17 @@ export async function fetchUsageInput(
     from: new Date(from).toISOString(),
     to: new Date(now).toISOString(),
   };
+  const settingsPromise = readUsageLogging(signal);
   const [settings, ...results] = await Promise.all([
-    readUsageLogging(signal),
+    settingsPromise,
     ...USAGE_KINDS.map((kind) =>
-      read(kind, range, { ...resolvedIdentity, signal }),
+      // Defer fos_usage until settings resolves so a concurrent storageBillingIntervals
+      // call registers the wider 30-day fos_usage read first and this read slices from it.
+      kind === "fos_usage"
+        ? settingsPromise.then(() =>
+            read(kind, range, { ...resolvedIdentity, signal }),
+          )
+        : read(kind, range, { ...resolvedIdentity, signal }),
     ),
   ]);
   assertOpsEpoch(startOpsEpoch, signal);
@@ -2447,7 +2507,12 @@ type UsageSummaryResult = UsageSummary & {
   totalUsd: number;
 };
 
+const SUMMARY_TTL_MS = 15_000;
 const sharedUsageSummaries = createSharedRequests<UsageSummaryResult>();
+const settledUsageSummaries = new Map<
+  string,
+  { at: number; value: UsageSummaryResult }
+>();
 
 export async function fetchUsageSummary(options: {
   from: string | number;
@@ -2459,6 +2524,7 @@ export async function fetchUsageSummary(options: {
   const toMs =
     typeof options.to === "number" ? options.to : Date.parse(options.to);
   const identity = currentOpsIdentity();
+  const startOpsEpoch = currentOpsCacheEpoch();
   const key = JSON.stringify([
     fromMs,
     toMs,
@@ -2466,8 +2532,14 @@ export async function fetchUsageSummary(options: {
     identity.role,
     activeOpsUser(),
     dashboardCacheIdentity(),
-    currentOpsCacheEpoch(),
+    startOpsEpoch,
   ]);
+  const wallNow = Date.now();
+  for (const [k, entry] of settledUsageSummaries) {
+    if (wallNow - entry.at >= SUMMARY_TTL_MS) settledUsageSummaries.delete(k);
+  }
+  const cached = settledUsageSummaries.get(key);
+  if (cached) return cached.value;
   return sharedUsageSummaries(
     key,
     async (sharedSignal) => {
@@ -2493,13 +2565,17 @@ export async function fetchUsageSummary(options: {
         loggedComputeSegments: summary.computeSegments,
         billing: null,
       });
-      return {
+      const result: UsageSummaryResult = {
         ...summary,
         input,
         summary,
         lines: incurred.lines,
         totalUsd: incurred.total,
       };
+      if (startOpsEpoch === currentOpsCacheEpoch()) {
+        settledUsageSummaries.set(key, { at: Date.now(), value: result });
+      }
+      return result;
     },
     { signal: options.signal },
   );

@@ -1,10 +1,14 @@
+import { dashboardCacheIdentity } from "../dashboard/sources";
+import { createSharedRequests } from "../shared-request";
 import { getLoggedTraffic } from "../telemetry/admin";
 import { readLogs } from "../telemetry/client";
 import {
+  activeOpsUser,
   assertOpsEpoch,
   currentOpsCacheEpoch,
   currentOpsIdentity,
 } from "../telemetry/sources";
+import { usageComputeBilling } from "./computeUsage";
 import {
   measureEstimate,
   type EstimateRates,
@@ -22,6 +26,14 @@ import {
 
 /** Days of conversions and billing the unit costs are measured over. */
 export const UNIT_WINDOW_DAYS = 7;
+
+const PREFILL_TTL_MS = 15_000;
+const sharedPrefills = createSharedRequests<MeasuredEstimate>();
+const settledPrefills = new Map<string, { at: number; value: MeasuredEstimate }>();
+
+export function resetEstimatePrefillCache(): void {
+  settledPrefills.clear();
+}
 
 type Reader = (
   kind: "ingest_files",
@@ -50,17 +62,21 @@ export interface MeasuredEstimate extends EstimatePrefill {
   fosRegion?: string;
 }
 
-/** Everything the estimator measures from this install; any source that fails keeps its defaults. */
-export async function fetchEstimatePrefill(
-  identity: { user?: string; role?: string } = currentOpsIdentity(),
-  read: UsageLogReader & Reader = readLogs as UsageLogReader & Reader,
-  signal?: AbortSignal,
-  now = Date.now(),
+async function computeEstimatePrefill(
+  resolvedIdentity: { user: string; role: string },
+  read: UsageLogReader & Reader,
+  signal: AbortSignal | undefined,
+  resolvedNow: number,
+  hasExplicitNow: boolean,
+  startOpsEpoch: number,
 ): Promise<MeasuredEstimate> {
-  const startOpsEpoch = currentOpsCacheEpoch();
-  assertOpsEpoch(startOpsEpoch, signal);
-  const resolvedIdentity = currentOpsIdentity(identity);
-  const range = { from: now - UNIT_WINDOW_DAYS * DAY_MS, to: now };
+  const range = { from: resolvedNow - UNIT_WINDOW_DAYS * DAY_MS, to: resolvedNow };
+  // When using the default minute-quantized window, extend cron_runs by 60s to the
+  // ceiling minute so concurrent 24h usage summary AND unquantized 1h last-sync reads
+  // both slice from this single 7d cron_runs read.
+  const cronRange = hasExplicitNow
+    ? range
+    : { from: range.from, to: resolvedNow + 60_000 };
   const iso = {
     from: new Date(range.from).toISOString(),
     to: new Date(range.to).toISOString(),
@@ -73,19 +89,31 @@ export async function fetchEstimatePrefill(
       return null;
     });
   const settingsPromise = fetchUsageSettings(signal);
+  // Yield one microtask after settings resolves so a concurrent /api/usage/current-storage
+  // call registers its 31d fos_usage and ingest_files superset reads first.
+  const afterStorageBillingStart = settingsPromise.then(async (s) => {
+    await Promise.resolve();
+    return s;
+  });
+  const isDefaultRead = read === (readLogs as UsageLogReader & Reader);
+  const billingPromise = isDefaultRead
+    ? optional(usageComputeBilling(range, signal))
+    : optional(fetchComputeBilling(range, signal));
   const [settings, traffic, billing, runs, fos, files] = await Promise.all([
     settingsPromise,
     optional(getLoggedTraffic(signal)),
-    optional(fetchComputeBilling(range, signal)),
-    optional(fetchUsageKind("cron_runs", range, resolvedIdentity, read, signal)),
-    settingsPromise.then((s) =>
+    billingPromise,
+    optional(fetchUsageKind("cron_runs", cronRange, resolvedIdentity, read, signal)),
+    afterStorageBillingStart.then((s) =>
       s.enabled
         ? optional(
             fetchUsageKind("fos_usage", range, resolvedIdentity, read, signal),
           )
         : null,
     ),
-    optional(read("ingest_files", iso, { ...resolvedIdentity, signal })),
+    afterStorageBillingStart.then(() =>
+      optional(read("ingest_files", iso, { ...resolvedIdentity, signal })),
+    ),
   ]);
   assertOpsEpoch(startOpsEpoch, signal);
   const ingest = (runs ?? []).filter(
@@ -134,4 +162,61 @@ export async function fetchEstimatePrefill(
     usageLogging: fos !== null,
     fosRegion: traffic?.logging?.fos_region,
   };
+}
+
+/** Everything the estimator measures from this install; any source that fails keeps its defaults. */
+export async function fetchEstimatePrefill(
+  identity: { user?: string; role?: string } = currentOpsIdentity(),
+  read: UsageLogReader & Reader = readLogs as UsageLogReader & Reader,
+  signal?: AbortSignal,
+  now?: number,
+): Promise<MeasuredEstimate> {
+  const startOpsEpoch = currentOpsCacheEpoch();
+  assertOpsEpoch(startOpsEpoch, signal);
+  const resolvedIdentity = currentOpsIdentity(identity);
+  const hasExplicitNow = now !== undefined;
+  const resolvedNow = now ?? Math.floor(Date.now() / 60_000) * 60_000;
+  const isDefaultRead = read === (readLogs as UsageLogReader & Reader);
+  if (!isDefaultRead || hasExplicitNow) {
+    return computeEstimatePrefill(
+      resolvedIdentity,
+      read,
+      signal,
+      resolvedNow,
+      hasExplicitNow,
+      startOpsEpoch,
+    );
+  }
+  const cacheKey = JSON.stringify([
+    startOpsEpoch,
+    dashboardCacheIdentity(),
+    activeOpsUser(),
+    resolvedIdentity.user,
+    resolvedIdentity.role,
+    resolvedNow,
+  ]);
+  const wallNow = Date.now();
+  for (const [k, entry] of settledPrefills) {
+    if (wallNow - entry.at >= PREFILL_TTL_MS) settledPrefills.delete(k);
+  }
+  const cached = settledPrefills.get(cacheKey);
+  if (cached) return cached.value;
+  return sharedPrefills(
+    cacheKey,
+    async (sharedSignal) => {
+      const value = await computeEstimatePrefill(
+        resolvedIdentity,
+        read,
+        sharedSignal,
+        resolvedNow,
+        false,
+        startOpsEpoch,
+      );
+      if (startOpsEpoch === currentOpsCacheEpoch()) {
+        settledPrefills.set(cacheKey, { at: Date.now(), value });
+      }
+      return value;
+    },
+    { signal },
+  );
 }

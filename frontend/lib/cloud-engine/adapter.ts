@@ -193,7 +193,7 @@ async function storageBillingIntervals(
   now: number,
   fromMs: number,
   toMs: number,
-  summaryRead: ReturnType<typeof fetchUsageSummary>,
+  getSummaryRead: () => ReturnType<typeof fetchUsageSummary>,
   signal: AbortSignal,
   checkUsageEpoch: () => void,
 ): Promise<CloudStorageBillingResult> {
@@ -222,7 +222,7 @@ async function storageBillingIntervals(
   const coversBillingWindow =
     fromMs <= deletionWindow.from && toMs >= deletionWindow.to;
   const fosSourceRead = coversBillingWindow
-    ? summaryRead.then(({ input }) => ({
+    ? getSummaryRead().then(({ input }) => ({
         rows: input.rows.fos_usage,
         complete: input.telemetryCoverage?.fos_usage === true,
       }))
@@ -2402,16 +2402,18 @@ async function dispatchCloudRequest(
     const costBilling = pathname === "/api/usage/current-storage"
       ? usageComputeBilling({ from: fromMs, to: toMs }, request.signal)
       : Promise.resolve(null);
-    const summaryRead = fetchUsageSummary({
+    let summaryRead!: ReturnType<typeof fetchUsageSummary>;
+    // Start the 30-day lifecycle reads before fetchUsageSummary so their settings.then()
+    // registers the wider fos_usage read first and fetchUsageSummary slices from it.
+    const storageBillingRead = pathname === "/api/usage/current-storage"
+      ? storageBillingIntervals(now, fromMs, toMs, () => summaryRead, request.signal, checkUsageEpoch)
+      : null;
+    storageBillingRead?.catch(() => {});
+    summaryRead = fetchUsageSummary({
       from: fromMs,
       to: toMs,
       signal: request.signal,
     });
-    // The minimum-billed-days lifecycle reads span 30 days; start them with the range summary.
-    const storageBillingRead = pathname === "/api/usage/current-storage"
-      ? storageBillingIntervals(now, fromMs, toMs, summaryRead, request.signal, checkUsageEpoch)
-      : null;
-    storageBillingRead?.catch(() => {});
     const usageRes = await summaryRead;
     checkUsageEpoch();
     const { input, summary } = usageRes;

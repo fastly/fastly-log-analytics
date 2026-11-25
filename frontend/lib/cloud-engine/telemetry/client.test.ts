@@ -123,14 +123,127 @@ describe("readLogs request sharing", () => {
     await expect(retry).resolves.toEqual(result("cron_runs"));
   });
 
-  it("reads again after the shared read has settled", async () => {
+  it("memoizes settled reads within the short TTL and reads again after TTL expiry or cache clear", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.parse("2026-11-08T00:00:00.000Z"));
+    try {
+      const { readLogs } = await load();
+      const { clearOpsCaches } = await import("./sources");
+      const first = readLogs("cron_runs", range, identity);
+      const worker = MockWorker.instances[0];
+      worker.emit({ id: worker.jobs()[0].id, type: "result", result: result("cron_runs") });
+      await expect(first).resolves.toEqual(result("cron_runs"));
+
+      // Within 15s TTL: served from settled cache without starting a second worker job.
+      await expect(readLogs("cron_runs", range, identity)).resolves.toEqual(result("cron_runs"));
+      expect(worker.jobs()).toHaveLength(1);
+
+      // After TTL expires: dispatches a fresh worker job.
+      vi.advanceTimersByTime(15_001);
+      const second = readLogs("cron_runs", range, identity);
+      expect(worker.jobs()).toHaveLength(2);
+      worker.emit({ id: worker.jobs()[1].id, type: "result", result: result("cron_runs") });
+      await expect(second).resolves.toEqual(result("cron_runs"));
+
+      // clearOpsCaches() invalidates the settled cache immediately.
+      await clearOpsCaches();
+      const third = readLogs("cron_runs", range, identity);
+      expect(worker.jobs()).toHaveLength(3);
+      worker.emit({ id: worker.jobs()[2].id, type: "result", result: result("cron_runs") });
+      await expect(third).resolves.toEqual(result("cron_runs"));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("slices narrower in-flight and settled subset windows from a covering superset read", async () => {
     const { readLogs } = await load();
-    const first = readLogs("cron_runs", range, identity);
+    const wide = { from: "2026-10-08T00:00:00.000Z", to: "2026-11-08T00:00:00.000Z" };
+    const day = { from: "2026-11-07T00:00:00.000Z", to: "2026-11-08T00:00:00.000Z" };
+    const week = { from: "2026-11-01T00:00:00.000Z", to: "2026-11-08T00:00:00.000Z" };
+
+    const wideRead = readLogs("fos_usage", wide, identity);
+    const dayRead = readLogs("fos_usage", day, identity);
     const worker = MockWorker.instances[0];
-    worker.emit({ id: worker.jobs()[0].id, type: "result", result: result("cron_runs") });
-    await first;
-    void readLogs("cron_runs", range, identity);
+    // Concurrent 24h read attaches to the in-flight 31d read.
+    expect(worker.jobs()).toHaveLength(1);
+
+    const oldRow = { event_id: "old", timestamp: Date.parse("2026-10-15T12:00:00.000Z") };
+    const weekRow = { event_id: "week", timestamp: Date.parse("2026-11-03T12:00:00.000Z") };
+    const dayRow = { event_id: "day", timestamp: Date.parse("2026-11-07T12:00:00.000Z") };
+    worker.emit({
+      id: worker.jobs()[0].id,
+      type: "result",
+      result: {
+        kind: "fos_usage",
+        from: wide.from,
+        to: wide.to,
+        rows: [oldRow, weekRow, dayRow],
+        liveTruncated: false,
+      },
+    });
+
+    await expect(wideRead).resolves.toMatchObject({ rows: [oldRow, weekRow, dayRow] });
+    await expect(dayRead).resolves.toMatchObject({
+      from: day.from,
+      to: day.to,
+      rows: [dayRow],
+    });
+
+    // Settled 31d read also serves a subsequent 7d read with zero new worker jobs.
+    const weekRead = await readLogs("fos_usage", week, identity);
+    expect(worker.jobs()).toHaveLength(1);
+    expect(weekRead).toMatchObject({
+      from: week.from,
+      to: week.to,
+      rows: [weekRow, dayRow],
+    });
+  });
+
+  it("falls back to a fresh read when a covering superset read was truncated", async () => {
+    const { readLogs } = await load();
+    const wide = { from: "2026-10-08T00:00:00.000Z", to: "2026-11-08T00:00:00.000Z" };
+    const day = { from: "2026-11-07T00:00:00.000Z", to: "2026-11-08T00:00:00.000Z" };
+
+    const wideRead = readLogs("fos_usage", wide, identity);
+    const dayRead = readLogs("fos_usage", day, identity);
+    const worker = MockWorker.instances[0];
+    expect(worker.jobs()).toHaveLength(1);
+
+    worker.emit({
+      id: worker.jobs()[0].id,
+      type: "result",
+      result: {
+        kind: "fos_usage",
+        from: wide.from,
+        to: wide.to,
+        rows: [],
+        liveTruncated: true,
+      },
+    });
+
+    await expect(wideRead).resolves.toMatchObject({ liveTruncated: true });
+    // Wait a microtask for dayRead to launch its fallback job.
+    await Promise.resolve();
     expect(worker.jobs()).toHaveLength(2);
+    expect(worker.jobs()[1].options).toMatchObject({ kind: "fos_usage", ...day });
+
+    const dayRow = { event_id: "day", timestamp: Date.parse("2026-11-07T12:00:00.000Z") };
+    worker.emit({
+      id: worker.jobs()[1].id,
+      type: "result",
+      result: {
+        kind: "fos_usage",
+        from: day.from,
+        to: day.to,
+        rows: [dayRow],
+        liveTruncated: false,
+      },
+    });
+    await expect(dayRead).resolves.toMatchObject({
+      liveTruncated: false,
+      rows: [dayRow],
+    });
   });
 
   it("reports shared progress to every caller", async () => {

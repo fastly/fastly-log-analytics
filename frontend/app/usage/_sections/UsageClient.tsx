@@ -93,6 +93,22 @@ export function UsagePageContent({
   const isRumEnabled = activeSvc?.rum_enabled ?? false
   const isReady = useIsDataReady()
   const activityBy = config.effectiveInterval.split(' ')[1] || 'hour'
+  const estimatorRef = useRef<HTMLDivElement>(null)
+  const estimatorVisible = useInViewOnce(estimatorRef, { rootMargin: '600px' })
+  const cloudMode = isCloudMode()
+
+  // Declare prefill before current-storage so on Cloud its 7d cron_runs read starts first
+  // and current-storage/useLastSync slice their 24h/1h cron_runs windows from it.
+  const { data: prefillFull, isLoading: loadingPrefillFull, isError: prefillFullFailed } = useQuery({
+    queryKey: ['usage', 'prefill-full', activeServiceId],
+    queryFn: async ({ signal }) => {
+      return unwrapClient(client.GET('/api/usage/prefill', { signal }))
+    },
+    // On Cloud, start prefill in the initial wave alongside the 24h/30d reads so the
+    // loading popup doesn't finish and then jump into a second file-loading wave.
+    enabled: isReady && (cloudMode || estimatorVisible),
+    staleTime: 5 * 60_000,
+  })
 
   const {
     data: storage,
@@ -205,7 +221,7 @@ export function UsagePageContent({
         }),
       )
     },
-    enabled: isReady,
+    enabled: isReady && isRumEnabled,
     staleTime: 60_000,
   })
 
@@ -219,22 +235,6 @@ export function UsagePageContent({
       return unwrapClient(client.GET('/api/usage/prefill/rates', { signal }))
     },
     enabled: isReady,
-    staleTime: 5 * 60_000,
-  })
-
-  const estimatorRef = useRef<HTMLDivElement>(null)
-  const estimatorVisible = useInViewOnce(estimatorRef, { rootMargin: '600px' })
-
-  const cloudMode = isCloudMode()
-
-  const { data: prefillFull, isLoading: loadingPrefillFull, isError: prefillFullFailed } = useQuery({
-    queryKey: ['usage', 'prefill-full', activeServiceId],
-    queryFn: async ({ signal }) => {
-      return unwrapClient(client.GET('/api/usage/prefill', { signal }))
-    },
-    // On Cloud, start prefill in the initial wave alongside the 24h/30d reads so the
-    // loading popup doesn't finish and then jump into a second file-loading wave.
-    enabled: isReady && (cloudMode || estimatorVisible),
     staleTime: 5 * 60_000,
   })
 
