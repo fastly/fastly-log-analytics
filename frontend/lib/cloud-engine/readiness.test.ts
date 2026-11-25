@@ -2973,6 +2973,36 @@ it("SEC-T5-ITER40-FE-03: prevents non-contraction apostrophe mismatch and cross-
         ["example.com", "100ms", "response", "cache"],
         "Error: Runtime Error: [redacted]",
       ],
+      [
+        'Runtime Error: "Cookie": https://example.com = 100ms; mode = server',
+        ["example.com", "100ms", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": Digest https://example.com = 100ms, mode = server',
+        ["example.com", "100ms", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Cookie: https://example.com = 100ms; mode = server",
+        ["example.com", "100ms", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Authorization: Digest https://example.com = 100ms, mode = server",
+        ["example.com", "100ms", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Cookie": sid = https://example.com = https://b.com = 100ms; mode = server',
+        ["example.com", "b.com", "100ms", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Cookie": sid=123; https://example.com = https://b.com = 100ms; mode = server',
+        ["123", "example.com", "b.com", "100ms", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
     ];
     for (const [msg, forbidden, expectedExact] of cases) {
       const err = new Error(msg);

@@ -1728,6 +1728,39 @@ function scanSingleSecretValueEnd(
   return k;
 }
 
+function consumeChainedUrlEquals(
+  line: string,
+  segStart: number,
+  segEnd: number,
+  isCookie: boolean,
+  allowQuoted: boolean,
+  escapeState?: QuoteEscapeState,
+): number {
+  const len = line.length;
+  let curStart = segStart;
+  let curEnd = segEnd;
+  while (curEnd > curStart) {
+    const slice = line.slice(curStart, curEnd);
+    const hasUrl = slice.endsWith("[url]") || (allowQuoted && slice.includes("://"));
+    if (!hasUrl) break;
+    let afterUrl = curEnd;
+    const afterUrlWsLimit = Math.min(len, curEnd + 16);
+    while (afterUrl < afterUrlWsLimit && isInlineWs(line[afterUrl])) afterUrl += 1;
+    if (line[afterUrl] !== "=") break;
+    let val2Start = afterUrl + 1;
+    while (val2Start < len && isInlineWs(line[val2Start])) val2Start += 1;
+    const val2End = scanSingleSecretValueEnd(line, val2Start, true, true, isCookie, allowQuoted, escapeState);
+    if (val2End > val2Start) {
+      curStart = val2Start;
+      curEnd = val2End;
+    } else {
+      curEnd = afterUrl + 1;
+      break;
+    }
+  }
+  return curEnd;
+}
+
 function tryScanKeyValueParamEnd(
   line: string,
   p: number,
@@ -1740,6 +1773,10 @@ function tryScanKeyValueParamEnd(
   let keyLower = "";
   if (line.startsWith("[redacted]", p)) {
     k = p + 10;
+  } else if (line.startsWith("[url]", p)) {
+    k = p + 5;
+  } else if (allowQuoted && tryScanRawUrlEnd(line, p) !== -1) {
+    k = tryScanRawUrlEnd(line, p);
   } else if (allowQuoted && (line[p] === '"' || line[p] === "'" || line[p] === "`")) {
     const q = line[p]!;
     const useBackslash = escapeState ? escapeState.backslashEscapesQuotes : true;
@@ -1809,18 +1846,7 @@ function tryScanKeyValueParamEnd(
     }
   }
   let vEnd = scanSingleSecretValueEnd(line, vStart, true, true, isCookie, allowQuoted, escapeState);
-  const valSlice = vEnd > vStart ? line.slice(vStart, vEnd) : "";
-  if (vEnd > vStart && (valSlice.endsWith("[url]") || (allowQuoted && valSlice.includes("://")))) {
-    let afterUrl = vEnd;
-    const afterUrlWsLimit = Math.min(len, vEnd + 16);
-    while (afterUrl < afterUrlWsLimit && isInlineWs(line[afterUrl])) afterUrl += 1;
-    if (line[afterUrl] === "=") {
-      let val2Start = afterUrl + 1;
-      while (val2Start < len && isInlineWs(line[val2Start])) val2Start += 1;
-      const val2End = scanSingleSecretValueEnd(line, val2Start, true, true, isCookie, allowQuoted, escapeState);
-      vEnd = val2End > val2Start ? val2End : afterUrl + 1;
-    }
-  }
+  vEnd = consumeChainedUrlEquals(line, vStart, vEnd, isCookie, allowQuoted, escapeState);
   return vEnd > vStart ? vEnd : eqPos + 1;
 }
 
@@ -1847,32 +1873,13 @@ function scanContinuationParamsEnd(
         continue;
       }
       if (line.startsWith("[url]", next)) {
-        const afterUrl = next + 5;
-        let ws = afterUrl;
-        while (ws < len && isInlineWs(line[ws])) ws += 1;
-        if (line[ws] === "=") {
-          let vStart = ws + 1;
-          while (vStart < len && isInlineWs(line[vStart])) vStart += 1;
-          const vEnd = scanSingleSecretValueEnd(line, vStart, true, true, true, allowQuoted, escapeState);
-          end = vEnd > vStart ? vEnd : ws + 1;
-        } else {
-          end = afterUrl;
-        }
+        end = consumeChainedUrlEquals(line, next, next + 5, true, allowQuoted, escapeState);
         continue;
       }
       if (allowQuoted) {
         const rawUrlEnd = tryScanRawUrlEnd(line, next);
         if (rawUrlEnd !== -1) {
-          let ws = rawUrlEnd;
-          while (ws < len && isInlineWs(line[ws])) ws += 1;
-          if (line[ws] === "=") {
-            let vStart = ws + 1;
-            while (vStart < len && isInlineWs(line[vStart])) vStart += 1;
-            const vEnd = scanSingleSecretValueEnd(line, vStart, true, true, true, allowQuoted, escapeState);
-            end = vEnd > vStart ? vEnd : ws + 1;
-          } else {
-            end = rawUrlEnd;
-          }
+          end = consumeChainedUrlEquals(line, next, rawUrlEnd, true, allowQuoted, escapeState);
           continue;
         }
       }
@@ -1907,32 +1914,13 @@ function scanContinuationParamsEnd(
         continue;
       }
       if (line.startsWith("[url]", next)) {
-        const afterUrl = next + 5;
-        let ws = afterUrl;
-        while (ws < len && isInlineWs(line[ws])) ws += 1;
-        if (line[ws] === "=") {
-          let vStart = ws + 1;
-          while (vStart < len && isInlineWs(line[vStart])) vStart += 1;
-          const vEnd = scanSingleSecretValueEnd(line, vStart, true, true, false, allowQuoted, escapeState);
-          end = vEnd > vStart ? vEnd : ws + 1;
-        } else {
-          end = afterUrl;
-        }
+        end = consumeChainedUrlEquals(line, next, next + 5, false, allowQuoted, escapeState);
         continue;
       }
       if (allowQuoted) {
         const rawUrlEnd = tryScanRawUrlEnd(line, next);
         if (rawUrlEnd !== -1) {
-          let ws = rawUrlEnd;
-          while (ws < len && isInlineWs(line[ws])) ws += 1;
-          if (line[ws] === "=") {
-            let vStart = ws + 1;
-            while (vStart < len && isInlineWs(line[vStart])) vStart += 1;
-            const vEnd = scanSingleSecretValueEnd(line, vStart, true, true, false, allowQuoted, escapeState);
-            end = vEnd > vStart ? vEnd : ws + 1;
-          } else {
-            end = rawUrlEnd;
-          }
+          end = consumeChainedUrlEquals(line, next, rawUrlEnd, false, allowQuoted, escapeState);
           continue;
         }
       }
