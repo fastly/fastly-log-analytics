@@ -439,6 +439,8 @@ class ScoringStatusResponse(PassthroughModel):
     drift_detail: str | None = None
     drift_known: bool | None = None
     preflight_pragmas_ready: bool | None = None
+    capture: str | None = None
+    scoring_fields_enabled: bool | None = None
 
 
 class _ScoringConfigBase(PassthroughModel):

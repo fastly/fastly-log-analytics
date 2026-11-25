@@ -225,7 +225,42 @@ export function buildRumWhere(
   return clauses.join(" AND ");
 }
 
-const RUM_ROW_WEIGHT = "CASE WHEN coalesce(sample_rate, 1.0) > 0 AND coalesce(sample_rate, 1.0) < 1.0 THEN 1.0 / sample_rate ELSE 1.0 END";
+const RUM_SAMPLED_ROW_WEIGHT = "CASE WHEN coalesce(sample_rate, 1.0) > 0 AND coalesce(sample_rate, 1.0) < 1.0 THEN 1.0 / sample_rate ELSE 1.0 END";
+const RUM_SAMPLED_FLAG = "coalesce(bool_or(coalesce(sample_rate, 1.0) > 0 AND coalesce(sample_rate, 1.0) < 1.0), FALSE)";
+
+export interface RumWeightExpr {
+  weight: string;
+  weightWithAlias: (alias: string) => string;
+  sampled: string;
+}
+
+const SAMPLED_WEIGHT_EXPR: RumWeightExpr = {
+  weight: RUM_SAMPLED_ROW_WEIGHT,
+  weightWithAlias: (alias: string) =>
+    `CASE WHEN coalesce(${alias}.sample_rate, 1.0) > 0 AND coalesce(${alias}.sample_rate, 1.0) < 1.0 THEN 1.0 / ${alias}.sample_rate ELSE 1.0 END`,
+  sampled: RUM_SAMPLED_FLAG,
+};
+
+const UNWEIGHTED_EXPR: RumWeightExpr = {
+  weight: "1.0",
+  weightWithAlias: () => "1.0",
+  sampled: "FALSE",
+};
+
+/** Probe whether a RUM table exposes `sample_rate` before interpolating weight SQL. */
+export async function rumRowWeightExpr(
+  engine: Pick<ReturnType<typeof getDuckDBEngine>["readContext"] extends () => infer T ? T : never, "executeSql">,
+  table: "client_vitals" | "client_errors",
+  signal?: AbortSignal,
+): Promise<RumWeightExpr> {
+  try {
+    await engine.executeSql(`SELECT sample_rate FROM ${table} LIMIT 0`, [], signal);
+    return SAMPLED_WEIGHT_EXPR;
+  } catch (err) {
+    if (signal?.aborted) throw err;
+    return UNWEIGHTED_EXPR;
+  }
+}
 
 export async function queryRumAnalytics(params: RumQueryParams = {}) {
   if (params.rollupSource && rumRollupEligible(params)) {
@@ -235,6 +270,10 @@ export async function queryRumAnalytics(params: RumQueryParams = {}) {
   const engine = params.engine ?? getDuckDBEngine().readContext();
   const where = buildRumWhere(params);
   const errorWhere = buildRumWhere(params, "client_errors");
+  const [vitalsWeight, errorsWeight] = await Promise.all([
+    rumRowWeightExpr(engine, "client_vitals", params.signal),
+    rumRowWeightExpr(engine, "client_errors", params.signal),
+  ]);
 
   const countRows = await engine.executeSql<{
     vitals_cnt: number;
@@ -242,9 +281,9 @@ export async function queryRumAnalytics(params: RumQueryParams = {}) {
     sampled: boolean;
   }>(
     `SELECT
-      coalesce(round(sum(${RUM_ROW_WEIGHT})), 0)::BIGINT AS vitals_cnt,
+      coalesce(round(sum(${vitalsWeight.weight})), 0)::BIGINT AS vitals_cnt,
       COUNT(DISTINCT NULLIF(session_id, ''))::BIGINT AS sessions_cnt,
-      coalesce(bool_or(coalesce(sample_rate, 1.0) > 0 AND coalesce(sample_rate, 1.0) < 1.0), FALSE) AS sampled
+      ${vitalsWeight.sampled} AS sampled
     FROM client_vitals
     WHERE ${where}`,
     [],
@@ -257,10 +296,10 @@ export async function queryRumAnalytics(params: RumQueryParams = {}) {
     sampled: boolean;
   }>(
     `SELECT
-      coalesce(round(sum(${RUM_ROW_WEIGHT})), 0)::BIGINT AS errors_cnt,
+      coalesce(round(sum(${errorsWeight.weight})), 0)::BIGINT AS errors_cnt,
       COUNT(DISTINCT NULLIF(session_id, ''))::BIGINT AS affected_sessions,
       COUNT(DISTINCT COALESCE(NULLIF(error_message, ''), NULLIF(message, '')))::BIGINT AS unique_msgs,
-      coalesce(bool_or(coalesce(sample_rate, 1.0) > 0 AND coalesce(sample_rate, 1.0) < 1.0), FALSE) AS sampled
+      ${errorsWeight.sampled} AS sampled
     FROM client_errors
     WHERE ${errorWhere}`,
     [],
@@ -297,11 +336,11 @@ export async function queryRumAnalytics(params: RumQueryParams = {}) {
   }>(
     `SELECT
       UPPER(COALESCE(metric_name, '')) AS metric,
-      coalesce(round(sum(${RUM_ROW_WEIGHT})), 0)::BIGINT AS cnt,
+      coalesce(round(sum(${vitalsWeight.weight})), 0)::BIGINT AS cnt,
       QUANTILE_CONT(metric_value, 0.5)::DOUBLE AS p50,
       QUANTILE_CONT(metric_value, 0.75)::DOUBLE AS p75,
       QUANTILE_CONT(metric_value, 0.95)::DOUBLE AS p95,
-      coalesce(round(sum(${RUM_ROW_WEIGHT}) FILTER (WHERE
+      coalesce(round(sum(${vitalsWeight.weight}) FILTER (WHERE
         CASE UPPER(COALESCE(metric_name, ''))
           WHEN 'LCP' THEN metric_value <= 2500
           WHEN 'CLS' THEN metric_value <= 0.1
@@ -311,7 +350,7 @@ export async function queryRumAnalytics(params: RumQueryParams = {}) {
           ELSE metric_value <= 2500
         END
       )), 0)::BIGINT AS good_cnt,
-      coalesce(round(sum(${RUM_ROW_WEIGHT}) FILTER (WHERE
+      coalesce(round(sum(${vitalsWeight.weight}) FILTER (WHERE
         CASE UPPER(COALESCE(metric_name, ''))
           WHEN 'LCP' THEN metric_value > 4000
           WHEN 'CLS' THEN metric_value > 0.25
@@ -360,7 +399,7 @@ export async function queryRumAnalytics(params: RumQueryParams = {}) {
   const worstPageRows = await engine.executeSql<Record<string, unknown>>(
     `SELECT
       COALESCE(page_url, url, path, '/') AS page_url,
-      coalesce(round(sum(${RUM_ROW_WEIGHT})), 0)::BIGINT AS sample_count,
+      coalesce(round(sum(${vitalsWeight.weight})), 0)::BIGINT AS sample_count,
       QUANTILE_CONT(metric_value, 0.75) FILTER (WHERE UPPER(metric_name) = 'LCP')::DOUBLE AS lcp_p75,
       QUANTILE_CONT(metric_value, 0.75) FILTER (WHERE UPPER(metric_name) = 'CLS')::DOUBLE AS cls_p75,
       QUANTILE_CONT(metric_value, 0.75) FILTER (WHERE UPPER(metric_name) = 'INP')::DOUBLE AS inp_p75
@@ -384,22 +423,22 @@ export async function queryRumAnalytics(params: RumQueryParams = {}) {
 
   const [browserRows, osRows, deviceRows, connRows] = await Promise.all([
     engine.executeSql<{ name: string; count: number }>(
-      `SELECT COALESCE(browser_name, 'Unknown') AS name, coalesce(round(sum(${RUM_ROW_WEIGHT})), 0)::BIGINT AS count FROM client_vitals WHERE ${where} GROUP BY 1 ORDER BY count DESC LIMIT 20`,
+      `SELECT COALESCE(browser_name, 'Unknown') AS name, coalesce(round(sum(${vitalsWeight.weight})), 0)::BIGINT AS count FROM client_vitals WHERE ${where} GROUP BY 1 ORDER BY count DESC LIMIT 20`,
       [],
       params.signal,
     ),
     engine.executeSql<{ name: string; count: number }>(
-      `SELECT COALESCE(os_name, 'Unknown') AS name, coalesce(round(sum(${RUM_ROW_WEIGHT})), 0)::BIGINT AS count FROM client_vitals WHERE ${where} GROUP BY 1 ORDER BY count DESC LIMIT 20`,
+      `SELECT COALESCE(os_name, 'Unknown') AS name, coalesce(round(sum(${vitalsWeight.weight})), 0)::BIGINT AS count FROM client_vitals WHERE ${where} GROUP BY 1 ORDER BY count DESC LIMIT 20`,
       [],
       params.signal,
     ),
     engine.executeSql<{ name: string; count: number }>(
-      `SELECT COALESCE(device_type, 'Unknown') AS name, coalesce(round(sum(${RUM_ROW_WEIGHT})), 0)::BIGINT AS count FROM client_vitals WHERE ${where} GROUP BY 1 ORDER BY count DESC LIMIT 20`,
+      `SELECT COALESCE(device_type, 'Unknown') AS name, coalesce(round(sum(${vitalsWeight.weight})), 0)::BIGINT AS count FROM client_vitals WHERE ${where} GROUP BY 1 ORDER BY count DESC LIMIT 20`,
       [],
       params.signal,
     ),
     engine.executeSql<{ name: string; count: number }>(
-      `SELECT COALESCE(connection_type, 'Unknown') AS name, coalesce(round(sum(${RUM_ROW_WEIGHT})), 0)::BIGINT AS count FROM client_vitals WHERE ${where} GROUP BY 1 ORDER BY count DESC LIMIT 20`,
+      `SELECT COALESCE(connection_type, 'Unknown') AS name, coalesce(round(sum(${vitalsWeight.weight})), 0)::BIGINT AS count FROM client_vitals WHERE ${where} GROUP BY 1 ORDER BY count DESC LIMIT 20`,
       [],
       params.signal,
     ),
@@ -416,7 +455,7 @@ export async function queryRumAnalytics(params: RumQueryParams = {}) {
     `SELECT
       COALESCE(NULLIF(error_message, ''), NULLIF(message, ''), 'Unknown Error') AS message,
       COALESCE(filename, source, '') AS source,
-      coalesce(round(sum(${RUM_ROW_WEIGHT})), 0)::BIGINT AS count,
+      coalesce(round(sum(${errorsWeight.weight})), 0)::BIGINT AS count,
       MIN(lineno)::BIGINT AS lineno,
       MIN(colno)::BIGINT AS colno,
       COUNT(DISTINCT NULLIF(session_id, ''))::BIGINT AS affected_sessions,

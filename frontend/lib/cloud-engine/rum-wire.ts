@@ -2,12 +2,11 @@ import { loadAsnNames } from "./asn-names";
 import { getDuckDBEngine, duckSqlString } from "./dashboard/duckdb";
 import { parseEpochMs, roundTo } from "./engine-utils";
 import { formatAsnLabel } from "./performance";
-import { buildRumWhere, queryRumAnalytics, queryRumLiveEvents, type RumQueryParams } from "./rum";
+import { buildRumWhere, queryRumAnalytics, queryRumLiveEvents, rumRowWeightExpr, type RumQueryParams } from "./rum";
 import { queryRumWireFromRollup, type RumRollupSource } from "./rum-rollup";
 
 const BEACON_IDENTITY = `coalesce(nullif(request_event_id, ''), nullif(client_id, '') || '_' || round(ts_ms / 1000.0)::BIGINT::VARCHAR,
   scoped_key || '_' || ts_ms::VARCHAR)`;
-const ROW_WEIGHT = `CASE WHEN coalesce(sample_rate, 1.0) > 0 AND coalesce(sample_rate, 1.0) < 1.0 THEN 1.0 / sample_rate ELSE 1.0 END`;
 const PAGE_VITALS = `coalesce(metric_name, '') <> 'ttlb'`;
 const HOUR_MS = 3_600_000;
 const DAY_MS = 86_400_000;
@@ -26,9 +25,13 @@ export async function cloudRumUsage(params: RumQueryParams, classARate: number) 
   const engine = params.engine ?? getDuckDBEngine().readContext();
   const where = buildRumWhere(params);
   const errorWhere = buildRumWhere(params, "client_errors");
+  const [vitalsWeight, errorsWeight] = await Promise.all([
+    rumRowWeightExpr(engine, "client_vitals", params.signal),
+    rumRowWeightExpr(engine, "client_errors", params.signal),
+  ]);
   const rows = await engine.executeSql<Record<string, unknown>>(`WITH events AS (
-    SELECT ts_ms, ${BEACON_IDENTITY} AS beacon_id, ${ROW_WEIGHT} AS w FROM client_vitals WHERE ${where} AND ${PAGE_VITALS}
-    UNION ALL SELECT ts_ms, ${BEACON_IDENTITY}, ${ROW_WEIGHT} AS w FROM client_errors WHERE ${errorWhere}
+    SELECT ts_ms, ${BEACON_IDENTITY} AS beacon_id, ${vitalsWeight.weight} AS w FROM client_vitals WHERE ${where} AND ${PAGE_VITALS}
+    UNION ALL SELECT ts_ms, ${BEACON_IDENTITY}, ${errorsWeight.weight} AS w FROM client_errors WHERE ${errorWhere}
   ), per_beacon AS (
     SELECT strftime(epoch_ms(ts_ms), '%Y-%m-%d') AS date, beacon_id, max(w) AS w
     FROM events GROUP BY 1, 2
@@ -96,6 +99,7 @@ export async function queryRumResourceTimings(params: RumQueryParams): Promise<{
   slowest_networks: RumSlowestNetworkRow[];
 }> {
   const engine = params.engine ?? getDuckDBEngine().readContext();
+  const vitalsWeight = await rumRowWeightExpr(engine, "client_vitals", params.signal);
   const ttlbWhere = `${buildRumWhere(params, "client_vitals", { includeTtlb: true })} AND metric_name = 'ttlb'`;
   const reqServiceClause = params.service_id
     ? `(service_id = ${duckSqlString(String(params.service_id))} OR service_id IS NULL)`
@@ -128,7 +132,7 @@ export async function queryRumResourceTimings(params: RumQueryParams): Promise<{
       (quantile_cont(r.edge_ms, 0.99) FILTER (WHERE r.edge_ms IS NOT NULL))::DOUBLE AS edge_p99_ms
     `;
     const urlSql = `WITH ttlb_rows AS (
-      SELECT coalesce(nullif(req_id, ''), request_event_id) AS rid, resource_url, metric_value, ${ROW_WEIGHT} AS w
+      SELECT coalesce(nullif(req_id, ''), request_event_id) AS rid, resource_url, metric_value, ${vitalsWeight.weight} AS w
       FROM client_vitals
       WHERE ${ttlbWhere} AND resource_url IS NOT NULL AND resource_url != ''
     ), ${reqCte}
@@ -138,7 +142,7 @@ export async function queryRumResourceTimings(params: RumQueryParams): Promise<{
     ORDER BY p99_ms DESC NULLS LAST, p95_ms DESC NULLS LAST, requests DESC
     LIMIT 20`;
     const netSql = `WITH ttlb_rows AS (
-      SELECT coalesce(nullif(req_id, ''), request_event_id) AS rid, asn, metric_value, ${ROW_WEIGHT} AS w
+      SELECT coalesce(nullif(req_id, ''), request_event_id) AS rid, asn, metric_value, ${vitalsWeight.weight} AS w
       FROM client_vitals
       WHERE ${ttlbWhere}
     ), ${reqCte}, joined AS (
@@ -206,7 +210,11 @@ export async function cloudRumAnalytics(
     if (rolled) return rolled;
   }
   const engine = params.engine ?? getDuckDBEngine().readContext();
-  const data = await queryRumAnalytics({ ...params, engine });
+  const [data, vitalsWeight, errorsWeight] = await Promise.all([
+    queryRumAnalytics({ ...params, engine }),
+    rumRowWeightExpr(engine, "client_vitals", params.signal),
+    rumRowWeightExpr(engine, "client_errors", params.signal),
+  ]);
   const where = buildRumWhere(params);
   const errorWhere = buildRumWhere(params, "client_errors");
   const identity = BEACON_IDENTITY;
@@ -220,10 +228,10 @@ export async function cloudRumAnalytics(
   // below; a day of per-period files blew the memory limit without it.
   const events = `WITH events AS MATERIALIZED (
     SELECT ts_ms, ${identity} AS beacon_id, page_url, browser_name, os_name, device_type,
-      metric_name, metric_value, FALSE AS is_error, ${ROW_WEIGHT} AS w
+      metric_name, metric_value, FALSE AS is_error, ${vitalsWeight.weight} AS w
     FROM client_vitals WHERE ${where} AND ${PAGE_VITALS}
     UNION ALL SELECT ts_ms, ${identity}, page_url, browser_name, os_name, device_type,
-      NULL, NULL, TRUE, ${ROW_WEIGHT} AS w
+      NULL, NULL, TRUE, ${errorsWeight.weight} AS w
     FROM client_errors WHERE ${errorWhere}
   )`;
   const counts = (await engine.executeSql<Record<string, unknown>>(`${events}, per_beacon AS (
@@ -245,15 +253,15 @@ export async function cloudRumAnalytics(
   const vitalRows = await engine.executeSql<Record<string, unknown>>(
     `SELECT upper(coalesce(metric_name, '')) AS metric_name,
       quantile_cont(metric_value, 0.75)::DOUBLE AS p75,
-      sum(${ROW_WEIGHT})::DOUBLE AS total_w,
-      sum(${ROW_WEIGHT}) FILTER (WHERE coalesce(nullif(lower(rating), ''), '') = 'good' OR (coalesce(nullif(rating, ''), '') = '' AND CASE upper(coalesce(metric_name, ''))
+      sum(${vitalsWeight.weight})::DOUBLE AS total_w,
+      sum(${vitalsWeight.weight}) FILTER (WHERE coalesce(nullif(lower(rating), ''), '') = 'good' OR (coalesce(nullif(rating, ''), '') = '' AND CASE upper(coalesce(metric_name, ''))
         WHEN 'LCP' THEN metric_value <= 2500
         WHEN 'CLS' THEN metric_value <= 0.1
         WHEN 'INP' THEN metric_value <= 200
         WHEN 'FCP' THEN metric_value <= 1800
         WHEN 'TTFB' THEN metric_value <= 800
         ELSE metric_value <= 2500 END))::DOUBLE AS good_w,
-      sum(${ROW_WEIGHT}) FILTER (WHERE coalesce(nullif(lower(rating), ''), '') = 'poor' OR (coalesce(nullif(rating, ''), '') = '' AND CASE upper(coalesce(metric_name, ''))
+      sum(${vitalsWeight.weight}) FILTER (WHERE coalesce(nullif(lower(rating), ''), '') = 'poor' OR (coalesce(nullif(rating, ''), '') = '' AND CASE upper(coalesce(metric_name, ''))
         WHEN 'LCP' THEN metric_value > 4000
         WHEN 'CLS' THEN metric_value > 0.25
         WHEN 'INP' THEN metric_value > 500
@@ -305,7 +313,7 @@ export async function cloudRumAnalytics(
       coalesce(filename, source, '') AS file,
       coalesce(lineno, 0)::BIGINT AS line,
       coalesce(colno, 0)::BIGINT AS col,
-      coalesce(round(sum(${ROW_WEIGHT})), 0)::BIGINT AS count
+      coalesce(round(sum(${errorsWeight.weight})), 0)::BIGINT AS count
     FROM client_errors WHERE ${errorWhere}
     GROUP BY 1, 2, 3, 4
     ORDER BY count DESC, message, file, line, col

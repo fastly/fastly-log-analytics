@@ -786,6 +786,9 @@ fn attach_mode_scoring_present_missing_fields_edge_fields_and_scoring_status() {
     );
     assert_eq!(sc_status["capture"], "attached");
     assert_eq!(sc_status["scoring_fields_enabled"], true);
+    assert_eq!(sc_status["capabilities"]["historical_analytics"], true);
+    assert_eq!(sc_status["capabilities"]["management"], false);
+    assert_eq!(sc_status["capabilities"]["thresholds"], false);
     assert!(sc_status["preflight_pragmas_ready"].is_null());
     assert!(
         !platform

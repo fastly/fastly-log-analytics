@@ -766,7 +766,10 @@ _READ_PATHS = (
     "/api/services/{service_id}/realtime-seed"
 ).split() + [
     *(f"/api/services/{{service_id}}/scoring/{s}" for s in _SCORING_READS),
-    *(f"/api/services/{{service_id}}/rum/{s}" for s in "status beacon-health analytics live-events".split()),
+    *(
+        f"/api/services/{{service_id}}/rum/{s}"
+        for s in "status beacon-health analytics live-events request-log".split()
+    ),
 ]
 _READ_ALLOWLIST: set[tuple[str, str]] = {("GET", p) for p in _READ_PATHS}
 

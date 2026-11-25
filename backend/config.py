@@ -953,6 +953,25 @@ def rollback_deployed_config(service_id: str) -> tuple[dict, int | None]:
     return (restored, prev_ver)
 
 
+def peek_rollback_snapshot(service_id: str) -> tuple[bool, int | None] | None:
+    """Return ``(has_previous_snapshot, previous_activated_version)`` from metadata DB, or ``None``."""
+    sid = _validate_service_id(service_id)
+    try:
+        with config_lock(sid), _open_or_reuse_conn(sid) as (conn, _):
+            row = conn.execute(
+                "SELECT previous_deployed_config_json, previous_activated_version "
+                "FROM service_configs WHERE service_id = ?",
+                (sid,),
+            ).fetchone()
+    except Exception:
+        return None
+    if row is None:
+        return None
+    raw_ver = row["previous_activated_version"]
+    prev_ver = int(raw_ver) if isinstance(raw_ver, int) and not isinstance(raw_ver, bool) else None
+    return (row["previous_deployed_config_json"] is not None, prev_ver)
+
+
 def migrate_legacy_file_configs_once(configs_dir: Path | None = None) -> int:
     """Import legacy ``configs/*.json`` files once if ``service_configs`` is empty."""
     from backend.core.metadata import pg_pool

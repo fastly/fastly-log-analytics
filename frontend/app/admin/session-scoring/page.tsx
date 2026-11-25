@@ -195,6 +195,22 @@ function SessionScoringPageContent() {
     [qc, effectiveServiceId],
   )
 
+  const configComposite = useQuery({
+    ...baseConfigOpts,
+    queryFn: async (ctx) => {
+      const d = await baseConfigOpts.queryFn!(ctx)
+      if (d) {
+        seedConfigSubQueries(d)
+        configSeededAt.current = Date.now() + 1
+      }
+      return d
+    },
+    enabled: !!effectiveServiceId,
+  })
+
+  const isAttached = configComposite.data?.status?.capture === 'attached'
+  const attachedFieldsOff = isAttached && configComposite.data?.status?.scoring_fields_enabled === false
+
   // ── Composite queries: collapse 10+ individual requests into 2 ──
   // Seed individual component cache keys synchronously inside queryFn BEFORE
   // returning so that when isLoading flips false and child cards mount, their
@@ -210,20 +226,7 @@ function SessionScoringPageContent() {
       }
       return d
     },
-    enabled: !!effectiveServiceId,
-  })
-
-  const configComposite = useQuery({
-    ...baseConfigOpts,
-    queryFn: async (ctx) => {
-      const d = await baseConfigOpts.queryFn!(ctx)
-      if (d) {
-        seedConfigSubQueries(d)
-        configSeededAt.current = Date.now() + 1
-      }
-      return d
-    },
-    enabled: !!effectiveServiceId,
+    enabled: !!effectiveServiceId && !attachedFieldsOff,
   })
 
   // Also keep effect-based seeding in case the composite was pre-warmed in cache
@@ -247,7 +250,7 @@ function SessionScoringPageContent() {
   // so mounting them before the config composite seeds those keys refetches each.
   const overviewLoading = !effectiveServiceId
     ? servicesLoading
-    : analyticsComposite.isLoading || configComposite.isLoading
+    : configComposite.isLoading || (!attachedFieldsOff && analyticsComposite.isLoading)
   const isStatusRefreshing = configComposite.isFetching && !statusLoading
   const isOverviewRefreshing = analyticsComposite.isFetching && !overviewLoading
   const isRefreshing = isStatusRefreshing || isOverviewRefreshing
@@ -270,10 +273,12 @@ function SessionScoringPageContent() {
       >
         <SinceHoursPicker value={sinceHours} onChange={setSinceHours} />
         {effectiveServiceId ? (
-          <>
-            <RetrainButton serviceId={effectiveServiceId} />
-            <RotateKeyButton serviceId={effectiveServiceId} />
-          </>
+          !isAttached ? (
+            <>
+              <RetrainButton serviceId={effectiveServiceId} />
+              <RotateKeyButton serviceId={effectiveServiceId} />
+            </>
+          ) : null
         ) : (
           <>
             <Skeleton className="h-8 w-28 rounded-md" />
@@ -361,6 +366,14 @@ function SessionScoringPageContent() {
                     <Skeleton className="h-80 w-full rounded-xl" />
                   </div>
                 </div>
+              ) : attachedFieldsOff ? (
+                <Alert data-testid="admin-session-scoring-attached-fields-off">
+                  <AlertDescription>
+                    Scoring health, flagged sessions, and distributions will appear here once{' '}
+                    <code>edge_score*</code> log fields are enabled and ingested on this attached
+                    service.
+                  </AlertDescription>
+                </Alert>
               ) : (
                 <>
                   <ScoringHealthCard serviceId={effectiveServiceId} sinceHours={sinceHours} />
@@ -369,9 +382,13 @@ function SessionScoringPageContent() {
                     <ScorerErrorsChart serviceId={effectiveServiceId} sinceHours={sinceHours} />
                   </div>
                   <ScorerFailOpenBreakdownCard serviceId={effectiveServiceId} sinceHours={sinceHours} />
-                  <ThresholdSlider serviceId={effectiveServiceId} sinceHours={sinceHours} />
-                  <L2EnforcementCard serviceId={effectiveServiceId} sinceHours={sinceHours} />
-                  <ExcludeRegexCard serviceId={effectiveServiceId} />
+                  {!isAttached && (
+                    <>
+                      <ThresholdSlider serviceId={effectiveServiceId} sinceHours={sinceHours} />
+                      <L2EnforcementCard serviceId={effectiveServiceId} sinceHours={sinceHours} />
+                      <ExcludeRegexCard serviceId={effectiveServiceId} />
+                    </>
+                  )}
                   <RocPrCurves serviceId={effectiveServiceId} sinceHours={sinceHours} />
                   <PerReasonAucCard serviceId={effectiveServiceId} />
                   <TopFlaggedTable serviceId={effectiveServiceId} sinceHours={sinceHours} />

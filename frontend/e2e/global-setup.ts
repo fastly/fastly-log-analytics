@@ -68,7 +68,7 @@ with psycopg.connect(maint_dsn, autocommit=True) as admin_conn:
             pass
 
 from backend.core.metadata.pg_schema import ensure_pg_schema
-ensure_pg_schema(dsn)
+ensure_pg_schema()
 
 configs_dir = Path(os.environ["CONTRACT_CONFIGS_DIR"])
 with psycopg.connect(dsn, autocommit=True) as conn:

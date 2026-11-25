@@ -82858,6 +82858,28 @@
               }
             ],
             "title": "Preflight Pragmas Ready"
+          },
+          "capture": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capture"
+          },
+          "scoring_fields_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scoring Fields Enabled"
           }
         },
         "additionalProperties": true,

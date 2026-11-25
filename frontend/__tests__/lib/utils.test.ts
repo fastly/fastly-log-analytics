@@ -492,6 +492,7 @@ const ALLOWED_GAPS = new Set<string>([
   'GET /api/services/:service_id/control-room/error-stream', 'GET /api/debug/state', 'POST /api/share/logout', 'GET /api/share/heartbeat', 'POST /api/share/claim/:token',
   'POST /api/admin/share/invites/:invite_id/claim-token', 'POST /api/admin/share/backup/export', 'POST /api/admin/share/backup/import', 'POST /api/admin/share/gdpr/erase',
   'GET /js/rum.js', 'GET /js/faro-sdk.js', 'GET /rum-beacon', 'POST /rum-beacon', 'GET /api/debug/page-telemetry',
+  'GET /api/services/:service_id/rum/request-log', 'POST /api/services/:service_id/rollback',
 ])
 
 function describeHandler(h: unknown): { method: string; pathname: string } | null {

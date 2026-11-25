@@ -3103,6 +3103,7 @@ fn status_payload(
         }
     };
 
+    let attached = service.capture == Capture::Attached;
     let mut payload = json!({
         "service_id": sid,
         "generation": generation,
@@ -3115,15 +3116,15 @@ fn status_payload(
         "scoring": scoring_obj,
         "capabilities": {
             "historical_analytics": true,
-            "management": true,
+            "management": !attached,
             "labels": true,
             "evaluation": true,
-            "thresholds": true,
-            "matrix_versions": true,
-            "audit": true,
+            "thresholds": !attached,
+            "matrix_versions": !attached,
+            "audit": !attached,
         },
     });
-    if service.capture == Capture::Attached {
+    if attached {
         payload["capture"] = json!("attached");
         payload["scoring_fields_enabled"] = json!(service
             .active_log_field_ids()

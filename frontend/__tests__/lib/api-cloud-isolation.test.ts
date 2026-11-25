@@ -5,7 +5,10 @@ import { setCloudModeRuntime } from "@/lib/cloud-engine/mode";
 const adapter = vi.hoisted(() => ({ evaluated: vi.fn(), handle: vi.fn() }));
 vi.mock("@/lib/cloud-engine/adapter", () => {
   adapter.evaluated();
-  return { handleCloudAnalyticalRequest: adapter.handle };
+  return {
+    handleCloudAnalyticalRequest: adapter.handle,
+    isCloudConfigMutation: () => false,
+  };
 });
 
 import { adminFetch, adminJsonResult, client } from "@/lib/api";

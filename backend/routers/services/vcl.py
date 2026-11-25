@@ -403,19 +403,11 @@ def api_service_rollback(
     token = require_fastly_token(service_id, (body.token or "").strip() if body else "")
 
     with acquire_vcl_lock(service_id):
-        db_row = None
-        try:
-            with svcconfig.config_lock(service_id), svcconfig._open_or_reuse_conn(service_id) as (conn, _):
-                db_row = conn.execute(
-                    "SELECT previous_deployed_config_json, previous_activated_version "
-                    "FROM service_configs WHERE service_id = ?",
-                    (service_id,),
-                ).fetchone()
-        except Exception:
-            db_row = None
+        peek = svcconfig.peek_rollback_snapshot(service_id)
 
-        if db_row is not None:
-            if db_row["previous_deployed_config_json"] is None:
+        if peek is not None:
+            has_snapshot, prev_ver = peek
+            if not has_snapshot:
                 raise HTTPException(
                     status_code=400,
                     detail=make_error(
@@ -423,7 +415,6 @@ def api_service_rollback(
                         f"No previous deployed config snapshot recorded for {service_id}",
                     ),
                 )
-            prev_ver = db_row["previous_activated_version"]
             if prev_ver is not None:
                 try:
                     fastly("PUT", f"/service/{service_id}/version/{prev_ver}/activate", token=token)

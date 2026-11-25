@@ -17183,6 +17183,10 @@ export interface components {
             drift_known?: boolean | null;
             /** Preflight Pragmas Ready */
             preflight_pragmas_ready?: boolean | null;
+            /** Capture */
+            capture?: string | null;
+            /** Scoring Fields Enabled */
+            scoring_fields_enabled?: boolean | null;
         } & {
             [key: string]: unknown;
         };

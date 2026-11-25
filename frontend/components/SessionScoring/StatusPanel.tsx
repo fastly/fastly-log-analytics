@@ -1,6 +1,7 @@
 'use client'
 
 import React from 'react'
+import Link from 'next/link'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle,
@@ -15,7 +16,7 @@ import {
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { SSEModal } from '@/components/SSEModal'
 import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
+import { Button, buttonVariants } from '@/components/ui/button'
 import {
   Dialog,
   DialogContent,
@@ -349,8 +350,10 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
       }),
   )
 
-  const enabled = !!data?.enabled
-  const pragmasMissing = !enabled && data?.preflight_pragmas_ready === false
+  const isAttached = data?.capture === 'attached'
+  const scoringFieldsEnabled = data?.scoring_fields_enabled === true
+  const enabled = isAttached ? scoringFieldsEnabled : !!data?.enabled
+  const pragmasMissing = !isAttached && !enabled && data?.preflight_pragmas_ready === false
   const [pragmaModalOpen, setPragmaModalOpen] = React.useState(false)
   if (data?.preflight_pragmas_ready === true && pragmaModalOpen) setPragmaModalOpen(false)
 
@@ -385,7 +388,18 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
         helpTitle="About Session Scoring"
         className="min-h-[236px]"
         headerAction={
-          isCloudMode() ? (
+          isCloudMode() && isAttached ? (
+            <Link
+              href={`/admin?service=${encodeURIComponent(serviceId)}`}
+              className={buttonVariants({
+                variant: scoringFieldsEnabled ? 'outline' : 'default',
+                size: 'sm',
+              })}
+              data-testid="admin-session-scoring-configure-fields-btn"
+            >
+              Configure Log Fields
+            </Link>
+          ) : isCloudMode() ? (
             enabled ? (
               <div className="flex items-center gap-2">
                 <CloudScoringJobButton
@@ -608,7 +622,21 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
         <div className="space-y-3 text-sm">
           <div className="flex items-center gap-2" data-testid="admin-session-scoring-status-line">
             <span className="text-muted-foreground">Status:</span>
-            {enabled ? (
+            {isAttached ? (
+              scoringFieldsEnabled ? (
+                <Badge
+                  variant="default"
+                  className="bg-emerald-600"
+                  data-testid="admin-session-scoring-status-badge"
+                >
+                  Enabled (Attached)
+                </Badge>
+              ) : (
+                <Badge variant="secondary" data-testid="admin-session-scoring-status-badge">
+                  Log Fields Off (Attached)
+                </Badge>
+              )
+            ) : enabled ? (
               <Badge
                 variant="default"
                 className="bg-emerald-600"
@@ -623,7 +651,28 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
             )}
           </div>
 
-          {enabled && (
+          {isAttached && !isLoading && (
+            scoringFieldsEnabled ? (
+              <div className="space-y-2">
+                <p className="text-xs text-muted-foreground">
+                  This service is running in <strong>Attached</strong> capture mode. The{' '}
+                  <code>edge_score*</code> log fields are enabled so Cloud ingests scored
+                  requests, while the primary install manages the edge scorer Compute service and
+                  VCL.
+                </p>
+                {evalData && <AucField evalData={evalData} />}
+              </div>
+            ) : (
+              <CalloutBanner testId="admin-session-scoring-attached-fields-warning">
+                <span className="font-semibold">Attached mode: scoring log fields are off.</span>{' '}
+                Cloud does not provision or modify the primary install&apos;s edge scorer Compute
+                service or VCL. To view scored requests here, enable the <code>edge_score*</code>{' '}
+                custom log fields in Service Settings and reconcile Cloud logging.
+              </CalloutBanner>
+            )
+          )}
+
+          {!isAttached && enabled && (
             <>
               {data?.scorer_drift && (
                 <CalloutBanner>
@@ -729,7 +778,7 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
             </>
           )}
 
-          {!enabled && !isLoading && (
+          {!isAttached && !enabled && !isLoading && (
             <>
               {pragmasMissing && (
                 <CalloutBanner testId="admin-session-scoring-pragma-warning">
