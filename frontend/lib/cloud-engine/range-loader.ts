@@ -26,8 +26,22 @@ const MAX_RANGE_BYTES = MAX_REGISTERED_BYTES;
 const PREFETCH_CONCURRENCY = 6;
 // Projected ranges are mostly a few KiB, so their round trips, not bandwidth, bound a cold load.
 const RANGE_CONCURRENCY = 16;
-// Fall back to a whole-file fetch only when coalesced column ranges would already transfer 85%+ of the file.
+// Fall back to a whole-file fetch when coalesced column ranges would already transfer 85%+ of
+// the file, or when a multi-row-group file would issue 8+ HTTP 206 requests for 60%+ of the file.
 const WHOLE_FALLBACK_RANGE_RATIO = 0.85;
+const WHOLE_FALLBACK_MANY_RANGES_MIN = 8;
+const WHOLE_FALLBACK_MANY_RANGES_RATIO = 0.60;
+
+function shouldFallbackToWhole(
+  plan: ParquetProjection,
+  fileSize: number,
+  plannedRangeBytes: number,
+): boolean {
+  if (plan.ranges.length === 0 || fileSize <= 0 || fileSize > MAX_RANGE_BYTES) return false;
+  if (plannedRangeBytes >= fileSize * WHOLE_FALLBACK_RANGE_RATIO) return true;
+  return plan.ranges.length >= WHOLE_FALLBACK_MANY_RANGES_MIN
+    && plannedRangeBytes >= fileSize * WHOLE_FALLBACK_MANY_RANGES_RATIO;
+}
 const source = browserSource("");
 const requestReads = new WeakMap<Request, DuckDBReadContext>();
 const activeRangeDownloads = new Set<AbortController>();
@@ -351,10 +365,7 @@ export async function ensureCloudRange(
           const held = wholes.get(file.scopedKey);
           if (held?.cached) return total;
           const plannedRangeBytes = plan.ranges.reduce((sum, r) => sum + (r.end - r.start), 0);
-          const willFetchWhole = Boolean(held) || (
-            plan.ranges.length > 0 && file.size > 0 && file.size <= MAX_RANGE_BYTES
-            && plannedRangeBytes >= file.size * WHOLE_FALLBACK_RANGE_RATIO
-          );
+          const willFetchWhole = Boolean(held) || shouldFallbackToWhole(plan, file.size, plannedRangeBytes);
           return total + (willFetchWhole ? file.size : plannedRangeBytes);
         }, 0);
         if (wireNeeded > byteLimit) throw overBudget({ unit: "bytes", needed: wireNeeded, limit: byteLimit });
@@ -406,8 +417,7 @@ export async function ensureCloudRange(
         // When coalesced ranges already cover most of a file (e.g. heavily compacted multi-row-group
         // files), fetch the file once via `fileSource.fetchFile` so concurrent page sections share a
         // single in-flight/cached download instead of each pulling the file separately via ranges.
-        if (held || (plan.ranges.length > 0 && file.size > 0 && file.size <= MAX_RANGE_BYTES
-          && plannedRangeBytes >= file.size * WHOLE_FALLBACK_RANGE_RATIO)) {
+        if (held || shouldFallbackToWhole(plan, file.size, plannedRangeBytes)) {
           const fetched = held ?? await fetchWhole(file);
           const parts = await fetchProjectedRanges(plan, async (start, end) => fetched.bytes.slice(start, end));
           const bytes = assembleProjectedParquet(plan, parts);

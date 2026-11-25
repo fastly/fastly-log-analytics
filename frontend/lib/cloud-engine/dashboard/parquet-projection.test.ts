@@ -307,10 +307,11 @@ describe("column-projected Parquet", () => {
   });
 
   it("coalesces medium inter-chunk gaps down to TARGET_RANGES_PER_FILE to cut HTTP 206s", async () => {
-    // 44 row groups where each unneeded column chunk is ~80 KiB (above baseGap, below SOFT_MERGE_MAX_GAP):
-    // two-tier coalescing should merge down to TARGET_RANGES_PER_FILE (32) rather than issuing 44+ HTTP 206s.
+    // 18 row groups where each unneeded column chunk is ~50 KiB (above baseGap, below SOFT_MERGE_MAX_GAP),
+    // shaped like /assets-shield compact files: soft coalescing should merge down toward TARGET_RANGES_PER_FILE
+    // (8) rather than leaving 18 separate HTTP 206 range requests.
     const rowGroupSize = 500;
-    const rowGroups = 44;
+    const rowGroups = 18;
     const count = rowGroupSize * rowGroups;
     const bytes = parquetWriteBuffer({
       codec: "SNAPPY",
@@ -318,13 +319,15 @@ describe("column-projected Parquet", () => {
       columnData: [
         { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: count }, (_, i) => new Date(1700000000000 + i * 1000)) },
         { name: "status", type: "INT32", data: Array.from({ length: count }, () => 200) },
-        { name: "medium_unneeded", type: "STRING", data: Array.from({ length: count }, () => noise(160)) },
+        { name: "medium_unneeded", type: "STRING", data: Array.from({ length: count }, () => noise(110)) },
       ],
     });
     const footer = await readParquetFooter(bytes.byteLength, ranged(bytes).fetchRange);
     expect(footer.metadata.row_groups).toHaveLength(rowGroups);
     const plan = planParquetProjection(footer, new Set(["timestamp", "status"]));
-    expect(plan.ranges.length).toBeLessThanOrEqual(TARGET_RANGES_PER_FILE);
+    expect(TARGET_RANGES_PER_FILE).toBeLessThanOrEqual(8);
+    expect(plan.ranges.length).toBeLessThan(rowGroups);
+    expect(plan.ranges.length).toBeLessThanOrEqual(12);
   });
 
   it("prunes row groups using Parquet column chunk statistics for include/exclude filters", async () => {

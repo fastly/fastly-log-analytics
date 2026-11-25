@@ -22,7 +22,7 @@ export const RANGE_REQUEST_COST_BYTES = 32 * 1024;
  * [`SOFT_MERGE_MAX_FILE_RATIO`] of the file size, reducing HTTP 206 counts
  * without swallowing wide unneeded columns.
  */
-export const TARGET_RANGES_PER_FILE = 32;
+export const TARGET_RANGES_PER_FILE = 8;
 /** Largest gap merged when reducing a file's ranges toward [`TARGET_RANGES_PER_FILE`]. */
 export const SOFT_MERGE_MAX_GAP = 96 * 1024;
 /** Maximum fraction of file size Pass 2 may reach while coalescing toward [`TARGET_RANGES_PER_FILE`]. */
@@ -310,6 +310,12 @@ export function planParquetProjection(
   };
 }
 
+export type CoalesceOptions = {
+  targetRanges?: number;
+  softMergeMaxGap?: number;
+  softMergeMaxFileRatio?: number;
+};
+
 /**
  * The cheapest coalescing of the chunks (sorted by start) by bytes plus request cost,
  * subject to at most [`MAX_RANGES_PER_FILE`] ranges.
@@ -317,8 +323,12 @@ export function planParquetProjection(
 function coalesceRanges(
   chunks: readonly { start: number; length: number }[],
   fileSize: number,
+  options?: CoalesceOptions,
 ): { start: number; end: number }[] {
   if (chunks.length === 0) return [];
+  const targetRanges = options?.targetRanges ?? TARGET_RANGES_PER_FILE;
+  const softMergeMaxGap = options?.softMergeMaxGap ?? SOFT_MERGE_MAX_GAP;
+  const softMergeMaxFileRatio = options?.softMergeMaxFileRatio ?? SOFT_MERGE_MAX_FILE_RATIO;
   // Merging any gap <= max(RANGE_MERGE_GAP, RANGE_REQUEST_COST_BYTES) strictly lowers or
   // preserves `bytes + ranges * RANGE_REQUEST_COST_BYTES` without pulling in large gaps.
   const baseGap = Math.max(RANGE_MERGE_GAP, RANGE_REQUEST_COST_BYTES);
@@ -332,11 +342,11 @@ function coalesceRanges(
     }
   }
   let totalBytes = ranges.reduce((sum, r) => sum + (r.end - r.start), 0);
-  const maxSoftBytes = Math.floor(fileSize * SOFT_MERGE_MAX_FILE_RATIO);
-  // Pass 2 (soft target): while above TARGET_RANGES_PER_FILE, merge the smallest
-  // remaining gap as long as it stays <= SOFT_MERGE_MAX_GAP and planned bytes stay
-  // within SOFT_MERGE_MAX_FILE_RATIO of the file size.
-  while (ranges.length > TARGET_RANGES_PER_FILE) {
+  const maxSoftBytes = Math.floor(fileSize * softMergeMaxFileRatio);
+  // Pass 2 (soft target): while above targetRanges, merge the smallest
+  // remaining gap as long as it stays <= softMergeMaxGap and planned bytes stay
+  // within softMergeMaxFileRatio of the file size.
+  while (ranges.length > targetRanges) {
     let minIndex = 0;
     let minGap = Infinity;
     for (let i = 0; i < ranges.length - 1; i++) {
@@ -346,7 +356,7 @@ function coalesceRanges(
         minIndex = i;
       }
     }
-    if (minGap > SOFT_MERGE_MAX_GAP || totalBytes + minGap > maxSoftBytes) break;
+    if (minGap > softMergeMaxGap || totalBytes + minGap > maxSoftBytes) break;
     ranges[minIndex].end = ranges[minIndex + 1].end;
     ranges.splice(minIndex + 1, 1);
     totalBytes += minGap;
@@ -392,6 +402,18 @@ export async function fetchProjectedRanges(plan: ParquetProjection, fetchRange: 
   return Promise.all(plan.ranges.map(({ start, end }) => fetchRangeWithTail(plan.footer.tail, start, end, fetchRange)));
 }
 
+/** Plans the coalesced HTTP ranges needed to satisfy multiple projections of the same Parquet file. */
+export function planCoalescedProjectedRanges(
+  plans: readonly ParquetProjection[],
+  options?: CoalesceOptions,
+): { start: number; end: number }[] {
+  if (plans.length === 0) return [];
+  const spans = plans
+    .flatMap((plan) => plan.ranges.map((r) => ({ start: r.start, length: r.end - r.start })))
+    .sort((a, b) => a.start - b.start || a.length - b.length);
+  return coalesceRanges(spans, plans[0].footer.size, options);
+}
+
 /**
  * Fetches ranges for multiple projections of the same Parquet file in one coalesced pass,
  * pooling adjacent ranges across plans so each file issues minimal HTTP 206 requests.
@@ -399,13 +421,11 @@ export async function fetchProjectedRanges(plan: ParquetProjection, fetchRange: 
 export async function fetchCoalescedProjectedRanges(
   plans: readonly ParquetProjection[],
   fetchRange: FetchRange,
+  options?: CoalesceOptions,
 ): Promise<ArrayBuffer[][]> {
   if (plans.length === 0) return [];
-  if (plans.length === 1) return [await fetchProjectedRanges(plans[0], fetchRange)];
-  const spans = plans
-    .flatMap((plan) => plan.ranges.map((r) => ({ start: r.start, length: r.end - r.start })))
-    .sort((a, b) => a.start - b.start || a.length - b.length);
-  const unified = coalesceRanges(spans, plans[0].footer.size);
+  if (plans.length === 1 && !options) return [await fetchProjectedRanges(plans[0], fetchRange)];
+  const unified = planCoalescedProjectedRanges(plans, options);
   const tail = plans[0].footer.tail;
   const fetched = await Promise.all(
     unified.map(({ start, end }) => fetchRangeWithTail(tail, start, end, fetchRange)),

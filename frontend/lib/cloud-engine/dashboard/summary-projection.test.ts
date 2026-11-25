@@ -313,6 +313,31 @@ describe("readSummaryProjection", () => {
     expect(await groupRows(read.parts, spec, ["bundle", "bucket", "field", "value", "truncated", "count", "requests"]))
       .toEqual(want);
   });
+
+  it("reads hour bundles up to 2 MiB whole in one request to avoid 7x HTTP 206 fan-out", async () => {
+    expect(summaryProjectionLimits.wholeBelowBytes).toBe(2 * 1024 * 1024);
+    const source = fakeSource(layoutBytes);
+    const simulatedHourBundle = { ...manifestFile(layoutBytes), size: 1_500_000 };
+    const read = await readSummaryProjection(source, simulatedHourBundle, FIELDS);
+    expect(read.whole).toBe(true);
+    expect(source.net.whole).toEqual([KEY]);
+    expect(source.net.ranges).toEqual([]);
+  });
+
+  it("falls back to whole-file fetch when coalesced summary wire ranges exceed wholeAboveShare", async () => {
+    Object.assign(summaryProjectionLimits, { wholeBelowBytes: 0, wholeAboveShare: 0.6 });
+    const source = fakeSource(layoutBytes);
+    // Scattered groups across LAYOUT_B whose coalesced wire bytes exceed 60% of the file.
+    const wideSpec = defineSummarySpec({
+      groups: ["overview", "field_totals", "all_fields", "dims", "series5", "urls", "value", "dim_totals"],
+      columns: ["count", "requests", "errors", "resp_bytes_sum", "elapsed_count", "elapsed_hist"],
+    });
+    const read = await readSummaryProjection(source, manifestFile(layoutBytes), wideSpec);
+    expect(read.whole).toBe(true);
+    expect(source.net.whole).toEqual([KEY]);
+    // Only the footer probe was issued before falling back to a single whole-file GET.
+    expect(dataRanges(source.net, layoutBytes)).toEqual([]);
+  });
 });
 
 describe("summaryLayout", () => {

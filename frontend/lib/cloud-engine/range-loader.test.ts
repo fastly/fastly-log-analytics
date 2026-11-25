@@ -28,7 +28,7 @@ import * as sqlBuilder from "../sqlBuilder";
 import { insightsBaselineFromRollup } from "./insights-rollup";
 import { mergeRollups } from "./dashboard/rollup-query";
 import { dashboardManifestCacheScope } from "./dashboard/sources";
-import { wholeReadLimits } from "./dashboard/parquet-projection";
+import { planParquetProjection, readWholeParquetFooter, wholeReadLimits } from "./dashboard/parquet-projection";
 import { MAX_REGISTERED_BYTES } from "./dashboard/budget";
 
 const DEFAULT_WHOLE_READ_LIMITS = { ...wholeReadLimits };
@@ -1272,5 +1272,50 @@ describe("Cloud first-page analytical range loading", () => {
     expect(await fullRead.executeSql("SELECT count(*)::INT AS n FROM requests")).toEqual([{ n: rgRows * 4 }]);
     expect(dataRangeBytes).toBeGreaterThan(filteredBytes * 2);
     fullRead.release?.();
+  });
+
+  it("falls back to a single whole-file fetch when a multi-row-group projection needs 8+ ranges covering >=60% of the file", async () => {
+    // 12 row groups where wanted columns (`timestamp`, `url`, `status`) + gaps cover ~65-75% of the file
+    // while each unneeded `ua` chunk exceeds baseGap + SOFT_MERGE_MAX_GAP, leaving >= 8 ranges.
+    const rgRows = 500;
+    const rowGroups = 12;
+    const totalRows = rgRows * rowGroups;
+    let seed = 7;
+    const randStr = (len: number) => Array.from({ length: len }, () => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return String.fromCharCode(33 + (seed % 90));
+    }).join("");
+    const bytes = parquetWriteBuffer({
+      codec: "UNCOMPRESSED",
+      rowGroupSize: rgRows,
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: totalRows }, (_, i) => new Date(Date.parse(from) + i * 100)) },
+        { name: "url", type: "STRING", data: Array.from({ length: totalRows }, () => `/${randStr(380)}`) },
+        { name: "ua", type: "STRING", data: Array.from({ length: totalRows }, () => randStr(220)) },
+        { name: "status", type: "INT32", data: Array.from({ length: totalRows }, () => 200) },
+      ],
+    });
+    const entry = { ...file, key: "processed/request/assets-compact.parquet", size: bytes.byteLength };
+    const plan = planParquetProjection(await readWholeParquetFooter(bytes), new Set(["timestamp", "url", "status"]));
+    const plannedRangeBytes = plan.ranges.reduce((sum, r) => sum + (r.end - r.start), 0);
+    expect(plan.ranges.length).toBeGreaterThanOrEqual(8);
+    expect(plannedRangeBytes / bytes.byteLength).toBeGreaterThanOrEqual(0.6);
+    expect(plannedRangeBytes / bytes.byteLength).toBeLessThan(0.85);
+    vi.mocked(fetchManifest).mockResolvedValue({ files: [entry], complete: true });
+
+    let dataRangeCalls = 0;
+    source.fetchRange.mockImplementation(async (_f: ManifestFile, start: number, end: number) => {
+      if (end < bytes.byteLength) dataRangeCalls++;
+      return bytes.slice(start, end);
+    });
+    source.fetchFile.mockImplementation(async () => ({ bytes: bytes.slice(0), cached: false }));
+
+    const read = await ensureCloudRange(from, to, signal, ["request"], {
+      projection: { columns: ["timestamp", "url", "status"] },
+    });
+    expect(source.fetchFile).toHaveBeenCalledTimes(1);
+    expect(dataRangeCalls).toBe(0);
+    expect(await read.executeSql("SELECT count(*)::INT AS n FROM requests")).toEqual([{ n: totalRows }]);
+    read.release?.();
   });
 });

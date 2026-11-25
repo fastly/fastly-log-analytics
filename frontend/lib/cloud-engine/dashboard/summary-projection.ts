@@ -5,7 +5,9 @@ import { currentStoreMetaEpoch } from "./file-store";
 import type { ManifestFile } from "./manifest";
 import { readColumns, type DecodedColumns } from "./parquet";
 import {
-  assembleProjectedParquet, fetchCoalescedProjectedRanges, planParquetProjection, readParquetFooter, type ParquetFooter,
+  assembleProjectedParquet, fetchCoalescedProjectedRanges, planCoalescedProjectedRanges,
+  planParquetProjection, readParquetFooter, SOFT_MERGE_MAX_FILE_RATIO,
+  type CoalesceOptions, type ParquetFooter,
 } from "./parquet-projection";
 import type { DerivedFile } from "./sources";
 
@@ -48,7 +50,10 @@ export function defineSummarySpec({ groups, columns, only = {} }: {
  * `wholeBelowBytes` are read whole, as are files a projection would fetch
  * more than `wholeAboveShare` of. Mutable for tests.
  */
-export const summaryProjectionLimits = { wholeBelowBytes: 512 * 1024, wholeAboveShare: 0.6 };
+export const summaryProjectionLimits = { wholeBelowBytes: 2 * 1024 * 1024, wholeAboveShare: 0.6 };
+
+const SUMMARY_TARGET_RANGES = 4;
+const SUMMARY_SOFT_MERGE_MAX_GAP = 128 * 1024;
 
 const LAYOUT_KEY = "flp_summary_layout";
 
@@ -114,7 +119,9 @@ export type SummaryProjection = {
 
 const intersects = (a: ReadonlySet<string>, b: ReadonlySet<string>) => [...a].some((item) => b.has(item));
 
-type Read = { kind: "whole" } | { kind: "parts"; plans: ReturnType<typeof planParquetProjection>[] };
+type Read =
+  | { kind: "whole" }
+  | { kind: "parts"; plans: ReturnType<typeof planParquetProjection>[]; coalesceOptions: CoalesceOptions };
 
 function planSummary(footer: ParquetFooter, spec: SummarySpec): Read {
   const { metadata, size } = footer;
@@ -135,7 +142,17 @@ function planSummary(footer: ParquetFooter, spec: SummarySpec): Read {
   const plans = [...byColumns.values()].map((indexes) =>
     planParquetProjection(footer, new Set(columnsOf(indexes[0])), (index) => indexes.includes(index)));
   const projected = plans.reduce((sum, plan) => sum + plan.projectedBytes, 0);
-  return projected > summaryProjectionLimits.wholeAboveShare * size ? { kind: "whole" } : { kind: "parts", plans };
+  const maxShare = summaryProjectionLimits.wholeAboveShare;
+  const coalesceOptions: CoalesceOptions = {
+    targetRanges: SUMMARY_TARGET_RANGES,
+    softMergeMaxGap: SUMMARY_SOFT_MERGE_MAX_GAP,
+    softMergeMaxFileRatio: Number.isFinite(maxShare) ? Math.min(maxShare, 0.6) : SOFT_MERGE_MAX_FILE_RATIO,
+  };
+  const unified = planCoalescedProjectedRanges(plans, coalesceOptions);
+  const coalescedBytes = unified.reduce((sum, r) => sum + (r.end - r.start), 0) + footer.footerLength + 12;
+  return projected > maxShare * size || coalescedBytes > maxShare * size
+    ? { kind: "whole" }
+    : { kind: "parts", plans, coalesceOptions };
 }
 
 function splitParts(stored: ArrayBuffer, meta: string, key: string): ArrayBuffer[] {
@@ -223,7 +240,7 @@ export async function readSummaryProjection(
     void footerWrite;
     return whole();
   }
-  const grouped = await fetchCoalescedProjectedRanges(plan.plans, read);
+  const grouped = await fetchCoalescedProjectedRanges(plan.plans, read, plan.coalesceOptions);
   const parts = plan.plans.map((projection, index) => assembleProjectedParquet(projection, grouped[index]));
   assertProjectionActive();
   const joined = new Uint8Array(parts.reduce((sum, part) => sum + part.byteLength, 0));
