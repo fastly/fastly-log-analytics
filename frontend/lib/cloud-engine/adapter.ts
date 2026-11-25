@@ -1302,7 +1302,13 @@ async function prepareCloudScan(
                 : undefined,
         )
     : url.pathname === "/api/security/threat-intel" ? threatIntelScanColumns(params.filters)
-    : url.pathname === "/api/cmcd/aggregates" ? cmcdScanColumns(params.filters)
+    : url.pathname === "/api/cmcd/aggregates"
+      ? cmcdScanColumns(params.filters, params.sections, {
+          filter_sf: typeof params.filter_sf === "string" ? params.filter_sf : undefined,
+          filter_ot: typeof params.filter_ot === "string" ? params.filter_ot : undefined,
+          filter_st: typeof params.filter_st === "string" ? params.filter_st : undefined,
+          filter_cid: typeof params.filter_cid === "string" ? params.filter_cid : undefined,
+        })
     : /^\/api\/services\/[^/]+\/scoring\/(.+)$/.test(url.pathname)
       ? scoringScanColumns(url.pathname.match(/^\/api\/services\/[^/]+\/scoring\/(.+)$/)?.[1]) : null;
   const detectors = Array.isArray(params.detectors) ? params.detectors as string[] : undefined;

@@ -252,6 +252,56 @@ describe("Feature F24 — CMCD Streaming Media cloud-engine", () => {
     await engine.reset();
   });
 
+  it("narrows cmcdScanColumns and skips heavy core quantiles for breakdown-only extended sections", async () => {
+    const narrow = cmcdScanColumns(undefined, ["bitrate_ladder", "stream_type_dist"]);
+    expect(narrow).toEqual([
+      "timestamp", "ts_ms", "service_id", "cmcd_sid", "cmcd_br", "cmcd_bl", "cmcd_ot", "cmcd_bs", "cmcd_st",
+    ]);
+    const withFilter = cmcdScanColumns(
+      { host: { mode: "include", values: ["cdn.example"] }, filter_mode: "and" },
+      ["bitrate_ladder"],
+      { filter_sf: "h" },
+    );
+    expect(withFilter).toEqual([
+      "timestamp", "ts_ms", "service_id", "cmcd_sid", "cmcd_br", "cmcd_bl", "cmcd_ot", "cmcd_bs", "cmcd_sf", "host",
+    ]);
+
+    const engine = new DuckDBAnalyticalEngine();
+    await engine.executeSql(
+      `INSERT INTO requests (
+        scoped_key, ts_ms, "timestamp",
+        cmcd_sid, cmcd_br, cmcd_bl, cmcd_bs, cmcd_ot, cmcd_st
+      ) VALUES
+        ('c1', 1700000040000, epoch_ms(1700000040000)::TIMESTAMPTZ, 'sess-1', 4500, 12000, FALSE, 'v', 'l'),
+        ('c1', 1700000060000, epoch_ms(1700000060000)::TIMESTAMPTZ, 'sess-1', 6000, 16000, FALSE, 'v', 'l'),
+        ('c1', 1700000080000, epoch_ms(1700000080000)::TIMESTAMPTZ, 'sess-2', 3000, 500, TRUE, 'v', 'v')`,
+    );
+    const seenSql: string[] = [];
+    const readCtx = engine.readContext();
+    const spyEngine: typeof readCtx = {
+      ...readCtx,
+      executeSql: async <T = Record<string, unknown>>(sql: string, params?: unknown[], signal?: AbortSignal) => {
+        seenSql.push(sql);
+        return readCtx.executeSql<T>(sql, params, signal);
+      },
+    };
+
+    const res = await queryCmcdAggregates({
+      engine: spyEngine,
+      sections: ["bitrate_ladder", "stream_type_dist"],
+    });
+    expect(seenSql.some((q) => q.includes("QUANTILE_CONT"))).toBe(false);
+    expect(res.bitrate_ladder).toEqual([
+      { tier: "2.5–5 Mbps (1080p)", request_count: 2, session_count: 2, avg_bitrate: 3750, rebuffer_rate: 50 },
+      { tier: "5–10 Mbps (1440p)", request_count: 1, session_count: 1, avg_bitrate: 6000, rebuffer_rate: 0 },
+    ]);
+    expect(res.stream_type_dist).toEqual([
+      { stream_type: "l", session_count: 1, request_count: 2 },
+      { stream_type: "v", session_count: 1, request_count: 1 },
+    ]);
+    await engine.reset();
+  });
+
   it("aggregates from cmcd_summary", async () => {
     const hllOf = (items: string[]) => {
       const h = new Hll();

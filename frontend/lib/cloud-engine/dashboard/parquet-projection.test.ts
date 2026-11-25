@@ -127,6 +127,23 @@ describe("column-projected Parquet", () => {
       .toEqual(new Uint8Array(bytes.slice(plan.ranges[index].start, plan.ranges[index].end))));
   });
 
+  it("reads a ~100 KiB multi-row-group compact footer in a single range request", async () => {
+    const bytes = parquetWriteBuffer({
+      codec: "SNAPPY",
+      rowGroupSize: 10,
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: 2000 }, (_, i) => new Date(1700000000000 + i)) },
+        ...Array.from({ length: 12 }, (_, c) => ({ name: `c${c}`, type: "INT32" as const, data: Array.from({ length: 2000 }, (_, i) => i + c) })),
+      ],
+    });
+    const source = ranged(bytes);
+    const footer = await readParquetFooter(bytes.byteLength, source.fetchRange);
+    expect(footer.footerLength).toBeGreaterThan(64 * 1024);
+    expect(footer.footerLength).toBeLessThan(FOOTER_PROBE_BYTES);
+    expect(source.reads).toHaveLength(1);
+    expect(footer.metadata.row_groups).toHaveLength(200);
+  });
+
   it("reads a footer longer than the tail probe with one more range", async () => {
     const bytes = parquetWriteBuffer({
       codec: "SNAPPY",
@@ -585,17 +602,19 @@ describe("query schemas from footers", () => {
     expect(shouldFallbackToWhole(planWith(0), fileSize, 0)).toBe(false);
     expect(shouldFallbackToWhole(planWith(1), fileSize, Math.ceil(fileSize * 0.85))).toBe(true);
     expect(shouldFallbackToWhole(planWith(7), fileSize, Math.floor(fileSize * 0.45))).toBe(false);
-    // Medium compacts (<= 8 MiB) fall back at >= 8 ranges when >= 30% of bytes are read,
-    // while ultra-narrow projections (< 30%, e.g. 5% column slices) stay ranged to preserve byte budgets.
-    expect(shouldFallbackToWhole(planWith(8), fileSize, Math.floor(fileSize * 0.35))).toBe(true);
+    // Medium compacts (<= 8 MiB) stay ranged at 8–15 ranges unless planned bytes >= 60%,
+    // preventing multi-second whole-file downloads after footer probes on 4–8 MiB compacts.
+    expect(shouldFallbackToWhole(planWith(8), fileSize, Math.floor(fileSize * 0.35))).toBe(false);
+    expect(shouldFallbackToWhole(planWith(8), fileSize, Math.floor(fileSize * 0.55))).toBe(false);
+    expect(shouldFallbackToWhole(planWith(8), fileSize, Math.ceil(fileSize * 0.60))).toBe(true);
     expect(shouldFallbackToWhole(planWith(8), fileSize, Math.floor(fileSize * 0.10))).toBe(false);
-    expect(shouldFallbackToWhole(planWith(13), 1_650_000, Math.floor(1_650_000 * 0.37))).toBe(true);
+    expect(shouldFallbackToWhole(planWith(13), 1_650_000, Math.floor(1_650_000 * 0.37))).toBe(false);
     expect(shouldFallbackToWhole(planWith(16), fileSize, Math.floor(fileSize * 0.25))).toBe(true);
     // Larger files (> 8 MiB) stay ranged unless byte share justifies a whole download.
-    expect(shouldFallbackToWhole(planWith(8), largeFile, Math.ceil(largeFile * 0.50))).toBe(true);
-    expect(shouldFallbackToWhole(planWith(8), largeFile, Math.floor(largeFile * 0.45))).toBe(false);
-    expect(shouldFallbackToWhole(planWith(16), largeFile, Math.ceil(largeFile * 0.30))).toBe(true);
-    expect(shouldFallbackToWhole(planWith(16), largeFile, Math.floor(largeFile * 0.20))).toBe(false);
+    expect(shouldFallbackToWhole(planWith(8), largeFile, Math.ceil(largeFile * 0.60))).toBe(true);
+    expect(shouldFallbackToWhole(planWith(8), largeFile, Math.floor(largeFile * 0.55))).toBe(false);
+    expect(shouldFallbackToWhole(planWith(16), largeFile, Math.ceil(largeFile * 0.45))).toBe(true);
+    expect(shouldFallbackToWhole(planWith(16), largeFile, Math.floor(largeFile * 0.35))).toBe(false);
   });
 
   it("falls back to shared whole-file fetch in projectedReader on high-fan-out multi-row-group compacts", async () => {

@@ -1133,10 +1133,10 @@ describe("Cloud first-page analytical range loading", () => {
       columnData: [
         { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: 400 }, (_, i) => new Date(Date.parse(from) + i)) },
         { name: "status", type: "INT32", data: Array.from({ length: 400 }, () => 200) },
-        { name: "ua", type: "STRING", data: Array.from({ length: 400 }, (_, i) => `/ua-${i}-${"u".repeat(300)}`) },
+        { name: "ua", type: "STRING", data: Array.from({ length: 400 }, (_, i) => `/ua-${i}-${"u".repeat(700)}`) },
       ],
     });
-    expect(oneGroupBytes.byteLength).toBeGreaterThan(100 * 1024);
+    expect(oneGroupBytes.byteLength).toBeGreaterThan(256 * 1024);
 
     // 1. Footer read (line 191): aborting during footer fetchRange must skip writeDerivedFile(footerKey)
     const footerEntry = { ...file, key: "processed/request/abort-footer.parquet", size: oneGroupBytes.byteLength };

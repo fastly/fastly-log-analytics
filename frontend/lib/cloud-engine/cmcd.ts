@@ -259,11 +259,50 @@ export const CMCD_SCAN_COLUMNS = [
 /** A Parquet file must contain at least one of these columns to satisfy `buildCmcdWhere`. */
 export const CMCD_REQUIRED_ANY_COLUMNS = ["cmcd_sid", "cmcd_br", "cmcd_bl", "cmcd_ot"] as const;
 
+const CMCD_WHERE_BASE_COLUMNS = [
+  "timestamp", "ts_ms", "service_id", "cmcd_sid", "cmcd_br", "cmcd_bl", "cmcd_ot",
+] as const;
+
+const CMCD_BREAKDOWN_SECTION_COLUMNS: Readonly<Record<string, readonly string[]>> = {
+  bitrate_ladder: ["cmcd_bs"],
+  stream_type_dist: ["cmcd_st", "cmcd_bs"],
+  top_content: ["cmcd_cid", "cmcd_bs"],
+  rebuffer_by_country: ["geo_country", "country", "cmcd_bs", "cmcd_mtp"],
+  rebuffer_by_asn: ["client_asn", "asn", "as_name", "cmcd_bs", "cmcd_mtp"],
+};
+
+function isBreakdownOnlySections(sections: readonly string[] | null | undefined): boolean {
+  return Boolean(
+    sections && sections.length > 0 && sections.every((s) => Object.prototype.hasOwnProperty.call(CMCD_BREAKDOWN_SECTION_COLUMNS, s)),
+  );
+}
+
 /** The columns a projected /api/cmcd/aggregates load needs, or null when the filters can't name theirs. */
-export function cmcdScanColumns(filters: unknown): string[] | null {
-  if (filters == null || filters === "") return [...CMCD_SCAN_COLUMNS];
+export function cmcdScanColumns(
+  filters: unknown,
+  sections?: unknown,
+  cmcdFilters?: Pick<CmcdQueryParams, "filter_sf" | "filter_ot" | "filter_st" | "filter_cid">,
+): string[] | null {
+  const sectionList = Array.isArray(sections)
+    ? sections.filter((s): s is string => typeof s === "string")
+    : undefined;
+  let base: string[];
+  if (isBreakdownOnlySections(sectionList)) {
+    const cols = new Set<string>(CMCD_WHERE_BASE_COLUMNS);
+    for (const s of sectionList!) {
+      for (const col of CMCD_BREAKDOWN_SECTION_COLUMNS[s]) cols.add(col);
+    }
+    if (cmcdFilters?.filter_sf) cols.add("cmcd_sf");
+    if (cmcdFilters?.filter_ot) cols.add("cmcd_ot");
+    if (cmcdFilters?.filter_st) cols.add("cmcd_st");
+    if (cmcdFilters?.filter_cid) cols.add("cmcd_cid");
+    base = [...cols];
+  } else {
+    base = [...CMCD_SCAN_COLUMNS];
+  }
+  if (filters == null || filters === "") return base;
   if (typeof filters !== "object" || Array.isArray(filters)) return null;
-  return [...new Set([...CMCD_SCAN_COLUMNS, ...Object.keys(filters).filter((key) => key !== "filter_mode")])];
+  return [...new Set([...base, ...Object.keys(filters).filter((key) => key !== "filter_mode")])];
 }
 
 export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
@@ -271,7 +310,9 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
     const rollup = await cmcdFromRollup(params, params.rollupSource, params.signal);
     if (rollup) return rollup;
   }
-  const asnNamesReady = loadAsnNames();
+  const sectionSet = params.sections?.length ? new Set(params.sections) : null;
+  const breakdownOnly = isBreakdownOnlySections(params.sections);
+  const asnNamesReady = !sectionSet || sectionSet.has("rebuffer_by_asn") ? loadAsnNames() : Promise.resolve();
   const engine = params.engine ?? getDuckDBEngine().readContext();
   params = { ...params, customColumnTypes: engine.getCustomColumnTypes?.() };
   const where = buildCmcdWhere(params);
@@ -279,7 +320,23 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
   const topN = Math.max(1, Math.min(100, Math.floor(params.top_n ?? 30)));
   const nullable = (value: unknown) => value == null ? null : Number(value);
 
-  const coreRows = await engine.executeSql<Record<string, unknown>>(
+  const coreRows = breakdownOnly
+    ? await engine.executeSql<Record<string, unknown>>(
+      `SELECT
+        7::INTEGER AS grp,
+        COUNT(*)::BIGINT AS total_requests,
+        COUNT(cmcd_bs) AS has_bs,
+        COUNT(NULLIF(cmcd_ot, '')) AS has_ot,
+        COUNT(cmcd_bl) AS has_bl,
+        COUNT(cmcd_br) AS has_br,
+        COUNT(NULLIF(cmcd_st, '')) AS has_st,
+        COUNT(NULLIF(cmcd_cid, '')) AS has_cid
+      FROM requests
+      WHERE ${where}`,
+      [],
+      params.signal,
+    )
+    : await engine.executeSql<Record<string, unknown>>(
     `SELECT
       GROUPING(bucket_ms, ot_key, sf_key)::INTEGER AS grp,
       bucket_ms,
@@ -461,7 +518,6 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
     ? "COUNT(DISTINCT NULLIF(cmcd_sid, '')) FILTER (WHERE cmcd_bs IS TRUE) * 100.0 / NULLIF(COUNT(DISTINCT NULLIF(cmcd_sid, '')), 0)"
     : "NULL";
 
-  const sectionSet = params.sections?.length ? new Set(params.sections) : null;
   const wantSection = (name: string) => !sectionSet || sectionSet.has(name);
   const wantCid = wantSection("top_content") && has("cid");
   const wantGeo = (wantSection("rebuffer_by_country") || wantSection("rebuffer_by_asn")) && hasBsEffective;
@@ -528,13 +584,13 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
       ${wantGeo ? `QUANTILE_CONT(cmcd_mtp, 0.5) FILTER (WHERE ${video})::DOUBLE` : "NULL::DOUBLE"} AS median_throughput,
       ${rebufferRateSql} AS rebuffer_rate,
       ${segRebufferRateSql} AS seg_rebuffer_rate,
-      AVG(cmcd_mtp)::DOUBLE AS avg_throughput_kbps
+      ${wantGeo ? "AVG(cmcd_mtp)::DOUBLE" : "NULL::DOUBLE"} AS avg_throughput_kbps
     FROM (
       SELECT
-        NULLIF(cmcd_cid, '') AS content_id,
-        COALESCE(NULLIF(geo_country, ''), NULLIF(country, '')) AS country_key,
-        COALESCE(client_asn, asn)::BIGINT AS asn_key,
-        COALESCE(NULLIF(as_name, ''), 'AS' || CAST(COALESCE(client_asn, asn) AS VARCHAR)) AS asn_name_key,
+        ${wantCid ? "NULLIF(cmcd_cid, '')" : "NULL::VARCHAR"} AS content_id,
+        ${wantGeo ? "COALESCE(NULLIF(geo_country, ''), NULLIF(country, ''))" : "NULL::VARCHAR"} AS country_key,
+        ${wantGeo ? "COALESCE(client_asn, asn)::BIGINT" : "NULL::BIGINT"} AS asn_key,
+        ${wantGeo ? "COALESCE(NULLIF(as_name, ''), 'AS' || CAST(COALESCE(client_asn, asn) AS VARCHAR))" : "NULL::VARCHAR"} AS asn_name_key,
         CASE
           WHEN (${video}) AND cmcd_br IS NOT NULL AND cmcd_br > 0 THEN
             CASE
@@ -546,8 +602,8 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
             END
           ELSE NULL
         END AS br_tier,
-        NULLIF(cmcd_st, '') AS st_key,
-        cmcd_sid, cmcd_bs, cmcd_br, cmcd_bl, cmcd_mtp, cmcd_ot
+        ${wantSt ? "NULLIF(cmcd_st, '')" : "NULL::VARCHAR"} AS st_key,
+        cmcd_sid, cmcd_bs, cmcd_br, cmcd_bl, ${wantGeo ? "cmcd_mtp" : "NULL::DOUBLE AS cmcd_mtp"}, cmcd_ot
       FROM requests
       WHERE ${where}
     ) base

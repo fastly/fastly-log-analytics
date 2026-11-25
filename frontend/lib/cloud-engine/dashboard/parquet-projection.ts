@@ -3,8 +3,8 @@ import { ByteWriter } from "hyparquet-writer";
 import { writeMetadata } from "hyparquet-writer/src/metadata.js";
 import { MAX_REGISTERED_BYTES } from "./budget";
 
-/** One tail read usually covers the whole footer. */
-export const FOOTER_PROBE_BYTES = 64 * 1024;
+/** One tail read usually covers the whole footer, including 100-column multi-row-group compacts. */
+export const FOOTER_PROBE_BYTES = 256 * 1024;
 /**
  * Needed chunks closer than this always share one HTTP range. Compacted files
  * hold many row groups of ~100 columns, so most chunks are a few KiB and a
@@ -25,7 +25,7 @@ export const RANGE_REQUEST_COST_BYTES = 32 * 1024;
  */
 export const TARGET_RANGES_PER_FILE = 8;
 /** Largest gap merged when reducing a file's ranges toward [`TARGET_RANGES_PER_FILE`]. */
-export const SOFT_MERGE_MAX_GAP = 96 * 1024;
+export const SOFT_MERGE_MAX_GAP = 128 * 1024;
 /** Maximum fraction of file size Pass 2 may reach while coalescing toward [`TARGET_RANGES_PER_FILE`]. */
 export const SOFT_MERGE_MAX_FILE_RATIO = 0.40;
 /**
@@ -58,9 +58,9 @@ export function readsWholeFirst(file: { size: number; end: string }, nowMs = Dat
 
 export const WHOLE_FALLBACK_RANGE_RATIO = 0.85;
 export const WHOLE_FALLBACK_MANY_RANGES_MIN = 8;
-export const WHOLE_FALLBACK_MANY_RANGES_RATIO = 0.50;
+export const WHOLE_FALLBACK_MANY_RANGES_RATIO = 0.60;
 export const WHOLE_FALLBACK_HIGH_FANOUT_MIN = 16;
-export const WHOLE_FALLBACK_HIGH_FANOUT_RATIO = 0.30;
+export const WHOLE_FALLBACK_HIGH_FANOUT_RATIO = 0.45;
 export const WHOLE_FALLBACK_HIGH_FANOUT_MAX_BYTES = 8 * 1024 * 1024;
 
 /**
@@ -75,12 +75,9 @@ export function shouldFallbackToWhole(
 ): boolean {
   if (plan.ranges.length === 0 || fileSize <= 0 || fileSize > maxFileBytes) return false;
   if (plannedRangeBytes >= fileSize * WHOLE_FALLBACK_RANGE_RATIO) return true;
-  if (plan.ranges.length >= WHOLE_FALLBACK_MANY_RANGES_MIN) {
-    if (plannedRangeBytes >= fileSize * WHOLE_FALLBACK_MANY_RANGES_RATIO) return true;
-    if (fileSize <= WHOLE_FALLBACK_HIGH_FANOUT_MAX_BYTES
-      && plannedRangeBytes >= fileSize * WHOLE_FALLBACK_HIGH_FANOUT_RATIO) {
-      return true;
-    }
+  if (plan.ranges.length >= WHOLE_FALLBACK_MANY_RANGES_MIN
+    && plannedRangeBytes >= fileSize * WHOLE_FALLBACK_MANY_RANGES_RATIO) {
+    return true;
   }
   return plan.ranges.length >= WHOLE_FALLBACK_HIGH_FANOUT_MIN
     && (plannedRangeBytes >= fileSize * WHOLE_FALLBACK_HIGH_FANOUT_RATIO
