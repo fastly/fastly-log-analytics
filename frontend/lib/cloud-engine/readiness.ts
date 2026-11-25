@@ -1644,7 +1644,12 @@ function isMultiParamAuthHeader(keyName: string, authScheme: string): boolean {
   return hasKeyStemSegment(keyName, MULTI_PARAM_AUTH_KEY_STEMS, false);
 }
 
-function scanBalancedGroupEnd(line: string, p: number): number {
+function scanBalancedGroupEnd(
+  line: string,
+  p: number,
+  allowQuoted = false,
+  escapeState?: QuoteEscapeState,
+): number {
   const len = line.length;
   const openCh = line[p];
   const closeCh = openCh === "(" ? ")" : openCh === "[" ? "]" : openCh === "{" ? "}" : "";
@@ -1652,6 +1657,10 @@ function scanBalancedGroupEnd(line: string, p: number): number {
   let depth = 1;
   let k = p + 1;
   while (k < len && depth > 0) {
+    if (allowQuoted && (line[k] === '"' || line[k] === "'" || line[k] === "`")) {
+      k = scanQuotedLiteralEnd(line, k, line[k]!, escapeState);
+      continue;
+    }
     if (line.startsWith("[redacted]", k)) {
       k += 10;
       continue;
@@ -1706,7 +1715,7 @@ function scanSingleSecretValueEnd(
     }
     if (line[k] === "(" || line[k] === "[" || line[k] === "{") {
       sawOnlySimpleNumber = false;
-      k = scanBalancedGroupEnd(line, k);
+      k = scanBalancedGroupEnd(line, k, allowQuoted, escapeState);
       continue;
     }
     if (!isAsciiDigit(line[k]) && line[k] !== ".") sawOnlySimpleNumber = false;

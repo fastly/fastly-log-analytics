@@ -2933,6 +2933,26 @@ it("SEC-T5-ITER40-FE-03: prevents non-contraction apostrophe mismatch and cross-
         ["HTTP", "403", "100", "MB", "session", "valid"],
         "Error: Runtime Error: [redacted]",
       ],
+      [
+        'Runtime Error: "Cookie": sid=("a\\") HTTP 403 100 MB session valid"',
+        ["HTTP", "403", "100", "MB", "session", "valid"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Cookie": sid=["a\\"] HTTP 403 100 MB session valid"',
+        ["HTTP", "403", "100", "MB", "session", "valid"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": Digest realm=("a\\") HTTP 403 100 MB session valid"',
+        ["HTTP", "403", "100", "MB", "session", "valid"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": Digest realm={"a\\"} HTTP 403 100 MB session valid"',
+        ["HTTP", "403", "100", "MB", "session", "valid"],
+        "Error: Runtime Error: [redacted]",
+      ],
     ];
     for (const [msg, forbidden, expectedExact] of cases) {
       const err = new Error(msg);
