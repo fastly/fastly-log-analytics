@@ -1,16 +1,23 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { cloudAdminWire } from "./admin-wire";
+import { cloudAdminWire, resetCronWireCache } from "./admin-wire";
 import { adminRequest, deleteLogHistory, purgeQuarantine } from "./telemetry/admin";
 import { queryOpsLogs } from "./telemetry/client";
 
 vi.mock("./telemetry/admin", () => ({
   adminRequest: vi.fn(), deleteLogHistory: vi.fn(), purgeQuarantine: vi.fn(),
 }));
-vi.mock("./telemetry/client", () => ({ queryOpsLogs: vi.fn() }));
+vi.mock("./telemetry/client", () => ({
+  queryOpsLogs: vi.fn(),
+  readLogs: vi.fn(),
+  resetOpsReadCache: vi.fn(),
+}));
 const request = (path: string, method = "GET") => new Request(`http://localhost${path}`, {
   method, headers: { "x-service-id": "fixture-service" },
 });
-beforeEach(() => vi.resetAllMocks());
+beforeEach(() => {
+  vi.resetAllMocks();
+  resetCronWireCache();
+});
 
 describe("Cloud administrative wire parity", () => {
   it("collects native tree pages, canonicalizes prefixes and preserves file metadata", async () => {
@@ -214,26 +221,78 @@ describe("Cloud administrative wire parity", () => {
     expect(queryOpsLogs).not.toHaveBeenCalled();
   });
 
-  it("shares one cron history read across the page's concurrent default-range cron requests", async () => {
+  it("shares one native /api/cron-runs fetch and one cron_runs ops read across the /logs wave and TTL-caches sequential filter queries", async () => {
     cronEvidence();
+    const now = Date.now();
+    vi.mocked(queryOpsLogs).mockResolvedValue({
+      kind: "cron_runs",
+      from: new Date(now - 7 * 86400_000).toISOString(),
+      to: new Date(now).toISOString(),
+      rows: [
+        { timestamp: now - 30_000, event_id: "ingest", run_id: "run-1", cron_kind: "request_ingest",
+          service_id: "fixture-service", started_at: now - 30_000, duration_ms: 200, outcome: "done" },
+        { timestamp: now - 20_000, event_id: "delete", run_id: "run-2", cron_kind: "raw_delete",
+          service_id: "fixture-service", started_at: now - 20_000, duration_ms: 100, outcome: "error", error: "delete failed" },
+      ],
+      oldestLiveMs: null, status: null,
+      stats: { listed: 1, read: 1, cached: 0, cdnHits: 0, skippedCovered: 0, ignoredCompact: 0, evicted: 0, liveRows: 0 },
+    });
     const abandoned = new AbortController();
     const reads = [
       cloudAdminWire(request("/api/cron-runs?page=1&per_page=500")),
       cloudAdminWire(request("/api/cron-runs?page=1&per_page=10")),
       cloudAdminWire(request("/api/cron-schedule")),
+      cloudAdminWire(request("/api/cron-runs?task=log_discovery&per_page=1&page=1&skip_total=true")),
       cloudAdminWire(new Request("http://localhost/api/cron-runs?page=1&per_page=50", {
         headers: { "x-service-id": "fixture-service" }, signal: abandoned.signal,
       })),
     ];
     abandoned.abort();
     const results = await Promise.allSettled(reads);
-    expect(results.slice(0, 3).map((result) => result.status)).toEqual(["fulfilled", "fulfilled", "fulfilled"]);
-    expect(results[3].status).toBe("rejected");
-    // The fixture rows are old, so every caller widens through the same three lookback tiers.
-    expect(queryOpsLogs).toHaveBeenCalledTimes(3);
-    const later = await cloudAdminWire(request("/api/cron-runs?page=1&per_page=10"));
-    expect(later!.ok).toBe(true);
-    expect(queryOpsLogs).toHaveBeenCalledTimes(6);
+    expect(results.slice(0, 4).map((result) => result.status)).toEqual(["fulfilled", "fulfilled", "fulfilled", "fulfilled"]);
+    expect(results[4].status).toBe("rejected");
+    expect(adminRequest).toHaveBeenCalledTimes(1);
+    expect(queryOpsLogs).toHaveBeenCalledTimes(1);
+
+    // Sequential filtered query within TTL reuses both caches and still filters accurately.
+    const filtered = await (await cloudAdminWire(request("/api/cron-runs?page=1&per_page=500&task=raw_delete&status=error")))!.json();
+    expect(filtered).toMatchObject({ total: 1, entries: [{ task: "raw_delete", status: "error" }] });
+    expect(adminRequest).toHaveBeenCalledTimes(1);
+    expect(queryOpsLogs).toHaveBeenCalledTimes(1);
+
+    // Explicitly resetting the cron wire cache (e.g. after DELETE /api/cron-runs or manual trigger) forces fresh reads.
+    resetCronWireCache();
+    const afterReset = await cloudAdminWire(request("/api/cron-runs?page=1&per_page=500"));
+    expect(afterReset!.ok).toBe(true);
+    expect(adminRequest).toHaveBeenCalledTimes(2);
+    expect(queryOpsLogs).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not widen /api/cron-schedule lookback solely for disabled tasks", async () => {
+    const now = Date.now();
+    vi.mocked(adminRequest).mockResolvedValue({
+      configured: true, service_id: "fixture-service",
+      schedules: [
+        { task: "request_ingest", next_run_time: "2026-01-01T00:00:10Z", interval_s: 10 },
+        { task: "rum_ingest", next_run_time: null, disabled_reason: "RUM is disabled" },
+      ],
+      clock: { probe_interval_s: 15, log_period_s: 60, rum_log_period_s: null },
+      runs: [],
+    });
+    vi.mocked(queryOpsLogs).mockResolvedValue({
+      kind: "cron_runs", from: "", to: "",
+      rows: [
+        { timestamp: now - 15_000, event_id: "r1", run_id: "run-1", cron_kind: "request_ingest",
+          service_id: "fixture-service", started_at: now - 15_000, duration_ms: 50, outcome: "done" },
+      ],
+      oldestLiveMs: null, status: null,
+      stats: { listed: 1, read: 1, cached: 0, cdnHits: 0, skippedCovered: 0, ignoredCompact: 0, evicted: 0, liveRows: 0 },
+    });
+    const res = await (await cloudAdminWire(request("/api/cron-schedule")))!.json();
+    expect(res.schedules).toHaveLength(2);
+    expect(queryOpsLogs).toHaveBeenCalledTimes(1);
+    const [, range] = vi.mocked(queryOpsLogs).mock.calls[0];
+    expect(Date.parse(range.to) - Date.parse(range.from)).toBe(3600_000);
   });
 
   it("answers the header's last-sync probe from the last hour and maps log_discovery to the Cloud ingest stage", async () => {

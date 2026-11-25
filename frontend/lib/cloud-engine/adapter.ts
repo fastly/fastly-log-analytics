@@ -70,7 +70,7 @@ import { cloudDeleteData } from "./delete-data";
 import { cloudTeardown } from "./teardown";
 import { cloudProvisionExecute } from "./provision";
 import { cloudLogAccounting, cloudQuarantine } from "./admin-reads";
-import { cloudAdminWire } from "./admin-wire";
+import { cloudAdminWire, resetCronWireCache } from "./admin-wire";
 import { cloudActiveLogFieldIds } from "./active-log-fields";
 import { beginCloudLoading, type LoadingStage } from "./loading-progress";
 import {
@@ -104,7 +104,7 @@ import {
   startBackfill,
   sweepRetention,
 } from "./telemetry/admin";
-import { queryOpsLogs } from "./telemetry/client";
+import { queryOpsLogs, resetOpsReadCache } from "./telemetry/client";
 import type { OpsKind } from "./telemetry/kinds";
 import {
   activeOpsUser,
@@ -1766,6 +1766,8 @@ async function dispatchCloudRequest(
       });
       if (!triggered.ok) return triggered;
     }
+    resetCronWireCache();
+    resetOpsReadCache();
     return jsonResponse({ run_id: "cloud-tick", status: "started" }, request);
   }
   if (pathname === "/api/admin/share/banner" && method === "GET") {
@@ -2556,6 +2558,8 @@ async function dispatchCloudRequest(
   // Page 6 & 7: Operational Logs, Schema & Usage Log
   if (pathname === "/api/cron-runs" && method === "DELETE") {
     const res = await deleteLogHistory("cron_runs");
+    resetCronWireCache();
+    resetOpsReadCache();
     return jsonResponse(res, request);
   }
   if (pathname === "/api/admin/metadata-storage" && method === "GET") {
@@ -3036,6 +3040,8 @@ export async function cloudStreamFetch(
               signal,
             });
             if (!triggered.ok) throw new Error(`Ingest trigger failed (${triggered.status})`);
+            resetCronWireCache();
+            resetOpsReadCache();
           }
           emit({ type: "status", status: "complete", message: "Triggered ingest tick" });
           emit({ type: "done", status: "complete" });

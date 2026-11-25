@@ -128,7 +128,12 @@ export function makeCronRunsApplier(qc: QueryClient, serviceId: string | null): 
     pending.clear()
     const opts = { cancelRefetch: false } as const
     if (due.has('table')) qc.invalidateQueries({ queryKey: queryKeys.admin.cronLogsFor(serviceId) }, opts)
-    if (due.has('recent')) qc.invalidateQueries({ queryKey: queryKeys.admin.cronLogsRecent(serviceId) }, opts)
+    if (due.has('recent')) {
+      qc.invalidateQueries({ queryKey: queryKeys.admin.cronLogsRecent(serviceId) }, opts)
+      if (!due.has('table') && !qc.getQueryCache().find({ queryKey: queryKeys.admin.cronLogsRecent(serviceId) })?.getObserversCount()) {
+        qc.invalidateQueries({ queryKey: queryKeys.admin.cronLogs(serviceId, 'all', 'all') }, opts)
+      }
+    }
     if (due.has('last-sync')) qc.invalidateQueries({ queryKey: queryKeys.lastSync(serviceId) }, opts)
     if (due.has('storage')) qc.invalidateQueries({ queryKey: queryKeys.admin.storageAll() }, opts)
     if (due.has('schedule')) qc.invalidateQueries({ queryKey: queryKeys.admin.cronSchedule(serviceId) }, opts)
@@ -193,6 +198,7 @@ export function cronCacheBust(queryClient: QueryClient, _serviceId?: string | nu
   const keys = [
     queryKeys.admin.cronLogsAll(),
     queryKeys.admin.cronLogsRecentAll(),
+    ['admin', 'cron-schedule'] as const,
     queryKeys.admin.storageAll(),
     queryKeys.admin.schemaAll(),
     queryKeys.lastSyncAll(),

@@ -75,31 +75,205 @@ function paginate(rows: Row[], params: URLSearchParams) {
 }
 
 type OpsRead = Awaited<ReturnType<typeof queryOpsLogs>>;
-const sharedCronReads = new Map<string, { read: Promise<OpsRead>; controller: AbortController; users: number }>();
 
-// The logs page asks for runs, recent runs and the schedule at once; all of
-// them need the same cron history, so concurrent callers share one read. The
+const CRON_WIRE_TTL_MS = 15_000;
+
+interface InFlightCronNative {
+  read: Promise<Row>;
+  controller: AbortController;
+  users: number;
+}
+
+interface SettledCronNative {
+  at: number;
+  page: Row;
+}
+
+interface InFlightCronRead {
+  scopeKey: string;
+  fromMs: number;
+  toMs: number;
+  read: Promise<OpsRead>;
+  controller: AbortController;
+  users: number;
+}
+
+interface SettledCronRead {
+  scopeKey: string;
+  fromMs: number;
+  toMs: number;
+  at: number;
+  result: OpsRead;
+}
+
+const inFlightCronNative = new Map<string, InFlightCronNative>();
+const settledCronNative = new Map<string, SettledCronNative>();
+const inFlightCronReads = new Set<InFlightCronRead>();
+const settledCronReads = new Map<string, SettledCronRead>();
+
+export function resetCronWireCache(): void {
+  settledCronNative.clear();
+  settledCronReads.clear();
+}
+
+async function nativeCronPage(
+  request: Request,
+  entryMetaEpoch: number,
+  entryOpsEpoch: number,
+): Promise<Row> {
+  assertAdminWireEpoch(request, entryMetaEpoch, entryOpsEpoch);
+  const original = new URL(request.url);
+  const service = original.searchParams.get("service_id") ?? request.headers.get("x-service-id") ?? "";
+  const scopeKey = JSON.stringify([
+    entryMetaEpoch,
+    entryOpsEpoch,
+    activeOpsUser(),
+    dashboardCacheIdentity(),
+    service,
+  ]);
+  const now = Date.now();
+  const settled = settledCronNative.get(scopeKey);
+  if (settled) {
+    if (now - settled.at < CRON_WIRE_TTL_MS) return settled.page;
+    settledCronNative.delete(scopeKey);
+  }
+  let entry = inFlightCronNative.get(scopeKey);
+  if (!entry) {
+    const controller = new AbortController();
+    const cleanUrl = new URL("/api/cron-runs", request.url);
+    if (service) cleanUrl.searchParams.set("service_id", service);
+    const cleanRequest = new Request(cleanUrl, {
+      method: "GET",
+      headers: service ? { "x-service-id": service } : undefined,
+      signal: controller.signal,
+    });
+    const created: InFlightCronNative = {
+      read: nativePages(cleanRequest, "/api/cron-runs", "runs", entryMetaEpoch, entryOpsEpoch)
+        .then((page) => {
+          if (entryMetaEpoch === currentStoreMetaEpoch() && entryOpsEpoch === currentOpsCacheEpoch()) {
+            settledCronNative.set(scopeKey, { at: Date.now(), page });
+          }
+          return page;
+        }),
+      controller,
+      users: 0,
+    };
+    const forget = () => { if (inFlightCronNative.get(scopeKey) === created) inFlightCronNative.delete(scopeKey); };
+    created.read.then(forget, forget);
+    inFlightCronNative.set(scopeKey, created);
+    entry = created;
+  }
+  const shared = entry;
+  shared.users += 1;
+  let onAbort!: () => void;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(request.signal.reason);
+    request.signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    const page = await Promise.race([shared.read, aborted]);
+    assertAdminWireEpoch(request, entryMetaEpoch, entryOpsEpoch);
+    return page;
+  } finally {
+    request.signal.removeEventListener("abort", onAbort);
+    shared.users -= 1;
+    if (shared.users === 0 && request.signal.aborted) {
+      shared.controller.abort(request.signal.reason);
+      if (inFlightCronNative.get(scopeKey) === shared) inFlightCronNative.delete(scopeKey);
+    }
+  }
+}
+
+function findCoveringSettledCronRead(scopeKey: string, fromMs: number, toMs: number): OpsRead | null {
+  const now = Date.now();
+  let best: SettledCronRead | null = null;
+  let bestSpan = Number.POSITIVE_INFINITY;
+  for (const [key, entry] of settledCronReads) {
+    if (now - entry.at >= CRON_WIRE_TTL_MS) {
+      settledCronReads.delete(key);
+      continue;
+    }
+    if (entry.scopeKey !== scopeKey) continue;
+    if (entry.fromMs <= fromMs && entry.toMs >= toMs) {
+      const span = entry.toMs - entry.fromMs;
+      if (span < bestSpan) {
+        best = entry;
+        bestSpan = span;
+      }
+    }
+  }
+  return best?.result ?? null;
+}
+
+function findCoveringInFlightCronRead(scopeKey: string, fromMs: number, toMs: number): InFlightCronRead | null {
+  let best: InFlightCronRead | null = null;
+  let bestSpan = Number.POSITIVE_INFINITY;
+  for (const entry of inFlightCronReads) {
+    if (entry.scopeKey !== scopeKey) continue;
+    if (entry.fromMs <= fromMs && entry.toMs >= toMs) {
+      const span = entry.toMs - entry.fromMs;
+      if (span < bestSpan) {
+        best = entry;
+        bestSpan = span;
+      }
+    }
+  }
+  return best;
+}
+
+// The logs page asks for runs, recent runs, schedule, and header last-sync at once;
+// concurrent and short-TTL callers share any covering cron_runs history read. The
 // read is cancelled only when every caller has gone.
 async function cronHistory(
-  key: string,
   range: { from: string; to: string },
   signal: AbortSignal,
   entryOpsEpoch: number,
 ): Promise<OpsRead> {
   assertOpsEpoch(entryOpsEpoch, signal);
-  const scopedKey = JSON.stringify([
-    key,
+  const scopeKey = JSON.stringify([
     entryOpsEpoch,
     activeOpsUser(),
     dashboardCacheIdentity(),
   ]);
-  let entry = sharedCronReads.get(scopedKey);
+  const fromMs = Date.parse(range.from);
+  const toMs = Date.parse(range.to);
+  if (Number.isFinite(fromMs) && Number.isFinite(toMs)) {
+    const settled = findCoveringSettledCronRead(scopeKey, fromMs, toMs);
+    if (settled) return settled;
+  }
+  let entry = Number.isFinite(fromMs) && Number.isFinite(toMs)
+    ? findCoveringInFlightCronRead(scopeKey, fromMs, toMs)
+    : null;
   if (!entry) {
     const controller = new AbortController();
-    const created = { read: queryOpsLogs("cron_runs", range, { signal: controller.signal }), controller, users: 0 };
-    const forget = () => { if (sharedCronReads.get(scopedKey) === created) sharedCronReads.delete(scopedKey); };
+    const created: InFlightCronRead = {
+      scopeKey,
+      fromMs,
+      toMs,
+      read: queryOpsLogs("cron_runs", range, { signal: controller.signal })
+        .then((res) => {
+          if (
+            entryOpsEpoch === currentOpsCacheEpoch() &&
+            res.liveTruncated !== true &&
+            Number.isFinite(fromMs) &&
+            Number.isFinite(toMs)
+          ) {
+            settledCronReads.set(`${scopeKey}|${range.from}|${range.to}`, {
+              scopeKey,
+              fromMs,
+              toMs,
+              at: Date.now(),
+              result: res,
+            });
+          }
+          return res;
+        }),
+      controller,
+      users: 0,
+    };
+    const forget = () => { inFlightCronReads.delete(created); };
     created.read.then(forget, forget);
-    sharedCronReads.set(scopedKey, created);
+    inFlightCronReads.add(created);
     entry = created;
   }
   const shared = entry;
@@ -118,7 +292,7 @@ async function cronHistory(
     shared.users -= 1;
     if (shared.users === 0 && signal.aborted) {
       shared.controller.abort(signal.reason);
-      if (sharedCronReads.get(scopedKey) === shared) sharedCronReads.delete(scopedKey);
+      inFlightCronReads.delete(shared);
     }
   }
 }
@@ -130,6 +304,7 @@ const TASK_ALIASES: Record<string, readonly string[]> = { log_discovery: ["reque
 // the page it asked for is not yet full: the header's "last sync" badge and
 // the recent-runs strip want one or ten rows, not a week of ten-second ticks.
 const DEFAULT_LOOKBACKS_MS = [3600_000, 86400_000, 7 * 86400_000] as const;
+const WIDE_PAGE_THRESHOLD = 100;
 
 function matchesTask(row: Row, task: string | null): boolean {
   if (!task) return true;
@@ -143,18 +318,24 @@ async function cron(
 ): Promise<Response> {
   const url = new URL(request.url);
   const params = url.searchParams;
-  const end = params.get("end") ?? params.get("end_time") ?? new Date().toISOString();
-  const to = Date.parse(end);
   const explicitStart = params.get("start") ?? params.get("start_time");
-  const defaultRange = explicitStart === null && !params.has("end") && !params.has("end_time");
-  const lookbacks = explicitStart === null ? DEFAULT_LOOKBACKS_MS : [to - Date.parse(explicitStart)];
+  const explicitEnd = params.get("end") ?? params.get("end_time");
+  const defaultRange = explicitStart === null && explicitEnd === null;
+  const to = defaultRange ? Math.ceil(Date.now() / 60_000) * 60_000 : Date.parse(explicitEnd ?? new Date().toISOString());
+  const end = defaultRange ? new Date(to).toISOString() : (explicitEnd ?? new Date(to).toISOString());
+  const perPage = positive(params, "per_page", 50, 1000);
+  const pageNumber = positive(params, "page", 1, 100000);
+  const isSchedule = url.pathname === "/api/cron-schedule";
+  const lookbacks: readonly number[] = explicitStart !== null
+    ? [to - Date.parse(explicitStart)]
+    : !isSchedule && perPage >= WIDE_PAGE_THRESHOLD
+      ? [7 * 86400_000]
+      : DEFAULT_LOOKBACKS_MS;
   if (!Number.isFinite(to) || lookbacks.some((span) => !Number.isFinite(span) || span < 0)) {
     return Response.json({ detail: { error: "invalid_time_range" } }, { status: 422 });
   }
-  const page = await nativePages(
+  const page = await nativeCronPage(
     request,
-    "/api/cron-runs",
-    "runs",
     entryMetaEpoch,
     entryOpsEpoch,
   );
@@ -162,18 +343,13 @@ async function cron(
   if (service && page.service_id !== service) throw new Error("Cloud cron service does not match the selected service");
   const coordinators = (page.runs as Row[]).map((row): Row => ({ ...row, task: "cloud_ingest_clock" }));
   const sinceId = params.has("since_id") ? Number(params.get("since_id")) : null;
-  const perPage = positive(params, "per_page", 50, 1000);
-  const pageNumber = positive(params, "page", 1, 100000);
-  const isSchedule = url.pathname === "/api/cron-schedule";
   const taskFilter = params.get("task");
 
   for (const [index, span] of lookbacks.entries()) {
     const start = explicitStart ?? new Date(to - span).toISOString();
     const from = to - span;
-    const key = defaultRange ? `default:${span}` : `${start}|${end}`;
     assertAdminWireEpoch(request, entryMetaEpoch, entryOpsEpoch);
     const evidence = await cronHistory(
-      key,
       { from: start, to: end },
       request.signal,
       entryOpsEpoch,
@@ -214,12 +390,12 @@ async function cron(
     const history = { history_from: start, history_to: end };
     if (isSchedule) {
       if (!Array.isArray(page.schedules)) throw new Error("Cloud native task schedules are unavailable");
-      const schedules = (page.schedules as Row[]).map((schedule) => {
+      const schedules = (page.schedules as Row[]).map((schedule): Row => {
         const observed = entries.find((row) => row.task === schedule.task)?.started_at;
         const recorded = typeof schedule.last_run_time === "string" ? schedule.last_run_time : null;
         return { ...schedule, last_run_time: observed && (!recorded || Date.parse(observed) > Date.parse(recorded)) ? observed : recorded };
       });
-      if (widest || schedules.every((schedule) => typeof schedule.last_run_time === "string")) {
+      if (widest || schedules.every((schedule) => Boolean(schedule.disabled_reason) || typeof schedule.last_run_time === "string")) {
         return Response.json({ schedules, ...history, clock: page.clock ?? null });
       }
       continue;

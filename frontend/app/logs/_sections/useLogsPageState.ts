@@ -116,6 +116,8 @@ export function useLogsPageState(initialTab?: string) {
   }, [activeServiceId])
 
   const { data: status } = useSyncStatus()
+  const shareCronLogsAsRecent = activeTab === 'cron' && taskFilter === 'all' && statusFilter === 'all'
+
   const { data: cronLogs, isLoading: isLoadingCron, isFetching: isFetchingCron } = useQuery({
     queryKey: queryKeys.admin.cronLogs(activeServiceId, taskFilter, statusFilter),
     queryFn: ({ signal }) =>
@@ -138,7 +140,7 @@ export function useLogsPageState(initialTab?: string) {
     staleTime: 30_000,
   })
 
-  const { data: recentCrons } = useQuery({
+  const { data: recentCronsQuery } = useQuery({
     queryKey: queryKeys.admin.cronLogsRecent(activeServiceId),
     queryFn: ({ signal }) =>
       unwrapClient(
@@ -153,11 +155,18 @@ export function useLogsPageState(initialTab?: string) {
           },
         }),
       ),
-    enabled: !!activeServiceId,
+    enabled: !!activeServiceId && !shareCronLogsAsRecent,
     refetchInterval: 5 * 60_000,
     refetchIntervalInBackground: false,
     staleTime: 15_000,
   })
+
+  const recentCrons = React.useMemo(() => {
+    if (shareCronLogsAsRecent) {
+      return cronLogs ? { ...cronLogs, entries: (cronLogs.entries || []).slice(0, 10) } : undefined
+    }
+    return recentCronsQuery
+  }, [shareCronLogsAsRecent, cronLogs, recentCronsQuery])
 
   const runningCrons = React.useMemo(
     () => ({ entries: (recentCrons?.entries || []).filter((e) => e.status === 'running') }),
@@ -301,6 +310,9 @@ export function useLogsPageState(initialTab?: string) {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.admin.cronLogsFor(activeServiceId) })
+      queryClient.invalidateQueries({ queryKey: queryKeys.admin.cronLogsRecent(activeServiceId) })
+      queryClient.invalidateQueries({ queryKey: queryKeys.admin.cronSchedule(activeServiceId) })
+      queryClient.invalidateQueries({ queryKey: queryKeys.lastSync(activeServiceId) })
       setIsPurgeOpen(false)
     },
   })

@@ -4,6 +4,9 @@ import React from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { RefreshCw, HelpCircle, Trash2 } from 'lucide-react'
 import { queryKeys } from '@/lib/api'
+import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
+import { resetCronWireCache } from '@/lib/cloud-engine/admin-wire'
+import { resetOpsReadCache } from '@/lib/cloud-engine/telemetry/client'
 import { cn } from '@/lib/utils'
 import type { SyncStatus } from '@/hooks/useSSE'
 import { Button, buttonVariants } from '@/components/ui/button'
@@ -248,7 +251,14 @@ export function CronTab({
                   size="sm"
                   className="h-8 text-xs"
                   disabled={isFetchingCron}
-                  onClick={() => queryClient.invalidateQueries({ queryKey: queryKeys.admin.cronLogsFor(activeServiceId) })}
+                  onClick={() => {
+                    if (IS_CLOUD_MODE) {
+                      resetCronWireCache()
+                      resetOpsReadCache()
+                    }
+                    queryClient.invalidateQueries({ queryKey: queryKeys.admin.cronLogsFor(activeServiceId) })
+                    queryClient.invalidateQueries({ queryKey: queryKeys.admin.cronSchedule(activeServiceId) })
+                  }}
                 >
                   <RefreshCw className={`h-3 w-3 mr-1.5 ${isFetchingCron ? 'animate-spin' : ''}`} />
                   Refresh
