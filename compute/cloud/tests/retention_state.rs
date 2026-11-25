@@ -179,6 +179,15 @@ impl Runtime for LaggingKv {
         kv.insert(key.into(), (next, value.clone()));
         Ok(true)
     }
+    fn kv_delete(&self, key: &str) -> Result<(), String> {
+        self.charge()?;
+        let current = self.kv.borrow_mut().remove(key);
+        self.before_write
+            .borrow_mut()
+            .entry(key.into())
+            .or_insert(current);
+        Ok(())
+    }
     fn admin_fos(&self, request: FosRequest<'_>) -> Result<FosResponse, String> {
         self.charge()?;
         self.vcpu.set(self.vcpu.get() + self.vcpu_per_fos.get());

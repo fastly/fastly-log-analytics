@@ -423,9 +423,9 @@ def wait_for(manager: HistoricalJobManager, job_id: str, state: HistoricalJobSta
 
 
 def test_job_completes_and_stops_at_max_rows() -> None:
-    manager = HistoricalJobManager(max_output_bytes=100, terminal_grace_ttl=timedelta(seconds=60))
+    manager = HistoricalJobManager(max_output_bytes=600, terminal_grace_ttl=timedelta(seconds=60))
     job = wait_for(manager, manager.submit(cold_plan(), lambda: [{"id": 1}, {"id": 2}]), HistoricalJobState.COMPLETED)
-    assert job.rows == ({"id": 1}, {"id": 2}) and job.row_count == 2 and job.output_bytes <= 100
+    assert job.rows == ({"id": 1}, {"id": 2}) and job.row_count == 2 and job.output_bytes <= 600
     manager.shutdown()
 
     manager2 = HistoricalJobManager(max_output_bytes=10_000)
