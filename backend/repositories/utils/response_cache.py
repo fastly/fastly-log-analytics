@@ -158,17 +158,31 @@ def cache_put(cache: BoundedTTLCache, key: str, value: dict, *, strip: tuple[str
 
 
 _RESPONSE_MEMOS: list[ResponseMemo] = []
-_SERVICE_CACHE_INVALIDATORS: list[Callable[[str], int]] = []
+_SERVICE_CACHE_INVALIDATORS: list[tuple[Callable[[str], int], bool]] = []
 
 
-def register_service_cache_invalidator(fn: Callable[[str], int]) -> None:
-    """Register a callback invoked by ``invalidate_service_cache(service_id)``."""
-    if fn not in _SERVICE_CACHE_INVALIDATORS:
-        _SERVICE_CACHE_INVALIDATORS.append(fn)
+def register_service_cache_invalidator(fn: Callable[[str], int], *, on_ingest: bool = True) -> None:
+    """Register a callback invoked by ``invalidate_service_cache(service_id)``.
+
+    Pass ``on_ingest=False`` for long-horizon rolling SWR caches (e.g. 30-day storage billing)
+    that should only be cleared on explicit mutations/manual triggers, not routine ingest ticks.
+    """
+    for idx, (existing, _) in enumerate(_SERVICE_CACHE_INVALIDATORS):
+        if existing is fn:
+            _SERVICE_CACHE_INVALIDATORS[idx] = (fn, on_ingest)
+            return
+    _SERVICE_CACHE_INVALIDATORS.append((fn, on_ingest))
 
 
 class ResponseMemo:
-    def __init__(self, *, ttl: float = 30.0, maxsize: int = 256, prewarmer: bool | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        ttl: float = 30.0,
+        maxsize: int = 256,
+        prewarmer: bool | None = None,
+        invalidate_on_ingest: bool = True,
+    ) -> None:
         self.cache: BoundedTTLCache = BoundedTTLCache(maxsize=maxsize, ttl_seconds=ttl)
         self._telemetry_cache: BoundedTTLCache = BoundedTTLCache(maxsize=maxsize, ttl_seconds=ttl)
         memo_id = next(_MEMO_COUNTER)
@@ -176,6 +190,7 @@ class ResponseMemo:
         CacheRegistry.register(f"response_memo.telemetry.{memo_id}", self._telemetry_cache)
         _RESPONSE_MEMOS.append(self)
         self.prewarmer = prewarmer
+        self.invalidate_on_ingest = invalidate_on_ingest
 
     def get(self, key: str) -> dict | None:
         return cache_get(self.cache, key, prewarmer=self.prewarmer)
@@ -209,15 +224,24 @@ class ResponseMemo:
             self._telemetry_cache.pop(key, None)
 
 
-def invalidate_service_cache(service_id: str | dict = "") -> int:
-    """Invalidate cached analytical responses across all registered ResponseMemos."""
+def invalidate_service_cache(service_id: str | dict = "", *, scope: Literal["all", "ingest"] = "all") -> int:
+    """Invalidate cached analytical responses across registered ResponseMemos.
+
+    ``scope="all"`` (default) clears every memo and registered invalidator (used by explicit
+    delete/config mutations and manual sync triggers). ``scope="ingest"`` is used by routine
+    periodic discovery ticks and skips long-horizon caches opted out via
+    ``invalidate_on_ingest=False`` / ``on_ingest=False``.
+    """
     svc = (
         str(service_id.get("name") or service_id.get("service_id") or "")
         if isinstance(service_id, dict)
         else str(service_id or "")
     )
+    is_ingest = scope == "ingest"
     cleared = 0
     for memo in _RESPONSE_MEMOS:
+        if is_ingest and not memo.invalidate_on_ingest:
+            continue
         if not svc:
             cleared += len(memo.cache)
             memo.cache.clear()
@@ -233,7 +257,9 @@ def invalidate_service_cache(service_id: str | dict = "") -> int:
                 cleared += len(memo.cache)
                 memo.cache.clear()
                 memo._telemetry_cache.clear()
-    for invalidator in list(_SERVICE_CACHE_INVALIDATORS):
+    for invalidator, run_on_ingest in list(_SERVICE_CACHE_INVALIDATORS):
+        if is_ingest and not run_on_ingest:
+            continue
         try:
             cleared += int(invalidator(svc) or 0)
         except Exception:

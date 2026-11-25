@@ -175,21 +175,22 @@ def test_usage_current_storage_warm_hit_service_isolation_time_range_and_invalid
     assert r2.archive_bytes == 2000
     assert r2.is_cached is True
 
-    # Different time window must miss
+    # Different time window must miss response memo (billing depends on window),
+    # while window-independent 30-day source/archive stats reuse their SWR caches.
     usage.usage_current_storage(start="2026-11-24T09:00:05Z", end="2026-11-24T11:00:05Z", source=src_a)
-    assert pg_calls == {"storage": 2, "archive": 2, "billing": 2}
+    assert pg_calls == {"storage": 1, "archive": 1, "billing": 2}
 
     # Different service must miss
     usage.usage_current_storage(start="2026-11-24T10:00:05Z", end="2026-11-24T11:00:05Z", source=src_b)
-    assert pg_calls == {"storage": 3, "archive": 3, "billing": 3}
+    assert pg_calls == {"storage": 2, "archive": 2, "billing": 3}
 
     # Cache invalidation for svc-a must force recomputation for svc-a only
     invalidate_service_cache("svc-a")
     usage.usage_current_storage(start="2026-11-24T10:00:30Z", end="2026-11-24T11:00:30Z", source=src_a)
-    assert pg_calls == {"storage": 4, "archive": 4, "billing": 4}
+    assert pg_calls == {"storage": 3, "archive": 3, "billing": 4}
     # svc-b stays cached
     usage.usage_current_storage(start="2026-11-24T10:00:30Z", end="2026-11-24T11:00:30Z", source=src_b)
-    assert pg_calls == {"storage": 4, "archive": 4, "billing": 4}
+    assert pg_calls == {"storage": 3, "archive": 3, "billing": 4}
 
     # Authoritative ledger-incomplete billing (DB succeeded, e.g. source_missing or cloud_copy_deletions)
     # MUST be cached while preserving storage_billing_complete=False verbatim.
@@ -200,9 +201,9 @@ def test_usage_current_storage_warm_hit_service_isolation_time_range_and_invalid
     assert r_inc_1.storage_billing_complete is False
     assert r_inc_2.storage_billing_complete is False
     assert r_inc_2.is_cached is True
-    assert pg_calls == {"storage": 5, "archive": 5, "billing": 5}
+    assert pg_calls == {"storage": 4, "archive": 4, "billing": 5}
 
-    # Transient Postgres unavailability must NOT be cached so the next request retries
+    # Transient Postgres unavailability must NOT be cached so the next request retries billing
     class _FailingBillingPG(_FakePG):
         def storage_billing_summary(self, sid: str, start: Any, end: Any, *, minimum_days: int = 30) -> Any:
             pg_calls["billing"] += 1
@@ -215,7 +216,7 @@ def test_usage_current_storage_warm_hit_service_isolation_time_range_and_invalid
     assert r_err_1.storage_billing_complete is False
     assert r_err_2.storage_billing_complete is False
     assert "high-scale:postgres_unavailable" in r_err_1.storage_billing_provenance
-    assert pg_calls == {"storage": 7, "archive": 7, "billing": 7}
+    assert pg_calls == {"storage": 5, "archive": 5, "billing": 7}
 
 
 def test_usage_operations_and_log_activity_warm_cache_and_invalidation(monkeypatch):

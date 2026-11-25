@@ -168,7 +168,10 @@ def test_archive_storage_summary_filters_to_live_and_30d_expired():
 
     assert summary == {"live_bytes": 100, "live_objects": 6, "expired_30d_bytes": 50, "live_rum_bytes": 25}
     select_sql = [s for s in executed_sql if "FROM high_scale_archive_manifests" in s][0]
-    assert "archive_expired_at IS NULL OR archive_expired_at > statement_timestamp() - interval '30 days'" in select_sql
+    assert "UNION ALL" in select_sql
+    assert "archive_expired_at IS NULL" in select_sql
+    assert "archive_expired_at > statement_timestamp() - interval '30 days'" in select_sql
+    assert " OR " not in select_sql
 
 
 def test_storage_billing_summary_uses_any_status_predicate():

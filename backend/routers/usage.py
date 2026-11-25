@@ -72,8 +72,10 @@ _PREFILL_ENDPOINT_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=64, ttl_secon
 _EDGE_RATIO_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=64, ttl_seconds=60.0)
 _EDGE_RATIO_NONE = object()
 _RUM_BREAKDOWN_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=60.0)
-_USAGE_RESPONSE_MEMO = ResponseMemo(ttl=60.0, maxsize=256, prewarmer=False)
+_USAGE_RESPONSE_MEMO = ResponseMemo(ttl=60.0, maxsize=256, prewarmer=False, invalidate_on_ingest=False)
 _USAGE_ROLLING_STORAGE_CACHE: SWRTTLCache = SWRTTLCache(maxsize=64, ttl_seconds=60.0, stale_ttl_seconds=900.0)
+_SOURCE_STORAGE_WINDOW_CACHE: SWRTTLCache = SWRTTLCache(maxsize=64, ttl_seconds=60.0, stale_ttl_seconds=900.0)
+_ARCHIVE_STORAGE_SUMMARY_CACHE: SWRTTLCache = SWRTTLCache(maxsize=64, ttl_seconds=60.0, stale_ttl_seconds=900.0)
 _rolling_storage_bg_guard = threading.Lock()
 _rolling_storage_bg_inflight: set[Any] = set()
 _CacheRegistry.register("routers.usage._FASTLY_STATS_CACHE", _FASTLY_STATS_CACHE)
@@ -83,10 +85,11 @@ _CacheRegistry.register("routers.usage._PREFILL_ENDPOINT_CACHE", _PREFILL_ENDPOI
 _CacheRegistry.register("routers.usage._EDGE_RATIO_CACHE", _EDGE_RATIO_CACHE)
 _CacheRegistry.register("routers.usage._RUM_BREAKDOWN_CACHE", _RUM_BREAKDOWN_CACHE)
 _CacheRegistry.register("routers.usage._USAGE_ROLLING_STORAGE_CACHE", _USAGE_ROLLING_STORAGE_CACHE)
+_CacheRegistry.register("routers.usage._SOURCE_STORAGE_WINDOW_CACHE", _SOURCE_STORAGE_WINDOW_CACHE)
+_CacheRegistry.register("routers.usage._ARCHIVE_STORAGE_SUMMARY_CACHE", _ARCHIVE_STORAGE_SUMMARY_CACHE)
 
 
-def _invalidate_rolling_storage_cache(service_id: str) -> int:
-    cache = _USAGE_ROLLING_STORAGE_CACHE
+def _clear_swr_for_service(cache: SWRTTLCache, service_id: str) -> int:
     if not service_id:
         n = len(cache)
         cache.clear()
@@ -94,14 +97,73 @@ def _invalidate_rolling_storage_cache(service_id: str) -> int:
     removed = 0
     with cache.lock:
         for layer in (cache._cache, cache._stale):
-            keys = [k for k in list(layer.keys()) if isinstance(k, tuple) and k and k[0] == service_id]
+            keys = [
+                k for k in list(layer.keys()) if k == service_id or (isinstance(k, tuple) and k and k[0] == service_id)
+            ]
             for k in keys:
                 layer.pop(k, None)
                 removed += 1
     return removed
 
 
-register_service_cache_invalidator(_invalidate_rolling_storage_cache)
+def _invalidate_rolling_storage_cache(service_id: str) -> int:
+    removed = 0
+    for cache in (
+        _USAGE_ROLLING_STORAGE_CACHE,
+        _SOURCE_STORAGE_WINDOW_CACHE,
+        _ARCHIVE_STORAGE_SUMMARY_CACHE,
+    ):
+        removed += _clear_swr_for_service(cache, service_id)
+    return removed
+
+
+register_service_cache_invalidator(_invalidate_rolling_storage_cache, on_ingest=False)
+
+
+def _swr_storage_fetch(
+    cache: SWRTTLCache,
+    key: Any,
+    fetch: Any,
+    *,
+    label: str,
+    should_cache: Any = None,
+) -> Any:
+    fresh = cache.get(key)
+    if fresh is not None:
+        return fresh
+    stale = cache.get_stale(key)
+    if stale is not None:
+        inflight_key = (label, key)
+        with _rolling_storage_bg_guard:
+            already = inflight_key in _rolling_storage_bg_inflight
+            if not already:
+                _rolling_storage_bg_inflight.add(inflight_key)
+        if not already:
+
+            def _refresh() -> None:
+                try:
+                    val = fetch()
+                    if should_cache is None or should_cache(val):
+                        cache[key] = val
+                except Exception:
+                    logger.debug("usage_current_storage: background SWR refresh (%s) failed", label, exc_info=True)
+                finally:
+                    try:
+                        from backend.core.metadata import pg_pool
+
+                        pg_pool.release_thread_connection()
+                    except Exception:
+                        logger.debug("usage_current_storage: thread connection release failed", exc_info=True)
+                    with _rolling_storage_bg_guard:
+                        _rolling_storage_bg_inflight.discard(inflight_key)
+
+            threading.Thread(target=_refresh, name=f"usage-{label}-swr", daemon=True).start()
+        return stale
+    val = fetch()
+    if should_cache is None or should_cache(val):
+        cache[key] = val
+    return val
+
 
 STORAGE_PLATFORM_METRICS = (
     "object_storage_buckets_count",
@@ -750,14 +812,18 @@ def _rolling_storage_cache_key(
 
 
 def prewarm_usage_storage(service_id: str) -> None:
-    """Best-effort startup pre-warm of the rolling 24h current-storage billing summary."""
+    """Best-effort startup pre-warm of the rolling 24h, 6h, and 1h current-storage billing summaries."""
     try:
         from backend.core import fos_client as _fos
+        from backend.utils.date_utils import iso_z
 
         src = _fos.get_source_for_service(service_id)
         if not src or not src.get("bucket"):
             return
-        usage_current_storage(start="", end="", source=src)
+        now = datetime.now(UTC)
+        end_iso = iso_z(now)
+        for hours in (24, 6, 1):
+            usage_current_storage(start=iso_z(now - timedelta(hours=hours)), end=end_iso, source=src)
     except Exception:
         logger.debug("[usage] current-storage pre-warm skipped for %s", service_id, exc_info=True)
     finally:
@@ -867,21 +933,38 @@ def usage_current_storage(
                     logger.debug("usage_current_storage: get_quarantine_storage_total failed (ignored)", exc_info=True)
                     return 0
 
-            def _read_archive() -> tuple[int, int, int, int, bool]:
-                try:
-                    from backend.high_scale.postgres_control import PostgresControlPlane
+            def _read_storage_stats() -> dict[str, Any]:
+                return _swr_storage_fetch(
+                    _SOURCE_STORAGE_WINDOW_CACHE,
+                    (service_id, src.get("name"), int(query_days)),
+                    lambda: _get_storage_stats(src, retention_start_str, retention_end_str),
+                    label="source-window",
+                )
 
-                    summary = PostgresControlPlane().archive_storage_summary(service_id)
-                    return (
-                        summary["live_bytes"],
-                        summary["live_objects"],
-                        summary["expired_30d_bytes"],
-                        int(summary.get("live_rum_bytes", 0)),
-                        True,
-                    )
-                except Exception:
-                    logger.debug("usage_current_storage: archive summary failed (ignored)", exc_info=True)
-                    return 0, 0, 0, 0, False
+            def _read_archive() -> tuple[int, int, int, int, bool]:
+                def _fetch_archive() -> tuple[int, int, int, int, bool]:
+                    try:
+                        from backend.high_scale.postgres_control import PostgresControlPlane
+
+                        summary = PostgresControlPlane().archive_storage_summary(service_id)
+                        return (
+                            summary["live_bytes"],
+                            summary["live_objects"],
+                            summary["expired_30d_bytes"],
+                            int(summary.get("live_rum_bytes", 0)),
+                            True,
+                        )
+                    except Exception:
+                        logger.debug("usage_current_storage: archive summary failed (ignored)", exc_info=True)
+                        return 0, 0, 0, 0, False
+
+                return _swr_storage_fetch(
+                    _ARCHIVE_STORAGE_SUMMARY_CACHE,
+                    service_id,
+                    _fetch_archive,
+                    label="archive-summary",
+                    should_cache=lambda res: bool(res[4]),
+                )
 
             def _read_cloud_copy_deleted() -> tuple[int, bool]:
                 try:
@@ -932,9 +1015,7 @@ def usage_current_storage(
                         logger.debug("usage_current_storage: thread connection release failed", exc_info=True)
 
             with ThreadPoolExecutor(max_workers=4, thread_name_prefix="usage-storage") as pool:
-                fut_stats = pool.submit(
-                    contextvars.copy_context().run, _get_storage_stats, src, retention_start_str, retention_end_str
-                )
+                fut_stats = pool.submit(contextvars.copy_context().run, _read_storage_stats)
                 fut_archive = (
                     pool.submit(contextvars.copy_context().run, _read_archive)
                     if high_scale_service is not None

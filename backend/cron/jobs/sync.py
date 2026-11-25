@@ -243,7 +243,10 @@ def _run_log_discovery_cron(
     needs_status_publish = bool(discovered > 0 or do_heavy_refresh or force)
 
     try:
-        invalidate_service_cache(src.get("name", ""))
+        if force:
+            invalidate_service_cache(src.get("name", ""))
+        elif discovered > 0:
+            invalidate_service_cache(src.get("name", ""), scope="ingest")
     except Exception:
         pass
 

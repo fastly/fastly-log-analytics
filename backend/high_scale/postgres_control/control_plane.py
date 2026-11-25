@@ -236,11 +236,19 @@ _ARCHIVE_MANIFESTS_EXPIRED_BILLING_INDEX_DDL = (
     "INCLUDE (artifact_size, created_at, state, domain) "
     "WHERE state <> 'artifact_uploading'"
 )
+SOURCE_OBJECTS_ACTIVITY_INDEX = "high_scale_source_objects_activity_idx"
+_SOURCE_OBJECTS_ACTIVITY_INDEX_DDL = (
+    f"CREATE INDEX CONCURRENTLY IF NOT EXISTS {SOURCE_OBJECTS_ACTIVITY_INDEX} "
+    "ON high_scale_source_objects (service_id, discovered_at) "
+    "INCLUDE (accepted_rows, size_bytes) "
+    "WHERE status NOT IN ('discovered', 'claimed')"
+)
 _CONCURRENT_BILLING_INDEXES: tuple[tuple[str, str], ...] = (
     (SOURCE_OBJECTS_BILLING_INDEX, _SOURCE_OBJECTS_BILLING_INDEX_DDL),
     (SOURCE_OBJECTS_UPDATED_BILLING_INDEX, _SOURCE_OBJECTS_UPDATED_BILLING_INDEX_DDL),
     (ARCHIVE_MANIFESTS_BILLING_INDEX, _ARCHIVE_MANIFESTS_BILLING_INDEX_DDL),
     (ARCHIVE_MANIFESTS_EXPIRED_BILLING_INDEX, _ARCHIVE_MANIFESTS_EXPIRED_BILLING_INDEX_DDL),
+    (SOURCE_OBJECTS_ACTIVITY_INDEX, _SOURCE_OBJECTS_ACTIVITY_INDEX_DDL),
 )
 # A concurrent build waits for every older transaction in the database; an idle-in-transaction session would
 # otherwise stall the booting worker forever. Timing out leaves an INVALID index the next boot rebuilds.
@@ -1235,15 +1243,33 @@ class PostgresControlPlane:
         """
         _require_text(service_id, "service_id")
         with self.transaction(read_only=True) as connection:
+            # Two disjoint branches avoid an OR on archive_expired_at so Postgres can execute pure
+            # Index Only Scans on high_scale_archive_manifests_expired_billing_idx.
             row = connection.execute(
                 "SELECT "
-                "coalesce(sum(artifact_size) FILTER (WHERE archive_expired_at IS NULL), 0), "
-                "count(*) FILTER (WHERE archive_expired_at IS NULL), "
-                "coalesce(sum(artifact_size) FILTER (WHERE archive_expired_at > statement_timestamp() - interval '30 days'), 0), "
-                "coalesce(sum(artifact_size) FILTER (WHERE archive_expired_at IS NULL AND domain LIKE 'rum%%'), 0) "
-                "FROM high_scale_archive_manifests WHERE service_id = %s AND state <> 'artifact_uploading' "
-                "AND (archive_expired_at IS NULL OR archive_expired_at > statement_timestamp() - interval '30 days')",
-                (service_id,),
+                "coalesce(sum(live_bytes), 0), "
+                "coalesce(sum(live_count), 0), "
+                "coalesce(sum(expired_30d_bytes), 0), "
+                "coalesce(sum(live_rum_bytes), 0) "
+                "FROM ("
+                "SELECT "
+                "coalesce(sum(artifact_size), 0) AS live_bytes, "
+                "count(*) AS live_count, "
+                "0::bigint AS expired_30d_bytes, "
+                "coalesce(sum(artifact_size) FILTER (WHERE domain LIKE 'rum%%'), 0) AS live_rum_bytes "
+                "FROM high_scale_archive_manifests "
+                "WHERE service_id = %s AND state <> 'artifact_uploading' AND archive_expired_at IS NULL "
+                "UNION ALL "
+                "SELECT "
+                "0::bigint, "
+                "0::bigint, "
+                "coalesce(sum(artifact_size), 0), "
+                "0::bigint "
+                "FROM high_scale_archive_manifests "
+                "WHERE service_id = %s AND state <> 'artifact_uploading' "
+                "AND archive_expired_at > statement_timestamp() - interval '30 days'"
+                ") AS arc_summary",
+                (service_id, service_id),
             ).fetchone()
         return {
             "live_bytes": int(row[0]),

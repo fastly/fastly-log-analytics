@@ -304,11 +304,10 @@ def test_prewarm_usage_storage_warms_and_swallows_errors():
         patch.object(usage, "usage_current_storage", side_effect=RuntimeError("pg down")) as mock_storage,
     ):
         usage.prewarm_usage_storage("svc-u1")
-    mock_storage.assert_called_once_with(
-        start="",
-        end="",
-        source={"name": "svc-u1", "service_id": "svc-u1", "bucket": "b"},
-    )
+    mock_storage.assert_called_once()
+    call_kw = mock_storage.call_args.kwargs
+    assert call_kw["source"] == {"name": "svc-u1", "service_id": "svc-u1", "bucket": "b"}
+    assert call_kw["start"] and call_kw["end"]
 
 
 # ── 4. Lifespan startup prewarm ──────────────────────────────────────────────
