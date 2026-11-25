@@ -1,4 +1,5 @@
 import { parquetMetadata } from "hyparquet";
+import { fetchLanes } from "./fetch-lanes";
 import type { FileSource } from "./dashboard/engine";
 import { MissingCloudFileError } from "./dashboard/file-errors";
 import { Hll } from "./dashboard/hll";
@@ -377,11 +378,13 @@ function decodeCached(
           if (callEpoch !== securityRollupEpoch) throw securityRollupAbortError();
           return decodeSecuritySummary(parts, spec);
         })
-      : source.fetchFile(file.key, signal).then(({ bytes }) => {
-          signal.throwIfAborted();
-          if (callEpoch !== securityRollupEpoch) throw securityRollupAbortError();
-          return decodeSecuritySummary(bytes);
-        })
+      : fetchLanes
+          .run("summary", () => source.fetchFile(file.key, signal, { priority: "high" }), signal)
+          .then(({ bytes }) => {
+            signal.throwIfAborted();
+            if (callEpoch !== securityRollupEpoch) throw securityRollupAbortError();
+            return decodeSecuritySummary(bytes);
+          })
   ).then((summary) => {
     if (callEpoch !== securityRollupEpoch || signal.aborted) {
       if (decoded.get(key) === pending) decoded.delete(key);

@@ -1584,7 +1584,7 @@ describe("Cloud first-page analytical range loading", () => {
     expect(rangeCalls).toBe(0);
   });
 
-  it("fails fast without footer probes when over-budget wide-projection compacts exceed byteLimit, and caps >2 MiB whole concurrency to 4", async () => {
+  it("fails fast without footer probes when over-budget wide-projection compacts exceed byteLimit, and caps >2 MiB whole concurrency to 2", async () => {
     Object.assign(wholeReadLimits, DEFAULT_WHOLE_READ_LIMITS);
     const rgRows = 500;
     const rowGroups = 6;
@@ -1652,7 +1652,7 @@ describe("Cloud first-page analytical range loading", () => {
     expect(rangeCalls).toBe(0);
     expect(source.fetchFile).not.toHaveBeenCalled();
 
-    // In-budget default limits: all 6 >2 MiB compacts (<= 6 MiB) fetch whole with at most 4 concurrent downloads.
+    // In-budget default limits: all 6 >2 MiB compacts (<= 6 MiB) fetch whole with at most 2 concurrent downloads.
     Object.assign(wholeReadLimits, DEFAULT_WHOLE_READ_LIMITS);
     const read = await ensureCloudRange(
       new Date(startMs - 60_000).toISOString(),
@@ -1664,8 +1664,8 @@ describe("Cloud first-page analytical range loading", () => {
     read.release?.();
     expect(rangeCalls).toBe(0);
     expect(source.fetchFile).toHaveBeenCalledTimes(6);
-    expect(peakLarge).toBeLessThanOrEqual(4);
-    expect(peakLarge).toBe(4);
+    expect(peakLarge).toBeLessThanOrEqual(2);
+    expect(peakLarge).toBe(2);
   });
 
   it("reads a low-overlap >2 MiB boundary compact whole-first without footer probes on both wide and narrow projections", async () => {

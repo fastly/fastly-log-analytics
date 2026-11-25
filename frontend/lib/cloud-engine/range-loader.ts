@@ -14,7 +14,7 @@ import {
 } from "./dashboard/parquet-projection";
 import { prefersWholeForWideProjection, wholeFileIdentity } from "./dashboard/projected-read";
 import { beginCloudLoading } from "./loading-progress";
-import { fetchLanes } from "./fetch-lanes";
+import { fetchLanes, rawLaneForBytes } from "./fetch-lanes";
 import { CloudBudgetError, MAX_REGISTERED_BYTES, type CloudBudgetDetail } from "./dashboard/budget";
 
 const MAX_RANGE_FILES = 256;
@@ -26,11 +26,6 @@ const MAX_RANGE_BYTES = MAX_REGISTERED_BYTES;
 const PREFETCH_CONCURRENCY = 6;
 // Projected ranges are mostly a few KiB, so their round trips, not bandwidth, bound a cold load.
 const RANGE_CONCURRENCY = 16;
-// Multi-MiB whole-file compacts are bandwidth-bound; capping concurrency prevents HTTP/2
-// contention from stretching each file's request duration past the slow-API threshold
-// while still overlapping 3-4 compacts in one wave.
-const LARGE_WHOLE_CONCURRENCY = 4;
-const LARGE_WHOLE_MIN_BYTES = 2 * 1024 * 1024;
 const source = browserSource("");
 const requestReads = new WeakMap<Request, DuckDBReadContext>();
 const activeRangeDownloads = new Set<AbortController>();
@@ -225,14 +220,14 @@ export async function ensureCloudRange(
     if (signal.aborted) abortDownloads();
     let slots = RANGE_CONCURRENCY;
     const waiting: (() => void)[] = [];
-    const inSlot = async <T>(read: () => Promise<T>) => {
+    const inSlot = async <T>(read: () => Promise<T>, lane: "raw" | "large" = "raw") => {
       if (slots === 0) await new Promise<void>((resolve) => waiting.push(resolve));
       else slots--;
       try {
-        return await fetchLanes.run("raw", () => {
+        return await fetchLanes.run(lane, () => {
           downloads.signal.throwIfAborted();
           return read();
-        });
+        }, downloads.signal);
       } finally {
         const next = waiting.shift();
         if (next) next();
@@ -255,24 +250,15 @@ export async function ensureCloudRange(
         generation.assertCurrent();
         downloads.signal.throwIfAborted();
       }, canPersistDerived);
-    let largeWholeSlots = LARGE_WHOLE_CONCURRENCY;
-    const largeWholeWaiting: (() => void)[] = [];
-    const inLargeWholeSlot = async <T>(read: () => Promise<T>) => {
-      if (largeWholeSlots === 0) await new Promise<void>((resolve) => largeWholeWaiting.push(resolve));
-      else largeWholeSlots--;
-      try {
-        downloads.signal.throwIfAborted();
-        return await read();
-      } finally {
-        const next = largeWholeWaiting.shift();
-        if (next) next();
-        else largeWholeSlots++;
-      }
-    };
     const fetchWhole = async (file: typeof files[number]) => {
-      const doFetch = () => inSlot(() => fileSource.fetchFile(file.key, downloads.signal, { identity: file.wholeKey }));
-      const isLargeWhole = wholeReadLimits.closedHourUpToBytes > 0 && file.size > LARGE_WHOLE_MIN_BYTES;
-      const fetched = isLargeWhole ? await inLargeWholeSlot(doFetch) : await doFetch();
+      const lane = rawLaneForBytes(file.size);
+      const fetched = await inSlot(
+        () => fileSource.fetchFile(file.key, downloads.signal, {
+          identity: file.wholeKey,
+          ...(lane === "large" ? { priority: "low" as const } : {}),
+        }),
+        lane,
+      );
       if (fetched.bytes.byteLength !== file.size) {
         throw new Error(`Whole-file read of ${file.key} returned ${fetched.bytes.byteLength} bytes, not ${file.size}`);
       }
@@ -463,8 +449,17 @@ export async function ensureCloudRange(
       };
       const fetchOne = (file: typeof files[number]): Promise<{
         bytes: ArrayBuffer; cached: boolean; downloaded?: number; presentColumns?: string[];
-      }> => projectedColumns ? fetchProjected(file)
-        : fileSource.fetchFile(file.key, downloads.signal, { identity: file.scopedKey });
+      }> => {
+        if (projectedColumns) return fetchProjected(file);
+        const lane = rawLaneForBytes(file.size);
+        return inSlot(
+          () => fileSource.fetchFile(file.key, downloads.signal, {
+            identity: file.scopedKey,
+            ...(lane === "large" ? { priority: "low" as const } : {}),
+          }),
+          lane,
+        );
+      };
       const fetches = new Map<string, ReturnType<typeof fetchOne>>();
       let nextFetch = 0;
       const prefetch = () => {

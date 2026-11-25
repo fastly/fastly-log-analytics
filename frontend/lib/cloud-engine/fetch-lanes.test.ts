@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createFetchLanes } from "./fetch-lanes";
+import { createFetchLanes, LARGE_WHOLE_MIN_BYTES, rawLaneForBytes } from "./fetch-lanes";
 
 function recorder() {
   const started: string[] = [];
@@ -55,5 +55,60 @@ describe("fetch lanes", () => {
     finish("a");
     finish("b");
     await expect(Promise.all([a, b])).resolves.toEqual(["a", "b"]);
+  });
+
+  it("holds large whole-file reads behind active summaries and caps large concurrency at 2 by default", async () => {
+    const lanes = createFetchLanes();
+    const { started, open, task, finish } = recorder();
+    const summary = lanes.run("summary", task("summary0"));
+    for (let i = 0; i < 6; i++) void lanes.run("raw", task(`raw${i}`));
+    for (let i = 0; i < 5; i++) void lanes.run("large", task(`large${i}`));
+    await settle();
+    expect(started.filter((n) => n.startsWith("summary"))).toHaveLength(1);
+    expect(started.filter((n) => n.startsWith("raw"))).toHaveLength(4);
+    expect(started.filter((n) => n.startsWith("large"))).toHaveLength(0);
+
+    finish("summary0");
+    await expect(summary).resolves.toBe("summary0");
+    await settle();
+    expect(started.filter((n) => n.startsWith("raw"))).toHaveLength(6);
+    expect(started.filter((n) => n.startsWith("large"))).toHaveLength(2);
+
+    finish("large0");
+    await settle();
+    expect(started.filter((n) => n.startsWith("large"))).toHaveLength(3);
+
+    for (const name of [...open.keys()]) finish(name);
+    await settle();
+    for (const name of [...open.keys()]) finish(name);
+    await settle();
+    expect(started.filter((n) => n.startsWith("large"))).toHaveLength(5);
+    for (const name of [...open.keys()]) finish(name);
+  });
+
+  it("aborts a queued waiter without leaking its lane and wakes dependent lanes", async () => {
+    const lanes = createFetchLanes({ summaryLimit: 1, rawWhileSummary: 0, largeLimit: 2, largeWhileSummary: 0 });
+    const { started, open, task, finish } = recorder();
+    const s0 = lanes.run("summary", task("s0"));
+    const ac = new AbortController();
+    const s1 = lanes.run("summary", task("s1"), ac.signal);
+    const large = lanes.run("large", task("large0"));
+    await settle();
+    expect(started).toEqual(["s0"]);
+
+    ac.abort(new Error("cancelled"));
+    await expect(s1).rejects.toThrow("cancelled");
+    finish("s0");
+    await expect(s0).resolves.toBe("s0");
+    await settle();
+    expect(started).toEqual(["s0", "large0"]);
+    finish("large0");
+    await expect(large).resolves.toBe("large0");
+    for (const name of [...open.keys()]) finish(name);
+  });
+
+  it("classifies files strictly above LARGE_WHOLE_MIN_BYTES into the large lane", () => {
+    expect(rawLaneForBytes(LARGE_WHOLE_MIN_BYTES)).toBe("raw");
+    expect(rawLaneForBytes(LARGE_WHOLE_MIN_BYTES + 1)).toBe("large");
   });
 });

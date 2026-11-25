@@ -1,4 +1,5 @@
 import { parquetMetadata } from "hyparquet";
+import { fetchLanes, rawLaneForBytes } from "../fetch-lanes";
 import type { FileSource } from "./engine";
 import { MissingCloudFileError } from "./file-errors";
 import { Histogram } from "./histogram";
@@ -1564,7 +1565,11 @@ function decodeCached(
       }
       rollup = await decodeRollup(parts, step, spec);
     } else {
-      const { bytes } = await source.fetchFile(file.key, signal);
+      const { bytes } = await fetchLanes.run(
+        "summary",
+        () => source.fetchFile(file.key, signal, { priority: "high" }),
+        signal,
+      );
       signal.throwIfAborted();
       if (callRollupEpoch !== rollupEpoch) {
         throw new DOMException("The operation was aborted.", "AbortError");
@@ -1839,7 +1844,21 @@ async function readResidual(
       assertActive();
       const bytes = project && file.size > 0
         ? (await (await project(file)).read()).bytes
-        : (await source.fetchFile(file.key, signal)).bytes;
+        : (
+            await fetchLanes.run(
+              rawLaneForBytes(file.size),
+              () => {
+                assertActive();
+                const lane = rawLaneForBytes(file.size);
+                return source.fetchFile(
+                  file.key,
+                  signal,
+                  lane === "large" ? { priority: "low" } : undefined,
+                );
+              },
+              signal,
+            )
+          ).bytes;
       assertActive();
       // Decoding one file at a time bounds the decoded columns held at once.
       const add = added.then(() => {

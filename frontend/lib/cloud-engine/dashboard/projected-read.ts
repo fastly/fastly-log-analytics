@@ -1,3 +1,4 @@
+import { fetchLanes, rawLaneForBytes } from "../fetch-lanes";
 import { FIELD_DUCKDB_TYPES } from "./duckdb";
 import type { FileSource } from "./engine";
 import type { DashboardFilter } from "./filters";
@@ -106,8 +107,10 @@ export function projectedReader(
     if (slots === 0) await new Promise<void>((resolve) => waiting.push(resolve));
     else slots--;
     try {
-      signal?.throwIfAborted();
-      return await fetchFrom(file, start, end, signal);
+      return await fetchLanes.run("raw", () => {
+        signal?.throwIfAborted();
+        return fetchFrom(file, start, end, signal, "low");
+      }, signal);
     } finally {
       const next = waiting.shift();
       if (next) next();
@@ -144,7 +147,18 @@ export function projectedReader(
         bytes: file.size,
         read: async () => {
           signal?.throwIfAborted();
-          const whole = await fetchFile(file.key, signal, { identity: wholeId });
+          const lane = rawLaneForBytes(file.size);
+          const whole = await fetchLanes.run(
+            lane,
+            () => {
+              signal?.throwIfAborted();
+              return fetchFile(file.key, signal, {
+                identity: wholeId,
+                ...(lane === "large" ? { priority: "low" as const } : {}),
+              });
+            },
+            signal,
+          );
           if (whole.bytes.byteLength !== file.size) {
             throw new Error(`Whole-file read of ${file.key} returned ${whole.bytes.byteLength} bytes, not ${file.size}`);
           }
@@ -191,7 +205,18 @@ export function projectedReader(
         bytes: file.size,
         read: async () => {
           signal?.throwIfAborted();
-          const whole = await fetchFile(file.key, signal, { identity: wholeFileIdentity(source.cacheScope, file) });
+          const lane = rawLaneForBytes(file.size);
+          const whole = await fetchLanes.run(
+            lane,
+            () => {
+              signal?.throwIfAborted();
+              return fetchFile(file.key, signal, {
+                identity: wholeFileIdentity(source.cacheScope, file),
+                ...(lane === "large" ? { priority: "low" as const } : {}),
+              });
+            },
+            signal,
+          );
           if (whole.bytes.byteLength !== file.size) {
             throw new Error(`Whole-file read of ${file.key} returned ${whole.bytes.byteLength} bytes, not ${file.size}`);
           }

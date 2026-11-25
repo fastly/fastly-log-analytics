@@ -1,4 +1,5 @@
 import { parquetMetadata } from "hyparquet";
+import { fetchLanes, rawLaneForBytes } from "./fetch-lanes";
 import { Hll } from "./dashboard/hll";
 import type { ManifestFile } from "./dashboard/manifest";
 import { readColumns } from "./dashboard/parquet";
@@ -370,7 +371,21 @@ export async function readSecurityResidual(
       assertActive();
       const bytes = project && file.size > 0
         ? (await (await project(file)).read()).bytes
-        : (await source.fetchFile(file.key, signal)).bytes;
+        : (
+            await fetchLanes.run(
+              rawLaneForBytes(file.size),
+              () => {
+                assertActive();
+                const lane = rawLaneForBytes(file.size);
+                return source.fetchFile(
+                  file.key,
+                  signal,
+                  lane === "large" ? { priority: "low" } : undefined,
+                );
+              },
+              signal,
+            )
+          ).bytes;
       assertActive();
       const add = added.then(() => {
         assertActive();

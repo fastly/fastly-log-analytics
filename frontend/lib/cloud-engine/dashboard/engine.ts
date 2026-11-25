@@ -1,4 +1,5 @@
 import { BOT_UA_CLASSIFY_LIMIT } from "../bots/classify";
+import { fetchLanes, rawLaneForBytes } from "../fetch-lanes";
 import { isCdnHit } from "./cdn-cache";
 import {
   FIELD_DUCKDB_TYPES,
@@ -2446,10 +2447,17 @@ async function collectAggregator(
           assertActive();
           whole = projected
             ? await projected.read()
-            : await source.fetchFile(file.key, signal, {
-                transfer: true,
-                priority: "high",
-              });
+            : await fetchLanes.run(
+                rawLaneForBytes(file.size),
+                () => {
+                  assertActive();
+                  return source.fetchFile(file.key, signal, {
+                    transfer: true,
+                    priority: rawLaneForBytes(file.size) === "large" ? "low" : "high",
+                  });
+                },
+                signal,
+              );
           assertActive();
         } catch (error) {
           releaseWhole(wholeBytes);
@@ -2563,10 +2571,18 @@ async function collectAggregator(
     if (hasFilters) {
       // DuckDB keeps the rows, so hand it the only copy of the bytes.
       assertActive();
-      const { bytes, cached, cdn } = await source.fetchFile(file.key, signal, {
-        transfer: true,
-        priority: "high",
-      });
+      const lane = rawLaneForBytes(file.size);
+      const { bytes, cached, cdn } = await fetchLanes.run(
+        lane,
+        () => {
+          assertActive();
+          return source.fetchFile(file.key, signal, {
+            transfer: true,
+            priority: lane === "large" ? "low" : "high",
+          });
+        },
+        signal,
+      );
       assertActive();
       const meta = await lease.ingestFile(
         scopedKey,
@@ -2593,9 +2609,17 @@ async function collectAggregator(
       ? ((await source.readRollup?.(file.key, variant)) ?? null)
       : null;
     assertActive();
-    const { bytes, cached, cdn } = await source.fetchFile(file.key, signal, {
-      priority: "high",
-    });
+    const lane = rawLaneForBytes(file.size);
+    const { bytes, cached, cdn } = await fetchLanes.run(
+      lane,
+      () => {
+        assertActive();
+        return source.fetchFile(file.key, signal, {
+          priority: lane === "large" ? "low" : "high",
+        });
+      },
+      signal,
+    );
     assertActive();
     const decoded = await readColumns(bytes, wanted);
     assertActive();

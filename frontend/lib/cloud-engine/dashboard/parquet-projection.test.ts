@@ -10,6 +10,7 @@ import {
   TARGET_RANGES_PER_FILE, wholeReadLimits,
 } from "./parquet-projection";
 import { prefersWholeForWideProjection, projectedReader } from "./projected-read";
+import { fetchLanes } from "../fetch-lanes";
 
 const tableRows = (table: unknown) => (table as { toArray(): Record<string, unknown>[] }).toArray();
 
@@ -831,5 +832,71 @@ describe("query schemas from footers", () => {
       end: openEnd,
       size: 1_200_000,
     }, nowMs)).toBe(false);
+  });
+
+  it("holds >2 MiB whole-file reads in projectedReader behind active summaries and caps concurrency at 2", async () => {
+    const rgRows = 500;
+    const rowGroups = 6;
+    const totalRows = rgRows * rowGroups;
+    const startMs = Date.parse("2026-11-25T11:00:00Z");
+    const stepMs = 500;
+    const endMs = startMs + totalRows * stepMs;
+    const bytes = parquetWriteBuffer({
+      codec: "UNCOMPRESSED",
+      rowGroupSize: rgRows,
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: totalRows }, (_, i) => new Date(startMs + i * stepMs)) },
+        { name: "status", type: "INT32", data: Array.from({ length: totalRows }, () => 200) },
+        { name: "url", type: "STRING", data: Array.from({ length: totalRows }, () => noise(400)) },
+        { name: "ua", type: "STRING", data: Array.from({ length: totalRows }, () => noise(400)) },
+      ],
+    });
+    expect(bytes.byteLength).toBeGreaterThan(2 * 1024 * 1024);
+
+    let inFlight = 0;
+    let peak = 0;
+    let startedWhileSummary = 0;
+    let summaryActive = true;
+    const priorities: (RequestPriority | undefined)[] = [];
+    const source = {
+      cacheScope: "fixture-session:svc-lanes",
+      fetchRange: async (_file: unknown, start: number, end: number) => bytes.slice(start, end),
+      fetchFile: async (_key: string, _signal?: AbortSignal, mode?: { priority?: RequestPriority }) => {
+        if (summaryActive) startedWhileSummary++;
+        priorities.push(mode?.priority);
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await new Promise((r) => setTimeout(r, 15));
+        inFlight--;
+        return { bytes: bytes.slice(0), cached: false };
+      },
+    };
+    const entries = Array.from({ length: 4 }, (_, i) => ({
+      key: `processed/request/year=2026/month=11/day=25/hour=11/compact=c4-n${i}.parquet`,
+      start: new Date(startMs).toISOString(),
+      end: new Date(endMs).toISOString(),
+      size: bytes.byteLength,
+      rows: totalRows,
+      etag: `"etag-${i}"`,
+    }));
+
+    let releaseSummary!: () => void;
+    const summaryPromise = fetchLanes.run("summary", () => new Promise<void>((resolve) => {
+      releaseSummary = () => {
+        summaryActive = false;
+        resolve();
+      };
+    }));
+    const reader = projectedReader(source, ["timestamp", "status"]);
+    const readsPromise = Promise.all(entries.map(async (entry) => (await reader(entry)).read()));
+
+    await new Promise((r) => setTimeout(r, 20));
+    expect(startedWhileSummary).toBe(0);
+    releaseSummary();
+    await summaryPromise;
+    await readsPromise;
+
+    expect(peak).toBe(2);
+    expect(priorities).toEqual(["low", "low", "low", "low"]);
   });
 });
