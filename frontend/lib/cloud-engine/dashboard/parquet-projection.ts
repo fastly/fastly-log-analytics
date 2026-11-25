@@ -58,7 +58,7 @@ export const MAX_RANGES_PER_FILE = 64;
  * bytes; larger compacts keep ranges, where a dashboard projection reads far fewer bytes.
  * Open-hour compacts above `anyUpToBytes` keep ranges too.
  */
-export const wholeReadLimits = { anyUpToBytes: 256 * 1024, closedHourUpToBytes: 2 * 1024 * 1024 };
+export const wholeReadLimits = { anyUpToBytes: 256 * 1024, closedHourUpToBytes: 6 * 1024 * 1024 };
 
 const HOUR_MS = 3_600_000;
 

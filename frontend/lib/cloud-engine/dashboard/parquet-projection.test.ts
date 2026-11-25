@@ -7,7 +7,7 @@ import {
   assembleProjectedParquet, defaultFooterProbeBytes, fetchProjectedRanges, filterRowGroupFilter, FOOTER_PROBE_BYTES,
   LARGE_FOOTER_PROBE_BYTES, MAX_RANGES_PER_FILE, parquetQuerySchema, planParquetProjection, readParquetFooter,
   readsWholeFirst, RANGE_MERGE_GAP, RANGE_REQUEST_COST_BYTES, shouldFallbackToWhole, SMALL_FOOTER_PROBE_BYTES,
-  TARGET_RANGES_PER_FILE,
+  TARGET_RANGES_PER_FILE, wholeReadLimits,
 } from "./parquet-projection";
 import { prefersWholeForWideProjection, projectedReader } from "./projected-read";
 
@@ -722,77 +722,84 @@ describe("query schemas from footers", () => {
     expect(prefersWholeForWideProjection(compact, 20, { fromMs: endMs - 4 * 60_000, toMs: endMs + 3_600_000 })).toBe(false);
     expect(prefersWholeForWideProjection(compact, 9, { fromMs: startMs + 9_000, toMs: endMs + 3_600_000 })).toBe(false);
     expect(prefersWholeForWideProjection({ ...compact, size: 40 * 1024 * 1024 }, 20)).toBe(false);
-    expect(prefersWholeForWideProjection({ ...compact, size: 1024 * 1024 }, 20)).toBe(false);
+    expect(prefersWholeForWideProjection({ ...compact, size: 6 * 1024 * 1024 }, 20)).toBe(false);
+    expect(prefersWholeForWideProjection({ ...compact, size: 7 * 1024 * 1024 }, 20)).toBe(true);
   });
 
   it("reads a high-overlap boundary compact whole-first on wide projections without footer probes", async () => {
-    const rgRows = 500;
-    const rowGroups = 6;
-    const totalRows = rgRows * rowGroups;
-    const startMs = 1795579440_000;
-    const stepMs = 500;
-    const endMs = startMs + totalRows * stepMs;
-    const bytes = parquetWriteBuffer({
-      codec: "UNCOMPRESSED",
-      rowGroupSize: rgRows,
-      columnData: [
-        { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: totalRows }, (_, i) => new Date(startMs + i * stepMs)) },
-        { name: "status", type: "INT32", data: Array.from({ length: totalRows }, () => 200) },
-        { name: "url", type: "STRING", data: Array.from({ length: totalRows }, () => noise(400)) },
-        { name: "ua", type: "STRING", data: Array.from({ length: totalRows }, () => noise(400)) },
-      ],
-    });
-    expect(bytes.byteLength).toBeGreaterThan(2 * 1024 * 1024);
-    const entry = {
-      key: "processed/request/year=2026/month=11/day=25/hour=04/catalog1/compact-edge.parquet",
-      start: new Date(startMs).toISOString(),
-      end: new Date(endMs).toISOString(),
-      size: bytes.byteLength,
-      rows: totalRows,
-      etag: "\"etag-edge\"",
-    };
-    const wideCols = [
-      "timestamp", "status", "cache", "resp_bytes", "edge", "url",
-      "ua", "referer", "ip", "host", "country", "asn",
-    ];
-    let rangeCalls = 0;
-    let fileCalls = 0;
-    const source = {
-      cacheScope: "fixture-session:svc-edge",
-      fetchRange: async (_file: unknown, start: number, end: number) => {
-        rangeCalls++;
-        return bytes.slice(start, end);
-      },
-      fetchFile: async () => {
-        fileCalls++;
-        return { bytes: bytes.slice(0), cached: false };
-      },
-    };
+    const prevClosedLimit = wholeReadLimits.closedHourUpToBytes;
+    wholeReadLimits.closedHourUpToBytes = 2 * 1024 * 1024;
+    try {
+      const rgRows = 500;
+      const rowGroups = 6;
+      const totalRows = rgRows * rowGroups;
+      const startMs = 1795579440_000;
+      const stepMs = 500;
+      const endMs = startMs + totalRows * stepMs;
+      const bytes = parquetWriteBuffer({
+        codec: "UNCOMPRESSED",
+        rowGroupSize: rgRows,
+        columnData: [
+          { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: totalRows }, (_, i) => new Date(startMs + i * stepMs)) },
+          { name: "status", type: "INT32", data: Array.from({ length: totalRows }, () => 200) },
+          { name: "url", type: "STRING", data: Array.from({ length: totalRows }, () => noise(400)) },
+          { name: "ua", type: "STRING", data: Array.from({ length: totalRows }, () => noise(400)) },
+        ],
+      });
+      expect(bytes.byteLength).toBeGreaterThan(2 * 1024 * 1024);
+      const entry = {
+        key: "processed/request/year=2026/month=11/day=25/hour=04/catalog1/compact-edge.parquet",
+        start: new Date(startMs).toISOString(),
+        end: new Date(endMs).toISOString(),
+        size: bytes.byteLength,
+        rows: totalRows,
+        etag: "\"etag-edge\"",
+      };
+      const wideCols = [
+        "timestamp", "status", "cache", "resp_bytes", "edge", "url",
+        "ua", "referer", "ip", "host", "country", "asn",
+      ];
+      let rangeCalls = 0;
+      let fileCalls = 0;
+      const source = {
+        cacheScope: "fixture-session:svc-edge",
+        fetchRange: async (_file: unknown, start: number, end: number) => {
+          rangeCalls++;
+          return bytes.slice(start, end);
+        },
+        fetchFile: async () => {
+          fileCalls++;
+          return { bytes: bytes.slice(0), cached: false };
+        },
+      };
 
-    // High overlap (99%): skips footer probes and downloads once via fetchFile.
-    const highOverlap = projectedReader(source, wideCols, undefined, { fromMs: startMs + 9_000, toMs: endMs + 3_600_000 });
-    const highResult = await (await highOverlap(entry)).read();
-    expect(fileCalls).toBe(1);
-    expect(rangeCalls).toBe(0);
-    expect(await query({ "h.parquet": highResult.bytes }, "SELECT count(*)::INT AS n FROM 'h.parquet'"))
-      .toEqual([{ n: totalRows }]);
+      // High overlap (99%): skips footer probes and downloads once via fetchFile.
+      const highOverlap = projectedReader(source, wideCols, undefined, { fromMs: startMs + 9_000, toMs: endMs + 3_600_000 });
+      const highResult = await (await highOverlap(entry)).read();
+      expect(fileCalls).toBe(1);
+      expect(rangeCalls).toBe(0);
+      expect(await query({ "h.parquet": highResult.bytes }, "SELECT count(*)::INT AS n FROM 'h.parquet'"))
+        .toEqual([{ n: totalRows }]);
 
-    // Low overlap (~15%): stays on footer + range reads and avoids downloading the whole file.
-    rangeCalls = 0;
-    fileCalls = 0;
-    const lowOverlap = projectedReader(source, wideCols, undefined, {
-      fromMs: endMs - Math.floor((endMs - startMs) * 0.15),
-      toMs: endMs + 3_600_000,
-    });
-    const lowResult = await (await lowOverlap(entry)).read();
-    expect(fileCalls).toBe(0);
-    expect(rangeCalls).toBeGreaterThan(0);
-    const [{ n: lowRows }] = await query({ "l.parquet": lowResult.bytes }, "SELECT count(*)::INT AS n FROM 'l.parquet'") as [{ n: number }];
-    expect(lowRows).toBeGreaterThan(0);
-    expect(lowRows).toBeLessThan(totalRows);
+      // Low overlap (~15%): stays on footer + range reads and avoids downloading the whole file.
+      rangeCalls = 0;
+      fileCalls = 0;
+      const lowOverlap = projectedReader(source, wideCols, undefined, {
+        fromMs: endMs - Math.floor((endMs - startMs) * 0.15),
+        toMs: endMs + 3_600_000,
+      });
+      const lowResult = await (await lowOverlap(entry)).read();
+      expect(fileCalls).toBe(0);
+      expect(rangeCalls).toBeGreaterThan(0);
+      const [{ n: lowRows }] = await query({ "l.parquet": lowResult.bytes }, "SELECT count(*)::INT AS n FROM 'l.parquet'") as [{ n: number }];
+      expect(lowRows).toBeGreaterThan(0);
+      expect(lowRows).toBeLessThan(totalRows);
+    } finally {
+      wholeReadLimits.closedHourUpToBytes = prevClosedLimit;
+    }
   });
 
-  it("uses 512 KiB tail probes for >= 4 MiB files and reads open-hour compact= files up to 2 MiB whole-first", () => {
+  it("uses 512 KiB tail probes for >= 4 MiB files and reads compact= files up to 6 MiB whole-first", () => {
     expect(defaultFooterProbeBytes(100 * 1024)).toBe(SMALL_FOOTER_PROBE_BYTES);
     expect(defaultFooterProbeBytes(1024 * 1024)).toBe(FOOTER_PROBE_BYTES);
     expect(defaultFooterProbeBytes(4 * 1024 * 1024)).toBe(LARGE_FOOTER_PROBE_BYTES);
@@ -807,7 +814,17 @@ describe("query schemas from footers", () => {
     expect(readsWholeFirst({
       key: "processed/request/year=2026/month=11/day=25/hour=10/compact=1795601520-1795602120-c32-n42943-abc.parquet",
       end: openEnd,
-      size: 3 * 1024 * 1024,
+      size: 4 * 1024 * 1024,
+    }, nowMs)).toBe(true);
+    expect(readsWholeFirst({
+      key: "processed/request/year=2026/month=11/day=25/hour=10/compact=1795601520-1795602120-c32-n42943-abc.parquet",
+      end: openEnd,
+      size: 6 * 1024 * 1024,
+    }, nowMs)).toBe(true);
+    expect(readsWholeFirst({
+      key: "processed/request/year=2026/month=11/day=25/hour=10/compact=1795601520-1795602120-c32-n42943-abc.parquet",
+      end: openEnd,
+      size: 7 * 1024 * 1024,
     }, nowMs)).toBe(false);
     expect(readsWholeFirst({
       key: "processed/request/year=2026/month=11/day=25/hour=10/window=1795602240.parquet",

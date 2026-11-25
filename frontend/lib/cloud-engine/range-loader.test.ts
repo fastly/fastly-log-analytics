@@ -1584,7 +1584,7 @@ describe("Cloud first-page analytical range loading", () => {
     expect(rangeCalls).toBe(0);
   });
 
-  it("fails fast without footer probes when over-budget wide-projection compacts exceed byteLimit, and caps large whole concurrency to 2", async () => {
+  it("fails fast without footer probes when over-budget wide-projection compacts exceed byteLimit, and caps >2 MiB whole concurrency to 4", async () => {
     Object.assign(wholeReadLimits, DEFAULT_WHOLE_READ_LIMITS);
     const rgRows = 500;
     const rowGroups = 6;
@@ -1608,8 +1608,9 @@ describe("Cloud first-page analytical range loading", () => {
       ],
     });
     expect(bytes.byteLength).toBeGreaterThan(2 * 1024 * 1024);
+    expect(bytes.byteLength).toBeLessThanOrEqual(DEFAULT_WHOLE_READ_LIMITS.closedHourUpToBytes);
 
-    const entries: ManifestFile[] = Array.from({ length: 4 }, (_, i) => ({
+    const entries: ManifestFile[] = Array.from({ length: 6 }, (_, i) => ({
       key: `processed/request/year=2026/month=11/day=25/hour=0${i + 7}/compact=c4-n${i}.parquet`,
       start: new Date(startMs).toISOString(),
       end: new Date(endMs).toISOString(),
@@ -1639,7 +1640,8 @@ describe("Cloud first-page analytical range loading", () => {
       "ua", "referer", "ip", "host",
     ];
 
-    // Over-budget attempt fails fast before issuing any 206 footer probes.
+    // Over-budget wide-projection (> closedHourUpToBytes) fails fast before issuing any 206 footer probes.
+    wholeReadLimits.closedHourUpToBytes = 2 * 1024 * 1024;
     await expect(ensureCloudRange(
       new Date(startMs - 60_000).toISOString(),
       new Date(endMs + 60_000).toISOString(),
@@ -1650,7 +1652,8 @@ describe("Cloud first-page analytical range loading", () => {
     expect(rangeCalls).toBe(0);
     expect(source.fetchFile).not.toHaveBeenCalled();
 
-    // In-budget attempt fetches all 4 >2 MiB compacts whole with at most 2 concurrent downloads.
+    // In-budget default limits: all 6 >2 MiB compacts (<= 6 MiB) fetch whole with at most 4 concurrent downloads.
+    Object.assign(wholeReadLimits, DEFAULT_WHOLE_READ_LIMITS);
     const read = await ensureCloudRange(
       new Date(startMs - 60_000).toISOString(),
       new Date(endMs + 60_000).toISOString(),
@@ -1660,8 +1663,62 @@ describe("Cloud first-page analytical range loading", () => {
     );
     read.release?.();
     expect(rangeCalls).toBe(0);
-    expect(source.fetchFile).toHaveBeenCalledTimes(4);
-    expect(peakLarge).toBeLessThanOrEqual(2);
-    expect(peakLarge).toBe(2);
+    expect(source.fetchFile).toHaveBeenCalledTimes(6);
+    expect(peakLarge).toBeLessThanOrEqual(4);
+    expect(peakLarge).toBe(4);
+  });
+
+  it("reads a low-overlap >2 MiB boundary compact whole-first without footer probes on both wide and narrow projections", async () => {
+    Object.assign(wholeReadLimits, DEFAULT_WHOLE_READ_LIMITS);
+    const rgRows = 500;
+    const rowGroups = 6;
+    const totalRows = rgRows * rowGroups;
+    let seed = 41;
+    const randStr = (len: number) => Array.from({ length: len }, () => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return String.fromCharCode(33 + (seed % 90));
+    }).join("");
+    const startMs = Date.parse("2026-11-25T12:00:00Z");
+    const stepMs = 160;
+    const endMs = startMs + totalRows * stepMs;
+    const bytes = parquetWriteBuffer({
+      codec: "UNCOMPRESSED",
+      rowGroupSize: rgRows,
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: totalRows }, (_, i) => new Date(startMs + i * stepMs)) },
+        { name: "status", type: "INT32", data: Array.from({ length: totalRows }, () => 200) },
+        { name: "url", type: "STRING", data: Array.from({ length: totalRows }, () => randStr(400)) },
+        { name: "ua", type: "STRING", data: Array.from({ length: totalRows }, () => randStr(400)) },
+      ],
+    });
+    expect(bytes.byteLength).toBeGreaterThan(2 * 1024 * 1024);
+    expect(bytes.byteLength).toBeLessThanOrEqual(DEFAULT_WHOLE_READ_LIMITS.closedHourUpToBytes);
+
+    const entry: ManifestFile = {
+      key: "processed/request/year=2026/month=11/day=25/hour=12/catalog1/compact=1795608000-1795608480-c32-n40747.parquet",
+      start: new Date(startMs).toISOString(),
+      end: new Date(endMs).toISOString(),
+      rows: totalRows,
+      size: bytes.byteLength,
+      etag: "\"etag-boundary-c32\"",
+    };
+    vi.mocked(fetchManifest).mockResolvedValue({ files: [entry], complete: true });
+
+    let rangeCalls = 0;
+    source.fetchRange.mockImplementation(async (_f: ManifestFile, start: number, end: number) => {
+      rangeCalls++;
+      return bytes.slice(start, end);
+    });
+    source.fetchFile.mockImplementation(async () => ({ bytes: bytes.slice(0), cached: false }));
+
+    // 25% window overlap (below WIDE_PROJECTION_MIN_OVERLAP) and narrow 2-column projection.
+    const lowOverlapFrom = new Date(endMs - Math.floor((endMs - startMs) * 0.25)).toISOString();
+    const lowOverlapTo = new Date(endMs + 3_600_000).toISOString();
+    const read = await ensureCloudRange(lowOverlapFrom, lowOverlapTo, signal, ["request"], {
+      projection: { columns: ["timestamp", "status"] },
+    });
+    read.release?.();
+    expect(rangeCalls).toBe(0);
+    expect(source.fetchFile).toHaveBeenCalledTimes(1);
   });
 });
