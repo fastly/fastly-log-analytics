@@ -770,7 +770,7 @@ def security_aggregates(
             tasks,
             source=source_for,
             activity=lambda k: "overhead" if k == "ngwaf_configured" else "compute",
-            max_workers=3,
+            max_workers=4,
             thread_name_prefix="hs-sec",
         ).items():
             if k == "_top_bots":

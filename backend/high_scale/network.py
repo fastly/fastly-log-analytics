@@ -185,6 +185,25 @@ def _network_sample_stride(span_s: float) -> int:
     return 1
 
 
+def _network_time_sample_clause(stride: int, *, bucket_seconds: int | None = None) -> str:
+    """Granule-skipping primary-key time-block sample clause for ClickHouse PREWHERE.
+
+    `request_facts` is ordered by `(service_id, toStartOfHour(event_timestamp), event_timestamp)`,
+    so `line_ordinal % stride = 0` matches rows inside every granule and still decompresses 100% of
+    granules. Sampling whole `chunk_s`-second blocks on `event_timestamp` lets ClickHouse skip
+    ~(1 - 1/stride) of granules before reading `_cf_*` columns.
+    """
+    if stride <= 1:
+        return ""
+    if bucket_seconds is not None:
+        if bucket_seconds < stride:
+            return f" AND line_ordinal % {stride} = 0"
+        chunk_s = max(1, min(30, bucket_seconds // stride))
+    else:
+        chunk_s = 30
+    return f" AND intDiv(toUnixTimestamp(event_timestamp), {chunk_s}) % {stride} = 0"
+
+
 def _ch_bucket_expr(bucket_seconds: int) -> str:
     return f"intDiv(toUnixTimestamp(event_timestamp), {bucket_seconds}) * {bucket_seconds}"
 
@@ -272,10 +291,9 @@ def _shielding_analysis(service: HighScaleService, start: datetime, end: datetim
     sh_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
     sh_join_stride = 1
     if is_real_ch:
-        shield_prewhere = f"{_BASE_WHERE} AND custom_fields['prid'] != ''"
+        shield_prewhere = f"{_BASE_WHERE} AND custom_fields['edge'] IN ('false', '0', 'False', 'FALSE') AND custom_fields['prid'] != ''"
         shield_rows = service.client.execute(
-            f"SELECT count() AS n FROM (SELECT 1 FROM request_facts PREWHERE {shield_prewhere} "
-            "WHERE lower(custom_fields['edge']) IN ('false', '0') LIMIT 1)",
+            f"SELECT count() AS n FROM (SELECT 1 FROM request_facts PREWHERE {shield_prewhere} LIMIT 1)",
             {"service_id": service.service_id, "start": start, "end": end},
         )
         if not shield_rows or int(shield_rows[0]["n"]) == 0:
@@ -283,7 +301,11 @@ def _shielding_analysis(service: HighScaleService, start: datetime, end: datetim
                 **cache_result({}, state="bypass", prewarmer=False), has_data=False, edge_only=True, rows=[]
             )
         if sh_span_s >= 1800 and not os.getenv("PYTEST_CURRENT_TEST"):
-            sh_join_stride = 20 if sh_span_s >= 43200 else (10 if sh_span_s >= 21600 else 4)
+            sh_join_stride = (
+                100
+                if sh_span_s >= 604800
+                else (50 if sh_span_s >= 172800 else (20 if sh_span_s >= 43200 else (10 if sh_span_s >= 21600 else 4)))
+            )
     filter_sql, filter_params = _filter_clause(filters)
     params = {"service_id": service.service_id, "start": start, "end": end, **filter_params}
     hop_ms = "coalesce(toFloat64OrNull(custom_fields['ottfb']), toFloat64OrNull(custom_fields['ttfb']) * 1000000.0)"
@@ -292,17 +314,19 @@ def _shielding_analysis(service: HighScaleService, start: datetime, end: datetim
         shield_hash = f" AND cityHash64(custom_fields['prid']) % {sh_join_stride} = 0" if sh_join_stride > 1 else ""
         edge_sub = (
             f"SELECT custom_fields['rid'] AS rid, custom_fields['pop'] AS edge_pop, {hop_ms} AS hop_us "
-            f"FROM request_facts PREWHERE {_BASE_WHERE}{filter_sql}{edge_hash} AND custom_fields['rid'] != '' "
-            "WHERE lower(custom_fields['edge']) IN ('true', '1')"
+            f"FROM request_facts PREWHERE {_BASE_WHERE}{filter_sql} "
+            f"AND custom_fields['edge'] IN ('true', '1', 'True', 'TRUE') AND custom_fields['rid'] != ''{edge_hash}"
         )
         shield_sub = (
             f"SELECT custom_fields['prid'] AS prid, custom_fields['pop'] AS shield_pop, {hop_ms} AS hop_us "
-            f"FROM request_facts PREWHERE {_BASE_WHERE}{shield_hash} AND custom_fields['prid'] != '' "
-            "WHERE lower(custom_fields['edge']) IN ('false', '0')"
+            f"FROM request_facts PREWHERE {_BASE_WHERE} "
+            f"AND custom_fields['edge'] IN ('false', '0', 'False', 'FALSE') AND custom_fields['prid'] != ''{shield_hash}"
         )
         pairs = service.client.execute(
             "SELECT edge_pop, shield_pop, requests, "
-            "quants[1] / 1000.0 AS p50_ms, quants[2] / 1000.0 AS p95_ms, quants[3] / 1000.0 AS p99_ms "
+            "toFloat64(ifNotFinite(quants[1] / 1000.0, 0)) AS p50_ms, "
+            "toFloat64(ifNotFinite(quants[2] / 1000.0, 0)) AS p95_ms, "
+            "toFloat64(ifNotFinite(quants[3] / 1000.0, 0)) AS p99_ms "
             "FROM (SELECT e.edge_pop AS edge_pop, s.shield_pop AS shield_pop, "
             f"count() * {sh_join_stride} AS requests, "
             "quantilesTDigest(0.50, 0.95, 0.99)(e.hop_us - s.hop_us) AS quants "
@@ -502,7 +526,7 @@ def network_health(
         if is_real_ch:
             nh_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
             sample_stride = _network_sample_stride(nh_span_s) if not os.getenv("PYTEST_CURRENT_TEST") else 1
-            stride_sql = f" AND line_ordinal % {sample_stride} = 0" if sample_stride > 1 else ""
+            stride_sql = _network_time_sample_clause(sample_stride, bucket_seconds=bs)
             rtt_prewhere = f"{_BASE_WHERE}{filter_sql}{stride_sql} AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0'"
             top_asn_ints: list[int] = []
             raw_speed_rows: list[dict[str, Any]] | None = None
@@ -629,6 +653,20 @@ def network_health(
                 max_workers=2,
                 thread_name_prefix="hs-net-health",
             )
+            if sample_stride > 1 and not q_results.get("heatmap") and not q_results.get("map"):
+                fallback_tasks = [
+                    (f"{name}_fallback", partial(service.client.execute, sql.replace(stride_sql, ""), params))
+                    for name, sql in fast_queries_list
+                ]
+                fb_res = trace.run_parallel(
+                    fallback_tasks,
+                    source="fact",
+                    max_workers=2,
+                    thread_name_prefix="hs-net-health-fb",
+                )
+                for name, _ in fast_queries_list:
+                    q_results[name] = fb_res.get(f"{name}_fallback", [])
+                sample_stride = 1
             shielding = q_results.get("shielding_analysis") if (not map_only and _want_shielding(sections)) else None
 
             def _unpack_rtt_quants(row: dict[str, Any], expect: int) -> dict[str, Any]:
@@ -1133,7 +1171,7 @@ def network_quality(
         def _bar(group_expr: str, extra_where: str = "") -> list[dict]:
             q_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
             scale_factor = _network_sample_stride(q_span_s) if is_real_ch else 1
-            hash_clause = f" AND line_ordinal % {scale_factor} = 0" if scale_factor > 1 else ""
+            hash_clause = _network_time_sample_clause(scale_factor)
             if is_real_ch and group_expr != _ASN:
                 sql = (
                     f"SELECT {group_expr} AS label, avg({_RTT} / 1000.0) AS rtt_ms, count() AS reqs "
@@ -1177,7 +1215,7 @@ def network_quality(
             )
             q_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
             region_scale = _network_sample_stride(q_span_s)
-            region_hash = f" AND line_ordinal % {region_scale} = 0" if region_scale > 1 else ""
+            region_hash = _network_time_sample_clause(region_scale)
             sql = (
                 "SELECT dimension, label, rtt_ms, reqs FROM ("
                 "SELECT dimension, value AS label, "
@@ -1229,8 +1267,8 @@ def network_quality(
                     return (
                         f"SELECT {_RTT} / 1000.0 AS rtt_ms, {_TTFB} * 1000.0 AS ttfb_ms, "
                         "if(custom_fields['cache'] = '', 'UNKNOWN', custom_fields['cache']) AS cache_state "
-                        f"FROM request_facts PREWHERE {_BASE_WHERE}{filter_sql}{sample_clause} "
-                        "AND custom_fields['tcp_rtt'] != '' AND custom_fields['ttfb'] != '' "
+                        f"FROM request_facts PREWHERE {_BASE_WHERE}{filter_sql} "
+                        f"AND custom_fields['tcp_rtt'] != '' AND custom_fields['ttfb'] != ''{sample_clause} "
                         f"WHERE {_RTT} > 0 AND {_TTFB} > 0 LIMIT {_SCATTER_SAMPLE}"
                     )
 
@@ -1265,7 +1303,7 @@ def network_quality(
             q_res: dict[str, list[dict[str, Any]]] = trace.run_parallel(
                 q_tasks,
                 source="fact",
-                max_workers=4,
+                max_workers=2,
                 thread_name_prefix="hs-net-quality",
             )
             by_country, by_asn, by_region, by_pop, scatter_rows = (
@@ -1350,11 +1388,12 @@ def get_pop_health(
         if is_real_ch:
             pop_span_s = (end - start).total_seconds()
             pop_stride = 1 if filter_sql else _network_sample_stride(pop_span_s)
-            hash_clause = f" AND line_ordinal % {pop_stride} = 0" if pop_stride > 1 else ""
+            hash_clause = _network_time_sample_clause(pop_stride)
+            cache_hit_pred = "(startsWith(custom_fields['cache'], 'HIT') OR startsWith(custom_fields['cache'], 'hit'))"
             fact_sql = (
                 f"SELECT custom_fields['pop'] AS pop, count() AS requests, countIf({_STATUS} >= 500) AS errors, "
                 f"quantileTDigest(0.5)({_RTT}) AS p50_rtt_us, quantileTDigest(0.95)({_TTFB}) * 1000.0 AS p95_ttfb_ms, "
-                "countIf(startsWith(upper(custom_fields['cache']), 'HIT')) AS cache_hits, "
+                f"countIf({cache_hit_pred}) AS cache_hits, "
                 "sum(toInt64OrZero(custom_fields['resp_bytes'])) AS bandwidth_bytes "
                 f"FROM request_facts PREWHERE {base_where}{hash_clause} AND custom_fields['pop'] != '' "
                 "GROUP BY pop ORDER BY requests DESC"
@@ -1379,7 +1418,7 @@ def get_pop_health(
                     "CAST(NULL, 'Nullable(UInt64)') AS errors, "
                     "CAST(NULL, 'Nullable(Float64)') AS p50_rtt_us, "
                     "CAST(NULL, 'Nullable(Float64)') AS p95_ttfb_ms, "
-                    "toUInt64(countIf(startsWith(upper(custom_fields['cache']), 'HIT'))) AS cache_hits, "
+                    f"toUInt64(countIf({cache_hit_pred})) AS cache_hits, "
                     "toInt64(sum(toInt64OrZero(custom_fields['resp_bytes']))) AS bandwidth_bytes "
                     f"FROM request_facts PREWHERE {base_where}{hash_clause} AND custom_fields['pop'] != '' "
                     "GROUP BY pop"
@@ -1542,7 +1581,7 @@ def get_transport_metrics(
         if is_real_ch:
             tr_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
             scale_factor = _network_sample_stride(tr_span_s)
-            hash_clause = f" AND line_ordinal % {scale_factor} = 0" if scale_factor > 1 else ""
+            hash_clause = _network_time_sample_clause(scale_factor)
             combined_sql = (
                 f"SELECT count() AS total_reqs, sum(toInt64OrZero(custom_fields['resp_bytes'])) AS total_bytes, "
                 f"quantilesTDigest(0.50, 0.90, 0.95, 0.99)({_RTT}) AS rtt_quants, "

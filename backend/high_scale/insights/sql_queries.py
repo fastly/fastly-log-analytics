@@ -336,10 +336,14 @@ _BOT_STEM_SUFFIX = "'(-searchbot|-assistbot|-externalagent|-extended|-user|searc
 _BOT_STEM = f"if(replaceRegexpOne(raw_tok, {_BOT_STEM_SUFFIX}, '') != '', replaceRegexpOne(raw_tok, {_BOT_STEM_SUFFIX}, ''), raw_tok)"
 # crawler_traffic is non-empty exactly when a bot stem has 50+ window requests; deciding that
 # from window rows alone avoids re-running crawler_traffic's full-range scan for the guard.
+_CRAWLER_WIN_SCOPE = " AND ".join(visible_fact_clauses("request"))
 _CRAWLER_IN_WINDOW = (
     f"(SELECT count() FROM (SELECT {_BOT_STEM} AS bot_stem FROM ("
     f"SELECT extract(lower(ua), {_CRAWLER_TOKEN}) AS raw_tok, cnt FROM ("
-    "SELECT ua, count() AS cnt FROM base WHERE is_w GROUP BY ua"
+    "SELECT custom_fields['ua'] AS ua, count() AS cnt FROM request_facts "
+    f"PREWHERE {_CRAWLER_WIN_SCOPE} AND event_timestamp >= {{window_start:DateTime64(3)}} "
+    "AND event_timestamp < {window_end:DateTime64(3)} "
+    "WHERE custom_fields['ua'] != '' GROUP BY ua"
     ")) WHERE raw_tok != '' AND bot_stem != '' GROUP BY bot_stem HAVING sum(cnt) >= 50)) > 0"
 )
 
@@ -575,7 +579,7 @@ DETECTIONS: dict[str, Detection] = {
     "low_and_slow": Detection(
         ("ip", "url", "sec"),
         _base_group_sql(
-            "ip, count() AS hits, uniqExact(url) AS distinct_paths, (max(sec) - min(sec)) AS span_s, round(count() * 1.0 / nullIf(max(sec) - min(sec), 0), 5) AS rps",
+            "ip, count() AS hits, uniqCombined(url) AS distinct_paths, (max(sec) - min(sec)) AS span_s, round(count() * 1.0 / nullIf(max(sec) - min(sec), 0), 5) AS rps",
             "ip",
             having="hits >= 5 AND distinct_paths >= 3 AND span_s >= 600 AND count() * 1.0 / nullIf(max(sec) - min(sec), 0) < 0.2",
             order_by="distinct_paths DESC, span_s DESC",
@@ -690,7 +694,7 @@ DETECTIONS: dict[str, Detection] = {
         FROM edge_logs e LEFT JOIN shield_logs s ON s.prid = e.rid)
     SELECT edge_pop, shield_pop, quantileTDigestIf(0.50)(transit_ms, is_w) AS w_p50, quantileTDigestIf(0.50)(transit_ms, is_b) AS b_p50, countIf(is_w) AS w_cnt
     FROM joined GROUP BY edge_pop, shield_pop HAVING w_cnt >= 5 AND w_p50 > b_p50 * 1.5 ORDER BY (w_p50 / nullIf(b_p50, 0)) DESC LIMIT 20 """,
-        row_filter="ottfb IS NOT NULL AND (rid != '' OR prid != '')",
+        row_filter="custom_fields['ottfb'] != '' AND ottfb IS NOT NULL AND (rid != '' OR prid != '')",
     ),
     "repeated_patterns": Detection(
         ("sec", "ip", "ua"),

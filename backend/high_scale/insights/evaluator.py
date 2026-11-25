@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import contextvars
+import inspect
 import json
 import logging
+import os
 import re
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import wait as _wait_futures
 from dataclasses import dataclass, field
@@ -82,6 +84,7 @@ logger = logging.getLogger(__name__)
 
 _MAX_WORKERS = 2
 _BACKGROUND_MAX_WORKERS = 1
+_BACKGROUND_QUERY_MAX_THREADS = str(max(1, int(os.getenv("INSIGHTS_BG_MAX_THREADS", "2") or "2")))
 _INSIGHT_MARKER_RE = re.compile(r"^\s*/\*\s*insight:\w+\s*\*/\s*")
 _MULTIPLEX_GROUPS: tuple[tuple[str, frozenset[str]], ...] = (
     ("group_rollup_batches", frozenset({"batch_misc", "batch_geo", "batch_asn", "batch_url_cache"})),
@@ -194,6 +197,7 @@ def _evaluate(
     on_meta: Callable[[dict[str, Any]], None] | None = None,
     *,
     max_workers: int = _MAX_WORKERS,
+    query_settings: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, Any], bool]:
     """Run every detection once; returns the envelope and whether any card is an error card.
 
@@ -201,6 +205,13 @@ def _evaluate(
     columns only shape each detection's SQL, so rows logged before a field was enabled can't break it.
     """
     trace = HighScaleSections(service.service_id, "insights")
+    accepts_settings = bool(query_settings) and "settings" in inspect.signature(service.client.execute).parameters
+
+    def _exec(sql: str, q_params: dict[str, Any]) -> list[dict[str, Any]]:
+        if accepts_settings and query_settings:
+            return service.client.execute(sql, q_params, settings=query_settings)
+        return service.client.execute(sql, q_params)
+
     baseline_start, window_start, now = _window(window_hours, baseline_hours, clamp_start, clamp_end)
     scope = " AND ".join(visible_fact_clauses("request"))
     if filter_clause:
@@ -244,7 +255,7 @@ def _evaluate(
 
     def read_coverage() -> list[dict[str, Any]]:
         try:
-            return service.client.execute(coverage_sql(), coverage_params)
+            return _exec(coverage_sql(), coverage_params)
         except Exception as exc:
             logger.warning("insights rollup coverage unavailable for %s: %s", service.service_id, exc)
             return []
@@ -258,12 +269,8 @@ def _evaluate(
     meta_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-insights-meta")
     fut_coverage = None
     try:
-        fut_history = trace.submit(
-            meta_pool, "history", lambda: service.client.execute(history_sql, params), source="fact"
-        )
-        fut_sample = trace.submit(
-            meta_pool, "fields", lambda: service.client.execute(sample_sql, params), source="fact"
-        )
+        fut_history = trace.submit(meta_pool, "history", lambda: _exec(history_sql, params), source="fact")
+        fut_sample = trace.submit(meta_pool, "fields", lambda: _exec(sample_sql, params), source="fact")
         history = fut_history.result()
         sample = fut_sample.result()
         earliest = history[0].get("earliest") if history else None
@@ -347,7 +354,10 @@ def _evaluate(
     def _prepare_batch(batch: DetectionBatch, members: list[tuple[InsightDefinition, Detection]]) -> _QueryUnit:
         active_ids = {definition.id for definition, _ in members}
         span = rollup_spans.get(batch.rollup_shape) if batch.rollup_shape else None
-        sql, source = batch.build_sql(active_ids, present=present, rollup_span=span, filter_clause=filter_clause)
+        build_kwargs: dict[str, Any] = {"present": present, "rollup_span": span, "filter_clause": filter_clause}
+        if "baseline_hours" in inspect.signature(batch.build_sql).parameters:
+            build_kwargs["baseline_hours"] = baseline_hours
+        sql, source = batch.build_sql(active_ids, **build_kwargs)
         query_params = (
             {**params, "rollup_start": span[0], "rollup_end": span[1]} if (batch.rollup_shape and span) else params
         )
@@ -382,9 +392,7 @@ def _evaluate(
 
     def _run_unit(unit: _QueryUnit) -> list[tuple[str, dict[str, Any]]]:
         try:
-            raw_rows = trace.run(
-                unit.key, lambda: service.client.execute(unit.sql, unit.query_params), source=unit.source
-            )
+            raw_rows = trace.run(unit.key, lambda: _exec(unit.sql, unit.query_params), source=unit.source)
         except Exception as exc:
             return unit.on_error(exc)
         return unit.finish(raw_rows)
@@ -407,9 +415,7 @@ def _evaluate(
             "mixed" if any(unit.source == "mixed" for unit in group_units) else "fact"
         )
         try:
-            raw_rows = trace.run(
-                group_name, lambda: service.client.execute(combined_sql, combined_params), source=group_source
-            )
+            raw_rows = trace.run(group_name, lambda: _exec(combined_sql, combined_params), source=group_source)
             by_key: dict[str, list[dict[str, Any]]] = {}
             for row in raw_rows:
                 tag = str(row.get("_q") or "")
@@ -665,6 +671,7 @@ def insights_endpoint(
         on_meta: Callable[[dict[str, Any]], None] | None = None,
         *,
         max_workers: int = _MAX_WORKERS,
+        query_settings: Mapping[str, str] | None = None,
     ) -> tuple[dict[str, Any], bool]:
         return _evaluate(
             service,
@@ -678,10 +685,15 @@ def insights_endpoint(
             enabled_fields,
             on_meta,
             max_workers=max_workers,
+            query_settings=query_settings,
         )
 
     def evaluate_bg(on_meta: Callable[[dict[str, Any]], None] | None = None) -> tuple[dict[str, Any], bool]:
-        return evaluate(on_meta, max_workers=_BACKGROUND_MAX_WORKERS)
+        return evaluate(
+            on_meta,
+            max_workers=_BACKGROUND_MAX_WORKERS,
+            query_settings={"max_threads": _BACKGROUND_QUERY_MAX_THREADS},
+        )
 
     if not isinstance(service, HighScaleService):
         get_queries()

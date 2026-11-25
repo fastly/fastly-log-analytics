@@ -175,6 +175,7 @@ _QUERY_SETTINGS = frozenset(
         "result_overflow_mode",
         "max_rows_to_read",
         "read_overflow_mode",
+        "max_threads",
     }
 )
 _PARAM_ESCAPES = {

@@ -43,6 +43,15 @@ def _parse_int(value: Any) -> int | None:
         return None
 
 
+def _baseline_sample_stride(baseline_hours: float) -> int:
+    """Granule-skipping time-block stride for raw-fact baseline portions (>= 48h)."""
+    if baseline_hours >= 168:
+        return 10
+    if baseline_hours >= 48:
+        return 5
+    return 1
+
+
 def _base_cte(
     name: str,
     projections: list[tuple[str, str]],
@@ -53,6 +62,7 @@ def _base_cte(
     row_filter: str = "",
     filter_clause: str = "",
     weighted: bool = False,
+    baseline_sample_stride: int = 1,
 ) -> tuple[str, QuerySource]:
     """Build the ``/* insight:batch_<name> */ WITH base AS (...)`` prefix."""
     fact_scope = " AND ".join(visible_fact_clauses("request"))
@@ -86,12 +96,17 @@ def _base_cte(
 
     lower = "{window_start:DateTime64(3)}" if window_only else "{baseline_start:DateTime64(3)}"
     weight_col = ", toUInt64(1) AS n" if (weighted or rollup_shape) else ""
+    baseline_sample = (
+        f" AND (event_timestamp >= {{window_start:DateTime64(3)}} OR intDiv(toUnixTimestamp(event_timestamp), 60) % {baseline_sample_stride} = 0)"
+        if (baseline_sample_stride > 1 and not window_only)
+        else ""
+    )
     raw = (
         f"SELECT {raw_proj}, "
         "event_timestamp < {window_start:DateTime64(3)} AS is_b, "
         f"event_timestamp >= {{window_start:DateTime64(3)}} AS is_w{weight_col} "
         f"FROM request_facts PREWHERE {fact_scope} AND event_timestamp >= {lower} "
-        f"AND event_timestamp < {{window_end:DateTime64(3)}}{raw_where}"
+        f"AND event_timestamp < {{window_end:DateTime64(3)}}{baseline_sample}{raw_where}"
     )
     return f"/* insight:batch_{name} */ WITH base AS ({raw})", "fact"
 
@@ -723,6 +738,7 @@ def _build_latency_dim(
     present: set[str],
     rollup_span: tuple[datetime, datetime] | None,
     filter_clause: str,
+    baseline_hours: float = 0.0,
 ) -> tuple[str, QuerySource]:
     proj: list[tuple[str, str]] = [("elapsed", COLUMNS["elapsed"])]
     sets: list[str] = []
@@ -747,11 +763,14 @@ def _build_latency_dim(
         )
         sets.append("(city, region, country)")
 
+    b_stride = _baseline_sample_stride(baseline_hours)
+    b_scale = f" * {b_stride}" if b_stride > 1 else ""
     cte, source = _base_cte(
         "latency_dim",
         proj,
         row_filter="custom_fields['elapsed'] != '' AND elapsed IS NOT NULL",
         filter_clause=filter_clause,
+        baseline_sample_stride=b_stride,
     )
     g_pop = "grouping(pop)" if "pop_latency_regression" in active else "toUInt8(1)"
     g_reg = "grouping(server_region)" if "region_latency" in active else "toUInt8(1)"
@@ -786,7 +805,7 @@ def _build_latency_dim(
         f"{cte} SELECT {g_pop} AS g_pop, {g_reg} AS g_reg, {g_city} AS g_city, "
         f"{pop_col}, {reg_col}, {city_cols}, "
         f"{_P95}(elapsed, is_w) / 1000.0 AS w_p95, {_P95}(elapsed, is_b) / 1000.0 AS b_p95, "
-        f"countIf(is_w) AS w_total, countIf(is_b) AS b_total, {ottfb_sel} "
+        f"countIf(is_w) AS w_total, countIf(is_b){b_scale} AS b_total, {ottfb_sel} "
         f"FROM base GROUP BY GROUPING SETS ({', '.join(sets)}) HAVING {' OR '.join(having)}"
     )
     return sql, source
@@ -837,6 +856,7 @@ def _build_url_perf(
     present: set[str],
     rollup_span: tuple[datetime, datetime] | None,
     filter_clause: str,
+    baseline_hours: float = 0.0,
 ) -> tuple[str, QuerySource]:
     proj = [
         ("url", COLUMNS["url"]),
@@ -845,7 +865,15 @@ def _build_url_perf(
         ("resp_bytes", COLUMNS["resp_bytes"]),
         ("resp_header_content_encoding", COLUMNS["resp_header_content_encoding"]),
     ]
-    cte, source = _base_cte("url_perf", proj, filter_clause=filter_clause)
+    b_stride = _baseline_sample_stride(baseline_hours)
+    b_scale = f" * {b_stride}" if b_stride > 1 else ""
+    cte, source = _base_cte(
+        "url_perf",
+        proj,
+        row_filter="url != ''",
+        filter_clause=filter_clause,
+        baseline_sample_stride=b_stride,
+    )
     url_win_from = _window_from(filter_clause=filter_clause, row_filter="url != ''")
     win_urls = (
         f"SELECT url {url_win_from} "
@@ -857,11 +885,11 @@ def _build_url_perf(
         f"{_P95}(elapsed, is_w AND elapsed IS NOT NULL) / 1000.0 AS l_w_p95, "
         f"{_P95}(elapsed, is_b AND elapsed IS NOT NULL) / 1000.0 AS l_b_p95, "
         "countIf(is_w AND elapsed IS NOT NULL) AS l_w_total, "
-        "countIf(is_b AND elapsed IS NOT NULL) AS l_b_total, "
+        f"countIf(is_b AND elapsed IS NOT NULL){b_scale} AS l_b_total, "
         f"countIf(is_w AND {_COMP_ROW} AND {_UNCOMP}) * 1.0 / nullIf(countIf(is_w AND {_COMP_ROW}), 0) AS c_w_rate, "
         f"countIf(is_b AND {_COMP_ROW} AND {_UNCOMP}) * 1.0 / nullIf(countIf(is_b AND {_COMP_ROW}), 0) AS c_b_rate, "
         f"countIf(is_w AND {_COMP_ROW}) AS c_w_total, "
-        f"countIf(is_b AND {_COMP_ROW}) AS c_b_total "
+        f"countIf(is_b AND {_COMP_ROW}){b_scale} AS c_b_total "
         "FROM base "
         f"WHERE url != '' AND url IN ({win_urls}) "
         "GROUP BY url HAVING "
@@ -915,9 +943,6 @@ def _build_ip_outlier(
         ("req_header_bytes", COLUMNS["req_header_bytes"]),
         ("conn_requests", COLUMNS["conn_requests"]),
     ]
-    cte, source = _base_cte(
-        "ip_outlier", proj, row_filter="req_header_bytes > 0 OR conn_requests > 0", filter_clause=filter_clause
-    )
     ip_out_win_from = _window_from(
         filter_clause=filter_clause,
         row_filter="client_ip != '' AND (custom_fields['req_header_bytes'] != '' OR custom_fields['conn_requests'] != '')",
@@ -926,6 +951,16 @@ def _build_ip_outlier(
         f"SELECT client_ip {ip_out_win_from} "
         f"GROUP BY client_ip HAVING countIf({COLUMNS['req_header_bytes']} > 0) >= 3 "
         f"OR countIf({COLUMNS['conn_requests']} > 0) >= 5"
+    )
+    cte, source = _base_cte(
+        "ip_outlier",
+        proj,
+        row_filter=(
+            f"client_ip IN ({win_ips}) AND "
+            "(custom_fields['req_header_bytes'] != '' OR custom_fields['conn_requests'] != '') AND "
+            "(req_header_bytes > 0 OR conn_requests > 0)"
+        ),
+        filter_clause=filter_clause,
     )
     sql = (
         f"{cte} SELECT ip, "
@@ -939,7 +974,7 @@ def _build_ip_outlier(
         "countIf(is_w AND conn_requests > 0) AS ca_w_total, "
         "quantileTDigestIf(0.95)(conn_requests, is_b AND conn_requests > 0) AS ca_b_p95, "
         "countIf(is_b AND conn_requests > 0) AS ca_b_total "
-        f"FROM base WHERE ip IN ({win_ips}) GROUP BY ip HAVING "
+        "FROM base GROUP BY ip HAVING "
         "(rs_w_total >= 3 AND rs_b_total > 0 AND max_bytes > rs_b_p95 * 3) "
         "OR (ca_w_total >= 5 AND ca_b_total > 0 AND max_reqs >= 50 AND max_reqs > ca_b_p95 * 3)"
     )
@@ -989,7 +1024,6 @@ def _build_ip_abuse(
     if "orphaned_deep_crawl" in active:
         proj.append(("referer", COLUMNS["referer"]))
 
-    cte, source = _base_cte("ip_abuse", proj, row_filter="ip != ''", filter_clause=filter_clause)
     sel = ["ip"]
     pre_having: list[str] = []
     having: list[str] = []
@@ -1046,7 +1080,13 @@ def _build_ip_abuse(
 
     ip_abuse_win_from = _window_from(filter_clause=filter_clause, row_filter="client_ip != ''")
     win_ips = f"SELECT client_ip {ip_abuse_win_from} GROUP BY client_ip HAVING {' OR '.join(pre_having)}"
-    sql = f"{cte} SELECT {', '.join(sel)} FROM base WHERE ip IN ({win_ips}) GROUP BY ip HAVING {' OR '.join(having)}"
+    cte, source = _base_cte(
+        "ip_abuse",
+        proj,
+        row_filter=f"client_ip != '' AND client_ip IN ({win_ips})",
+        filter_clause=filter_clause,
+    )
+    sql = f"{cte} SELECT {', '.join(sel)} FROM base GROUP BY ip HAVING {' OR '.join(having)}"
     return sql, source
 
 
@@ -1111,13 +1151,22 @@ def _build_origin_perf(
     present: set[str],
     rollup_span: tuple[datetime, datetime] | None,
     filter_clause: str,
+    baseline_hours: float = 0.0,
 ) -> tuple[str, QuerySource]:
     proj = [
         ("ottfb", COLUMNS["ottfb"]),
         ("url", COLUMNS["url"]),
         ("oconnect_ms", COLUMNS["oconnect_ms"]),
     ]
-    cte, source = _base_cte("origin_perf", proj, row_filter="ottfb IS NOT NULL", filter_clause=filter_clause)
+    b_stride = _baseline_sample_stride(baseline_hours)
+    b_scale = f" * {b_stride}" if b_stride > 1 else ""
+    cte, source = _base_cte(
+        "origin_perf",
+        proj,
+        row_filter="custom_fields['ottfb'] != '' AND ottfb IS NOT NULL",
+        filter_clause=filter_clause,
+        baseline_sample_stride=b_stride,
+    )
     read_ms = "greatest(ottfb / 1000.0 - oconnect_ms, 0)"
     has_conn = "oconnect_ms IS NOT NULL"
     sql = (
@@ -1127,7 +1176,7 @@ def _build_origin_perf(
         "countIf(is_w) AS w_reqs, round(quantileTDigestIf(0.95)(ottfb, is_w) / 1000.0, 1) AS url_p95_ms, "
         f"{_P95}(oconnect_ms, is_w AND {has_conn}) AS w_conn, {_P95}(oconnect_ms, is_b AND {has_conn}) AS b_conn, "
         f"{_P95}({read_ms}, is_w AND {has_conn}) AS w_read, {_P95}({read_ms}, is_b AND {has_conn}) AS b_read, "
-        f"countIf(is_w AND {has_conn}) AS ts_w_total, countIf(is_b AND {has_conn}) AS ts_b_total "
+        f"countIf(is_w AND {has_conn}) AS ts_w_total, countIf(is_b AND {has_conn}){b_scale} AS ts_b_total "
         "FROM keyed GROUP BY GROUPING SETS ((), (w_url)) "
         "HAVING g_url = 1 OR w_reqs >= 10"
     )
@@ -1175,6 +1224,7 @@ def _build_network_asn(
     present: set[str],
     rollup_span: tuple[datetime, datetime] | None,
     filter_clause: str,
+    baseline_hours: float = 0.0,
 ) -> tuple[str, QuerySource]:
     proj: list[tuple[str, str]] = []
     sets: list[str] = []
@@ -1215,7 +1265,15 @@ def _build_network_asn(
     if has_metro:
         asn_metro_filters.append("custom_fields['metro'] != ''")
     row_filter = " OR ".join(asn_metro_filters)
-    cte, source = _base_cte("network_asn", proj, row_filter=row_filter, filter_clause=filter_clause)
+    b_stride = _baseline_sample_stride(baseline_hours)
+    b_scale = f" * {b_stride}" if b_stride > 1 else ""
+    cte, source = _base_cte(
+        "network_asn",
+        proj,
+        row_filter=row_filter,
+        filter_clause=filter_clause,
+        baseline_sample_stride=b_stride,
+    )
     g_asn = "grouping(asn_str)" if has_asn else "toUInt8(1)"
     g_metro = "grouping(metro)" if has_metro else "toUInt8(1)"
     sel = [
@@ -1235,7 +1293,7 @@ def _build_network_asn(
                 "avgIf(retrans, is_w) AS w_retrans",
                 "avgIf(retrans, is_b) AS b_retrans",
                 "countIf(is_w) AS nah_w_total",
-                "countIf(is_b) AS nah_b_total",
+                f"countIf(is_b){b_scale} AS nah_b_total",
             ]
         )
         having.append(
@@ -1251,7 +1309,7 @@ def _build_network_asn(
                 f"quantileTDigestIf(0.50)(tcp_rtt, is_w AND {amp}) / 1000.0 AS amp_w_med",
                 f"quantileTDigestIf(0.50)(tcp_rtt, is_b AND {amp}) / 1000.0 AS amp_b_med",
                 f"countIf(is_w AND {amp}) AS amp_w_total",
-                f"countIf(is_b AND {amp}) AS amp_b_total",
+                f"countIf(is_b AND {amp}){b_scale} AS amp_b_total",
             ]
         )
         having.append(
@@ -1264,7 +1322,7 @@ def _build_network_asn(
                 "quantileTDigestIf(0.5)(delivery_rate, is_w AND delivery_rate > 0) AS mdd_w_med",
                 "quantileTDigestIf(0.5)(delivery_rate, is_b AND delivery_rate > 0) AS mdd_b_med",
                 "countIf(is_w AND delivery_rate > 0) AS mdd_w_total",
-                "countIf(is_b AND delivery_rate > 0) AS mdd_b_total",
+                f"countIf(is_b AND delivery_rate > 0){b_scale} AS mdd_b_total",
             ]
         )
         having.append(
@@ -1365,7 +1423,22 @@ def _build_fingerprint_spread(
     if has_cipher:
         proj.append(("tls_ciphers_sha", COLUMNS["tls_ciphers_sha"]))
 
-    cte, source = _base_cte("fingerprint_spread", proj, filter_clause=filter_clause)
+    win_preds: list[str] = []
+    if has_fp:
+        fp_col = COLUMNS[fp]
+        fp_win_from = _window_from(filter_clause=filter_clause, row_filter=f"{fp_col} != '' AND client_ip != ''")
+        win_fps = f"SELECT {fp_col} {fp_win_from} GROUP BY {fp_col} HAVING uniqCombined(client_ip) >= 4"
+        win_preds.append(f"({fp_col} != '' AND {fp_col} IN ({win_fps}))")
+    if has_cipher:
+        cipher_col = COLUMNS["tls_ciphers_sha"]
+        cipher_win_from = _window_from(
+            filter_clause=filter_clause, row_filter=f"{cipher_col} != '' AND client_ip != ''"
+        )
+        win_ciphers = f"SELECT {cipher_col} {cipher_win_from} GROUP BY {cipher_col} HAVING uniqCombined(client_ip) >= 4"
+        win_preds.append(f"({cipher_col} != '' AND {cipher_col} IN ({win_ciphers}))")
+    row_filter = " OR ".join(win_preds)
+
+    cte, source = _base_cte("fingerprint_spread", proj, row_filter=row_filter, filter_clause=filter_clause)
     use_sets = has_fp and has_cipher
     g_fp = f"grouping({fp})" if use_sets else ("toUInt8(0)" if has_fp else "toUInt8(1)")
     g_cipher = "grouping(tls_ciphers_sha)" if use_sets else ("toUInt8(0)" if has_cipher else "toUInt8(1)")
@@ -1406,22 +1479,7 @@ def _build_fingerprint_spread(
         )
         having.append(f"(g_fp = 0 AND {fp} != '' AND res_w_ips >= 30 AND res_w_asns >= 5)")
 
-    win_preds: list[str] = []
-    if has_fp:
-        fp_col = COLUMNS[fp]
-        fp_win_from = _window_from(filter_clause=filter_clause, row_filter=f"{fp_col} != '' AND client_ip != ''")
-        win_fps = f"SELECT {fp_col} {fp_win_from} GROUP BY {fp_col} HAVING uniqCombined(client_ip) >= 4"
-        win_preds.append(f"({fp} != '' AND {fp} IN ({win_fps}))")
-    if has_cipher:
-        cipher_col = COLUMNS["tls_ciphers_sha"]
-        cipher_win_from = _window_from(
-            filter_clause=filter_clause, row_filter=f"{cipher_col} != '' AND client_ip != ''"
-        )
-        win_ciphers = f"SELECT {cipher_col} {cipher_win_from} GROUP BY {cipher_col} HAVING uniqCombined(client_ip) >= 4"
-        win_preds.append(f"(tls_ciphers_sha != '' AND tls_ciphers_sha IN ({win_ciphers}))")
-    pre_where = f" WHERE {' OR '.join(win_preds)}" if win_preds else ""
-
-    sql = f"{cte} SELECT {', '.join(sel)} FROM base{pre_where} {group_by} HAVING {' OR '.join(having)}"
+    sql = f"{cte} SELECT {', '.join(sel)} FROM base {group_by} HAVING {' OR '.join(having)}"
     return sql, source
 
 

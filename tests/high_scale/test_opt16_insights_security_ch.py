@@ -200,7 +200,7 @@ def test_security_bot_efficiency_and_proxies_optimize_prewhere_and_string_filter
 
 def test_security_aggregates_bounds_parallel_clickhouse_workers() -> None:
     src = inspect.getsource(security.security_aggregates)
-    assert "max_workers=3" in src
+    assert "max_workers=4" in src
 
 
 def test_insights_standalone_queries_use_prewhere_and_avoid_expensive_scans() -> None:

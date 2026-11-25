@@ -1612,9 +1612,9 @@ def test_network_health_real_ch_uses_rollups_subminute_sampling_and_fast_shieldi
     assert not client.matching("FROM network_minute_dimensions")
     assert client.matching("sumMap(")
 
-    # Heatmap uses single-pass WITH + quantileTDigest + position(..., 'HIT'), and deterministic line_ordinal sampling.
+    # Heatmap uses single-pass WITH + quantileTDigest + position(..., 'HIT'), and granule-skipping time-block sampling.
     ((heatmap_sql, _),) = client.matching("AS throughput_bps")
-    assert "line_ordinal % 20 = 0" in heatmap_sql
+    assert "intDiv(toUnixTimestamp(event_timestamp), 15) % 20 = 0" in heatmap_sql
     assert "toMinute" not in heatmap_sql and "toSecond" not in heatmap_sql
     assert "quantileTDigest(0.5)" in heatmap_sql
     assert "position(custom_fields['cache'], 'HIT') > 0" in heatmap_sql
@@ -2562,7 +2562,8 @@ def test_crawler_disparity_guard_reads_only_window_rows() -> None:
     sql, _ = client.queries()["crawler_disparity"]
     # Each reference to the full-range crawler_traffic CTE is another full baseline scan.
     assert sql.count("FROM crawler_traffic") == 1
-    assert "SELECT ua, count() AS cnt FROM base WHERE is_w GROUP BY ua" in sql
+    assert "SELECT custom_fields['ua'] AS ua, count() AS cnt FROM request_facts PREWHERE " in sql
+    assert "event_timestamp >= {window_start:DateTime64(3)}" in sql
     assert "HAVING sum(cnt) >= 50" in sql
 
 
