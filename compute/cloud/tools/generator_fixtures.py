@@ -1006,8 +1006,45 @@ def sync_catalog_and_templates(
                             and "unset req.http.X-FOS-Request;" not in body_str
                         ):
                             snippet["body"] = body_str.replace(old_line, new_line)
+        load_log_format = None
+        if any("J" in (case.get("config") or {}).get("groups", []) for case in fixtures_data.get("cases", [])):
+            ep_ns = dict(namespace)
+            definitions(repo_root / "backend/provision/fastly_api.py", {"load_log_format"}, ep_ns)
+            load_log_format = ep_ns["load_log_format"]
         for case in fixtures_data.get("cases", []):
-            if "M" in (case.get("config") or {}).get("groups", []):
+            groups = (case.get("config") or {}).get("groups", [])
+            if "J" in groups and load_log_format is not None:
+                cfg = case["config"]
+                old_fmt = case.get("format", "")
+                old_loaded = case.get("loaded_format", "")
+                old_routed = case.get("routed_format")
+                new_fmt = namespace["generate_log_format"](cfg)
+                new_loaded = load_log_format(cfg)
+                routed_cfg = {k: cfg[k] for k in ("groups", "custom_fields", "field_overrides") if k in cfg}
+                new_routed = namespace["generate_log_format"](routed_cfg) if old_routed else None
+                case["format"] = new_fmt
+                case["loaded_format"] = new_loaded
+                case["hash"] = namespace["format_hash"](cfg)
+                if new_routed is not None:
+                    case["routed_format"] = new_routed
+                for ep in case.get("endpoints", []):
+                    if ep.get("format_string") == old_fmt:
+                        ep["format_string"] = new_fmt
+                    elif old_routed and ep.get("format_string") == old_routed and new_routed:
+                        ep["format_string"] = new_routed
+                for ep in case.get("direct_endpoints", []):
+                    if ep.get("format_string") == old_loaded:
+                        ep["format_string"] = new_loaded
+                for body_key, canon_key, target_fmt in (
+                    ("endpoint_bodies", "endpoint_bodies_canonical", new_routed or new_fmt),
+                    ("direct_endpoint_bodies", "direct_endpoint_bodies_canonical", new_loaded),
+                ):
+                    bodies = case.get(body_key) or []
+                    for body in bodies:
+                        body["format"] = target_fmt
+                    if canon_key in case:
+                        case[canon_key] = [json.dumps(b, sort_keys=True, separators=(",", ":")) for b in bodies]
+            if "M" in groups:
                 updated_capture = capture(case["config"])
                 if "deliver" in updated_capture:
                     case["capture"]["deliver"] = updated_capture["deliver"]

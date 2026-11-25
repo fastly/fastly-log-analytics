@@ -204,6 +204,9 @@ export interface SecurityAggregatesResponse extends Partial<SecurityProxiesData>
   bot_efficiency?: BotEfficiencyRow[];
   bots?: BotRow[];
   ngwaf_bots?: Array<{ bot_name: string; bot_category: string | null; requests: number }>;
+  truncated?: boolean;
+  _approx?: boolean;
+  _approx_note?: string;
 }
 
 export interface ThreatIntelRow {
@@ -872,28 +875,34 @@ export function formatProxiesExportPayload(
 
   const filtered = clients.filter((c) => {
     if (threshold === "High") return c.risk_level === "High";
-    return c.risk_level === "High" || c.risk_level === "Medium";
+    if (threshold === "Medium") return c.risk_level === "High" || c.risk_level === "Medium";
+    return c.risk_level === "High" || c.risk_level === "Medium" || c.risk_level === "Low";
   });
 
   const seen = new Set<string>();
-  const unique: Array<{ ip: string; impossible_distance: boolean }> = [];
+  const unique: Array<{ ip: string; risk_level: string; impossible_distance: boolean; country: string; city: string; distance_km: number | null }> = [];
   for (const c of filtered) {
     const ip = String(c.ip ?? "").trim();
     if (!ip || seen.has(ip)) continue;
     seen.add(ip);
     unique.push({
       ip,
+      risk_level: String(c.risk_level ?? ""),
       impossible_distance: Boolean(c.impossible_distance ?? c.impossible_dist),
+      country: String(c.country ?? ""),
+      city: String(c.city ?? ""),
+      distance_km: c.distance_km == null ? null : Number(c.distance_km),
     });
   }
 
-  if (format === "fastly-acl") {
+  if (format === "fastly-acl" || format === "csv") {
     const lines = ["ip,comment"];
     for (const item of unique) {
       const reason = item.impossible_distance
         ? "Impossible distance mismatch"
         : "Behavioral VPN/Proxy tunnel";
-      lines.push(`${item.ip},Watchdog block: ${reason}`);
+      const label = format === "csv" && item.risk_level ? `${item.risk_level}: ${reason}` : `Watchdog block: ${reason}`;
+      lines.push(`${item.ip},${label}`);
     }
     return {
       body: `${lines.join("\n")}\n`,
@@ -1131,6 +1140,11 @@ export async function executeSecurityAggregates(
         const { sql, params } = buildSecurityProxiesSql(req, availableColumns);
         const [rows] = await Promise.all([client.query(sql, params), loadAsnNames()]);
         Object.assign(response, shapeSecurityProxiesFromRawRows(rows, maskIps));
+        if (rows.length >= 5000) {
+          response.truncated = true;
+          response._approx = true;
+          response._approx_note = "Proxy watchdog sampled at 5,000 raw rows.";
+        }
       })(),
     );
   }

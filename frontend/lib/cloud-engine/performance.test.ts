@@ -284,4 +284,33 @@ describe("performance cloud-engine module (F19)", () => {
     const other = await handlePerformanceRequest(new Request("https://example.test/api/other"));
     expect(other).toBeNull();
   });
+
+  it("sets both origin_wait and origin_download to 0 when ottfb is NULL even if ottlb is populated", async () => {
+    const engine = getDuckDBEngine();
+    try {
+      await engine.executeSql(`
+        INSERT INTO requests (scoped_key, ts_ms, "timestamp", elapsed, ttfb, ottfb, ottlb, cache, url, asn, ttl)
+        VALUES ('wf-null-ottfb', 1700000000000, epoch_ms(1700000000000), 100000, 0.025, NULL, 60000, 'HIT', '/cached', 15169, 300)
+      `);
+      const res = await handlePerformanceRequest(
+        new Request("https://example.test/api/performance/aggregates", {
+          method: "POST",
+          body: JSON.stringify({
+            start_time: "2023-11-14T22:00:00Z",
+            end_time: "2023-11-14T23:00:00Z",
+            sections: ["waterfall"],
+          }),
+        }),
+      );
+      const data = await res!.json();
+      expect(data.waterfall.avg).toEqual({
+        edge_processing: 25,
+        origin_wait: 0,
+        origin_download: 0,
+        client_download: 75,
+      });
+    } finally {
+      await engine.reset();
+    }
+  });
 });

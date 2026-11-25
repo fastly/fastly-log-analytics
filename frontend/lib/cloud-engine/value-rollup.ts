@@ -202,11 +202,11 @@ export function valueSummaryFromRollup(
   const cls = (name: string) => byClass?.get(name) ?? emptyValue();
   const hasCache = byClass ? [...byClass].some(([name, v]) => name !== "" && v.requests > 0) : false;
   const hits = cls("HIT").requests;
-  const offload = hasCache ? roundTo(hits * 100 / total, 2) : null;
+  const offload = hasCache ? roundTo(hits * 100 / total, 1) : null;
   const avgOf = (v: RollupValue) => (v.elapsedCount ? roundTo(v.elapsedSum / v.elapsedCount / 1000, 2) : null);
   const avgHit = avgOf(cls("HIT"));
   const avgMiss = avgOf(cls("MISS"));
-  const acceleration = avgHit !== null && avgHit > 0 && avgMiss !== null ? roundTo(avgMiss / avgHit, 2) : null;
+  const acceleration = avgHit !== null && avgHit > 0 && avgMiss !== null ? roundTo(avgMiss / avgHit, 1) : null;
   const days = byClass ? [...valueByDay(rollup, "cache")].sort(([a], [b]) => a - b) : [];
 
   if (want("overview")) {
@@ -239,8 +239,8 @@ export function valueSummaryFromRollup(
       out.overview = {
         total_requests: total,
         total_bandwidth_bytes: roundTo(overview.totalBandwidth, 2),
-        origin_offload_pct: hasCache ? roundTo(hits * 100 / total, 2) : null,
-        cache_acceleration_factor: avgHit !== null && avgHit > 0 && avgMiss !== null ? roundTo(avgMiss / avgHit, 2) : null,
+        origin_offload_pct: hasCache ? roundTo(hits * 100 / total, 1) : null,
+        cache_acceleration_factor: avgHit !== null && avgHit > 0 && avgMiss !== null ? roundTo(avgMiss / avgHit, 1) : null,
         threats_blocked: threatsBlocked,
         edge_hit_requests: hasCache ? hits : null,
         origin_requests: hasCache ? state("MISS") + state("PASS") : null,
@@ -260,7 +260,7 @@ export function valueSummaryFromRollup(
         const time = new Date(day).toISOString();
         const n = (name: string) => values.get(name)?.requests ?? 0;
         const dayTotal = sumOf(values.values()).requests;
-        offloadSeries.push({ time, value: roundTo(n("HIT") * 100 / dayTotal, 2) });
+        offloadSeries.push({ time, value: roundTo(n("HIT") * 100 / dayTotal, 1) });
         for (const name of ["HIT", "MISS", "PASS"]) stateSeries.push({ time, value: n(name), category: name });
         const other = dayTotal - n("HIT") - n("MISS") - n("PASS");
         if (other) stateSeries.push({ time, value: other, category: "OTHER" });
@@ -274,7 +274,7 @@ export function valueSummaryFromRollup(
       synth_requests: hasCache ? cls("SYNTH").requests : null,
       origin_offload_pct: offload,
       bandwidth_saved_bytes: bytes.bytesCount ? cls("HIT").respBytes : null,
-      shield_effectiveness_pct: shield ? roundTo(shieldHits * 100 / shield, 2) : null,
+      shield_effectiveness_pct: shield ? roundTo(shieldHits * 100 / shield, 1) : null,
       offload_time_series: offloadSeries,
       cache_state_time_series: stateSeries,
     };
@@ -404,7 +404,7 @@ export function valueSummaryFromRollup(
     const protocolSamples = countWhere(proto, (value) => value !== "");
     const tlsSamples = countWhere(tls, () => true);
     const ipv6Samples = countWhere(ipv6, () => true);
-    const pct = (samples: number, n: number) => (samples ? roundTo(n * 100 / total, 2) : null);
+    const pct = (samples: number, n: number) => (samples ? roundTo(n * 100 / total, 1) : null);
     const series: ValuePoint[] = [];
     if (protocolSamples) {
       if (truncated.has("series5/proto")) return null;
@@ -463,7 +463,7 @@ function filteredValueOverview(
     overview: {
       total_requests: total,
       total_bandwidth_bytes: agg.respBytes || null,
-      origin_offload_pct: total > 0 && hasCache ? roundTo((hits * 100) / total, 2) : null,
+      origin_offload_pct: total > 0 && hasCache ? roundTo((hits * 100) / total, 1) : null,
       threats_blocked: null,
       cache_acceleration_factor: null,
       edge_hit_requests: hasCache ? hits : null,

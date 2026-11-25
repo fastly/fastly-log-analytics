@@ -543,7 +543,7 @@ def network_health(
                     f"WITH {_RTT} AS _rtt, {_RTT_MIN} AS _rtt_min, {_RTT_VAR} AS _rtt_var, {_ELAPSED} AS _elapsed "
                     f"SELECT {_ASN} AS asn, {bucket_expr} AS bucket_ts, count() AS reqs, "
                     f"quantileTDigest(0.5)(if(position(custom_fields['cache'], 'HIT') > 0 AND _elapsed > 0, {_RESP_BYTES} * 1000000.0 / _elapsed, NULL)) AS throughput_bps, "
-                    f"quantileTDigest(0.5)(_rtt) AS rtt_med_us, quantileTDigest(0.1)(_rtt) AS rtt_p10_us, "
+                    f"avg(_rtt) AS rtt_avg_us, quantileTDigest(0.5)(_rtt) AS rtt_med_us, quantileTDigest(0.1)(_rtt) AS rtt_p10_us, "
                     f"quantileTDigest(0.95)(_rtt) AS rtt_p95_us, quantileTDigest(0.99)(_rtt) AS rtt_p99_us, "
                     f"quantileTDigest(0.5)(_rtt_min) AS rtt_baseline_us, "
                     f"quantileTDigest(0.5)(_rtt - _rtt_min) AS rtt_congestion_us, avg({_PLOSS}) AS avg_ploss, "
@@ -716,7 +716,7 @@ def network_health(
                     _ch_fact_query(
                         f"{_ASN} AS asn, {bucket_expr} AS bucket_ts, count() AS reqs, "
                         f"median(if({_NET_HIT} AND {_ELAPSED} > 0, {_RESP_BYTES} * 1000000.0 / {_ELAPSED}, NULL)) AS throughput_bps, "
-                        f"median({_RTT}) AS rtt_med_us, quantile(0.1)({_RTT}) AS rtt_p10_us, "
+                        f"avg({_RTT}) AS rtt_avg_us, median({_RTT}) AS rtt_med_us, quantile(0.1)({_RTT}) AS rtt_p10_us, "
                         f"median({_RTT_MIN}) AS rtt_baseline_us, "
                         f"median({_RTT} - {_RTT_MIN}) AS rtt_congestion_us, avg({_PLOSS}) AS avg_ploss, "
                         f"median({_RTT_VAR}) AS rtt_jitter_us, {err_pct_expr}",
@@ -894,17 +894,22 @@ def network_health(
 
         map_by_bucket: dict[str, list[dict]] = {}
         countries_set: set[str] = set()
+        # Accumulate full-window per-country health scores across all map_rows before
+        # per-bucket LIMIT 50 truncation so worst_country does not shift with bucket_seconds (NET-02).
+        country_health_agg: dict[str, list[float]] = {}
         for r in map_rows:
             if ctry := (r["country"] or ""):
                 countries_set.add(ctry)
+            pkt, err = _flt(r["avg_ploss"]), _flt(r["error_pct"])
+            row_reqs = int(r["reqs"])
+            row_hs = _geo_health_score(r, pkt, err)
+            if ctry and row_reqs > 0:
+                c_acc = country_health_agg.setdefault(ctry, [0.0, 0.0])
+                c_acc[0] += row_hs * row_reqs
+                c_acc[1] += row_reqs
             if (bucket := _fmt_ts(int(r["bucket_ts"]))) not in bucket_idx:
                 continue
-            pkt, err, metro_code, city = (
-                _flt(r["avg_ploss"]),
-                _flt(r["error_pct"]),
-                _parse_metro_code(r.get("metro")),
-                r["city"] or "",
-            )
+            metro_code, city = _parse_metro_code(r.get("metro")), r["city"] or ""
             display_city = (
                 dma_map.get(str(metro_code), city.title() if city else "")
                 if metro_code is not None
@@ -920,8 +925,8 @@ def network_health(
                         "rtt_med_us": _flt(r["rtt_med_us"]),
                         "avg_ploss": pkt,
                         "error_pct": _flt(err, 2),
-                        "health_score": _geo_health_score(r, pkt, err),
-                        "reqs": int(r["reqs"]),
+                        "health_score": row_hs,
+                        "reqs": row_reqs,
                     }
                 )
 
@@ -966,9 +971,12 @@ def network_health(
         )
 
         rtt_pairs = [
-            (float(r["rtt_med_us"]), max(0, int(r.get("reqs") or 0)))
+            (
+                float(r["rtt_avg_us"]) if r.get("rtt_avg_us") is not None else float(r["rtt_med_us"]),
+                max(0, int(r.get("reqs") or 0)),
+            )
             for r in heatmap_rows
-            if r.get("rtt_med_us") is not None
+            if (r.get("rtt_avg_us") if r.get("rtt_avg_us") is not None else r.get("rtt_med_us")) is not None
         ]
         raw_summary = compute_network_global_summary(
             leaderboard=leaderboard,
@@ -979,12 +987,23 @@ def network_health(
             cities_list=cities_list,
             zero_as_int=False,
         )
+        worst_country_entry = raw_summary["worst_country"]
+        if country_health_agg:
+            total_country_reqs = sum(v[1] for v in country_health_agg.values())
+            scored_countries = [
+                (ctry, round(v[0] / v[1], 1), v[1]) for ctry, v in country_health_agg.items() if v[1] > 0
+            ]
+            sig_countries = [c for c in scored_countries if c[2] > total_country_reqs * 0.01]
+            pool = sig_countries or scored_countries
+            if pool:
+                wc_code, wc_score, _ = min(pool, key=lambda c: c[1])
+                worst_country_entry = {"label": COUNTRY_MAP.get(wc_code, wc_code), "score": wc_score}
         summary = NetworkHealthSummary(
             global_health_score=raw_summary["global_health_score"],
             avg_rtt_ms=raw_summary["avg_rtt_ms"],
             total_reqs=raw_summary["total_reqs"],
             worst_asn=NetworkWorstEntry(**raw_summary["worst_asn"]) if raw_summary["worst_asn"] else None,
-            worst_country=NetworkWorstEntry(**raw_summary["worst_country"]) if raw_summary["worst_country"] else None,
+            worst_country=NetworkWorstEntry(**worst_country_entry) if worst_country_entry else None,
         )
         want_map = not sections or bool(set(sections) & {"health", "map_buckets", "cities"})
         req_metric = str(getattr(req, "metric", "health_score") or "health_score")
@@ -1241,11 +1260,16 @@ def network_quality(
 
 
 def get_pop_health(
-    service: HighScaleService, start_time: datetime | None, end_time: datetime | None
+    service: HighScaleService,
+    start_time: datetime | None,
+    end_time: datetime | None,
+    *,
+    filters: Any = None,
 ) -> PopHealthListResponse:
     end = end_time or datetime.now(UTC)
     start = start_time or (end - timedelta(hours=24))
     start, end = (dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt for dt in (start, end))
+    filter_sql, filter_params = _filter_clause(filters)
     is_real_ch = (
         hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
     )
@@ -1257,6 +1281,7 @@ def get_pop_health(
                 "cid": client_cache_token(service.client),
                 "s": int(start.timestamp()) // 60,
                 "e": int(end.timestamp()) // 60,
+                "f": serialize_filters_for_key(filters or {}),
             },
             {"name": service.service_id, "service_id": service.service_id},
         )
@@ -1267,17 +1292,18 @@ def get_pop_health(
         if memo_key is not None and (cached_inner := _network_memo.get_with_telemetry(memo_key)) is not None:
             return cached_inner
         trace = HighScaleSections(service.service_id, "network")
-        params = {"service_id": service.service_id, "start": start, "end": end}
+        params = {"service_id": service.service_id, "start": start, "end": end, **filter_params}
+        base_where = f"{_BASE_WHERE}{filter_sql}"
         if is_real_ch:
             pop_span_s = (end - start).total_seconds()
-            pop_stride = 10 if pop_span_s >= 43200 else (4 if pop_span_s > 21600 else 1)
+            pop_stride = 1 if filter_sql else (10 if pop_span_s >= 43200 else (4 if pop_span_s > 21600 else 1))
             hash_clause = f" AND cityHash64(event_id) % {pop_stride} = 0" if pop_stride > 1 else ""
             fact_sql = (
                 f"SELECT custom_fields['pop'] AS pop, count() AS requests, countIf({_STATUS} >= 500) AS errors, "
                 f"quantileTDigest(0.5)({_RTT}) AS p50_rtt_us, quantileTDigest(0.95)({_TTFB}) * 1000.0 AS p95_ttfb_ms, "
                 "countIf(startsWith(upper(custom_fields['cache']), 'HIT')) AS cache_hits, "
                 "sum(toInt64OrZero(custom_fields['resp_bytes'])) AS bandwidth_bytes "
-                f"FROM request_facts PREWHERE {_BASE_WHERE}{hash_clause} AND custom_fields['pop'] != '' "
+                f"FROM request_facts PREWHERE {base_where}{hash_clause} AND custom_fields['pop'] != '' "
                 "GROUP BY pop ORDER BY requests DESC"
             )
             rollup_by_pop: dict[str, tuple[int, Any, Any]] = {}
@@ -1301,7 +1327,7 @@ def get_pop_health(
                     f"quantileTDigest(0.5)({_RTT}) AS p50_rtt_us, quantileTDigest(0.95)({_TTFB}) * 1000.0 AS p95_ttfb_ms, "
                     "toUInt64(countIf(startsWith(upper(custom_fields['cache']), 'HIT'))) AS cache_hits, "
                     "toInt64(sum(toInt64OrZero(custom_fields['resp_bytes']))) AS bandwidth_bytes "
-                    f"FROM request_facts PREWHERE {_BASE_WHERE}{hash_clause} AND custom_fields['pop'] != '' "
+                    f"FROM request_facts PREWHERE {base_where}{hash_clause} AND custom_fields['pop'] != '' "
                     "GROUP BY pop"
                 )
                 combined_rows = trace.run(
@@ -1368,7 +1394,7 @@ def get_pop_health(
                 f"quantile(0.5)({_RTT}) AS p50_rtt_us, quantile(0.95)({_TTFB}) * 1000.0 AS p95_ttfb_ms, "
                 "countIf(startsWith(upper(custom_fields['cache']), 'HIT')) AS cache_hits, "
                 "sum(toInt64OrZero(custom_fields['resp_bytes'])) AS bandwidth_bytes",
-                f"{_BASE_WHERE} AND custom_fields['pop'] != ''",
+                f"{base_where} AND custom_fields['pop'] != ''",
                 group_by="pop",
                 order_by="requests DESC",
             )

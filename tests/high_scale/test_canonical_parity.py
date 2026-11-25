@@ -235,7 +235,7 @@ def test_canonical_fixture_six_paginated_objects_interrupted_publication_parity(
         watermark=watermark,
         now=datetime(2027, 1, 15, 8, 2, 1, tzinfo=UTC),
     )
-    assert dict(status_agg.top_values) == {"200": 2, "204": 1, "503": 1, "None": 1}
+    assert dict(status_agg.top_values) == {"200": 2, "204": 1, "503": 1}
 
     ip_agg = query_clickhouse_aggregate(
         _FixtureAggregateQuery(),

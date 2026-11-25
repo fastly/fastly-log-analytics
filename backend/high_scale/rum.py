@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
+from urllib.parse import unquote
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -26,6 +27,14 @@ if TYPE_CHECKING:
 
 _iso = format_iso_utc_or_empty
 _FILTER_COLUMNS = frozenset({"browser", "os", "device", "country", "pathname", "city", "region", "pop", "tls"})
+_CASE_INSENSITIVE_FILTER_COLUMNS = frozenset({"browser", "os", "device", "country", "pop", "tls"})
+
+
+def _decode_pct(value: Any) -> str:
+    text = str(value or "")
+    return unquote(text) if "%" in text else text
+
+
 _BEACON_IDENTITY = (
     "coalesce(nullIf(toString(request_event_id), ''), "
     "concat(client_id, '_', toString(toInt64(round(toUnixTimestamp64Milli(event_timestamp) / 1000.0)))))"
@@ -60,14 +69,16 @@ def _filter_clauses(filters: Mapping[str, Any] | None) -> tuple[list[str], dict[
         if column not in _FILTER_COLUMNS:
             unsupported.append(raw_key)
             continue
+        case_insensitive = column in _CASE_INSENSITIVE_FILTER_COLUMNS
         names: list[str] = []
         for j, value in enumerate(values):
             name = f"flt_{i}_{j}"
-            params[name] = str(value)
+            params[name] = str(value).lower() if case_insensitive else str(value)
             names.append(f"{{{name}:String}}")
         mode = str(filter_spec_attr(spec, "mode") or "include")
         operator = "NOT IN" if mode == "exclude" else "IN"
-        clauses.append(f"{column} {operator} ({', '.join(names)})")
+        col_expr = f"lower({column})" if case_insensitive else column
+        clauses.append(f"{col_expr} {operator} ({', '.join(names)})")
     if unsupported:
         raise ValueError(f"high-scale RUM cannot filter on: {', '.join(sorted(unsupported))}")
     return clauses, params
@@ -281,8 +292,13 @@ def rum_analytics(
             else:
                 vitals[m]["p75"] = int(p75)
             if t := r["total"]:
-                good, poor = int(r["good"] * 100 / t), int(r["poor"] * 100 / t)
-                vitals[m]["distribution"] = {"good": good, "poor": poor, "needs_improvement": max(0, 100 - good - poor)}
+                good = round(r["good"] * 100 / t, 2)
+                poor = round(r["poor"] * 100 / t, 2)
+                vitals[m]["distribution"] = {
+                    "good": good,
+                    "poor": poor,
+                    "needs_improvement": round(max(0.0, 100.0 - good - poor), 2),
+                }
         elif m == "fid":
             vitals["fid"]["p75"] = round(p75, 1) if p75 is not None else None
         elif m in ("fcp", "ttfb"):
@@ -317,7 +333,7 @@ def rum_analytics(
 
     worst_pages = [
         {
-            "path": row["path"],
+            "path": _decode_pct(row["path"]),
             "views": row["views"],
             "avg_load_time": seconds(row["avg_load"] or 0.0),
             "lcp_p75": seconds(row["lcp"]),
@@ -337,8 +353,8 @@ def rum_analytics(
         "worst_pages": worst_pages,
         "errors": [
             {
-                "message": row["error_message"],
-                "file": row["error_file"] or "unknown.js",
+                "message": _decode_pct(row["error_message"]),
+                "file": _decode_pct(row["error_file"] or "unknown.js") or "unknown.js",
                 "line": int(row.get("error_line") or 0),
                 "col": int(row.get("error_col") or 0),
                 "count": row["count"],
@@ -434,7 +450,7 @@ def rum_live_events(
     for d in res:
         etype = d.get("type", "pageview")
         mname, mrating, mval = d.get("metric_name"), d.get("metric_rating"), d.get("metric_value")
-        path = d.get("pathname") or "/"
+        path = _decode_pct(d.get("pathname") or "/") or "/"
         browser = clean_edge_meta_str(d.get("browser")) or "Unknown"
         os_name = clean_edge_meta_str(d.get("os")) or "Unknown"
         device_name = clean_edge_meta_str(d.get("device")) or "Unknown"
@@ -465,7 +481,7 @@ def rum_live_events(
             "ttfb": ttfb_ms,
         }
         if etype == "error":
-            desc = d.get("error_message") or "JS Error"
+            desc = _decode_pct(d.get("error_message") or "JS Error") or "JS Error"
             raw_log: dict[str, Any] = {
                 "meta": meta,
                 "measurements": [],

@@ -22,7 +22,7 @@ import { SkeletonGrid } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableRow } from '@/components/ui/table'
 import { Textarea } from '@/components/ui/textarea'
 import { client, extractApiError, unwrapClient } from '@/lib/api'
-import { formatLocalDateTime, keyByOccurrence } from '@/lib/utils'
+import { formatLocalDateTime, keyByOccurrence, normalizeCookieCompliance } from '@/lib/utils'
 import type { components } from '@/types/api'
 import type { LabelValue } from './LabelsTab'
 import { useScoringQuery } from './ScoringAdminPanels'
@@ -249,7 +249,7 @@ const EVENT_COLUMNS: BasicColumnDef<SessionEventRow>[] = [
           <div className="flex items-center gap-3 text-[10px] text-muted-foreground">
             <span>{ts}</span>
             {event.status != null && <span>HTTP {event.status}</span>}
-            {event.edge_cookie_compliance && <span>cookie:{event.edge_cookie_compliance}</span>}
+            {event.edge_cookie_compliance && <span>cookie:{normalizeCookieCompliance(event.edge_cookie_compliance)}</span>}
             {event.edge_score_reason && (
               <span className="text-amber-600">{event.edge_score_reason}</span>
             )}

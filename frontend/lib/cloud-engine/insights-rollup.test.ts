@@ -164,7 +164,10 @@ describe("insights baseline from summaries vs raw DuckDB over the same rows", ()
       expect(card.severity, card.id).toBe(rawCard.severity);
       expect(strip(card.items, approximate), card.id).toEqual(strip(rawCard.items, approximate));
       for (const [i, item] of card.items.entries()) {
-        expect(item.baseline_label, card.id).toBe(approximate ? "≈ baseline" : undefined);
+        const wantLabel = card.id === "tail_latency"
+          ? (approximate ? "≈ P50" : "P50")
+          : (approximate ? "≈ baseline" : undefined);
+        expect(item.baseline_label, card.id).toBe(wantLabel);
         // Summaries also count status 0 as an error.
         if (card.id === "city_error_spikes") expect(item.baseline_val).toBeGreaterThanOrEqual(rawCard.items[i].baseline_val);
       }

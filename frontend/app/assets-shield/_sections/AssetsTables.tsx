@@ -188,7 +188,7 @@ export function AssetsHotspotsSection({
           <button
             onClick={() => onSelectHelp({
               title: 'Large Uncompressed Assets',
-              calculated: 'Identified by scanning static asset requests (with text-based compressible headers like Javascript, CSS, HTML, SVG, Fonts, JSON) that were served without any gzip or Brotli (br) encoding where the file size exceeds 50KB.',
+              calculated: 'Identified by scanning static asset requests (with text-based compressible headers like Javascript, CSS, HTML, SVG, Fonts, JSON) that were served without any gzip or Brotli (br) encoding where the file size is at least 10 KB.',
               means: 'Lists specific raw files that are being delivered completely uncompressed, consuming massive excess CDN egress bandwidth and dragging down user load speed performance.',
               action: 'Verify your Fastly Gzip/Brotli rules are active for this content-type. If the file is extremely large, check if your origin server is stripping or missing Accept-Encoding headers, or check if the asset has a Cache-Control header preventing compression.',
             })}

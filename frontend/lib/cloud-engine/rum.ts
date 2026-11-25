@@ -58,9 +58,9 @@ function emptyMetricSummary() {
   };
 }
 
-export function emptyRumAnalytics() {
+export function emptyRumAnalytics(options?: { noData?: boolean }) {
   return {
-    no_data: true,
+    no_data: options?.noData ?? true,
     summary: {
       total_pageviews: 0,
       unique_sessions: 0,
@@ -165,16 +165,18 @@ const RUM_FILTER_ALIASES: Readonly<Record<string, string>> = {
 };
 const RUM_FILTER_FIELDS = new Set([...Object.keys(RUM_VITALS_COLUMNS), ...Object.keys(RUM_ERRORS_COLUMNS)]);
 
+const RUM_CASE_INSENSITIVE_FIELDS = new Set(["device_type", "browser_name", "os_name", "country", "pop", "tls"]);
+
 export function buildRumWhere(
   params: RumQueryParams,
   table: "client_vitals" | "client_errors" = "client_vitals",
 ): string {
   const clauses: string[] = [rangeServiceSql(params)];
   if (params.device_type) {
-    clauses.push(`device_type = ${duckSqlString(String(params.device_type))}`);
+    clauses.push(`LOWER(CAST(device_type AS VARCHAR)) = ${duckSqlString(String(params.device_type).toLowerCase())}`);
   }
   if (params.country) {
-    clauses.push(`country = ${duckSqlString(String(params.country))}`);
+    clauses.push(`LOWER(CAST(country AS VARCHAR)) = ${duckSqlString(String(params.country).toLowerCase())}`);
   }
   if (params.page_url) {
     clauses.push(`COALESCE(page_url, url, path) = ${duckSqlString(String(params.page_url))}`);
@@ -198,6 +200,15 @@ export function buildRumWhere(
     if (!Object.hasOwn(columns, field)) {
       // Missing columns have NULL semantics in the other RUM dataset.
       if (spec.mode !== "exclude") clauses.push("FALSE");
+      return [];
+    }
+    if (RUM_CASE_INSENSITIVE_FIELDS.has(field)) {
+      const loweredList = spec.values.map((v) => duckSqlString(String(v).toLowerCase())).join(", ");
+      clauses.push(
+        spec.mode === "exclude"
+          ? `(${field} IS NULL OR LOWER(CAST(${field} AS VARCHAR)) NOT IN (${loweredList}))`
+          : `LOWER(CAST(${field} AS VARCHAR)) IN (${loweredList})`,
+      );
       return [];
     }
     return spec.values.map((value) => ({
@@ -247,7 +258,20 @@ export async function queryRumAnalytics(params: RumQueryParams = {}) {
   const totalVitals = Number(countRows[0]?.vitals_cnt ?? 0);
   const totalErrors = Number(errorCountRows[0]?.errors_cnt ?? 0);
   if (totalVitals === 0 && totalErrors === 0) {
-    return emptyRumAnalytics();
+    const hasFilters = Boolean(params.device_type || params.country || params.page_url || params.filters);
+    const hasBounds = params.start_time != null || params.end_time != null;
+    let noData = true;
+    if (hasFilters || hasBounds) {
+      const svcClause = params.service_id
+        ? `(service_id = ${duckSqlString(String(params.service_id))} OR service_id IS NULL)`
+        : "1=1";
+      const [anyV, anyE] = await Promise.all([
+        engine.executeSql<{ n: number }>(`SELECT 1 AS n FROM client_vitals WHERE ${svcClause} LIMIT 1`, [], params.signal),
+        engine.executeSql<{ n: number }>(`SELECT 1 AS n FROM client_errors WHERE ${svcClause} LIMIT 1`, [], params.signal),
+      ]);
+      noData = anyV.length === 0 && anyE.length === 0;
+    }
+    return emptyRumAnalytics({ noData });
   }
 
   const metricRows = await engine.executeSql<{
@@ -455,6 +479,11 @@ export async function queryRumLiveEvents(params: RumQueryParams = {}) {
       os_name,
       device_type,
       country,
+      region,
+      city,
+      pop,
+      tls,
+      ttfb,
       session_id
     FROM client_vitals
     WHERE ts_ms > ${sinceMs} AND ${buildRumWhere(params)}
@@ -474,6 +503,11 @@ export async function queryRumLiveEvents(params: RumQueryParams = {}) {
       os_name,
       device_type,
       country,
+      region,
+      city,
+      pop,
+      tls,
+      ttfb,
       session_id
     FROM client_errors
     WHERE ts_ms > ${sinceMs} AND ${buildRumWhere(params, "client_errors")}

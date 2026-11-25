@@ -11,6 +11,7 @@ import {
   denseBarTrace,
   denseTimeGrid,
   lineTrace,
+  normalizeCookieCompliance,
   withSecondaryAxis,
 } from '@/lib/utils'
 import type { components, PlotlyLayout, PlotlyTrace } from '@/types/api'
@@ -131,6 +132,17 @@ export function ComplianceChart({
         params: { path: { service_id: serviceId }, query: { since_hours: sinceHours } },
       }),
   )
+  const normalizedRows = React.useMemo(() => {
+    const merged = new Map<string, CompRow>()
+    for (const row of data?.rows ?? []) {
+      const compliance = normalizeCookieCompliance(row.compliance)
+      const key = `${row.hour}|${compliance}`
+      const existing = merged.get(key)
+      if (existing) existing.count += row.count
+      else merged.set(key, { ...row, compliance })
+    }
+    return Array.from(merged.values())
+  }, [data?.rows])
   return (
     <StackedHourlyBarChart<CompRow>
       title={`Cookie compliance — last ${sinceHours}h`}
@@ -140,7 +152,7 @@ export function ComplianceChart({
       isLoading={isLoading}
       isFetching={isFetching}
       error={isError ? (error as AnalyticsCardError) : null}
-      rows={data?.rows ?? []}
+      rows={normalizedRows}
       categoryKey="compliance"
       colors={COMPLIANCE_COLORS}
     />

@@ -1381,6 +1381,9 @@ mod summary_bundles {
         watermark(&fake, BASE + 17 * HOUR);
         seed_hour(&fake, BASE, 6);
         seed_hour(&fake, BASE + HOUR, 2);
+        for h in 2..9 {
+            seed_hour(&fake, BASE + h * HOUR, 1);
+        }
         settle(&fake);
         let open = window(&fake, BASE + 16 * HOUR + 60, 0, 5);
         let day = BASE - 8 * HOUR;

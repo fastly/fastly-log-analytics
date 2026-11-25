@@ -21,6 +21,7 @@ import {
 import { syncOpsCacheForSession } from '@/lib/cloud-engine/telemetry/sources'
 import { cloudCacheIdentity } from '@/lib/cloud-engine/cache-identity'
 import { subscribeCloudMetadataInvalidation } from '@/lib/cloud-engine/metadata-cache'
+import { DEFAULT_POP_GEO, DEFAULT_POP_LOCATIONS } from '@/lib/popGeo'
 
 export {
   useUrlServiceSync,
@@ -228,16 +229,16 @@ export function useBootstrapSyncEffects(
     setServices((data.services ?? []).map(toService))
     setInitialized(true)
 
-    usePopGeoStore.getState().setMap(data.pop_geo ?? {})
+    usePopGeoStore.getState().setMap({ ...DEFAULT_POP_GEO, ...(data.pop_geo ?? {}) })
 
+    const locations: Record<string, [number, number]> = { ...DEFAULT_POP_LOCATIONS }
     const popsRaw = data.pops
     if (popsRaw) {
-      const locations: Record<string, [number, number]> = {}
       for (const [code, [lat, lon]] of Object.entries(popsRaw)) {
         if (lat != null && lon != null) locations[code] = [lat, lon]
       }
-      usePopGeoStore.getState().setLocations(locations)
     }
+    usePopGeoStore.getState().setLocations(locations)
 
     useSessionRoleStore.getState().setIsRemoteAnalyst(
       data?.settings?.is_remote_analyst === true,

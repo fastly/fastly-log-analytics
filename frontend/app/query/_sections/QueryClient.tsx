@@ -286,20 +286,24 @@ function QueryPageInner() {
       header: () => <span className="font-mono text-xs">{getFieldLabel(col)}</span>,
       cell: ({ row }: { row: { original: Record<string, unknown> } }) => {
         const value = row.original[col]
-        if (
-          (col === 'timestamp' || col.endsWith('_at')) &&
-          value &&
-          typeof value === 'string' &&
-          value.includes('T')
-        ) {
-          try {
-            return (
-              <span className="text-xs font-mono">
-                {full(value)} {abbr()}
-              </span>
-            )
-          } catch {
-            /* fallback */
+        if ((col === 'timestamp' || col.endsWith('_at')) && value !== null && value !== undefined && value !== '') {
+          let tsArg: string | null = null
+          if (typeof value === 'number' && Number.isFinite(value) && value > 1e11) {
+            tsArg = new Date(value).toISOString()
+          } else if (typeof value === 'string') {
+            if (/^\d{11,14}$/.test(value)) tsArg = new Date(Number(value)).toISOString()
+            else if (value.includes('T') || /^\d{4}-\d{2}-\d{2} /.test(value)) tsArg = value
+          }
+          if (tsArg !== null) {
+            try {
+              return (
+                <span className="text-xs font-mono">
+                  {full(tsArg)} {abbr()}
+                </span>
+              )
+            } catch {
+              /* fallback */
+            }
           }
         }
         return <span className="text-xs font-mono">{value !== null && value !== undefined ? String(value) : 'null'}</span>

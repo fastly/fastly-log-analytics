@@ -67,7 +67,7 @@ def _base_cte(
             "event_timestamp < {window_start:DateTime64(3)} AS is_b, "
             "event_timestamp >= {window_start:DateTime64(3)} AS is_w, toUInt64(1) AS n "
             f"FROM request_facts WHERE {scope} AND event_timestamp >= {{baseline_start:DateTime64(3)}} "
-            f"AND event_timestamp <= {{window_end:DateTime64(3)}}{rf} "
+            f"AND event_timestamp < {{window_end:DateTime64(3)}}{rf} "
             "AND (event_timestamp < {rollup_start:DateTime64(3)} OR event_timestamp >= {rollup_end:DateTime64(3)})"
         )
         rollup = (
@@ -85,7 +85,7 @@ def _base_cte(
         "event_timestamp < {window_start:DateTime64(3)} AS is_b, "
         f"event_timestamp >= {{window_start:DateTime64(3)}} AS is_w{weight_col} "
         f"FROM request_facts WHERE {scope} AND event_timestamp >= {lower} "
-        f"AND event_timestamp <= {{window_end:DateTime64(3)}}{rf}"
+        f"AND event_timestamp < {{window_end:DateTime64(3)}}{rf}"
     )
     return f"/* insight:batch_{name} */ WITH base AS ({raw})", "fact"
 

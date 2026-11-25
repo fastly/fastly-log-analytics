@@ -163,9 +163,14 @@ export function computeSummaryFromDims(
 
     totalRequests += reqs;
     totalBytes += bytesVal;
-    // High-Scale's cache hit ratio: HIT and HIT-SYNTHETIC over HIT, HIT-SYNTHETIC, MISS, PASS and BYPASS.
-    const isHit = cacheStatus === "HIT" || cacheStatus === "HIT-SYNTHETIC";
-    const inCacheDenom = isHit || cacheStatus === "MISS" || cacheStatus === "PASS" || cacheStatus === "BYPASS";
+    // Cache hit ratio includes HIT*/MISS*/PASS* variants (HIT-CLUSTER, MISS-CLUSTER, etc.), BYPASS, and ERROR.
+    const isHit = cacheStatus.startsWith("HIT");
+    const inCacheDenom =
+      isHit ||
+      cacheStatus.startsWith("MISS") ||
+      cacheStatus.startsWith("PASS") ||
+      cacheStatus === "BYPASS" ||
+      cacheStatus === "ERROR";
     if (isHit) hitRequests += reqs;
     if (inCacheDenom) cacheDenomRequests += reqs;
     totalTtfbWeighted += sumTtfb;
@@ -364,7 +369,7 @@ const DERIVED_ASSET_CTE = `
         ELSE 'uncompressed'
       END AS norm_encoding,
       (LOWER(raw_encoding) IN ('gzip', 'br', 'deflate'))::INTEGER AS is_compressed,
-      (${LIKE_ANY("url_lower", [".js", ".mjs", ".css", ".svg", ".html", ".json"])})::INTEGER AS is_compressible,
+      (${LIKE_ANY("split_part(split_part(url_lower, '?', 1), '#', 1)", [".js", ".mjs", ".css", ".svg", ".html", ".json"])})::INTEGER AS is_compressible,
       COALESCE(resp_body_size, resp_bytes, 0)::BIGINT AS body_bytes,
       COALESCE(ttfb_ms, ttfb * 1000.0, time_to_first_byte_ns / 1000000.0, time_elapsed_usec / 1000.0, elapsed / 1000.0, 0.0)::DOUBLE AS norm_ttfb_ms,
       COALESCE(origin_Whole_ms, origin_time_ms, 0.0)::DOUBLE AS norm_origin_ms,
@@ -421,8 +426,10 @@ export async function queryAssetsAggregates(params: AssetsQueryParams = {}) {
     WHERE ${where}
       AND is_compressed = 0
       AND is_compressible = 1
+      AND (${LIKE_ANY("split_part(split_part(url_lower, '?', 1), '#', 1)", [".js", ".mjs", ".css", ".svg", ".html", ".json"])})
       AND COALESCE(status, 200) NOT IN (304, 204)
     GROUP BY norm_url, COALESCE(status, 200)
+    HAVING AVG(body_bytes) >= 10240
     ORDER BY total_bytes DESC
     LIMIT 20`,
     [],
@@ -444,6 +451,7 @@ export async function queryAssetsAggregates(params: AssetsQueryParams = {}) {
       AND norm_cache_status = 'MISS'
       AND derived_asset_type != 'API/Dynamic'
     GROUP BY 1, 2
+    HAVING AVG(ttl) < 3600
     ORDER BY requests DESC
     LIMIT 20`,
     [],

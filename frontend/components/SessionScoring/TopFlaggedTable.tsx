@@ -14,6 +14,7 @@ import { Badge } from '@/components/ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { client, queryKeys } from '@/lib/api'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
+import { normalizeCookieCompliance } from '@/lib/utils'
 import type { components } from '@/types/api'
 import { TopFlaggedHelp } from './help-content'
 import { useScoringLabels } from './LabelsTab'
@@ -114,7 +115,8 @@ export function TopFlaggedTable({ serviceId, sinceHours = 24 }: TopFlaggedTableP
   const complianceValues = React.useMemo(() => {
     const s = new Set<string>()
     for (const r of flagged.data?.rows ?? []) {
-      if (r.edge_cookie_compliance) s.add(r.edge_cookie_compliance)
+      const c = normalizeCookieCompliance(r.edge_cookie_compliance)
+      if (c) s.add(c)
     }
     return Array.from(s).sort()
   }, [flagged.data])
@@ -124,7 +126,7 @@ export function TopFlaggedTable({ serviceId, sinceHours = 24 }: TopFlaggedTableP
     return (flagged.data?.rows ?? []).filter(
       (r) =>
         r.edge_score >= min &&
-        (complianceFilter === 'all' || r.edge_cookie_compliance === complianceFilter),
+        (complianceFilter === 'all' || normalizeCookieCompliance(r.edge_cookie_compliance) === complianceFilter),
     )
   }, [flagged.data, complianceFilter, minScore])
 
@@ -162,6 +164,7 @@ export function TopFlaggedTable({ serviceId, sinceHours = 24 }: TopFlaggedTableP
       },
       {
         accessorKey: 'edge_cookie_compliance',
+        accessorFn: (row) => normalizeCookieCompliance(row.edge_cookie_compliance),
         header: COLUMN_LABELS.edge_cookie_compliance,
         enableSorting: true,
         cell: ({ row }) => complianceBadge(row.getValue<string>('edge_cookie_compliance')),

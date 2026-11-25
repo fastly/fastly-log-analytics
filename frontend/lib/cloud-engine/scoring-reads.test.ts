@@ -52,7 +52,15 @@ describe("Cloud scoring reads", () => {
     expect(await cloudScoringRead(request("labels"))).toBeNull();
     await engine.syncWindow([{ key: "scored", bytes: scoringFixture() }]);
     const preview = await queryCloudScoring(request("threshold-preview?threshold=50"), "threshold-preview");
-    expect(preview).toMatchObject({ threshold: 50, total_scored: 2, flagged_count: 1, flagged_pct: 50 });
+    expect(preview).toMatchObject({
+      threshold: 50,
+      total_scored: 2,
+      flagged_count: 1,
+      flagged_pct: 50,
+      total_scored_sessions: 2,
+      flagged: { count: 1, pct: 50 },
+      passed: { count: 1, pct: 50 },
+    });
   });
 
   it("reports scoring off when the service's log field settings leave edge_score off, whatever the files hold", async () => {

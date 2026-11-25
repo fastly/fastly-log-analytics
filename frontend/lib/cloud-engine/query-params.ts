@@ -17,13 +17,23 @@ export async function readRequestParams(request: Request): Promise<Record<string
 }
 
 export function filtersPayloadToPredicates(
-  filters: FiltersPayload | WireFilters | null | undefined,
-  customFilters?: FiltersPayload | WireFilters | null,
+  filters: FiltersPayload | WireFilters | string | null | undefined,
+  customFilters?: FiltersPayload | WireFilters | string | null,
 ): DashboardFilter[] {
   const out: DashboardFilter[] = [];
-  for (const source of [filters, customFilters]) {
+  for (const rawSource of [filters, customFilters]) {
+    let source: unknown = rawSource;
+    if (typeof source === "string") {
+      const trimmed = source.trim();
+      if (!trimmed) continue;
+      try {
+        source = JSON.parse(trimmed);
+      } catch {
+        continue;
+      }
+    }
     if (!source || typeof source !== "object" || Array.isArray(source)) continue;
-    for (const [rawField, entry] of Object.entries(source)) {
+    for (const [rawField, entry] of Object.entries(source as WireFilters)) {
       if (!entry || !Array.isArray(entry.values)) continue;
       const field = rawField.replace(/_\d+$/, "");
       const mode = entry.mode === "exclude" ? "exclude" : "include";

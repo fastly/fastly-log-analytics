@@ -12,7 +12,7 @@ import { withNuqsTestingAdapter, type OnUrlUpdateFunction } from 'nuqs/adapters/
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { useColumnVisibility } from '@/hooks/useSSE'
 import { useDebounce, useRumStatus } from '@/hooks/useDashboardCards'
-import { useStreamAggregates } from '@/app/sessions/stream/page'
+import { useStreamAggregates } from '@/app/sessions/stream/_components/streamAggregates'
 import { useTimeseriesToTraces, type TimeseriesDataPoint } from '@/lib/utils'
 import {
   useFilteredActive, useKeyboardShortcuts, useQueryMonitorUrlState,
@@ -251,7 +251,7 @@ describe('useStreamAggregates', () => {
     ]
     const agg = renderHook(() => useStreamAggregates(rows)).result.current!
     expect(agg).not.toBeNull()
-    expect(agg.summary).toMatchObject({ totalRequests: 2, videoRequests: 1, avgBitrate: 2500, topBitrate: 2500, bufferHealthPct: 100 })
+    expect(agg.summary).toMatchObject({ totalRequests: 1, videoRequests: 1, avgBitrate: 2500, topBitrate: 2500, bufferHealthPct: 100 })
     expect(agg.timeline).toHaveLength(1)
   })
 })

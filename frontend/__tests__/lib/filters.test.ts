@@ -9,6 +9,7 @@ import {
   useFilterStore, useDebugStore, usePopGeoStore, useServiceStore,
   useSessionRoleStore, useTimezoneStore, type Service,
 } from '@/stores/filterStore'
+import { DEFAULT_POP_GEO } from '@/lib/popGeo'
 import { createTestQueryClient } from '../helpers/page-smoke'
 
 const mockAddFilter = vi.fn()
@@ -596,5 +597,14 @@ describe('debugStore, popGeoStore, serviceStore, sessionRoleStore & timezoneStor
     window.localStorage.setItem('timezone-storage', JSON.stringify({ state: { timezone: 'Asia/Tokyo', mode: 'system' }, version: 1 }))
     useTimezoneStore.persist.rehydrate()
     expect(useTimezoneStore.getState()).toMatchObject({ timezone: 'Asia/Tokyo', mode: 'system' })
+  })
+
+  it('DEFAULT_POP_GEO provides fallback city/country/state entries while initial store stays empty', () => {
+    expect(usePopGeoStore.getState().map).toEqual({})
+    expect(DEFAULT_POP_GEO.SJC).toMatchObject({ city: 'San Jose', country: 'us' })
+    expect(Object.keys(DEFAULT_POP_GEO).length).toBeGreaterThanOrEqual(190)
+    usePopGeoStore.getState().setMap({ ...DEFAULT_POP_GEO, SJC: { city: 'Override', country: 'US', region: 'CA', state: 'CA' } })
+    expect(usePopGeoStore.getState().map.SJC?.city).toBe('Override')
+    expect(usePopGeoStore.getState().map.IAD?.city).toBeTruthy()
   })
 })

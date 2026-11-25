@@ -138,8 +138,14 @@ def _add_waterfall_and_scatter(
         return
     elapsed_ms = elapsed_us / 1000.0
     ttfb_ms = ttfb_s * 1000.0
-    ottfb_ms = (_finite_float(row.get("ottfb")) or 0.0) / 1000.0
-    ottlb_ms = (_finite_float(row.get("ottlb")) or 0.0) / 1000.0
+    raw_ottfb = _finite_float(row.get("ottfb"))
+    ottfb_ms = (raw_ottfb / 1000.0) if raw_ottfb is not None and raw_ottfb > 0 else 0.0
+    raw_ottlb = _finite_float(row.get("ottlb"))
+    ottlb_ms = (
+        (raw_ottlb / 1000.0)
+        if raw_ottfb is not None and raw_ottfb > 0 and raw_ottlb is not None and raw_ottlb > 0
+        else 0.0
+    )
     sums = waterfalls[bucket]
     sums.count += 1
     sums.edge_processing += max(0.0, ttfb_ms - ottfb_ms)
@@ -226,8 +232,11 @@ def _ttl_bucket_expr(column: str) -> str:
 
 _ELAPSED_MS = "toFloat64OrNull(custom_fields['elapsed']) / 1000.0"
 _TTFB_MS = "toFloat64OrNull(custom_fields['ttfb']) * 1000.0"
-_OTTFB_MS = "coalesce(toFloat64OrNull(custom_fields['ottfb']), 0) / 1000.0"
-_OTTLB_MS = "coalesce(toFloat64OrNull(custom_fields['ottlb']), 0) / 1000.0"
+_OTTFB_MS = "if(toFloat64OrNull(custom_fields['ottfb']) > 0, toFloat64OrNull(custom_fields['ottfb']) / 1000.0, 0.0)"
+_OTTLB_MS = (
+    "if(toFloat64OrNull(custom_fields['ottfb']) > 0 AND toFloat64OrNull(custom_fields['ottlb']) > 0, "
+    "toFloat64OrNull(custom_fields['ottlb']) / 1000.0, 0.0)"
+)
 
 
 def _active_filters(req: Any) -> dict[str, Any]:
@@ -260,7 +269,9 @@ def _optional_float(value: Any) -> float:
 def _merged_percentile(index: int, legacy_column: str) -> str:
     return (
         f"if(sumArray(latency_sk_w) > 0, "
+        f"if(sumArray(latency_sk_w) >= sum(latency_count), "
         f"quantilesExactWeightedArray(0.5, 0.95, 0.99)(latency_sk_v, latency_sk_w)[{index}], "
+        f"{_weighted(legacy_column)}), "
         f"{_weighted(legacy_column)}) / 1000.0"
     )
 
@@ -326,7 +337,7 @@ def _ttl_dist(
     service: HighScaleService, start_time: str | None, end_time: str | None, filters: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
     if filters:
-        where, params = _facts_where(service.service_id, start_time, end_time, filters)
+        where, params = _facts_where(service.service_id, start_time, end_time, filters, end_inclusive=False)
         source = (
             "SELECT toFloat64OrNull(raw_ttl) AS ttl, weight FROM ("
             f"SELECT custom_fields['ttl'] AS raw_ttl, count() AS weight FROM request_facts WHERE {where} GROUP BY raw_ttl"
@@ -351,7 +362,7 @@ def _waterfall(
     service: HighScaleService, start_time: str | None, end_time: str | None, filters: Mapping[str, Any]
 ) -> dict[str, Any]:
     if filters:
-        where, params = _facts_where(service.service_id, start_time, end_time, filters)
+        where, params = _facts_where(service.service_id, start_time, end_time, filters, end_inclusive=False)
         sql = (
             "/* perf:waterfall */ SELECT count() AS component_count, "
             "sum(greatest(0, ttfb_ms - ottfb_ms)) / nullIf(count(), 0) AS edge_processing, "
@@ -381,7 +392,7 @@ def _scatter(
     service: HighScaleService, start_time: str | None, end_time: str | None, filters: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
     if filters:
-        where, params = _facts_where(service.service_id, start_time, end_time, filters)
+        where, params = _facts_where(service.service_id, start_time, end_time, filters, end_inclusive=False)
         sql = (
             "/* perf:scatter */ SELECT ttfb_ms AS origin_ms, elapsed_ms - ttfb_ms AS edge_ms, cache "
             f"FROM (SELECT event_id, {_ELAPSED_MS} AS elapsed_ms, {_TTFB_MS} AS ttfb_ms, "
@@ -441,7 +452,7 @@ def performance_aggregates(
             return cached_inner
         facts_where_params: tuple[str, dict[str, Any]] | None = None
         if filters and (wanted & {"top_urls", "top_asns", "ttl_dist", "waterfall", "scatter"}):
-            facts_where_params = _facts_where(service.service_id, start_time, end_time, filters)
+            facts_where_params = _facts_where(service.service_id, start_time, end_time, filters, end_inclusive=False)
         trace = HighScaleSections(service.service_id, "performance")
         tasks: list[tuple[str, Any]] = []
         if "top_urls" in wanted:
@@ -579,9 +590,18 @@ def value_summary(
             "(lower(custom_fields['is_shield']) IN ('true', '1') OR lower(custom_fields['edge']) IN ('false', '0'))"
         )
         waf_cond = "lower(custom_fields['waf']) IN ('1', 'true')"
+        _info_waf_re = (
+            "^(bot-analysis|datacenter|site-flagged-ip|tor-exit|corporate-proxy|"
+            "residential-proxy|public-proxy|vpn|verified-bot([.][a-z0-9_.-]+)?|"
+            "suspected-(bad-)?bot([.][a-z0-9_.-]+)?|site[.][a-z0-9_.-]+)$"
+        )
+        _has_attack_waf_sig = (
+            f"arrayExists(t -> t != '' AND NOT match(lower(t), '{_info_waf_re}'), "
+            "splitByRegexp('[,[:space:]]+', custom_fields['waf_sig']))"
+        )
         waf_block_cond = f"{waf_cond} AND custom_fields['waf_resp'] = '406'"
-        waf_log_cond = f"{waf_cond} AND custom_fields['waf_resp'] != '406' AND custom_fields['waf_sig'] != ''"
-        waf_pass_cond = f"{waf_cond} AND custom_fields['waf_resp'] = '200'"
+        waf_log_cond = f"{waf_cond} AND custom_fields['waf_resp'] != '406' AND {_has_attack_waf_sig}"
+        waf_pass_cond = f"{waf_cond} AND custom_fields['waf_resp'] = '200' AND NOT ({_has_attack_waf_sig})"
         elapsed_us_expr = f"({_ELAPSED_MS} * 1000.0)"
         bytes_expr = "toInt64OrZero(coalesce(nullIf(custom_fields['resp_bytes'], ''), custom_fields['bytes']))"
         proto_expr = "coalesce(nullIf(custom_fields['proto'], ''), custom_fields['protocol'])"

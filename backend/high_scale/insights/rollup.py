@@ -183,7 +183,7 @@ def rollup_base_sql(detection: Detection, insight_id: str, shape: str) -> str:
         "event_timestamp < {window_start:DateTime64(3)} AS is_b, "
         "event_timestamp >= {window_start:DateTime64(3)} AS is_w, toUInt64(1) AS n "
         f"FROM request_facts{raw_prewhere} WHERE {scope} AND event_timestamp >= {{baseline_start:DateTime64(3)}} "
-        f"AND event_timestamp <= {{window_end:DateTime64(3)}}{row_filter} "
+        f"AND event_timestamp < {{window_end:DateTime64(3)}}{row_filter} "
         "AND (event_timestamp < {rollup_start:DateTime64(3)} OR event_timestamp >= {rollup_end:DateTime64(3)})"
     )
     rollup = (

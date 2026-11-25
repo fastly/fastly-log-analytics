@@ -293,4 +293,43 @@ describe("cloud-engine sessions & session scoring module", () => {
       expect(res.body.sessions[0].unique_urls).toBe(16);
     }
   });
+
+  it("reads full matching session total via window count rather than page length", async () => {
+    const res = await handleSessionsList(
+      {
+        start_time: "2026-11-21T00:00:00Z",
+        end_time: "2026-11-22T00:00:00Z",
+        limit: 1,
+        sort_by: "req_count",
+        sort_dir: "desc",
+      },
+      {
+        availableColumns: new Set(["timestamp", "ts_ms", "ip", "ja4", "url", "ua", "status"]),
+        loadedFromMs: 0,
+        runSql: async (sql) => {
+          expect(sql).toContain("COUNT(*) OVER () AS _total_sessions");
+          return [
+            {
+              ip: "173.234.58.191",
+              ja4: "t13d",
+              session_start: "2026-11-21T10:00:00Z",
+              session_end: "2026-11-21T10:05:00Z",
+              req_count: 16,
+              reqs_4xx: 0,
+              reqs_5xx: 0,
+              unique_urls: 2,
+              ua: "Mozilla/5.0",
+              streaming_reqs: 0,
+              _total_sessions: 42,
+            },
+          ];
+        },
+      },
+    );
+    expect(res.status).toBe(200);
+    if ("sessions" in res.body) {
+      expect(res.body.sessions).toHaveLength(1);
+      expect(res.body.total).toBe(42);
+    }
+  });
 });

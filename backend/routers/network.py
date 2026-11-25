@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from backend.core.request_context import RequestContext, build_request_context
@@ -34,7 +35,7 @@ from backend.models.analytics import (
 )
 from backend.models.common import DEFAULT_ERROR_RESPONSES
 from backend.utils.date_utils import parse_iso_utc
-from backend.utils.router_utils import make_section_expander, query_errors, require_high_scale
+from backend.utils.router_utils import make_error, make_section_expander, query_errors, require_high_scale
 from backend.utils.telemetry import process_context_scope
 from backend.utils.time_window import (
     invite_clamp_fingerprint,
@@ -103,8 +104,18 @@ def get_pop_health(
     ctx: RequestContext = Depends(build_request_context),
     start_time: datetime | None = Query(default=None),
     end_time: datetime | None = Query(default=None),
+    filters: str | None = Query(default=None),
 ):
     """Aggregate edge-routing and cache metrics across Fastly POP locations."""
+    parsed_filters: dict[str, Any] | None = None
+    if filters is not None and filters.strip() != "":
+        try:
+            loaded = json.loads(filters)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail=make_error("invalid_filters", "filters must be JSON")) from exc
+        if not isinstance(loaded, dict):
+            raise HTTPException(status_code=400, detail=make_error("invalid_filters", "filters must be a JSON object"))
+        parsed_filters = loaded
     clamped_start, clamped_end = ctx.clamp(
         start_time.isoformat() if start_time is not None else None,
         end_time.isoformat() if end_time is not None else None,
@@ -112,7 +123,7 @@ def get_pop_health(
     clamped_start_dt = parse_iso_utc(clamped_start) if clamped_start else start_time
     clamped_end_dt = parse_iso_utc(clamped_end) if clamped_end else end_time
     high_scale_service = require_high_scale(ctx)
-    return hs_get_pop_health(high_scale_service, clamped_start_dt, clamped_end_dt)
+    return hs_get_pop_health(high_scale_service, clamped_start_dt, clamped_end_dt, filters=parsed_filters)
 
 
 def _network_bundle_impl(

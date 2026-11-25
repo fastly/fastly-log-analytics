@@ -18,6 +18,7 @@ import {
 } from '@/lib/utils'
 import { buildTrafficDataAsync } from '@/app/dashboard/_sections/DashboardClient'
 import { formatPopGeo } from '@/components/DataTable'
+import { normalizeCookieCompliance } from '@/lib/format'
 import { shouldLoadRumScript } from '@/lib/ssr/upstream'
 import { invalidInput } from '../helpers/page-smoke'
 import { handlers } from '@/__tests__/helpers/msw/handlers'
@@ -716,5 +717,32 @@ describe('upstream API/JS proxy route handler (ECONNRESET resilience)', () => {
     } finally {
       await server.close()
     }
+  })
+})
+
+describe('normalizeCookieCompliance', () => {
+  it('maps truncated 6-char VCL tokens to canonical labels', () => {
+    expect(normalizeCookieCompliance('missin')).toBe('missing')
+    expect(normalizeCookieCompliance('unknow')).toBe('unknown')
+    expect(normalizeCookieCompliance('tamper')).toBe('tampered')
+    expect(normalizeCookieCompliance('expire')).toBe('expired')
+    expect(normalizeCookieCompliance('valid')).toBe('valid')
+    expect(normalizeCookieCompliance('  Missin  ')).toBe('missing')
+    expect(normalizeCookieCompliance('')).toBe('')
+    expect(normalizeCookieCompliance(null)).toBe('')
+  })
+})
+
+describe('denseTimeGrid half-open window', () => {
+  it('excludes the aligned half-open endTime bucket (50 x 1m buckets and 24 x 1h buckets)', () => {
+    const g1m = denseTimeGrid(['2026-11-24T21:10:00Z'], 60, '2026-11-24T21:10:00Z', '2026-11-24T22:00:00Z')
+    expect(g1m).toHaveLength(50)
+    expect(g1m?.[0]).toBe('2026-11-24T21:10:00.000Z')
+    expect(g1m?.[49]).toBe('2026-11-24T21:59:00.000Z')
+
+    const g1h = denseTimeGrid(['2026-11-23T22:00:00Z'], 3600, '2026-11-23T22:00:00Z', '2026-11-24T22:00:00Z')
+    expect(g1h).toHaveLength(24)
+    expect(g1h?.[0]).toBe('2026-11-23T22:00:00.000Z')
+    expect(g1h?.[23]).toBe('2026-11-24T21:00:00.000Z')
   })
 })

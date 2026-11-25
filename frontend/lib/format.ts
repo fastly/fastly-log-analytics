@@ -9,7 +9,7 @@ function getNumberFormat(locale?: string, options?: Intl.NumberFormatOptions): I
   return fmt
 }
 
-function formatDecimal(n: number, minDigits: number, maxDigits = minDigits): string {
+export function formatDecimal(n: number, minDigits: number, maxDigits = minDigits): string {
   return getNumberFormat('en-US', {
     minimumFractionDigits: minDigits,
     maximumFractionDigits: maxDigits,
@@ -182,6 +182,19 @@ export function formatPercent(ratio: number, options?: { decimals?: number }): s
     maximumFractionDigits: digits,
     useGrouping: false,
   }).format(ratio)
+}
+
+const COMPLIANCE_TRUNCATED_MAP: Record<string, string> = {
+  missin: 'missing',
+  unknow: 'unknown',
+  tamper: 'tampered',
+  expire: 'expired',
+}
+
+export function normalizeCookieCompliance(value: string | null | undefined): string {
+  const cleaned = (value ?? '').trim()
+  if (!cleaned) return ''
+  return COMPLIANCE_TRUNCATED_MAP[cleaned.toLowerCase()] ?? cleaned
 }
 
 export function formatPctValue(v: number | null | undefined, decimals?: number): string {

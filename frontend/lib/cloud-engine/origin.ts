@@ -216,11 +216,17 @@ export function originLatencyUsExpr(
 ): string | null {
   const hasOttfb = actualCols.has("ottfb");
   const hasTtfb = actualCols.has("ttfb");
+  const hasCache = actualCols.has("cache");
+  const nonCacheFallback = hasCache
+    ? `CASE WHEN NOT (starts_with(UPPER(COALESCE("cache", '')), 'HIT') OR starts_with(UPPER(COALESCE("cache", '')), 'SYNTH')) THEN "ttfb" * 1000000.0 ELSE NULL END`
+    : '"ttfb" * 1000000.0';
   if (hasOttfb && hasTtfb) {
-    return 'COALESCE("ottfb", "ttfb" * 1000000.0)';
+    return hasCache
+      ? `CASE WHEN "ottfb" IS NOT NULL THEN "ottfb" WHEN NOT (starts_with(UPPER(COALESCE("cache", '')), 'HIT') OR starts_with(UPPER(COALESCE("cache", '')), 'SYNTH')) THEN "ttfb" * 1000000.0 ELSE NULL END`
+      : 'COALESCE("ottfb", "ttfb" * 1000000.0)';
   }
   if (hasOttfb) return '"ottfb"';
-  if (hasTtfb) return '"ttfb" * 1000000.0';
+  if (hasTtfb) return nonCacheFallback;
   return absent;
 }
 

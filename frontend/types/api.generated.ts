@@ -5111,7 +5111,7 @@ export interface components {
              * @default requests
              * @enum {string}
              */
-            chart_metric: "requests" | "5xx" | "4xx" | "hit_rate" | "p50_latency" | "p95_latency" | "p99_latency" | "throughput" | "req_size" | "ttfb";
+            chart_metric: "requests" | "5xx" | "4xx" | "hit_rate" | "p50_latency" | "p95_latency" | "p99_latency" | "throughput" | "req_size" | "ttfb" | "ttfb_ms";
             /** Fields */
             fields?: string[] | null;
             /** Include Time Series */
@@ -21362,6 +21362,7 @@ export interface operations {
             query?: {
                 start_time?: string | null;
                 end_time?: string | null;
+                filters?: string | null;
                 service?: string | null;
                 service_id?: string | null;
             };

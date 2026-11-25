@@ -3042,6 +3042,22 @@
             }
           },
           {
+            "name": "filters",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Filters"
+            }
+          },
+          {
             "name": "service",
             "in": "query",
             "required": false,
@@ -46903,7 +46919,8 @@
               "p99_latency",
               "throughput",
               "req_size",
-              "ttfb"
+              "ttfb",
+              "ttfb_ms"
             ],
             "title": "Chart Metric",
             "default": "requests"

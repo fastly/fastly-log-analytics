@@ -331,7 +331,17 @@ class ValueSummaryResponse(BaseResponse):
 
 
 ChartMetric = Literal[
-    "requests", "5xx", "4xx", "hit_rate", "p50_latency", "p95_latency", "p99_latency", "throughput", "req_size", "ttfb"
+    "requests",
+    "5xx",
+    "4xx",
+    "hit_rate",
+    "p50_latency",
+    "p95_latency",
+    "p99_latency",
+    "throughput",
+    "req_size",
+    "ttfb",
+    "ttfb_ms",
 ]
 DashboardSectionName = Literal["core", "topten", "bots"]
 

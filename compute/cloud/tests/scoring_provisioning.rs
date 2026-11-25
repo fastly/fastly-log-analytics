@@ -2737,7 +2737,7 @@ fn bug_cloud_dr_20c_scoring_rollback_never_livelocks_preserves_pending_failure_a
     );
     p2.adapter.cache_stale("svc:fixtureService", pre_svc);
     let (st_def, res_def) = p2.call_with_initial_used(
-        13,
+        14,
         "POST",
         &format!("/api/admin/jobs/{j2_id}/step"),
         json!({}),
@@ -2825,7 +2825,7 @@ fn bug_cloud_dr_20c_scoring_rollback_never_livelocks_preserves_pending_failure_a
     );
     p2b.adapter.cache_stale("svc:fixtureService", pre_svc_b);
     let (_, def_b) = p2b.call_with_initial_used(
-        13,
+        14,
         "POST",
         &format!("/api/admin/jobs/{j2b_id}/step"),
         json!({}),

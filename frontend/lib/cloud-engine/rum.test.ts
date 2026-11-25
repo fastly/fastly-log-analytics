@@ -477,9 +477,10 @@ describe("Feature F23 — RUM & Web Vitals cloud-engine", () => {
       expect(rolled.worst_pages.map((p) => [p.page_url, p.sample_count]))
         .toEqual(raw.worst_pages.map((p) => [p.page_url, p.sample_count]));
 
-      // Filtered queries bypass rum_summary and hit raw DuckDB
+      // Filtered queries bypass rum_summary and hit raw DuckDB (service still has RUM data, so no_data stays false)
       const filtered = await queryRumAnalytics({ engine, start_time: T0, end_time: T1, rollupSource, country: "US" });
-      expect(filtered.no_data).toBe(true);
+      expect(filtered.summary.total_vitals_events).toBe(0);
+      expect(filtered.no_data).toBe(false);
 
       // A listed summary whose object is gone leaves the read to raw DuckDB
       const gone: RumRollupSource = {
@@ -516,6 +517,42 @@ describe("Feature F23 — RUM & Web Vitals cloud-engine", () => {
       expect(data.error_summary.unique_error_messages).toBe(1);
       const typeErr = data.top_errors.find((e) => e.message === "TypeError");
       expect(typeErr?.affected_sessions).toBe(1);
+    } finally {
+      await engine.reset();
+    }
+  });
+
+  it("applies case-insensitive RUM filters, returns no_data=false when data exists outside filter, and includes live event context fields", async () => {
+    const engine = new DuckDBAnalyticalEngine();
+    try {
+      await engine.executeSql(`INSERT INTO client_vitals
+        (scoped_key, ts_ms, metric_name, metric_value, device_type, browser_name, os_name, country, region, city, pop, tls, ttfb)
+        VALUES ('v', 1700000000000, 'LCP', 1800, 'Desktop', 'Chrome', 'macOS', 'US', 'VA', 'Ashburn', 'IAD', 'TLSv1.3', 0.042)`);
+      const matched = await queryRumAnalytics({
+        engine,
+        filters: { device: { mode: "include", values: ["desktop"] } },
+      });
+      expect(matched.summary.total_vitals_events).toBe(1);
+
+      const filteredEmpty = await queryRumAnalytics({
+        engine,
+        filters: { device: { mode: "include", values: ["tablet"] } },
+      });
+      expect(filteredEmpty.summary.total_vitals_events).toBe(0);
+      expect(filteredEmpty.no_data).toBe(false);
+
+      const live = await queryRumLiveEvents({
+        engine,
+        filters: { browser: { mode: "include", values: ["chrome"] } },
+      });
+      expect(live.events).toHaveLength(1);
+      expect(live.events[0]).toMatchObject({
+        region: "VA",
+        city: "Ashburn",
+        pop: "IAD",
+        tls: "TLSv1.3",
+        ttfb: 0.042,
+      });
     } finally {
       await engine.reset();
     }

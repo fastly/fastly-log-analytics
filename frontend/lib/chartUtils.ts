@@ -67,7 +67,7 @@ export function useTimeLayout(
 
 const MAX_DENSE_BUCKETS = 5000
 
-function parseUtcMs(t: string | number | null | undefined): number {
+export function parseUtcMs(t: string | number | null | undefined): number {
   if (t == null) return NaN
   if (typeof t === 'number') return Math.round(t / 1000) * 1000
   const parsed = toUTCDate(t).getTime()
@@ -93,7 +93,9 @@ export function denseTimeGrid(
     if (first === undefined || sb < first) first = sb
   }
   if (!Number.isNaN(eMs)) {
-    const eb = eMs - (eMs % stepMs)
+    const rawEb = eMs - (eMs % stepMs)
+    const explicitEnd = timesMs.some((t) => t >= rawEb)
+    const eb = eMs % stepMs === 0 && !explicitEnd && rawEb - stepMs >= (first ?? -Infinity) ? rawEb - stepMs : rawEb
     if (last === undefined || eb > last) last = eb
   }
   if (first === undefined || last === undefined || first > last) return null

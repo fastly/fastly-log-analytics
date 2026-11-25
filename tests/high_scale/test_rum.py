@@ -165,8 +165,8 @@ def test_errors_only_and_null_metric_rows_remain_honest() -> None:
 
     result = rum_analytics(service_for(ErrorsOnlyClient()), "2026-09-01T00:00:00Z", "2026-09-01T02:00:00Z")
     assert result["no_data"] is False and result["vitals"]["lcp"]["p75"] is None
-    assert result["trends"]["lcp"] == result["trends"]["cls"] == [None, None, None]
-    assert result["trends"]["error_rate"] == [None, 100.0, None]
+    assert result["trends"]["lcp"] == result["trends"]["cls"] == [None, None]
+    assert result["trends"]["error_rate"] == [None, 100.0]
 
 
 # ── RUM field extraction ──
@@ -349,9 +349,9 @@ def test_filters_apply_to_every_analytics_query() -> None:
     data_queries = [(sql, params) for sql, params in client.calls if "rum_" in sql and "any_data" not in sql]
     assert len(data_queries) >= 5
     for sql, params in data_queries:
-        assert "browser IN ({flt_0_0:String}, {flt_0_1:String})" in sql
-        assert "country NOT IN ({flt_1_0:String})" in sql
-        assert (params["flt_0_0"], params["flt_0_1"], params["flt_1_0"]) == ("Chrome", "Firefox", "RU")
+        assert "lower(browser) IN ({flt_0_0:String}, {flt_0_1:String})" in sql
+        assert "lower(country) NOT IN ({flt_1_0:String})" in sql
+        assert (params["flt_0_0"], params["flt_0_1"], params["flt_1_0"]) == ("chrome", "firefox", "ru")
 
 
 def test_filters_rum_facts_cannot_express_and_blank_filters() -> None:
@@ -522,7 +522,7 @@ def test_live_events_query_is_bounded_visible_and_parameterised() -> None:
     assert "SELECT * FROM (" in sql and sql.index("SELECT * FROM (") < sql.index("UNION ALL")
     assert sql.index("UNION ALL") < sql.index(")\n    ORDER BY timestamp DESC")
     assert "LIMIT {limit:UInt32}" in sql and params["limit"] == 25
-    assert sql.count("os IN ({flt_0_0:String})") == 2 and params["flt_0_0"] == "Linux"
+    assert sql.count("lower(os) IN ({flt_0_0:String})") == 2 and params["flt_0_0"] == "linux"
 
 
 def test_live_event_query_failures_propagate() -> None:
@@ -806,8 +806,8 @@ def test_real_sql_errors_only_is_not_onboarding(run_analytics) -> None:
     result = run_analytics([], [_ch_error("2026-09-01T01:00:00Z")])
     assert result["no_data"] is False and result["beacon_count"] == result["error_count"] == 1
     assert result["pageview_count"] == result["interaction_count"] == 0
-    assert result["trends"]["lcp"] == result["trends"]["cls"] == [None, None, None]
-    assert result["trends"]["error_rate"] == [None, 100.0, None]
+    assert result["trends"]["lcp"] == result["trends"]["cls"] == [None, None]
+    assert result["trends"]["error_rate"] == [None, 100.0]
     assert result["errors"] and result["worst_pages"] == []
 
 

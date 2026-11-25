@@ -73,6 +73,7 @@ export interface AssetsReportContentProps extends Pick<RangeWireArgs, 'relativeR
   endTime: string | null
   activeServiceId: string | null
   filterPayload: FiltersPayload
+  embedded?: boolean
 }
 
 export function AssetsReportContent({
@@ -83,6 +84,7 @@ export function AssetsReportContent({
   relativeRange,
   isAutoRange,
   anchor,
+  embedded = false,
 }: AssetsReportContentProps) {
   // Cloud answers the summary cards and breakdowns from summaries when unfiltered or filtered on cache
   // status alone; read them apart so they paint without waiting on the URL-level raw scan.
@@ -162,8 +164,8 @@ export function AssetsReportContent({
   const missingFields = ASSET_LOG_FIELDS.filter((field) => logFields.ready && !logFields.isFieldActive(field))
 
   return (
-    <div className={cn('space-y-8 py-6 transition-opacity duration-150', isFetching && !isLoading && 'opacity-60 pointer-events-none')}>
-      <RollupDataThroughSlot reserve={rollupFirst} meta={rollup} />
+    <div className={cn('space-y-8 transition-opacity duration-150', !embedded && 'py-6', isFetching && !isLoading && 'opacity-60 pointer-events-none')}>
+      <RollupDataThroughSlot reserve={embedded ? Boolean(rollup) : rollupFirst} meta={rollup} />
       <RawWindowNote window={readRawWindow(bundle.data) ?? readRawWindow(rollupQuery.data)} />
 
       <AssetsOverviewGrid

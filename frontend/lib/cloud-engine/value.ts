@@ -154,6 +154,15 @@ export async function queryValueSummary(params: ValueQueryParams = {}): Promise<
       `waf AS waf_flag`,
       `waf_resp AS waf_resp_code`,
       `NULLIF(waf_sig, '') AS waf_signals`,
+      `CASE WHEN NULLIF(waf_sig, '') IS NOT NULL THEN
+        len(list_filter(
+          regexp_split_to_array(LOWER(TRIM(CAST(waf_sig AS VARCHAR))), '[,[:space:]]+'),
+          t -> t != '' AND NOT regexp_matches(
+            t,
+            '^(bot-analysis|datacenter|site-flagged-ip|tor-exit|corporate-proxy|residential-proxy|public-proxy|vpn|verified-bot([.][a-z0-9_.-]+)?|suspected-(bad-)?bot([.][a-z0-9_.-]+)?|site[.][a-z0-9_.-]+)$'
+          )
+        )) > 0
+      ELSE FALSE END AS has_attack_waf_sig`,
     );
   }
   if (needBots) {
@@ -218,11 +227,11 @@ export async function queryValueSummary(params: ValueQueryParams = {}): Promise<
       END) AS blocked`,
       `COUNT(*) FILTER (WHERE CASE
         WHEN waf_decision IS NOT NULL THEN UPPER(waf_decision) IN ('LOG', 'LOGGED')
-        ELSE waf_flag IS TRUE AND COALESCE(waf_resp_code, 0) != 406 AND waf_signals IS NOT NULL
+        ELSE waf_flag IS TRUE AND COALESCE(waf_resp_code, 0) != 406 AND has_attack_waf_sig
       END) AS logged`,
       `COUNT(*) FILTER (WHERE CASE
         WHEN waf_decision IS NOT NULL THEN UPPER(waf_decision) IN ('ALLOW', 'ALLOWED', 'PASS', 'PASSED')
-        ELSE waf_flag IS TRUE AND waf_resp_code = 200
+        ELSE waf_flag IS TRUE AND waf_resp_code = 200 AND NOT has_attack_waf_sig
       END) AS passed`,
     );
   }
@@ -282,13 +291,13 @@ export async function queryValueSummary(params: ValueQueryParams = {}): Promise<
   const hits = sumKey("hits");
   const cacheSamples = sumKey("cache_samples");
   const hasCache = cacheSamples > 0;
-  const offload = hasCache ? roundTo(hits * 100 / total) : null;
+  const offload = hasCache ? roundTo(hits * 100 / total, 1) : null;
   const cntHitLat = sumKey("cnt_hit_latency");
   const cntMissLat = sumKey("cnt_miss_latency");
   const avgHit = cntHitLat > 0 ? roundTo(sumKey("sum_hit_latency") / cntHitLat) : null;
   const avgMiss = cntMissLat > 0 ? roundTo(sumKey("sum_miss_latency") / cntMissLat) : null;
   const acceleration = avgHit !== null && avgHit > 0 && avgMiss !== null
-    ? roundTo(avgMiss / avgHit) : null;
+    ? roundTo(avgMiss / avgHit, 1) : null;
   const hasWaf = sumKey("waf_samples") > 0;
   const byteSamples = sumKey("byte_samples");
   result.overview = {
@@ -307,7 +316,7 @@ export async function queryValueSummary(params: ValueQueryParams = {}): Promise<
     origin_offload_pct: offload,
     bandwidth_saved_bytes: byteSamples ? sumKey("saved_bytes") : null,
     shield_effectiveness_pct: shieldRequests
-      ? roundTo(sumKey("shield_hits") * 100 / shieldRequests) : null,
+      ? roundTo(sumKey("shield_hits") * 100 / shieldRequests, 1) : null,
     offload_time_series: [], cache_state_time_series: [],
   };
   result.performance = {
@@ -330,10 +339,10 @@ export async function queryValueSummary(params: ValueQueryParams = {}): Promise<
   const protocolSamples = sumKey("protocol_samples");
   result.network = {
     total_requests: total,
-    http3_pct: protocolSamples ? roundTo(sumKey("h3") * 100 / total) : null,
-    h2_pct: protocolSamples ? roundTo(sumKey("h2") * 100 / total) : null,
-    tls_pct: sumKey("tls_samples") ? roundTo(sumKey("tls_count") * 100 / total) : null,
-    ipv6_pct: sumKey("ipv6_samples") ? roundTo(sumKey("ipv6_count") * 100 / total) : null,
+    http3_pct: protocolSamples ? roundTo(sumKey("h3") * 100 / total, 1) : null,
+    h2_pct: protocolSamples ? roundTo(sumKey("h2") * 100 / total, 1) : null,
+    tls_pct: sumKey("tls_samples") ? roundTo(sumKey("tls_count") * 100 / total, 1) : null,
+    ipv6_pct: sumKey("ipv6_samples") ? roundTo(sumKey("ipv6_count") * 100 / total, 1) : null,
     protocol_time_series: [],
   };
   const ioCount = sumKey("io_count");
@@ -358,7 +367,7 @@ export async function queryValueSummary(params: ValueQueryParams = {}): Promise<
       const point = (value: number, category?: string): ValuePoint => ({ time, value, ...(category ? { category } : {}) });
       const bucketTotal = count(b, "total");
       if (needCache && hasCache) {
-        result.caching.offload_time_series!.push(point(roundTo(count(b, "hits") * 100 / bucketTotal)));
+        result.caching.offload_time_series!.push(point(roundTo(count(b, "hits") * 100 / bucketTotal, 1)));
         for (const [key, category] of [["hits", "HIT"], ["misses", "MISS"], ["passes", "PASS"]] as const) {
           result.caching.cache_state_time_series!.push(point(count(b, key), category));
         }

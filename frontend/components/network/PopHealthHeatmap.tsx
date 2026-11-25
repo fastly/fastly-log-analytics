@@ -8,7 +8,7 @@ import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Activity, ShieldAlert, Globe, Wifi, Zap, Percent, HardDrive, AlertTriangle } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
-import type { components } from '@/types/api.generated'
+import type { components, FiltersPayload } from '@/types/api'
 import {
   Dialog,
   DialogContent,
@@ -49,14 +49,19 @@ interface PopHealthHeatmapProps {
   serviceId: string
   startTime: string | null
   endTime: string | null
+  filterPayload?: FiltersPayload
 }
 
-export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHeatmapProps) {
+export function PopHealthHeatmap({ serviceId, startTime, endTime, filterPayload }: PopHealthHeatmapProps) {
   const [selectedPop, setSelectedPop] = React.useState<PopHealthItem | null>(null)
+  const serializedFilters = React.useMemo(
+    () => (filterPayload && Object.keys(filterPayload).length > 0 ? JSON.stringify(filterPayload) : undefined),
+    [filterPayload],
+  )
 
   // Query PoP Health data using the service-query hook
   const popHealthQuery = useServiceQuery(
-    ['network', 'pop-health', serviceId, startTime, endTime],
+    ['network', 'pop-health', serviceId, startTime, endTime, serializedFilters],
     async ({ signal }) => {
       const data = await unwrapClient(
         client.GET('/api/network/pop-health', {
@@ -65,6 +70,7 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime }: PopHealthHea
             query: {
               start_time: startTime ?? undefined,
               end_time: endTime ?? undefined,
+              filters: serializedFilters,
             },
           },
         }),

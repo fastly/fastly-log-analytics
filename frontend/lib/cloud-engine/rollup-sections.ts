@@ -3,7 +3,17 @@
 
 /** Whether a filter body narrows anything; empty filter objects and value lists don't. */
 export function hasFilterValues(...groups: unknown[]): boolean {
-  return groups.some((group) => {
+  return groups.some((rawGroup) => {
+    let group: unknown = rawGroup;
+    if (typeof group === "string") {
+      const trimmed = group.trim();
+      if (!trimmed) return false;
+      try {
+        group = JSON.parse(trimmed);
+      } catch {
+        return false;
+      }
+    }
     if (!group || typeof group !== "object") return false;
     return Object.entries(group as Record<string, unknown>).some(([key, spec]) => {
       if (key === "filter_mode" || spec == null) return false;

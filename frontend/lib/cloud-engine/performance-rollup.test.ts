@@ -182,7 +182,13 @@ describe("performanceAggregatesFromRollup", () => {
 
   it("marks TTL buckets lower bounds when a summary cut TTL values to its top K", async () => {
     const result = await rollupOf(WINDOWS);
-    const cut: Rollup = { ...result.rollup, truncated: new Set(["all_fields/ttl"]) };
+    const urlsGroup = new Map(result.rollup.groups?.get("urls"));
+    urlsGroup.delete("ttl_bucket");
+    const groups = new Map(result.rollup.groups);
+    groups.set("urls", urlsGroup);
+    const present = new Set(result.rollup.present);
+    present.delete("urls/ttl_bucket");
+    const cut: Rollup = { ...result.rollup, groups, present, truncated: new Set(["all_fields/ttl"]) };
     expect(performanceAggregatesFromRollup({ ...result, rollup: cut }, body())!.rollup.lower_bound).toEqual(["ttl_dist"]);
   });
 

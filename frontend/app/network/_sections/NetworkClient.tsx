@@ -263,7 +263,7 @@ function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: Rep
       <TransportSection activeServiceId={activeServiceId} startTime={startTime} endTime={endTime} filterPayload={filterPayload} />
 
       <div className="my-6 min-h-[280px] [contain-intrinsic-size:280px]">
-        {activeServiceId && <PopHealthHeatmap serviceId={activeServiceId} startTime={startTime} endTime={endTime} />}
+        {activeServiceId && <PopHealthHeatmap serviceId={activeServiceId} startTime={startTime} endTime={endTime} filterPayload={filterPayload} />}
       </div>
 
       {heatmapData && (

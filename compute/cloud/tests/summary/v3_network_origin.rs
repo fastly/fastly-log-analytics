@@ -286,9 +286,15 @@ fn v3_rows_match_a_brute_force_computation_over_the_rows() {
     }
 }
 
-/// `COALESCE(ottfb, ttfb * 1e6)` in whole µs: /origin's latency.
+/// `COALESCE(ottfb, ttfb * 1e6)` in whole µs: /origin's latency (excluding HIT*/SYNTH* NULL-ottfb fallback).
 fn origin_us(r: &Value) -> Option<i64> {
-    i(r, "ottfb").or_else(|| ttfb_us(r))
+    i(r, "ottfb").or_else(|| {
+        if s(r, "cache").is_some_and(|c| c.starts_with("HIT") || c.starts_with("SYNTH")) {
+            None
+        } else {
+            ttfb_us(r)
+        }
+    })
 }
 
 fn leg_of(r: &Value) -> &'static str {

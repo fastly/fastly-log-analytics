@@ -1,6 +1,7 @@
 import { cloudActiveLogFieldIds } from "./active-log-fields";
 import { CloudBudgetError, cloudReadContext } from "./range-loader";
 import { computeRocAuc } from "./scoring-train";
+import { roundTo } from "./engine-utils";
 import { buildScoringSourceSql } from "./sessions";
 import { duckSqlString } from "./dashboard/duckdb";
 import { useSessionRoleStore } from "@/stores/filterStore";
@@ -393,12 +394,18 @@ export async function queryCloudScoring(
       FROM ${source} WHERE ${where} AND edge_score IS NOT NULL`);
     const total = Number(row?.total_scored ?? 0);
     const flagged = Number(row?.flagged_count ?? 0);
+    const passed = Math.max(0, total - flagged);
+    const flaggedPct = total > 0 ? roundTo((flagged / total) * 100, 1) : 0;
+    const passedPct = total > 0 ? roundTo((passed / total) * 100, 1) : 0;
     return {
       threshold,
       since_hours: sinceHours,
       total_scored: total,
       flagged_count: flagged,
       flagged_pct: total > 0 ? (flagged / total) * 100 : 0,
+      total_scored_sessions: total,
+      flagged: { count: flagged, pct: flaggedPct },
+      passed: { count: passed, pct: passedPct },
     };
   }
   if (route === "evaluation" || route === "evaluation/per-reason" || route === "curves") {

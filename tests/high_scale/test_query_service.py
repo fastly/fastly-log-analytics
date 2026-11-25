@@ -1520,11 +1520,14 @@ def test_network_health_real_ch_uses_rollups_subminute_sampling_and_fast_shieldi
                     "reqs": 100,
                     "throughput_bps": 1_500_000.0,
                     "rtt_med_us": 20000.0,
+                    "rtt_p95_us": (40000.0 * 2500 + 44000.0 * 500) / 3000,
+                    "rtt_p99_us": (60000.0 * 2500 + 66000.0 * 500) / 3000,
                     "rtt_baseline_us": 18000.0,
                     "rtt_congestion_us": 2000.0,
                     "avg_ploss": 0.0,
                     "rtt_jitter_us": 1000.0,
                     "error_pct": 0.0,
+                    "speed_map": {"fast": 250, "medium": 50},
                 }
             ]
         if "AS lat" in sql:
@@ -1570,9 +1573,9 @@ def test_network_health_real_ch_uses_rollups_subminute_sampling_and_fast_shieldi
     assert resp.leaderboard[0].p95_rtt_us == pytest.approx((40000.0 * 2500 + 44000.0 * 500) / 3000)
     assert resp.leaderboard[0].p99_rtt_us == pytest.approx((60000.0 * 2500 + 66000.0 * 500) / 3000)
 
-    # Percentiles/c_speed came from network_minute_dimensions, not a 3rd request_facts scan.
-    assert client.matching("FROM network_minute_dimensions")
-    assert not client.matching("sumMap(")
+    # Percentiles/c_speed came inline from the heatmap query, not a separate network_minute_dimensions scan.
+    assert not client.matching("FROM network_minute_dimensions")
+    assert client.matching("sumMap(")
 
     # Heatmap uses single-pass WITH + quantileTDigest + position(..., 'HIT'), and deterministic hash sampling.
     ((heatmap_sql, _),) = client.matching("AS throughput_bps")
@@ -1602,10 +1605,6 @@ def test_network_health_real_ch_falls_back_when_network_rollup_empty(monkeypatch
     def responder(sql, params):
         if "FROM request_aggregates" in sql:
             return [{"asn": 7922, "cnt": 1000}]
-        if "FROM network_minute_dimensions" in sql:
-            return []
-        if "sumMap(" in sql:
-            return [{"asn": 7922, "p95": 45000.0, "p99": 70000.0, "speed_map": {"fast": 100}}]
         if "AS throughput_bps" in sql:
             return [
                 {
@@ -1614,11 +1613,14 @@ def test_network_health_real_ch_falls_back_when_network_rollup_empty(monkeypatch
                     "reqs": 200,
                     "throughput_bps": 1_000_000.0,
                     "rtt_med_us": 20000.0,
+                    "rtt_p95_us": 45000.0,
+                    "rtt_p99_us": 70000.0,
                     "rtt_baseline_us": 18000.0,
                     "rtt_congestion_us": 2000.0,
                     "avg_ploss": 0.0,
                     "rtt_jitter_us": 1000.0,
                     "error_pct": 0.0,
+                    "speed_map": {"fast": 100},
                 }
             ]
         return []
@@ -1627,7 +1629,7 @@ def test_network_health_real_ch_falls_back_when_network_rollup_empty(monkeypatch
     req = NetworkHealthRequest(start_time=start_s, end_time=end_s, bucket_seconds=300, top_n=30)
     resp = network_health(svc, req, start_s, end_s)
 
-    assert client.matching("FROM network_minute_dimensions")
+    assert not client.matching("FROM network_minute_dimensions")
     assert client.matching("sumMap(")
     assert resp.leaderboard[0].p95_rtt_us == 45000.0
     assert resp.leaderboard[0].c_speed_mix == {"fast": 1.0}
@@ -2360,10 +2362,35 @@ class _InsightsClient:
             return [{"earliest": params["window_end"] - timedelta(hours=self._history_hours), "window_total": 1234}]
         if name == "fields":
             return [{"fields": self._fields}]
+        if name.startswith("group_"):
+            tags = re.findall(r"SELECT '(\w+)' AS _q, formatRow\('JSONEachRow', \*\) AS _r", sql)
+            if any(tag in self._fail for tag in tags):
+                raise RuntimeError("clickhouse unavailable")
+            return [{"_q": tag, "_r": json.dumps(row)} for tag in tags for row in self._rows.get(tag, [])]
         return self._rows.get(name, [])
 
     def queries(self) -> dict[str, tuple[str, dict]]:
-        return {re.search(r"/\* insight:(\w+) \*/", sql).group(1): (sql, params) for sql, params in self.calls}  # type: ignore[union-attr]
+        out: dict[str, tuple[str, dict]] = {}
+        for sql, params in self.calls:
+            name = re.search(r"/\* insight:(\w+) \*/", sql).group(1)  # type: ignore[union-attr]
+            out[name] = (sql, params)
+            if name.startswith("group_"):
+                body = sql.split("*/", 1)[1].strip()
+                parts = re.split(
+                    r"(?:^|\bUNION ALL\s+)SELECT '(\w+)' AS _q, formatRow\('JSONEachRow', \*\) AS _r FROM \(", body
+                )
+                for idx in range(1, len(parts), 2):
+                    tag = parts[idx]
+                    branch = parts[idx + 1].strip()
+                    if branch.endswith(")"):
+                        branch = branch[:-1]
+                    branch_params = dict(params)
+                    for m in re.finditer(r"\{(rollup_(?:start|end))_(\d+):", branch):
+                        orig_name, alias_name = m.group(1), f"{m.group(1)}_{m.group(2)}"
+                        if alias_name in params:
+                            branch_params[orig_name] = params[alias_name]
+                    out[tag] = (branch, branch_params)
+        return out
 
 
 def _run_insights(
@@ -2454,7 +2481,7 @@ def test_every_detection_runs_and_query_is_visible_scoped_and_parameterized() ->
             and "publication_state='visible'" in sql
         )
         assert "high_scale_batch_publications FINAL" in sql and "domain='request'" in sql
-        assert "event_timestamp <= {window_end:DateTime64(3)}" in sql
+        assert "event_timestamp < {window_end:DateTime64(3)}" in sql
         window_only = (
             qkey in {"batch_window_url", "batch_beaconing"}
             or (qkey in DETECTIONS and DETECTIONS[qkey].window_only)
@@ -2637,7 +2664,8 @@ def test_insights_detector_telemetry_survives_async_and_worker_boundaries(
         set_page_load_id(previous_page)
         current_attribution.reset(token)
 
-    assert {"history", "fields", "error_spikes"} <= client.scopes.keys()
+    expected_detector = "error_spikes" if fails else "group_rollup_standalone"
+    assert {"history", "fields", expected_detector} <= client.scopes.keys()
     for detector, (scope, thread) in client.scopes.items():
         assert scope["component"] == "insights" and scope["section"] == f"insights.{detector}"
         assert scope["source"] == "fact" and scope["service_id"] == "svc"
@@ -2645,7 +2673,7 @@ def test_insights_detector_telemetry_survives_async_and_worker_boundaries(
         assert scope["section_id"] is not None and thread.startswith("hs-insights")
     sections = {entry["section"]: entry for entry in logs if entry["event"] == "high_scale.section"}
     assert set(sections) == {f"insights.{detector}" for detector in client.scopes}
-    assert sections["insights.error_spikes"]["outcome"] == ("error" if fails else "success")
+    assert sections[f"insights.{expected_detector}"]["outcome"] == ("error" if fails else "success")
     assert _insight_cards(response)["error_spikes"]["severity"] == ("error" if fails else "clean")
     assert secret not in json.dumps(logs, default=str)
     assert current_clickhouse_scope()["section_id"] is None
@@ -2737,11 +2765,13 @@ def test_partial_insights_results_keep_card_errors_and_refresh_in_background(_in
     )
     assert _insight_cards(expired)["latency_regression"]["severity"] == "error"
     _drain_insights_refreshes()
-    assert len(client.calls) == 3 * computed_calls
+    # Clean refresh succeeds via the 7 multiplexed/meta calls without per-detector fallback.
+    expected_total = 2 * computed_calls + 7
+    assert len(client.calls) == expected_total
 
     skew[0] += 200.0
     clean = insights_endpoint(service, req, None, None)
-    assert clean.is_cached and len(client.calls) == 3 * computed_calls
+    assert clean.is_cached and len(client.calls) == expected_total
     assert _insight_cards(clean)["latency_regression"]["severity"] == "clean"
     assert _insights_body(clean)["refreshing"] is False
 

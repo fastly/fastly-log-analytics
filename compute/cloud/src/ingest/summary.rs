@@ -1427,10 +1427,18 @@ struct Transport {
     rtt: Hist,
     ploss: (f64, i64),
     delivery: (f64, i64),
+    retrans: i64,
 }
 
 impl Transport {
-    fn add(&mut self, bytes: i64, rtt: Option<(i64, u8)>, ploss: Option<f64>, rate: Option<f64>) {
+    fn add(
+        &mut self,
+        bytes: i64,
+        rtt: Option<(i64, u8)>,
+        ploss: Option<f64>,
+        rate: Option<f64>,
+        retrans: bool,
+    ) {
         self.requests += 1;
         self.bytes += bytes;
         if let Some((v, slot)) = rtt {
@@ -1444,6 +1452,7 @@ impl Transport {
             self.delivery.0 += r;
             self.delivery.1 += 1;
         }
+        self.retrans += i64::from(retrans);
     }
 
     fn push(&self, out: &mut Out, bucket: i64, field: &str, value: &str) {
@@ -1459,6 +1468,7 @@ impl Transport {
             (C::PlossCount, V::I(self.ploss.1)),
             (C::DeliveryRateSum, V::F(self.delivery.0)),
             (C::DeliveryRateCount, V::I(self.delivery.1)),
+            (C::RetransCount, V::I(self.retrans)),
         ];
         push_hists(&mut row, &[C::RttHist], std::slice::from_ref(&rtt));
         out.push(&row);
@@ -2410,7 +2420,13 @@ fn write_v3<'a>(
             a.origin_requests += i64::from(origin > 0.0);
 
             let ottlb = get_i(r.ottlb, i);
-            let origin_lat = lat(n.lat_us.map(|v| v.round() as i64));
+            let origin_lat = if ottfb.is_none()
+                && cache.is_some_and(|s| s.starts_with("HIT") || s.starts_with("SYNTH"))
+            {
+                None
+            } else {
+                lat(n.lat_us.map(|v| v.round() as i64))
+            };
             let edge = get_b(r.edge, i);
             let elapsed_lat = n.lat[1];
             let (body, t_rtt, rate) = (
@@ -2418,13 +2434,13 @@ fn write_v3<'a>(
                 lat(c.transport_rtt.get(i).map(|v| v.round() as i64)),
                 c.delivery.get(i),
             );
-            transport.add(body, t_rtt, n.ploss, rate);
+            transport.add(body, t_rtt, n.ploss, rate, n.retrans);
             by_transport
                 .entry(Cow::Borrowed(
                     c.transport_proto.get(i, false).unwrap_or("Unknown"),
                 ))
                 .or_default()
-                .add(body, t_rtt, n.ploss, rate);
+                .add(body, t_rtt, n.ploss, rate, n.retrans);
             for (k, col) in filter_cols.iter().enumerate() {
                 if let Some(col) = col {
                     col.for_each_key(i, true, |key| {
@@ -3567,8 +3583,13 @@ pub fn write_summary(batches: &[&RecordBatch], start: i64) -> Result<Vec<u8>, St
                 }
             }
             if let (Some(t), Some(e)) = (ttfb, elapsed) {
-                let ottfb_ms = ottfb.map_or(0.0, |v| v as f64 / 1000.0);
-                let ottlb_ms = ottlb.map_or(0.0, |v| v as f64 / 1000.0);
+                let (ottfb_ms, ottlb_ms) = match ottfb.filter(|&v| v > 0) {
+                    Some(v) => (
+                        v as f64 / 1000.0,
+                        ottlb.filter(|&l| l > 0).map_or(0.0, |l| l as f64 / 1000.0),
+                    ),
+                    None => (0.0, 0.0),
+                };
                 let ttfb_ms = t * 1000.0;
                 ov.waterfall += 1;
                 ov.edge_processing += (ttfb_ms - ottfb_ms).max(0.0);

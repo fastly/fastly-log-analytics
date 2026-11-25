@@ -73,7 +73,7 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "sql_type": "VARCHAR",
         "value_type": "string",
         "bytes_estimate": 12,
-        "byte_limit": 108,
+        "byte_limit": 128,
         "enabled": True,
     },
     {
@@ -108,7 +108,7 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "sql_type": "VARCHAR",
         "value_type": "string",
         "bytes_estimate": 150,
-        "byte_limit": 240,
+        "byte_limit": 320,
         "enabled": True,
     },
     {
@@ -156,7 +156,7 @@ _RUM_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "sql_type": "VARCHAR",
         "value_type": "string",
         "bytes_estimate": 128,
-        "byte_limit": 240,
+        "byte_limit": 320,
         "enabled": True,
     },
     {

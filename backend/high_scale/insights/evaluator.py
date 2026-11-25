@@ -207,7 +207,7 @@ def _evaluate(
         "bot_ua_regex": BOT_UA_REGEX,
         **filter_params,
     }
-    in_range = "event_timestamp >= {baseline_start:DateTime64(3)} AND event_timestamp <= {window_end:DateTime64(3)}"
+    in_range = "event_timestamp >= {baseline_start:DateTime64(3)} AND event_timestamp < {window_end:DateTime64(3)}"
     # The rollup has no per-request columns, so a filtered evaluation always reads raw facts.
     use_rollup = not filter_clause
     if use_rollup:
@@ -314,8 +314,8 @@ def _evaluate(
             sql = _base_sql(detection, definition.id)
         if filter_clause:
             sql = sql.replace(
-                "AND event_timestamp <= {window_end:DateTime64(3)}",
-                f"AND event_timestamp <= {{window_end:DateTime64(3)}} AND ({filter_clause})",
+                "AND event_timestamp < {window_end:DateTime64(3)}",
+                f"AND event_timestamp < {{window_end:DateTime64(3)}} AND ({filter_clause})",
             )
 
         def _finish(raw_rows: list[dict[str, Any]]) -> list[tuple[str, dict[str, Any]]]:
@@ -713,7 +713,7 @@ def cache_collapse_detail_endpoint(
             *visible_fact_clauses("request"),
             "url = {url:String}",
             "event_timestamp >= {baseline_start:DateTime64(3)}",
-            "event_timestamp <= {window_end:DateTime64(3)}",
+            "event_timestamp < {window_end:DateTime64(3)}",
         ]
     )
     params: dict[str, Any] = {
@@ -725,15 +725,15 @@ def cache_collapse_detail_endpoint(
     }
     cache = "custom_fields['cache']"
     hit, miss, passed = (f"startsWith({cache}, '{kind}')" for kind in ("HIT", "MISS", "PASS"))
+    is_w = "event_timestamp >= {window_start:DateTime64(3)}"
+    is_b = "event_timestamp < {window_start:DateTime64(3)}"
     rates_row = service.client.execute(
         "/* insight:cache_collapse_rates */ SELECT "
-        f"countIf(is_w AND {hit}) AS w_hits, countIf(is_w AND {miss}) AS w_miss, "
-        f"countIf(is_w AND {passed}) AS w_pass, countIf(is_w) AS w_total, "
-        f"countIf(is_b AND {hit}) AS b_hits, countIf(is_b AND {miss}) AS b_miss, "
-        f"countIf(is_b AND {passed}) AS b_pass, countIf(is_b) AS b_total "
-        "FROM (SELECT custom_fields, event_timestamp >= {window_start:DateTime64(3)} AS is_w, "
-        "event_timestamp < {window_start:DateTime64(3)} AS is_b "
-        f"FROM request_facts WHERE {scope})",
+        f"countIf({is_w} AND {hit}) AS w_hits, countIf({is_w} AND {miss}) AS w_miss, "
+        f"countIf({is_w} AND {passed}) AS w_pass, countIf({is_w}) AS w_total, "
+        f"countIf({is_b} AND {hit}) AS b_hits, countIf({is_b} AND {miss}) AS b_miss, "
+        f"countIf({is_b} AND {passed}) AS b_pass, countIf({is_b}) AS b_total "
+        f"FROM request_facts WHERE {scope}",
         params,
     )[0]
     rates = tuple(
@@ -744,8 +744,7 @@ def cache_collapse_detail_endpoint(
         "/* insight:cache_collapse_timeline */ SELECT "
         f"toStartOfInterval(event_timestamp, {_bucket_interval(window_hours + baseline_hours)}) AS bucket, "
         f"count() AS total_requests, countIf({hit}) AS real_hits, countIf({miss}) AS misses "
-        f"FROM (SELECT event_timestamp, custom_fields FROM request_facts WHERE {scope}) "
-        "GROUP BY bucket ORDER BY bucket ASC",
+        f"FROM request_facts WHERE {scope} GROUP BY bucket ORDER BY bucket ASC",
         params,
     )
     miss_rows = service.client.execute(

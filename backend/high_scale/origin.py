@@ -78,7 +78,9 @@ _NOT_APPROX: dict[str, Any] = {"_approx": False}
 
 _BASE_COLUMNS = (
     "event_timestamp, url, "
-    "coalesce(toFloat64OrNull(custom_fields['ottfb']), toFloat64OrNull(custom_fields['ttfb']) * 1000000.0) "
+    "multiIf(toFloat64OrNull(custom_fields['ottfb']) IS NOT NULL, toFloat64OrNull(custom_fields['ottfb']), "
+    "NOT (startsWith(upper(custom_fields['cache']), 'HIT') OR startsWith(upper(custom_fields['cache']), 'SYNTH')), "
+    "toFloat64OrNull(custom_fields['ttfb']) * 1000000.0, CAST(NULL, 'Nullable(Float64)')) "
     "AS latency_us, "
     "toInt32OrNull(custom_fields['ost']) AS status, "
     "upper(custom_fields['cache']) AS cache_u, "
@@ -107,7 +109,9 @@ class FactsScope:
 def _facts_scope(
     service: HighScaleService, start_time: str | None, end_time: str | None, filters: Mapping[str, Any] | None
 ) -> FactsScope:
-    where_sql, params = build_published_facts_where(service.service_id, start_time, end_time, filters)
+    where_sql, params = build_published_facts_where(
+        service.service_id, start_time, end_time, filters, end_inclusive=False
+    )
     return FactsScope(f"(SELECT {_BASE_COLUMNS} FROM request_facts WHERE {where_sql})", params)
 
 
@@ -674,7 +678,9 @@ def origin_drilldown(
                 source="projection",
             )
         else:
-            where_sql, params = build_published_facts_where(service.service_id, start_time, end_time, raw_filters)
+            where_sql, params = build_published_facts_where(
+                service.service_id, start_time, end_time, raw_filters, end_inclusive=False
+            )
             dim_map = {
                 "pop": "custom_fields['pop']",
                 "backend": "custom_fields['backend']",
@@ -904,6 +910,9 @@ def _origin_latency_us(row: Mapping[str, Any]) -> float | None:
     ottfb = _finite_float(row.get("ottfb"))
     if ottfb is not None:
         return ottfb
+    cache_u = str(row.get("cache") or "").strip().upper()
+    if cache_u.startswith(("HIT", "SYNTH")):
+        return None
     ttfb = _finite_float(row.get("ttfb"))
     return ttfb * 1_000_000.0 if ttfb is not None else None
 

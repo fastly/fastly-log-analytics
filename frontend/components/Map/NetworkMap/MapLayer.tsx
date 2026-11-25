@@ -277,9 +277,11 @@ export function useMapData({ map, dmaDataRef, data, bucketIdx, metric, isDark, s
           }
         }
 
-        if (c.metro_code) {
-          dmaColors[Number(c.metro_code)] = color
-          nextDmaData[Number(c.metro_code)] = { ...c, city: city.name }
+        const dmaId = Number(c.metro_code)
+        const isUsDma = Number.isFinite(dmaId) && dmaId >= 500 && dmaId <= 900 && (!c.country || c.country === 'US')
+        if (c.metro_code && isUsDma) {
+          dmaColors[dmaId] = color
+          nextDmaData[dmaId] = { ...c, city: city.name }
         } else if (city.lat != null && city.lon != null) {
           features.push({
             type: 'Feature',

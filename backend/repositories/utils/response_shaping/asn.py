@@ -445,10 +445,33 @@ def build_network_asn_leaderboard(
         if not buckets_data:
             continue
         label = asn_labels.get(asn, f"AS{asn}")
-        latest_bucket = max(buckets_data)
-        hs_now = buckets_data[latest_bucket].get("health_score")
-        hs_1h = hs_now
-        hs_1w = hs_now
+        # Request-weight health scores across all buckets so health_score_now,
+        # worst_asn, and global_health_score reflect the whole window rather than
+        # swinging with the trailing 1m/5m bucket (NET-02).
+        weighted_num = 0.0
+        weighted_den = 0
+        plain_scores: list[float] = []
+        for b in buckets_data.values():
+            score = b.get("health_score")
+            if score is None:
+                continue
+            s_val = float(score)
+            plain_scores.append(s_val)
+            reqs = int(b.get("reqs") or 0)
+            if reqs > 0:
+                weighted_num += s_val * reqs
+                weighted_den += reqs
+        hs_now: float | None
+        if weighted_den > 0:
+            hs_now = round(weighted_num / weighted_den, 1)
+        elif plain_scores:
+            hs_now = round(sum(plain_scores) / len(plain_scores), 1)
+        else:
+            latest_bucket = max(buckets_data)
+            raw_score = buckets_data[latest_bucket].get("health_score")
+            hs_now = float(raw_score) if raw_score is not None else None
+        hs_1h: float | None = hs_now
+        hs_1w: float | None = hs_now
         if len(all_buckets) > 1:
             n_buckets_1h = max(1, 3600 // bucket_seconds)
             sorted_buckets = sorted(buckets_data)

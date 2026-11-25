@@ -478,6 +478,7 @@ describe("security cloud-engine module (F20)", () => {
     const clients = [
       { ip: "198.51.100.1", risk_level: "High" as const, impossible_distance: true },
       { ip: "198.51.100.2", risk_level: "Medium" as const, impossible_distance: false },
+      { ip: "198.51.100.3", risk_level: "Low" as const, impossible_distance: false },
     ];
 
     const aclHigh = formatProxiesExportPayload(clients, { threshold: "High", format: "fastly-acl" });
@@ -485,6 +486,10 @@ describe("security cloud-engine module (F20)", () => {
     expect(aclHigh.body).toContain("ip,comment\n");
     expect(aclHigh.body).toContain("198.51.100.1,Watchdog block: Impossible distance mismatch");
     expect(aclHigh.body).not.toContain("198.51.100.2");
+
+    const csvLow = formatProxiesExportPayload(clients, { threshold: "Low", format: "csv" });
+    expect(csvLow.mediaType).toBe("text/csv");
+    expect(csvLow.body).toContain("198.51.100.3,Low:");
 
     const plainMed = formatProxiesExportPayload(clients, { threshold: "Medium", format: "plain" });
     expect(plainMed.mediaType).toBe("text/plain");

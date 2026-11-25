@@ -204,8 +204,17 @@ fn summary_matches_a_brute_force_computation_over_the_rows() {
         count(&|r| cache(r).as_deref() == Some("MISS") && r.get("ttfb").is_some())
     );
     let both = |r: &Value| r.get("ttfb").is_some() && r.get("elapsed").is_some();
-    let ottfb_ms = |r: &Value| f(r, "ottfb").map_or(0.0, |v| v / 1000.0);
-    let ottlb_ms = |r: &Value| f(r, "ottlb").map_or(0.0, |v| v / 1000.0);
+    let ottfb_ms = |r: &Value| {
+        f(r, "ottfb")
+            .filter(|&v| v > 0.0)
+            .map_or(0.0, |v| v / 1000.0)
+    };
+    let ottlb_ms = |r: &Value| {
+        f(r, "ottfb")
+            .filter(|&v| v > 0.0)
+            .and_then(|_| f(r, "ottlb").filter(|&v| v > 0.0))
+            .map_or(0.0, |v| v / 1000.0)
+    };
     assert_eq!(ov["waterfall_count"], count(&both));
     close(
         &ov["edge_processing_sum"],

@@ -25,7 +25,7 @@ import {
 import { StatCard } from '@/components/ui/confirm-dialog'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { PlotlyChart } from '@/components/PlotlyChart'
-import { formatBytes, formatCompactCount, formatMs, formatPctValue, CHART_COLORS } from '@/lib/utils'
+import { formatBytes, formatCompactCount, formatDecimal, formatMs, formatPctValue, CHART_COLORS } from '@/lib/utils'
 import type { components } from '@/types/api.generated'
 import { approxMark, boundMark, type NetworkRollupMeta } from '@/components/network/rollupLabels'
 
@@ -197,6 +197,8 @@ export function SummaryValueTab({ data, loading, cachingLoading }: { data?: Valu
   const network = data?.network
   const reported = data?.fastly_reported
   const offload = caching?.origin_offload_pct ?? overview?.origin_offload_pct
+  const accel = overview?.cache_acceleration_factor ?? data?.performance?.cache_accel_factor
+  const threatsBlocked = overview?.threats_blocked ?? data?.security?.waf_blocked
   return (
     <div className="space-y-6 pt-4">
       <div className="grid gap-4 grid-cols-2 lg:grid-cols-4">
@@ -221,7 +223,7 @@ export function SummaryValueTab({ data, loading, cachingLoading }: { data?: Valu
           loading={loading}
           value={overview?.total_bandwidth_bytes != null ? formatBytes(overview.total_bandwidth_bytes) : '—'}
           sub={withReported(
-            overview?.origin_offload_pct != null ? `${overview.origin_offload_pct}% served from cache` : '',
+            overview?.origin_offload_pct != null ? `${formatPctValue(overview.origin_offload_pct, 1)} served from cache` : '',
             reported && (
               <FastlyReportedLine
                 reported={reported}
@@ -237,7 +239,7 @@ export function SummaryValueTab({ data, loading, cachingLoading }: { data?: Valu
           title="Cache Acceleration"
           icon={Zap}
           loading={loading}
-          value={overview?.cache_acceleration_factor != null ? `${overview.cache_acceleration_factor}x` : '—'}
+          value={accel != null ? `${formatDecimal(accel, 1)}x` : '—'}
           sub="faster than origin"
           tooltip="How much faster cached responses are compared to origin fetches"
         />
@@ -245,7 +247,7 @@ export function SummaryValueTab({ data, loading, cachingLoading }: { data?: Valu
           title="Threats Blocked"
           icon={Shield}
           loading={loading}
-          value={overview?.threats_blocked != null ? formatCompactCount(overview.threats_blocked) : '—'}
+          value={threatsBlocked != null ? formatCompactCount(threatsBlocked) : '—'}
           sub="attacks blocked by WAF"
           tooltip="Total requests blocked by Fastly's WAF and DDoS mitigation"
         />
@@ -255,7 +257,7 @@ export function SummaryValueTab({ data, loading, cachingLoading }: { data?: Valu
           title="Origin Offload"
           icon={ArrowDownToLine}
           loading={loading || cachingLoading}
-          value={formatPctValue(caching?.origin_offload_pct)}
+          value={formatPctValue(caching?.origin_offload_pct, 1)}
           sub={withReported('requests served from cache', reported?.origin_offload_pct != null && (
             <span className="block" title={reportedTitle(reported)}>
               {`Fastly reported ${reported.origin_offload_pct.toFixed(1)}%${
@@ -276,7 +278,7 @@ export function SummaryValueTab({ data, loading, cachingLoading }: { data?: Valu
             title="HTTP/3 Adoption"
             icon={Wifi}
             loading={loading}
-            value={formatPctValue(network.http3_pct)}
+            value={formatPctValue(network.http3_pct, 1)}
             sub="of requests using QUIC"
           />
         )}
@@ -285,8 +287,8 @@ export function SummaryValueTab({ data, loading, cachingLoading }: { data?: Valu
             title="TLS Encrypted"
             icon={Lock}
             loading={loading}
-            value={formatPctValue(network.tls_pct)}
-            sub={network?.ipv6_pct != null ? `${network.ipv6_pct}% IPv6` : ''}
+            value={formatPctValue(network.tls_pct, 1)}
+            sub={network?.ipv6_pct != null ? `${formatPctValue(network.ipv6_pct, 1)} IPv6` : ''}
           />
         )}
       </div>
@@ -305,7 +307,7 @@ export function CachingValueTab({ data }: { data?: CachingData | null }) {
         <StatCard
           title="Origin Offload"
           icon={HardDrive}
-          value={data.origin_offload_pct != null ? `${data.origin_offload_pct}%` : '—'}
+          value={formatPctValue(data.origin_offload_pct, 1)}
           sub="requests served from cache"
         />
         <StatCard
@@ -318,7 +320,7 @@ export function CachingValueTab({ data }: { data?: CachingData | null }) {
         <StatCard
           title="Shield Effectiveness"
           icon={Shield}
-          value={data.shield_effectiveness_pct != null ? `${data.shield_effectiveness_pct}%` : '—'}
+          value={formatPctValue(data.shield_effectiveness_pct, 1)}
           sub="shield hit ratio"
         />
         <StatCard
@@ -506,7 +508,7 @@ export function PerformanceValueTab({ data, rollup }: { data?: PerformanceData |
         <StatCard
           title="Cache Acceleration"
           icon={Zap}
-          value={data.cache_accel_factor != null ? `${data.cache_accel_factor}x` : '—'}
+          value={data.cache_accel_factor != null ? `${formatDecimal(data.cache_accel_factor, 1)}x` : '—'}
           sub="faster than origin"
           tooltip="Ratio of miss latency to hit latency — how much faster cached responses are"
         />
@@ -562,10 +564,10 @@ export function NetworkValueTab({ data }: { data?: NetworkData | null }) {
   return (
     <div className="space-y-6 pt-4">
       <div className="grid gap-4 grid-cols-2 lg:grid-cols-4">
-        <StatCard title="HTTP/3" icon={Wifi} value={formatPctValue(data.http3_pct)} sub="of requests using QUIC" />
-        <StatCard title="TLS" icon={Lock} value={formatPctValue(data.tls_pct)} sub="encrypted connections" />
-        <StatCard title="IPv6" icon={Globe} value={formatPctValue(data.ipv6_pct)} sub="of requests over IPv6" />
-        <StatCard title="HTTP/2" icon={Network} value={formatPctValue(data.h2_pct)} sub="multiplexed connections" />
+        <StatCard title="HTTP/3" icon={Wifi} value={formatPctValue(data.http3_pct, 1)} sub="of requests using QUIC" />
+        <StatCard title="TLS" icon={Lock} value={formatPctValue(data.tls_pct, 1)} sub="encrypted connections" />
+        <StatCard title="IPv6" icon={Globe} value={formatPctValue(data.ipv6_pct, 1)} sub="of requests over IPv6" />
+        <StatCard title="HTTP/2" icon={Network} value={formatPctValue(data.h2_pct, 1)} sub="multiplexed connections" />
       </div>
       <div className="grid gap-4 grid-cols-1">
         <AnalyticsCard title="Protocol Adoption Trend" isEmpty={!protocolData.length}>

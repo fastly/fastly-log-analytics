@@ -624,7 +624,7 @@ export function transportFromRollup(result: RollupResult) {
   const p50 = rtt(0.5);
   const lowerBound = result.rollup.truncated.has("transport/proto") ? ["protocol_distribution"] : [];
   const dimsCountry = result.rollup.dims.get("country") ?? result.rollup.dims.get("asn");
-  const retransCount = dimsCountry ? sumAggs(dimsCountry.values()).retrans : (agg?.retrans ?? 0);
+  const retransCount = Math.max(agg?.retrans ?? 0, dimsCountry ? sumAggs(dimsCountry.values()).retrans : 0);
   return {
     total_requests: total,
     bandwidth_bytes: total ? agg!.respBytes : null,

@@ -139,4 +139,22 @@ describe("Feature F22 — Assets & Shielding cloud-engine", () => {
     expect(emptyAssetsAggregates().summary.total_requests).toBe(0);
     await engine.reset();
   });
+
+  it("enforces >=10KB & strips query suffixes on large uncompressed, <3600s on low TTL, and includes HIT/MISS clusters in ratio", async () => {
+    const engine = new DuckDBAnalyticalEngine();
+    await engine.executeSql(
+      `INSERT INTO requests (
+        scoped_key, ts_ms, "timestamp", url, cache_status, content_encoding, resp_body_size, ttl
+      ) VALUES
+        ('a2', 1700000000000, epoch_ms(1700000000000)::TIMESTAMPTZ, '/tiny.js', 'HIT-CLUSTER', 'none', 4000, 3600),
+        ('a2', 1700000001000, epoch_ms(1700000001000)::TIMESTAMPTZ, '/vuln.php?url=http://example.com/index1.html', 'MISS-CLUSTER', 'none', 25000, 120),
+        ('a2', 1700000002000, epoch_ms(1700000002000)::TIMESTAMPTZ, '/big.css?v=1', 'MISS', 'none', 15000, 3600),
+        ('a2', 1700000003000, epoch_ms(1700000003000)::TIMESTAMPTZ, '/short.png', 'MISS', 'none', 2000, 300)`,
+    );
+    const res = await handleAssetsRequest("/api/assets/aggregates", { engine });
+    expect(res.large_uncompressed_assets.map((r) => r.url)).toEqual(["/big.css?v=1"]);
+    expect(res.low_ttl_assets.map((r) => r.url)).toEqual(["/short.png"]);
+    expect(res.summary.overall_hit_ratio).toBeCloseTo(25);
+    await engine.reset();
+  });
 });

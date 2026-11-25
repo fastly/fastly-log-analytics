@@ -615,10 +615,11 @@ export async function handleInsights(
 
     const items: InsightItem[] = [];
     const add = (label: string, current: number, baseline: number, unit: string,
-      meta: Record<string, unknown>, severity: InsightItem["severity"] = "warning") => {
+      meta: Record<string, unknown>, severity: InsightItem["severity"] = "warning", itemBaselineLabel?: string) => {
+      const effectiveLabel = itemBaselineLabel ?? baselineLabel;
       items.push({ label, current_val: Math.round(current * 10) / 10,
         baseline_val: Math.round(baseline * 10) / 10,
-        ...(baselineLabel ? { baseline_label: baselineLabel } : {}), unit, meta, severity });
+        ...(effectiveLabel ? { baseline_label: effectiveLabel } : {}), unit, meta, severity });
     };
     const scan = (rows: Record<string, unknown>[] | undefined) => {
       if (!rows) throw new Error(`Missing local aggregate input for ${d.id}`);
@@ -669,7 +670,8 @@ export async function handleInsights(
                 : Math.round((n(r, "w_p99") / n(r, "w_p50")) * 10) / 10;
             if (rawRatio > 5) {
               add(label, n(r, "w_p99"), n(r, "w_p50"), "ms (P99 vs P50)",
-                { ...meta, ratio: rawRatio }, rawRatio > 10 ? "critical" : "warning");
+                { ...meta, ratio: rawRatio }, rawRatio > 10 ? "critical" : "warning",
+                source?.approximate.has("tail_latency") ? "≈ P50" : "P50");
             }
           }
         }

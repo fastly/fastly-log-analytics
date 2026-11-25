@@ -392,7 +392,7 @@ export function buildSessionsCteSql(options: {
       JOIN clients c ON a.k = c.k
     ),
     page AS (
-      SELECT *
+      SELECT *, COUNT(*) OVER () AS _total_sessions
       FROM sessions_flagged
       ${whereClause}
       ORDER BY ${order}
@@ -726,7 +726,7 @@ export async function handleSessionsList(
     status: 200,
     body: {
       sessions,
-      total: sessions.length,
+      total: rawRows.length > 0 && rawRows[0]._total_sessions != null ? Number(rawRows[0]._total_sessions) : sessions.length,
       page,
       limit,
       has_rtt: cols.has("tcp_rtt"),

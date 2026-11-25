@@ -103,10 +103,21 @@ function FastlyValueBody({ startTime, endTime, activeServiceId, filterPayload }:
   })
 
   const firstQuery = split ? rollupQuery : valueQuery
-  const data = React.useMemo(
-    () => (split ? { ...valueQuery.data, ...rollupQuery.data } as ValueData : valueQuery.data),
-    [split, valueQuery.data, rollupQuery.data],
-  )
+  const data = React.useMemo(() => {
+    if (!split) return valueQuery.data
+    const raw = valueQuery.data
+    const roll = rollupQuery.data
+    const overview =
+      roll?.overview || raw?.overview
+        ? {
+            ...raw?.overview,
+            ...Object.fromEntries(
+              Object.entries(roll?.overview ?? {}).filter(([, v]) => v !== null && v !== undefined),
+            ),
+          }
+        : undefined
+    return { ...raw, ...roll, ...(overview ? { overview } : {}) } as ValueData
+  }, [split, valueQuery.data, rollupQuery.data])
   const hasActiveSectionData =
     activeTab === 'summary'
       ? Boolean(data?.overview || data?.caching || data?.network)
@@ -131,17 +142,19 @@ function FastlyValueBody({ startTime, endTime, activeServiceId, filterPayload }:
 
   return (
     <div className="space-y-6">
-      <RollupDataThroughSlot reserve={split} meta={rollup} />
       <RawWindowNote window={readRawWindow(valueQuery.data) ?? readRawWindow(rollupQuery.data)} />
       <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as TabId)}>
-        <TabsList className="flex flex-wrap h-auto gap-1">
-          {TABS.map((tab) => (
-            <TabsTrigger key={tab.id} value={tab.id}>
-              <tab.icon className="h-4 w-4" />
-              {tab.label}
-            </TabsTrigger>
-          ))}
-        </TabsList>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <TabsList className="flex flex-wrap h-auto gap-1">
+            {TABS.map((tab) => (
+              <TabsTrigger key={tab.id} value={tab.id}>
+                <tab.icon className="h-4 w-4" />
+                {tab.label}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+          <RollupDataThroughSlot reserve={Boolean(rollup)} meta={rollup} />
+        </div>
         <div className="min-h-[820px]">
           {loading ? (
             <div className="space-y-6 pt-4">
@@ -202,6 +215,7 @@ function FastlyValueBody({ startTime, endTime, activeServiceId, filterPayload }:
                   relativeRange={relativeRange}
                   isAutoRange={isAutoRange}
                   anchor={anchor}
+                  embedded
                 />
               </TabsContent>
               <TabsContent value="io">

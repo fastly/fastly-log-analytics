@@ -876,6 +876,7 @@ def crawler_disparity_processor(row: tuple, definition: InsightDefinition, conte
         "baseline_crawls_per_referral": b_c_per_r,
         "bytes_per_referral": bytes_per_r,
         "baseline_bytes_per_referral": b_bytes_per_r,
+        **({"filters": {"ua": row[0]}} if row[0] else {}),
     }
     return _item(brand, c_per_r, b_c_per_r, "crawls/referral", meta, "critical" if is_crit else "warning")
 
@@ -965,7 +966,14 @@ def residential_fingerprint_dispersion_processor(row: tuple, definition: Insight
         w_asns,
         b_ips,
         "ASNs",
-        {"ja4": ja4, "ips": w_ips, "asns": w_asns, "requests": w_requests, "asn_expansion_ratio": asn_expansion},
+        {
+            "ja4": ja4,
+            "ips": w_ips,
+            "asns": w_asns,
+            "requests": w_requests,
+            "asn_expansion_ratio": asn_expansion,
+            **({"filters": {"ja4": ja4}} if ja4 and ja4 != "(empty)" else {}),
+        },
         "critical" if asn_expansion >= 3.0 else "warning",
         baseline_label="baseline IPs",
     )

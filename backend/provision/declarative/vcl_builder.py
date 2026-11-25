@@ -374,7 +374,20 @@ def desired_logging_endpoints(state: FeatureState) -> list[LoggingEndpoint]:
             for f in state.log_fields.custom_fields
             if isinstance(f, dict) and f.get("name") in _RUM_FIELD_NAMES
         }
-        rum_fields = [existing_rum.get(df["name"], df) for df in _RUM_CUSTOM_FIELDS]
+        rum_fields = [
+            {
+                **df,
+                **existing_rum[df["name"]],
+                "byte_limit": max(
+                    int(existing_rum[df["name"]].get("byte_limit") or 0),
+                    int(df.get("byte_limit") or 0),
+                )
+                or df.get("byte_limit"),
+            }
+            if df["name"] in existing_rum
+            else df
+            for df in _RUM_CUSTOM_FIELDS
+        ]
         endpoints.append(
             LoggingEndpoint(
                 name=state.rum_endpoint_name,
@@ -382,7 +395,7 @@ def desired_logging_endpoints(state: FeatureState) -> list[LoggingEndpoint]:
                 path=log_paths.rum_log_path(),
                 period=state.rum_log_period if state.rum_log_period is not None else state.log_period,
                 response_condition="rum_log_condition",
-                format_string=load_log_format({"custom_fields": rum_fields}),
+                format_string=load_log_format({"custom_fields": rum_fields, "field_limits": {"url": 3000}}),
                 placement=None,
                 response_object_name="",
             )

@@ -560,7 +560,7 @@ export function UsageChartsGrid({
                     {formatAbbreviatedCount(rumBreakdown.total_beacons)}
                   </p>
                   <p className="text-xs text-muted-foreground mt-1">
-                    {formatCountMaybe(rumBreakdown.average_beacons_per_day)} / day avg
+                    {formatCountMaybe(rumBreakdown.average_beacons_per_day, { maximumFractionDigits: 2 })} / day avg
                   </p>
                 </div>
                 <div>

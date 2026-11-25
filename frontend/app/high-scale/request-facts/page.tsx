@@ -9,7 +9,7 @@ import { useEffectiveServiceId, useBootstrapResolved } from '@/hooks/useBootstra
 import { keepPreviousWithinService, useTimeRange } from '@/hooks/useDashboardCards'
 import { client, extractApiError } from '@/lib/api'
 import type { components } from '@/types/api.generated'
-import { ELAPSED_FRESHNESS, formatElapsed } from '@/lib/utils'
+import { ELAPSED_FRESHNESS, formatElapsed, parseUtcMs } from '@/lib/utils'
 import { NoServiceSelected } from '@/components/ReportLayout'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -153,8 +153,8 @@ function valueAsString(value: unknown): string {
 
 function formatTimestamp(value: unknown): string {
   if (typeof value !== 'string') return valueAsString(value)
-  const parsed = new Date(value)
-  return Number.isNaN(parsed.getTime()) ? value : parsed.toISOString()
+  const ms = parseUtcMs(value)
+  return Number.isNaN(ms) ? value : new Date(ms).toISOString()
 }
 
 type FactRow = NonNullable<ReturnType<typeof useHighScaleRequestFacts>['data']>['rows'][number]

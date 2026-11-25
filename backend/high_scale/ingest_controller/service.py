@@ -686,9 +686,9 @@ def compute_summary_from_dims(
         r, b = int(reqs or 0), int(sum_bytes or 0)
         by_type_reqs[asset_type] += r
         by_type_bytes[asset_type] += b
-        if cache_status in ("HIT", "HIT-SYNTHETIC"):
+        if cache_status.startswith("HIT"):
             by_type_hit_reqs[asset_type] += r
-        if cache_status in ("HIT", "HIT-SYNTHETIC", "MISS", "PASS", "BYPASS"):
+        if cache_status.startswith(("HIT", "MISS", "PASS")) or cache_status in ("BYPASS", "ERROR"):
             by_type_cache_denom[asset_type] += r
         if is_compressible == 1:
             by_type_comp_denom[asset_type] += r
@@ -807,7 +807,13 @@ def assets_aggregates(
                        toInt64(sum(sum_bytes)) AS total_bytes, toInt32(status) AS status, '' AS asset_type
                 FROM assets_enriched
                 WHERE is_compressed = 0 AND is_compressible = 1 AND status NOT IN (304, 204)
-                GROUP BY url, status ORDER BY total_bytes DESC LIMIT 20
+                  AND (lower(splitByChar('#', splitByChar('?', url)[1])[1]) LIKE '%.js'
+                       OR lower(splitByChar('#', splitByChar('?', url)[1])[1]) LIKE '%.mjs'
+                       OR lower(splitByChar('#', splitByChar('?', url)[1])[1]) LIKE '%.css'
+                       OR lower(splitByChar('#', splitByChar('?', url)[1])[1]) LIKE '%.svg'
+                       OR lower(splitByChar('#', splitByChar('?', url)[1])[1]) LIKE '%.html'
+                       OR lower(splitByChar('#', splitByChar('?', url)[1])[1]) LIKE '%.json')
+                GROUP BY url, status HAVING metric_float >= 10240 ORDER BY total_bytes DESC LIMIT 20
             )
             UNION ALL
             SELECT * FROM (
@@ -816,7 +822,7 @@ def assets_aggregates(
                        toInt64(0) AS total_bytes, toInt32(0) AS status, asset_type
                 FROM assets_enriched
                 WHERE cache = 'MISS' AND asset_type != 'API/Dynamic'
-                GROUP BY url, asset_type ORDER BY requests DESC LIMIT 20
+                GROUP BY url, asset_type HAVING sum(cnt_ttl) > 0 AND metric_float < 3600 ORDER BY requests DESC LIMIT 20
             )
         """
         with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-assets") as pool:

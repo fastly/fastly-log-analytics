@@ -118,6 +118,7 @@ describe("origin cloud-engine module (F18)", () => {
     expect(originLatencyUsExpr(new Set(["ottfb", "ttfb"]))).toBe(
       'COALESCE("ottfb", "ttfb" * 1000000.0)',
     );
+    expect(originLatencyUsExpr(new Set(["ottfb", "ttfb", "cache"]))).toContain("starts_with");
     expect(originLatencyUsExpr(new Set(["ottfb"]))).toBe('"ottfb"');
     expect(originLatencyUsExpr(new Set(["ttfb"]))).toBe('"ttfb" * 1000000.0');
     expect(originLatencyUsExpr(new Set(), null)).toBeNull();
@@ -478,6 +479,33 @@ describe("origin cloud-engine module (F18)", () => {
       );
       const drill = await drillRes!.json();
       expect(drill.rows[0].error_rate).toBe(0.91);
+    } finally {
+      await engine.reset();
+    }
+  });
+
+  it("excludes HIT/SYNTH rows with NULL ottfb from originLatencyUs fallback and origin summary", async () => {
+    const engine = getDuckDBEngine();
+    try {
+      await engine.executeSql(`
+        INSERT INTO requests (scoped_key, ts_ms, "timestamp", cache, ttfb, ottfb, url)
+        VALUES
+          ('origin-hit', 1700000000000, epoch_ms(1700000000000), 'HIT', 0.005, NULL, '/cached'),
+          ('origin-hit', 1700000001000, epoch_ms(1700000001000), 'MISS', 0.080, 70000, '/origin')
+      `);
+      const res = await handleOriginRequest(
+        new Request("https://example.test/api/origin/aggregates", {
+          method: "POST",
+          body: JSON.stringify({
+            start_time: "2023-11-14T22:00:00Z",
+            end_time: "2023-11-14T23:00:00Z",
+            sections: ["summary"],
+          }),
+        }),
+      );
+      const data = await res!.json();
+      expect(data.summary.ottfb_p50_ms).toBe(70);
+      expect(data.summary.total_misses).toBe(1);
     } finally {
       await engine.reset();
     }

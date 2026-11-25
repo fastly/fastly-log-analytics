@@ -351,6 +351,9 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
                 }
             )
 
+    def _decode_vcl(val: Any) -> Any:
+        return unquote(val) if isinstance(val, str) and "%" in val else val
+
     raw_body = log_data.get("rum_body")
     extracted_metrics: list[dict] = []
     if raw_body:
@@ -372,11 +375,11 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
                     if ttfb_val is not None:
                         break
         for metric in extracted_metrics:
-            m_path = metric.get("pathname")
+            m_path = _decode_vcl(metric.get("pathname"))
             if (not m_path or m_path in ("/", "/rum-beacon", "/_rum/v1/beacon")) and (
                 log_data.get("rum_pathname") or url_pathname_fallback
             ):
-                m_path = log_data.get("rum_pathname") or url_pathname_fallback
+                m_path = _decode_vcl(log_data.get("rum_pathname") or url_pathname_fallback)
             common = _common(
                 (m_path or "/").replace("//", "/"),
                 metric.get("browser") or log_data.get("browser") or "Chrome",
@@ -387,8 +390,8 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
             )
             _append_rum_row(
                 is_error=bool((metric.get("metric_name") == "exception") or metric.get("error_message")),
-                err_msg=metric.get("error_message"),
-                err_file=metric.get("error_file"),
+                err_msg=_decode_vcl(metric.get("error_message")),
+                err_file=_decode_vcl(metric.get("error_file")),
                 err_line=metric.get("error_line"),
                 err_col=metric.get("error_col"),
                 metric_name=metric.get("metric_name"),
@@ -397,10 +400,6 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
                 common=common,
             )
     else:
-
-        def _decode_vcl(val: Any) -> Any:
-            return unquote(val) if isinstance(val, str) and "%" in val else val
-
         metric_name = log_data.get("rum_metric_name")
         metric_value = log_data.get("rum_metric_value")
         metric_rating = log_data.get("rum_metric_rating")
@@ -415,14 +414,14 @@ def _parse_rum_line(log_data: dict, service_id: str) -> tuple[list[dict], list[d
             if metric_value is None or metric_value == "":
                 metric_value = qparams.get("rum_metric_value", [metric_value])[0]
             metric_rating = metric_rating or qparams.get("rum_metric_rating", [metric_rating])[0]
-            err_msg = err_msg or qparams.get("rum_error_message", [err_msg])[0]
-            err_file = err_file or qparams.get("rum_error_file", [err_file])[0]
+            err_msg = err_msg or _decode_vcl(qparams.get("rum_error_message", [err_msg])[0])
+            err_file = err_file or _decode_vcl(qparams.get("rum_error_file", [err_file])[0])
             if err_line in (None, ""):
                 err_line = qparams.get("rum_error_line", [err_line])[0]
             if err_col in (None, ""):
                 err_col = qparams.get("rum_error_col", [err_col])[0]
             cid_val = cid_val or url_cid_fallback
-            pathname_val = pathname_val or url_pathname_fallback
+            pathname_val = pathname_val or _decode_vcl(url_pathname_fallback)
         if metric_value is not None and isinstance(metric_value, str):
             try:
                 metric_value = float(metric_value) if "." in metric_value else int(metric_value)

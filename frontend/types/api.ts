@@ -21,7 +21,7 @@ export type ChartMetric = components['schemas']['AggregatesRequest']['chart_metr
 // Typed as a Record so a change to the generated union fails tsc until this list matches it.
 const CHART_METRICS: Record<ChartMetric, true> = {
   requests: true, '5xx': true, '4xx': true, hit_rate: true, p50_latency: true, p95_latency: true,
-  p99_latency: true, throughput: true, req_size: true, ttfb: true,
+  p99_latency: true, throughput: true, req_size: true, ttfb: true, ttfb_ms: true,
 }
 
 export const isChartMetric = (value: string): value is ChartMetric => Object.hasOwn(CHART_METRICS, value)

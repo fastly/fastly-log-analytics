@@ -525,14 +525,22 @@ def _sec_combined_overview(
     h_case = _bucket_case("h", _REQ_HEADER_BUCKETS, _REQ_HEADER_LAST)
     c_case = _bucket_case("c", _CONN_REUSE_BUCKETS, _CONN_REUSE_LAST)
     base_sql = (
-        f"SELECT toUnixTimestamp(toStartOfHour(event_timestamp)) AS bucket_ts, "
-        "count() AS total_rows, "
-        "countIf(custom_fields['tls_ciphers_sha'] != '') AS tls_populated, "
-        f"countIf({_IS_IPV6}) AS ipv6_rows, "
+        "SELECT bucket_ts, "
+        "sum(c_rows) AS total_rows, "
+        "sum(c_tls) AS tls_populated, "
+        "sum(c_ipv6) AS ipv6_rows, "
+        "sumMap(h_map) AS h_map, "
+        "sumMap(c_map) AS c_map, "
+        "sumMap(p_map) AS p_map, "
+        "groupArraySortedIf(15)(tuple(-toInt64(ip_max_h), client_ip), ip_max_h IS NOT NULL AND client_ip != '') AS top_hdr_ips "
+        "FROM (SELECT toUnixTimestamp(toStartOfHour(event_timestamp)) AS bucket_ts, client_ip, "
+        "count() AS c_rows, "
+        "countIf(custom_fields['tls_ciphers_sha'] != '') AS c_tls, "
+        f"countIf({_IS_IPV6}) AS c_ipv6, "
         "sumMap(if(h IS NOT NULL, [h_b], []), if(h IS NOT NULL, [toUInt64(1)], [])) AS h_map, "
         "sumMap(if(c IS NOT NULL AND c > 0, [c_b], []), if(c IS NOT NULL AND c > 0, [toUInt64(1)], [])) AS c_map, "
         "sumMap(if(p_t != '', [p_t], []), if(p_t != '', [toUInt64(1)], [])) AS p_map, "
-        "groupArraySortedIf(15)(tuple(-toInt64(h), client_ip), h IS NOT NULL AND client_ip != '') AS top_hdr_ips "
+        "max(h) AS ip_max_h "
         "FROM (SELECT event_timestamp, client_ip, custom_fields['tls_ciphers_sha'], custom_fields['is_ipv6'], "
         "custom_fields['p_type'] AS p_t, toUInt64OrNull(custom_fields['req_header_bytes']) AS h, "
         f"{h_case} AS h_b, toUInt64OrNull(custom_fields['conn_requests']) AS c, {c_case} AS c_b "
@@ -541,7 +549,7 @@ def _sec_combined_overview(
         service,
         scope,
         "overview_5in1",
-        f"{base_sql}FROM request_facts PREWHERE __WHERE__) GROUP BY bucket_ts ORDER BY bucket_ts",
+        f"{base_sql}FROM request_facts PREWHERE __WHERE__) GROUP BY bucket_ts, client_ip) GROUP BY bucket_ts ORDER BY bucket_ts",
     )
     total_rows = 0
     tls_pop = 0

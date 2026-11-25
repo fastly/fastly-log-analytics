@@ -2402,18 +2402,19 @@ async function dispatchCloudRequest(
     const costBilling = pathname === "/api/usage/current-storage"
       ? usageComputeBilling({ from: fromMs, to: toMs }, request.signal)
       : Promise.resolve(null);
-    let summaryRead!: ReturnType<typeof fetchUsageSummary>;
+    const summaryRef: { current?: ReturnType<typeof fetchUsageSummary> } = {};
     // Start the 30-day lifecycle reads before fetchUsageSummary so their settings.then()
     // registers the wider fos_usage read first and fetchUsageSummary slices from it.
     const storageBillingRead = pathname === "/api/usage/current-storage"
-      ? storageBillingIntervals(now, fromMs, toMs, () => summaryRead, request.signal, checkUsageEpoch)
+      ? storageBillingIntervals(now, fromMs, toMs, () => summaryRef.current!, request.signal, checkUsageEpoch)
       : null;
     storageBillingRead?.catch(() => {});
-    summaryRead = fetchUsageSummary({
+    const summaryRead = fetchUsageSummary({
       from: fromMs,
       to: toMs,
       signal: request.signal,
     });
+    summaryRef.current = summaryRead;
     const usageRes = await summaryRead;
     checkUsageEpoch();
     const { input, summary } = usageRes;

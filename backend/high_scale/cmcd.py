@@ -593,10 +593,12 @@ def _cmcd_aggregates_compute(
         breakdown_branches.append(
             "SELECT * FROM (SELECT 'content' AS kind, cid AS k, toUInt64(count()) AS session_count, "
             "toNullable(sum(had_rebuffer) * 100.0 / nullIf(count(), 0)) AS rebuffer_rate, "
-            "toNullable(avg(avg_br)) AS avg_br, toNullable(avg(avg_bl)) AS avg_bl, "
+            "toNullable(sumIf(avg_br * br_reqs, avg_br IS NOT NULL) / nullIf(sumIf(br_reqs, avg_br IS NOT NULL), 0)) AS avg_br, "
+            "toNullable(sumIf(avg_bl * bl_reqs, avg_bl IS NOT NULL) / nullIf(sumIf(bl_reqs, avg_bl IS NOT NULL), 0)) AS avg_bl, "
             "CAST(NULL, 'Nullable(Float64)') AS median_mtp FROM ("
             "SELECT cid, sid, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
-            f"avgIf(br, {video}) AS avg_br, avgIf(bl, {video}) AS avg_bl "
+            f"avgIf(br, {video}) AS avg_br, countIf({video} AND br IS NOT NULL) AS br_reqs, "
+            f"avgIf(bl, {video}) AS avg_bl, countIf({video} AND bl IS NOT NULL) AS bl_reqs "
             f"FROM ({events}) WHERE cid != '' GROUP BY cid, sid) "
             "GROUP BY cid ORDER BY session_count DESC, k LIMIT {top_n:UInt32})"
         )
@@ -605,9 +607,9 @@ def _cmcd_aggregates_compute(
             "SELECT * FROM (SELECT 'country' AS kind, country AS k, toUInt64(count()) AS session_count, "
             "toNullable(sum(had_rebuffer) * 100.0 / nullIf(count(), 0)) AS rebuffer_rate, "
             "CAST(NULL, 'Nullable(Float64)') AS avg_br, CAST(NULL, 'Nullable(Float64)') AS avg_bl, "
-            "toNullable(avg(median_mtp)) AS median_mtp FROM ("
+            "toNullable(sumIf(median_mtp * mtp_reqs, median_mtp IS NOT NULL) / nullIf(sumIf(mtp_reqs, median_mtp IS NOT NULL), 0)) AS median_mtp FROM ("
             "SELECT country, sid, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
-            f"quantileTDigestIf(0.5)(mtp, {video}) AS median_mtp "
+            f"quantileTDigestIf(0.5)(mtp, {video}) AS median_mtp, countIf({video} AND mtp IS NOT NULL) AS mtp_reqs "
             f"FROM ({events}) WHERE country != '' GROUP BY country, sid) "
             "GROUP BY country ORDER BY session_count DESC, k LIMIT {top_n:UInt32})"
         )
@@ -615,10 +617,12 @@ def _cmcd_aggregates_compute(
         breakdown_branches.append(
             "SELECT * FROM (SELECT 'asn' AS kind, toString(asn) AS k, toUInt64(count()) AS session_count, "
             "toNullable(sum(had_rebuffer) * 100.0 / nullIf(count(), 0)) AS rebuffer_rate, "
-            "toNullable(avg(avg_br)) AS avg_br, toNullable(avg(avg_bl)) AS avg_bl, "
+            "toNullable(sumIf(avg_br * br_reqs, avg_br IS NOT NULL) / nullIf(sumIf(br_reqs, avg_br IS NOT NULL), 0)) AS avg_br, "
+            "toNullable(sumIf(avg_bl * bl_reqs, avg_bl IS NOT NULL) / nullIf(sumIf(bl_reqs, avg_bl IS NOT NULL), 0)) AS avg_bl, "
             "CAST(NULL, 'Nullable(Float64)') AS median_mtp FROM ("
             "SELECT asn, sid, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
-            f"avgIf(br, {video}) AS avg_br, avgIf(bl, {video}) AS avg_bl "
+            f"avgIf(br, {video}) AS avg_br, countIf({video} AND br IS NOT NULL) AS br_reqs, "
+            f"avgIf(bl, {video}) AS avg_bl, countIf({video} AND bl IS NOT NULL) AS bl_reqs "
             f"FROM ({events}) WHERE asn IS NOT NULL GROUP BY asn, sid) "
             "GROUP BY asn ORDER BY session_count DESC, k LIMIT {top_n:UInt32})"
         )

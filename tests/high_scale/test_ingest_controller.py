@@ -3017,11 +3017,91 @@ _CMCD_CANNED: dict[str, list[dict[str, Any]]] = {
         {"sort_order": 2, "session_count": 1, "positive_duration_sum": 125.4, "positive_duration_count": 1},
         {"sort_order": 5, "session_count": 3, "positive_duration_sum": 0.0, "positive_duration_count": 0},
     ],
+    "cmcd:sessions": [
+        {
+            "kind": "new_sessions",
+            "k": "2026-09-14 10:05:00",
+            "session_count": 2,
+            "positive_duration_sum": 0.0,
+            "positive_duration_count": 0,
+        },
+        {
+            "kind": "duration",
+            "k": "2",
+            "session_count": 1,
+            "positive_duration_sum": 125.4,
+            "positive_duration_count": 1,
+        },
+        {
+            "kind": "duration",
+            "k": "5",
+            "session_count": 3,
+            "positive_duration_sum": 0.0,
+            "positive_duration_count": 0,
+        },
+    ],
+    "cmcd:breakdowns": [
+        {
+            "kind": "content",
+            "k": "movie-1",
+            "session_count": 3,
+            "rebuffer_rate": 33.33,
+            "avg_br": 3000.0,
+            "avg_bl": 9.5,
+            "median_mtp": None,
+        },
+        {
+            "kind": "country",
+            "k": "US",
+            "session_count": 3,
+            "rebuffer_rate": 10.0,
+            "avg_br": None,
+            "avg_bl": None,
+            "median_mtp": 7500.0,
+        },
+        {
+            "kind": "asn",
+            "k": "7922",
+            "session_count": 2,
+            "rebuffer_rate": 50.0,
+            "avg_br": 2000.0,
+            "avg_bl": 8.0,
+            "median_mtp": None,
+        },
+        {
+            "kind": "ot",
+            "k": "v",
+            "session_count": 30,
+            "rebuffer_rate": None,
+            "avg_br": None,
+            "avg_bl": None,
+            "median_mtp": None,
+        },
+        {
+            "kind": "ot",
+            "k": "a",
+            "session_count": 10,
+            "rebuffer_rate": None,
+            "avg_br": None,
+            "avg_bl": None,
+            "median_mtp": None,
+        },
+        {
+            "kind": "sf",
+            "k": "h",
+            "session_count": 4,
+            "rebuffer_rate": None,
+            "avg_br": None,
+            "avg_bl": None,
+            "median_mtp": None,
+        },
+    ],
 }
 
 
 class _Client_cmcd:
     def __init__(self, probe: dict[str, Any] | None = None) -> None:
+        hs_cmcd._memo.cache.clear()
         self.calls: list[tuple[str, dict]] = []
         self.scopes: list[dict] = []
         self._probe = probe if probe is not None else _PRESENT
@@ -3179,8 +3259,10 @@ def test_only_requested_sections_are_queried() -> None:
     result = _run(client, sections={"object_type_dist"})
     assert [sql.split("*/")[0].split("/*")[1].strip() for sql, _ in client.calls] == [
         "cmcd:probe",
-        "cmcd:object_type_dist",
+        "cmcd:breakdowns",
     ]
+    assert "SELECT 'ot' AS kind" in client.calls[1][0]
+    assert "SELECT 'content' AS kind" not in client.calls[1][0]
     assert "overview" not in result and "top_content" not in result
 
 
@@ -3453,10 +3535,10 @@ def test_probe_and_asn_enrichment_are_disjoint_overhead(monkeypatch: pytest.Monk
     client = TimedClient()
     result = _run(client, sections={"rebuffer_by_asn"})
     timings = {row["section"]: row for row in result["section_timings"]}
-    assert set(timings) == {"cmcd.probe", "cmcd.rebuffer_asn", "cmcd.asn_labels"}
+    assert set(timings) == {"cmcd.probe", "cmcd.breakdowns", "cmcd.asn_labels"}
     assert timings["cmcd.probe"]["activity"] == "overhead" and timings["cmcd.probe"]["time_ms"] == pytest.approx(10)
-    assert timings["cmcd.rebuffer_asn"]["activity"] == "compute"
-    assert timings["cmcd.rebuffer_asn"]["time_ms"] == pytest.approx(20)
+    assert timings["cmcd.breakdowns"]["activity"] == "compute"
+    assert timings["cmcd.breakdowns"]["time_ms"] == pytest.approx(20)
     assert timings["cmcd.asn_labels"]["activity"] == "overhead"
     assert timings["cmcd.asn_labels"]["time_ms"] == pytest.approx(30)
     assert timings["cmcd.asn_labels"]["source"] == "unknown"
@@ -3466,7 +3548,7 @@ def test_probe_and_asn_enrichment_are_disjoint_overhead(monkeypatch: pytest.Monk
     assert all(row["source"] == "projected_fact" for row in client.scopes)
     assert {row["section_id"] for row in client.scopes} == {
         timings["cmcd.probe"]["section_id"],
-        timings["cmcd.rebuffer_asn"]["section_id"],
+        timings["cmcd.breakdowns"]["section_id"],
     }
     assert result["rebuffer_by_asn"][0]["label"] == "Example Network (7922)"
     assert result["_response_cache"]["state"] == "miss" and result["_response_cache"]["single_flight"] == "leader"
@@ -3493,7 +3575,7 @@ def test_asn_enrichment_failure_is_overhead_and_not_cached(monkeypatch: pytest.M
     with pytest.raises(RuntimeError, match="metadata unavailable"):
         _run(client, sections={"rebuffer_by_asn"})
     by_section = {row["section"]: row for row in observations}
-    assert by_section["cmcd.rebuffer_asn"]["outcome"] == "success"
+    assert by_section["cmcd.breakdowns"]["outcome"] == "success"
     assert (
         by_section["cmcd.asn_labels"]["outcome"] == "error" and by_section["cmcd.asn_labels"]["activity"] == "overhead"
     )
@@ -3514,12 +3596,8 @@ def test_all_cmcd_tasks_preserve_request_and_page_correlation() -> None:
     expected_sections = {
         "cmcd.probe",
         "cmcd.timeseries",
-        "cmcd.top_content",
-        "cmcd.rebuffer_country",
-        "cmcd.rebuffer_asn",
-        "cmcd.object_type",
-        "cmcd.streaming_format",
-        "cmcd.session_duration",
+        "cmcd.sessions",
+        "cmcd.breakdowns",
         "cmcd.asn_labels",
     }
     assert {row["section"] for row in timings.values()} == expected_sections

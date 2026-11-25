@@ -373,8 +373,13 @@ export function buildPerfWaterfallSql(
   const { whereSql, params } = buildBaseWhere(req, availableColumns);
   const hasOttfb = !availableColumns || availableColumns.has("ottfb");
   const hasOttlb = !availableColumns || availableColumns.has("ottlb");
-  const ottfbExpr = hasOttfb ? "COALESCE(TRY_CAST(ottfb AS DOUBLE), 0.0) / 1000.0" : "0.0";
-  const ottlbExpr = hasOttlb ? "COALESCE(TRY_CAST(ottlb AS DOUBLE), 0.0) / 1000.0" : "0.0";
+  const ottfbExpr = hasOttfb
+    ? "CASE WHEN TRY_CAST(ottfb AS DOUBLE) > 0 THEN TRY_CAST(ottfb AS DOUBLE) / 1000.0 ELSE 0.0 END"
+    : "0.0";
+  const ottlbExpr =
+    hasOttfb && hasOttlb
+      ? "CASE WHEN TRY_CAST(ottfb AS DOUBLE) > 0 AND TRY_CAST(ottlb AS DOUBLE) > 0 THEN TRY_CAST(ottlb AS DOUBLE) / 1000.0 ELSE 0.0 END"
+      : "0.0";
 
   const sql = `
     SELECT

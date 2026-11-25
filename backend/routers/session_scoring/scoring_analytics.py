@@ -75,6 +75,23 @@ _SCORING_COLUMNS: frozenset[str] = frozenset(
     }
 )
 
+_COOKIE_COMPLIANCE_ALIASES: dict[str, str] = {
+    "missin": "missing",
+    "unknow": "unknown",
+    "tamper": "tampered",
+    "expire": "expired",
+}
+
+
+def _normalize_cookie_compliance(value: str | None) -> str | None:
+    """Normalize truncated 6-char VCL edge_cookie_compliance values."""
+    if value is None:
+        return None
+    cleaned = value.strip().lower()
+    if not cleaned:
+        return None
+    return _COOKIE_COMPLIANCE_ALIASES.get(cleaned, cleaned)
+
 
 def query_logs(service_id: str, sql: str, params: dict | tuple = ()) -> list[dict]:
     """Execute ClickHouse SQL against request_facts for ``service_id`` and return ``list[dict]``."""
@@ -124,7 +141,13 @@ def _scoring_source(table: str, cols: set[str] | None = None) -> str:
         "toFloat64OrNull(nullIf(custom_fields['edge_score'], '')) AS edge_score, "
         "toFloat64OrNull(nullIf(custom_fields['edge_score_l1'], '')) AS edge_score_l1, "
         "toFloat64OrNull(nullIf(custom_fields['edge_score_l2'], '')) AS edge_score_l2, "
-        "nullIf(custom_fields['edge_cookie_compliance'], '') AS edge_cookie_compliance, "
+        "multiIf("
+        "lower(trimBoth(custom_fields['edge_cookie_compliance'])) = '', CAST(NULL, 'Nullable(String)'), "
+        "lower(trimBoth(custom_fields['edge_cookie_compliance'])) = 'missin', 'missing', "
+        "lower(trimBoth(custom_fields['edge_cookie_compliance'])) = 'unknow', 'unknown', "
+        "lower(trimBoth(custom_fields['edge_cookie_compliance'])) = 'tamper', 'tampered', "
+        "lower(trimBoth(custom_fields['edge_cookie_compliance'])) = 'expire', 'expired', "
+        "lower(trimBoth(custom_fields['edge_cookie_compliance']))) AS edge_cookie_compliance, "
         "nullIf(custom_fields['edge_score_reason'], '') AS edge_score_reason, "
         "toInt64OrNull(nullIf(custom_fields['edge_score_rtt_us'], '')) AS edge_score_rtt_us, "
         "toInt64OrNull(nullIf(custom_fields['edge_score_exec_us'], '')) AS edge_score_exec_us "
@@ -316,7 +339,7 @@ def _fetch_session_events(
                 "ip": r.get("ip"),
                 "ua": r.get("ua"),
                 "edge_score": r.get("edge_score"),
-                "edge_cookie_compliance": r.get("edge_cookie_compliance"),
+                "edge_cookie_compliance": _normalize_cookie_compliance(r.get("edge_cookie_compliance")),
                 "edge_score_reason": r.get("edge_score_reason"),
             }
         )

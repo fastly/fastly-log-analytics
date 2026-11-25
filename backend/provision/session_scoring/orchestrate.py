@@ -94,6 +94,7 @@ _SCORING_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "sql_type": "VARCHAR",
         "value_type": "string",
         "bytes_estimate": 10,
+        "byte_limit": 64,
         "enabled": True,
     },
     {
@@ -105,6 +106,7 @@ _SCORING_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "sql_type": "VARCHAR",
         "value_type": "string",
         "bytes_estimate": 60,
+        "byte_limit": 384,
         "enabled": True,
     },
     {
@@ -120,6 +122,7 @@ _SCORING_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "sql_type": "VARCHAR",
         "value_type": "string",
         "bytes_estimate": 12,
+        "byte_limit": 256,
         "enabled": True,
     },
     {
@@ -171,6 +174,7 @@ _SCORING_CUSTOM_FIELDS: list[dict[str, Any]] = [
         "sql_type": "VARCHAR",
         "value_type": "string",
         "bytes_estimate": 18,
+        "byte_limit": 128,
         "enabled": True,
     },
 ]

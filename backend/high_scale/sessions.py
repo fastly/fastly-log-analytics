@@ -547,7 +547,7 @@ def sessions_endpoint(
         [
             *visible_fact_clauses("request", client=service.client, service_id=service.service_id),
             "event_timestamp >= {start_time:DateTime64(3)}",
-            "event_timestamp <= {end_time:DateTime64(3)}",
+            "event_timestamp < {end_time:DateTime64(3)}",
             *filter_clauses,
         ]
     )
@@ -685,7 +685,7 @@ def sessions_endpoint(
             cmcd_probe = service.client.execute(
                 "SELECT 1 AS c FROM cmcd_projection_facts WHERE service_id = {service_id:String} "
                 "AND event_timestamp >= {start_time:DateTime64(3)} "
-                "AND event_timestamp <= {end_time:DateTime64(3)} AND cmcd['sid'] != '' LIMIT 1",
+                "AND event_timestamp < {end_time:DateTime64(3)} AND cmcd['sid'] != '' LIMIT 1",
                 params,
             )
             has_cmcd = bool(cmcd_probe)
@@ -764,6 +764,8 @@ def sessions_detail(
         toInt64OrZero(custom_fields['resp_bytes']) AS resp_bytes,
         toFloat64OrNull(custom_fields['elapsed']) AS elapsed,
         toFloat64OrZero(custom_fields['tcp_rtt']) AS tcp_rtt,
+        custom_fields['cache'] AS cache,
+        custom_fields['pop'] AS pop,
         custom_fields['edge'] AS edge,
         custom_fields['edge_sid'] AS edge_sid,
         custom_fields['ua'] AS ua,

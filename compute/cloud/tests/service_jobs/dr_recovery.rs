@@ -2870,6 +2870,7 @@ fn bug_cloud_dr_07_fail_closed_endpoint_verification_protects_shared_bucket_abse
 
     // PROBE_2B: Non-2xx logging/fos must fail closed (RT-D2-PERSISTENT: 502 with 0 KV writes)
     // and deactivated service (409 active_version_required) leaves owned_endpoint_names == [] so customer SIEM survives teardown!
+    #[allow(clippy::single_element_loop)]
     for fault_path in ["/service/fixtureService/version/1/logging/fos"] {
         let p_2b = Platform::new();
         p_2b.adapter.seed_resource(
@@ -17843,6 +17844,7 @@ fn iter41_day_max_gen_bound_and_manifest_zero_gen_rejected() {
     use fastly_log_analytics::ingest::catalog::{Day, Head, Reference, VERSION};
     use std::collections::BTreeMap;
 
+    #[allow(clippy::identity_op)]
     let hour: i64 = 1_760_000_400 - (1_760_000_400 % 3600);
 
     // Case 1: Poisoned Day with max_gen > 9_007_199_254_740_991 must not abort recovery of a valid Day.

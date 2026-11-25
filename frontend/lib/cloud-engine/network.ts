@@ -263,6 +263,7 @@ export function asnTrendFromBuckets(
   };
   const lastScore = sorted.length ? sorted[sorted.length - 1].health_score : null;
   const latest = typeof lastScore === "number" && Number.isFinite(lastScore) ? lastScore : fallbackScore;
+  const current = typeof fallbackScore === "number" && Number.isFinite(fallbackScore) ? fallbackScore : latest;
   let hs1h = latest;
   let hs1w = latest;
   if (totalBucketCount > 1 && sorted.length > 0) {
@@ -271,8 +272,8 @@ export function asnTrendFromBuckets(
     hs1h = avg(sorted.slice(Math.max(0, sorted.length - n1h)));
   }
   let trend: "improving" | "degrading" | "stable" = "stable";
-  if (latest != null && hs1h != null) {
-    const delta = latest - hs1h;
+  if (current != null && hs1h != null) {
+    const delta = current - hs1h;
     if (delta < -5) trend = "degrading";
     else if (delta > 5) trend = "improving";
   }
@@ -448,8 +449,20 @@ export function networkScans(path: string, sections: unknown): NetworkScan[] | n
  * filtered ones. Null when the filters can't name theirs.
  */
 export function networkScanColumns(path: string, params: Record<string, unknown>): string[] | null {
-  const { filters } = params;
-  if (filters != null && filters !== "" && (typeof filters !== "object" || Array.isArray(filters))) return null;
+  let filters: unknown = params.filters;
+  if (typeof filters === "string") {
+    const trimmed = filters.trim();
+    if (!trimmed) {
+      filters = null;
+    } else {
+      try {
+        filters = JSON.parse(trimmed);
+      } catch {
+        return null;
+      }
+    }
+  }
+  if (filters != null && (typeof filters !== "object" || Array.isArray(filters))) return null;
   const scans = networkScans(path, params.sections);
   const present = (value: unknown) => value != null && value !== "";
   const parts = qualityParts(params.quality_parts);

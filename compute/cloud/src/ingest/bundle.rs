@@ -650,6 +650,7 @@ const TRANSPORT_COLS: &[(C, Op)] = &[
     (C::PlossCount, Sum),
     (C::DeliveryRateSum, Sum),
     (C::DeliveryRateCount, Sum),
+    (C::RetransCount, Sum),
     (C::RttHist, Merge),
 ];
 
@@ -4419,7 +4420,7 @@ mod tests {
         let bundle = acc.write(1_800_000_000, Some(Unit::Hour), "hour").unwrap();
         assert_eq!(
             hex::encode(Sha256::digest(&bundle)),
-            "a3b8bb768332d976a0a25ffffcf30476b27a557af7eb1e24894490cbe489c589"
+            "2e1bafa33986a97cd9ae055d5833eeb508fae298665ba758db3b4da965f01b77"
         );
         let resumed = Acc::decode_partial(&acc.encode_partial(), Unit::Hour).unwrap();
         assert_eq!(

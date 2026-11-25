@@ -171,12 +171,15 @@ describe("Feature F22 — Fastly Value cloud-engine", () => {
       expect(res.overview?.threats_blocked).toBe(1);
       expect(res.security).toMatchObject({
         waf_blocked: 1,
-        waf_logged: 2,
+        waf_logged: 1,
         waf_passed: 1,
       });
+      expect(
+        (res.security?.waf_blocked ?? 0) + (res.security?.waf_logged ?? 0) + (res.security?.waf_passed ?? 0),
+      ).toBeLessThanOrEqual(3);
       expect(res.security?.threat_time_series).toEqual([
         { time: "2023-11-14T00:00:00.000Z", value: 1, category: "blocked" },
-        { time: "2023-11-14T00:00:00.000Z", value: 2, category: "logged" },
+        { time: "2023-11-14T00:00:00.000Z", value: 1, category: "logged" },
       ]);
       expect(res.bots).toMatchObject({
         total_requests: 4,

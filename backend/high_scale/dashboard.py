@@ -7,6 +7,7 @@ from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from backend.core.clickhouse import ClickHouseError
 from backend.core.request_telemetry import HighScaleSections
 from backend.high_scale._common import (
     _FIELD_DIMENSIONS,
@@ -16,6 +17,7 @@ from backend.high_scale._common import (
     normalize_request_dimension_values,
     request_filter_clauses,
     visible_fact_clauses,
+    visible_publication_fence_sql,
     visible_rollup_publication_fence_sql,
 )
 from backend.high_scale._common import (
@@ -1262,6 +1264,37 @@ def dashboard_aggregates(
             raw_total = responses[field].request_count
             if field == "waf_sig_ind" and not raw_entries and "waf_sig" in responses:
                 raw_entries, raw_total = _waf_sig_ind_from_raw_rows(responses["waf_sig"].top_values)  # type: ignore[assignment]
+            if (
+                field == "waf_sig_ind"
+                and not raw_entries
+                and is_real_ch
+                and not hasattr(service.client, "responses")
+                and start is not None
+                and end is not None
+            ):
+                try:
+                    fence = visible_publication_fence_sql("request")
+                    fb_rows = trace.run(
+                        "waf_sig_ind_fallback",
+                        lambda: service.client.execute(
+                            "SELECT custom_fields['waf_sig'] AS sig, count() AS cnt "
+                            "FROM request_facts "
+                            "PREWHERE service_id={service_id:String} "
+                            "AND event_timestamp >= {start:DateTime64(3)} "
+                            "AND event_timestamp < {end:DateTime64(3)} "
+                            f"AND {fence} AND custom_fields['waf_sig'] != '' "
+                            "GROUP BY sig ORDER BY cnt DESC LIMIT 200",
+                            {
+                                "service_id": service.service_id,
+                                "start": start.astimezone(UTC),
+                                "end": end.astimezone(UTC),
+                            },
+                        ),
+                        source="fact",
+                    )
+                    raw_entries, raw_total = _waf_sig_ind_from_raw_rows([(r.get("sig"), r.get("cnt")) for r in fb_rows])  # type: ignore[assignment]
+                except ClickHouseError:
+                    pass
             shaped_rows, card_total = _shape_card_aggregate(field, raw_entries, raw_total, limit=10)
             if field == "asn":
                 _enrich_asn_card_entries(shaped_rows, service.service_id)

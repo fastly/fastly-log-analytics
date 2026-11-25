@@ -786,7 +786,7 @@ def _base_sql(detection: Detection, insight_id: str) -> str:
         "event_timestamp < {window_start:DateTime64(3)} AS is_b, "
         "event_timestamp >= {window_start:DateTime64(3)} AS is_w "
         f"FROM request_facts{prewhere} WHERE {scope} AND event_timestamp >= {lower} "
-        f"AND event_timestamp <= {{window_end:DateTime64(3)}}{row_filter}) {detection.sql}"
+        f"AND event_timestamp < {{window_end:DateTime64(3)}}{row_filter}) {detection.sql}"
     )
 
 

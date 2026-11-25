@@ -225,6 +225,27 @@ def _hourly_edge_time_clause(start_utc: datetime, end_utc: datetime, h_start: da
     return f"({' OR '.join(parts)})"
 
 
+_CONN_SMALL = "('2', '3', '4', '5', '2-5', '2\u20135')"
+_CONN_MEDIUM = (
+    "('6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '6-20', '6\u201320')"
+)
+_CONN_SENTINEL = "('', '0', '-', '?', 'null', 'NULL', 'none', 'None', 'N/A', 'n/a', 'unknown', 'Unknown', '(none)')"
+_CONN_REQUESTS_BUCKET_SQL = (
+    "CASE "
+    "WHEN value IN ('1', '21+') THEN value "
+    f"WHEN value IN {_CONN_SMALL} THEN '2\u20135' "
+    f"WHEN value IN {_CONN_MEDIUM} THEN '6\u201320' "
+    f"WHEN value NOT IN {_CONN_SENTINEL} AND value NOT LIKE '-%' THEN '21+' "
+    "ELSE '' "
+    "END"
+)
+
+
+def _bucketed_dim_value_sql(dim_expr: str = "dimension") -> str:
+    """Bucket ``conn_requests`` integers in ANSI SQL before ``GROUP BY``/``LIMIT`` so ``21+`` keeps tail counts."""
+    return f"CASE WHEN {dim_expr} = 'conn_requests' THEN ({_CONN_REQUESTS_BUCKET_SQL}) ELSE value END"
+
+
 def _require_window_bounds(start: datetime | None, end: datetime | None) -> tuple[datetime, datetime]:
     if start is None or end is None:
         raise ValueError("aggregate fact query requires both range bounds")
@@ -265,8 +286,9 @@ def _query_fact_aggregates(
         f"WHERE {' AND '.join(clauses)}"
     )
     totals = client.execute(f"SELECT dimension, count() AS total_count FROM ({fact_values}) GROUP BY dimension", params)
+    fact_val_sql = _bucketed_dim_value_sql()
     rows = client.execute(
-        f"SELECT dimension, value, count() AS aggregate_count FROM ({fact_values}) "
+        f"SELECT dimension, {fact_val_sql} AS value, count() AS aggregate_count FROM ({fact_values}) "
         "GROUP BY dimension, value "
         "ORDER BY dimension ASC, aggregate_count DESC, value ASC "
         f"LIMIT {max(1, int(limit))} BY dimension",
@@ -309,6 +331,7 @@ def query_clickhouse_aggregate(
         clauses.extend(["bucket_start >= {start:DateTime64(3)}", f"bucket_start {end_operator} {{end:DateTime64(3)}}"])
         params.update({"start": start, "end": end})
     row_limit = max(1, int(limit))
+    single_val_sql = _CONN_REQUESTS_BUCKET_SQL if dimension == "conn_requests" else "value"
     try:
         if partial_minute_window:
             start, end = _require_window_bounds(request.start, request.end)
@@ -340,7 +363,7 @@ def query_clickhouse_aggregate(
                     f"AND {rollup_fence}"
                 )
                 top_union = (
-                    "SELECT value, sum(request_count) AS request_count FROM request_aggregates_1h "
+                    f"SELECT {single_val_sql} AS value, sum(request_count) AS request_count FROM request_aggregates_1h "
                     "WHERE service_id={service_id:String} AND dimension={dimension:String} "
                     f"AND bucket_start >= {{h_start:DateTime64(3)}} AND bucket_start < {{h_end:DateTime64(3)}} "
                     f"AND {rollup_fence} "
@@ -352,7 +375,7 @@ def query_clickhouse_aggregate(
                         f"WHERE service_id={{service_id:String}} AND dimension={{dimension:String}} AND {edge_clause} AND {fence}"
                     )
                     top_union += (
-                        " UNION ALL SELECT value, sum(request_count) AS request_count FROM request_aggregates "
+                        f" UNION ALL SELECT {single_val_sql} AS value, sum(request_count) AS request_count FROM request_aggregates "
                         f"WHERE service_id={{service_id:String}} AND dimension={{dimension:String}} AND {edge_clause} AND {fence} "
                         "GROUP BY value"
                     )
@@ -371,7 +394,7 @@ def query_clickhouse_aggregate(
                     f"SELECT sum({metric}) AS total_count FROM {table} WHERE {' AND '.join(clauses)}", params
                 )
                 rows = client.execute(
-                    f"SELECT value, sum({metric}) AS aggregate_count "
+                    f"SELECT {single_val_sql} AS value, sum({metric}) AS aggregate_count "
                     f"FROM {table} WHERE {' AND '.join(clauses)} "
                     f"GROUP BY value ORDER BY aggregate_count DESC, value ASC LIMIT {row_limit}",
                     params,
@@ -498,6 +521,8 @@ def query_clickhouse_aggregates_batch(
                 clauses_when.append(f"WHEN {{{k}:String}} THEN {lim}")
         return None, f"CASE dimension {' '.join(clauses_when)} ELSE {default_limit} END"
 
+    batch_val_sql = _bucketed_dim_value_sql()
+
     def _build_minute_top_query(dims_subset: tuple[str, ...]) -> tuple[str, dict[str, Any]]:
         sub_placeholders, sub_params = _dimension_query_params(params, dims_subset)
         sub_clauses = [
@@ -506,7 +531,7 @@ def query_clickhouse_aggregates_batch(
         uniform_limit, multi_limit_expr = _per_dim_limit_expr(dims_subset, sub_params)
         if uniform_limit is not None:
             sql = (
-                f"SELECT dimension, value, sum({metric}) AS aggregate_count "
+                f"SELECT dimension, {batch_val_sql} AS value, sum({metric}) AS aggregate_count "
                 f"FROM {table} WHERE {' AND '.join(sub_clauses)} "
                 "GROUP BY dimension, value "
                 "ORDER BY dimension ASC, aggregate_count DESC, value ASC "
@@ -515,7 +540,7 @@ def query_clickhouse_aggregates_batch(
             return sql, sub_params
         sql = (
             "SELECT dimension, value, aggregate_count FROM ("
-            f"SELECT dimension, value, sum({metric}) AS aggregate_count, "
+            f"SELECT dimension, {batch_val_sql} AS value, sum({metric}) AS aggregate_count, "
             f"row_number() OVER (PARTITION BY dimension ORDER BY sum({metric}) DESC, value ASC) AS _rn "
             f"FROM {table} WHERE {' AND '.join(sub_clauses)} "
             "GROUP BY dimension, value"
@@ -565,14 +590,14 @@ def query_clickhouse_aggregates_batch(
                     sub_placeholders, sub_params = _dimension_query_params(h_params, dims_subset)
                     dim_in = f"dimension IN ({', '.join(sub_placeholders)})"
                     union_sql = (
-                        "SELECT dimension, value, request_count FROM request_aggregates_1h "
+                        f"SELECT dimension, {batch_val_sql} AS value, request_count FROM request_aggregates_1h "
                         f"WHERE service_id={{service_id:String}} AND {dim_in} "
                         "AND bucket_start >= {h_start:DateTime64(3)} AND bucket_start < {h_end:DateTime64(3)} "
                         f"AND {rollup_fence}"
                     )
                     if edge_clause is not None:
                         union_sql += (
-                            " UNION ALL SELECT dimension, value, request_count FROM request_aggregates "
+                            f" UNION ALL SELECT dimension, {batch_val_sql} AS value, request_count FROM request_aggregates "
                             f"WHERE service_id={{service_id:String}} AND {dim_in} AND {edge_clause} AND {fence}"
                         )
                     uniform_limit, multi_limit_expr = _per_dim_limit_expr(dims_subset, sub_params)
