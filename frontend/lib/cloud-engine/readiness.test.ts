@@ -1356,7 +1356,7 @@ it("SEC-T5-ITER34-FE-02: redacts Stage-2A/2B delimited/spaced secrets, spaced SQ
       ['Runtime Error: {"a": "", "secret": server}', ["secret", "server"], "Error: Runtime Error: [redacted]: [redacted], [redacted]"],
       ['Runtime Error: {"secret": true, "token": false, "api_key": null}', ["secret", "true", "token", "false", "api_key", "null"], "Error: Runtime Error: [redacted], [redacted], [redacted]"],
       ['Runtime Error: {"session_id": [1, "server", true], "auth_code": {"nested": true, "cache": 847291}} rejected', ["session_id", "server", "true", "auth_code", "nested", "cache", "847291"], "Error: Runtime Error: [redacted], [redacted] rejected"],
-      ['Runtime Error: {"password_hash": "val\\"847291", "pin": server} rejected', ["password_hash", "847291", "pin", "server"], "Error: Runtime Error: [redacted], [redacted] rejected"],
+      ['Runtime Error: {"password_hash": "val\\"847291", "pin": server} rejected', ["password_hash", "847291", "pin", "server"], "Error: Runtime Error: [redacted]"],
       ["Runtime Error: {'secret': 847291, 'token': cache} rejected", ["secret", "847291", "token", "cache"], "Error: Runtime Error: [redacted], [redacted] rejected"],
 
       // Finding 7: Suffix-qualified secret stems & session
@@ -2902,6 +2902,36 @@ it("SEC-T5-ITER40-FE-03: prevents non-contraction apostrophe mismatch and cross-
         "Error: 'a\\' \\\\can't \\doesn't HTTP 403 100 MB session valid'",
         ["HTTP", "403", "100", "MB", "session", "valid"],
         "Error: Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "token": "a\\" and " HTTP 403 100 MB session valid"',
+        ["HTTP", "403", "100", "MB", "session", "valid"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "api_key": \'a\\\' and \' HTTP 403 100 MB session valid\'',
+        ["HTTP", "403", "100", "MB", "session", "valid"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "token": `a\\` and ` HTTP 403 100 MB session valid`',
+        ["HTTP", "403", "100", "MB", "session", "valid"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Cookie": "sid=a\\" ; " HTTP 403 100 MB session valid"',
+        ["HTTP", "403", "100", "MB", "session", "valid"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": Bearer "a\\" and " HTTP 403 100 MB session valid"',
+        ["HTTP", "403", "100", "MB", "session", "valid"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": Digest realm="a\\", response=" HTTP 403 100 MB session valid"',
+        ["HTTP", "403", "100", "MB", "session", "valid"],
+        "Error: Runtime Error: [redacted]",
       ],
     ];
     for (const [msg, forbidden, expectedExact] of cases) {

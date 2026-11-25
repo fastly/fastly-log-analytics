@@ -454,7 +454,7 @@ _EMBEDDED_IPV6_RE = re.compile(
     r"[A-Fa-f0-9]{1,4}(?::[A-Fa-f0-9]{1,4}){2,7}"
     r"|(?:[A-Fa-f0-9]{1,4}:){1,7}:(?:[A-Fa-f0-9]{1,4}(?::[A-Fa-f0-9]{1,4}){0,5})?"
     r"|::(?:[A-Fa-f0-9]{1,4}(?::[A-Fa-f0-9]{1,4}){0,6})"
-    r")(?![A-Za-z0-9]|\.\d|:(?!(?:[1-9]\d{1,4})(?![A-Za-z0-9]|:(?:[A-Fa-f0-9]{1,4}(?![A-Za-z0-9])|:)))(?:[A-Fa-f0-9]{1,4}(?![A-Za-z0-9])|:))"
+    r")(?![A-Za-z0-9]|\.\d|:(?!(?:[1-9]\d{1,4})(?![A-Za-z0-9]|\.\d|:(?:[A-Fa-f0-9]{1,4}(?![A-Za-z0-9])|:)))(?:[A-Fa-f0-9]{1,4}(?![A-Za-z0-9])|:))"
     r")"
 )
 _SAVED_VIEW_STRUCTURAL_KEYS = frozenset(
@@ -904,9 +904,13 @@ def scrub_ip_text(val: str) -> str:
     if not isinstance(val, str) or not val or ("." not in val and ":" not in val):
         return val
     ua_spans: list[tuple[int, int]] = []
+    ua_idx = 0
 
     def _in_ua(start: int, end: int) -> bool:
-        return any(s <= start and end <= e for s, e in ua_spans)
+        nonlocal ua_idx
+        while ua_idx < len(ua_spans) and ua_spans[ua_idx][1] < start:
+            ua_idx += 1
+        return ua_idx < len(ua_spans) and ua_spans[ua_idx][0] <= start and end <= ua_spans[ua_idx][1]
 
     def _sub_v4(match: re.Match[str]) -> str:
         if _in_ua(match.start(), match.end()):

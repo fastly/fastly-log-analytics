@@ -6058,6 +6058,19 @@ def test_sec_t5_iter40_scrub_ip_text_ipv6_trailing_colon_port_and_short_hex() ->
     assert scrub_ip_text("2001:db8::1:error") == "2001:db8:::error"
     assert scrub_ip_text("2001:db8::1:failed") == "2001:db8:::failed"
 
+    # 8. ITER44: 1-4 hex / timestamp prefix before 6-group IPv4-embedded IPv6 with 2-3 digit 1st octet,
+    #    plus O(N) performance on 64 KiB UA-heavy input:
+    import time as _time
+
+    assert scrub_ip_text("a:2001:db8:1:2:3:4:192.168.10.20") == "a:2001:db8:1::"
+    assert scrub_ip_text("cafe:2001:db8:1:2:3:4:203.0.113.42") == "cafe:2001:db8:1::"
+    assert scrub_ip_text("c1:2001:db8:1:2:3:4:10.0.0.1") == "c1:2001:db8:1::"
+    assert scrub_ip_text("16:42:00:2001:db8:1:2:3:4:203.0.113.42") == "16:42:00:2001:db8:1::"
+    ua_64k = "Chrome/1.2.3.4 " * 4369
+    t0 = _time.perf_counter()
+    assert scrub_ip_text(ua_64k) == ua_64k
+    assert (_time.perf_counter() - t0) < 0.15
+
 
 @pytest.mark.security_regression
 def test_sec_t5_iter40_live_chdb_paren_free_replace() -> None:

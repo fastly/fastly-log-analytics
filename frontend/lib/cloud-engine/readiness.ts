@@ -1034,7 +1034,62 @@ function isSecretJsonKey(key: string): boolean {
   return hasKeyStemSegment(key, SECRET_STEMS, true);
 }
 
-function scanJsonValueEnd(line: string, p: number): number {
+type QuoteEscapeState = {
+  backslashEscapesQuotes: boolean;
+  sawAmbiguousBackslashQuote: boolean;
+};
+
+function scanQuotedLiteralEnd(
+  line: string,
+  openIdx: number,
+  q: string,
+  escapeState?: QuoteEscapeState,
+): number {
+  const len = line.length;
+  const useBackslash = escapeState ? escapeState.backslashEscapesQuotes : true;
+  let k = openIdx + 1;
+  let consecutiveBackslashes = 0;
+  while (k < len) {
+    const c = line[k];
+    if (useBackslash) {
+      if (c === "\\") {
+        const nextCh = k + 1 < len ? line[k + 1] : "";
+        if (nextCh === "\\" || nextCh === q) {
+          k += 2;
+          continue;
+        }
+        k += 1;
+        continue;
+      }
+      if (c === q) {
+        return k + 1;
+      }
+      k += 1;
+    } else {
+      if (c === "\\") {
+        consecutiveBackslashes += 1;
+        k += 1;
+        continue;
+      }
+      if (c === q) {
+        if ((consecutiveBackslashes & 1) === 1 && escapeState) {
+          escapeState.sawAmbiguousBackslashQuote = true;
+        }
+        consecutiveBackslashes = 0;
+        if (k + 1 < len && line[k + 1] === q) {
+          k += 2;
+          continue;
+        }
+        return k + 1;
+      }
+      consecutiveBackslashes = 0;
+      k += 1;
+    }
+  }
+  return len;
+}
+
+function scanJsonValueEnd(line: string, p: number, escapeState?: QuoteEscapeState): number {
   const len = line.length;
   if (p >= len || line.startsWith("[url]", p)) return p;
   let k = p;
@@ -1049,19 +1104,7 @@ function scanJsonValueEnd(line: string, p: number): number {
     const ch = line[k]!;
     if (ch === '"' || ch === "'" || ch === "`") {
       sawOnlySimpleNumber = false;
-      k += 1;
-      while (k < len) {
-        if (line[k] === "\\") {
-          k += 2;
-          continue;
-        }
-        if (line[k] === ch) {
-          k += 1;
-          break;
-        }
-        k += 1;
-      }
-      if (k > len) k = len;
+      k = scanQuotedLiteralEnd(line, k, ch, escapeState);
       continue;
     }
     if (ch === "{" || ch === "[" || ch === "(") {
@@ -1072,20 +1115,7 @@ function scanJsonValueEnd(line: string, p: number): number {
       while (k < len && depth > 0) {
         const c = line[k]!;
         if (c === '"' || c === "'" || c === "`") {
-          const q = c;
-          k += 1;
-          while (k < len) {
-            if (line[k] === "\\") {
-              k += 2;
-              continue;
-            }
-            if (line[k] === q) {
-              k += 1;
-              break;
-            }
-            k += 1;
-          }
-          if (k > len) k = len;
+          k = scanQuotedLiteralEnd(line, k, c, escapeState);
           continue;
         }
         if (line.startsWith("[redacted]", k)) {
@@ -1131,7 +1161,12 @@ function tryScanRawUrlEnd(line: string, pos: number): number {
   return k;
 }
 
-function consumeJsonSecretValueAfterQuote(line1: string, pos: number, keyCandidate: string): number {
+function consumeJsonSecretValueAfterQuote(
+  line1: string,
+  pos: number,
+  keyCandidate: string,
+  escapeState?: QuoteEscapeState,
+): number {
   const len = line1.length;
   let p = pos;
   while (p < len && isInlineWs(line1[p])) p += 1;
@@ -1183,16 +1218,16 @@ function consumeJsonSecretValueAfterQuote(line1: string, pos: number, keyCandida
   let valEnd: number;
   if (valStartsQuotedOrGroup) {
     const kvEnd = valStartsQuoted && (cookieMode || authParamMode)
-      ? tryScanKeyValueParamEnd(line1, valStart, cookieMode, true)
+      ? tryScanKeyValueParamEnd(line1, valStart, cookieMode, true, escapeState)
       : -1;
-    valEnd = kvEnd !== -1 ? kvEnd : scanJsonValueEnd(line1, valStart);
+    valEnd = kvEnd !== -1 ? kvEnd : scanJsonValueEnd(line1, valStart, escapeState);
     if (valEnd > valStart && (cookieMode || authParamMode)) {
-      valEnd = scanContinuationParamsEnd(line1, valEnd, cookieMode, authParamMode, true);
+      valEnd = scanContinuationParamsEnd(line1, valEnd, cookieMode, authParamMode, true, escapeState);
     }
   } else if (cookieMode || authParamMode) {
-    valEnd = scanSecretHeaderOrValueEnd(line1, valStart, keyCandidate, matchedScheme, true, true);
+    valEnd = scanSecretHeaderOrValueEnd(line1, valStart, keyCandidate, matchedScheme, true, true, escapeState);
   } else {
-    valEnd = scanJsonValueEnd(line1, valStart);
+    valEnd = scanJsonValueEnd(line1, valStart, escapeState);
   }
 
   if (valEnd > valStart) return valEnd;
@@ -1328,7 +1363,9 @@ function scanQuotesAndUrlsPass(
       }
       if (i > limit) i = limit;
       if (typedLen === 0 && contentEnd > contentStart && i < limit) {
-        i = Math.min(limit, consumeJsonSecretValueAfterQuote(line1, i, line1.slice(contentStart, contentEnd)));
+        const subState: QuoteEscapeState = { backslashEscapesQuotes, sawAmbiguousBackslashQuote };
+        i = Math.min(limit, consumeJsonSecretValueAfterQuote(line1, i, line1.slice(contentStart, contentEnd), subState));
+        sawAmbiguousBackslashQuote = subState.sawAmbiguousBackslashQuote;
       }
       spans.push({ start: spanStart, end: i, replacement: "[redacted]" });
       outChars += 10;
@@ -1379,7 +1416,9 @@ function scanQuotesAndUrlsPass(
       }
       if (i > limit) i = limit;
       if (contentEnd > contentStart && i < limit) {
-        i = Math.min(limit, consumeJsonSecretValueAfterQuote(line1, i, line1.slice(contentStart, contentEnd)));
+        const subState: QuoteEscapeState = { backslashEscapesQuotes, sawAmbiguousBackslashQuote };
+        i = Math.min(limit, consumeJsonSecretValueAfterQuote(line1, i, line1.slice(contentStart, contentEnd), subState));
+        sawAmbiguousBackslashQuote = subState.sawAmbiguousBackslashQuote;
       }
       spans.push({ start: spanStart, end: i, replacement: "[redacted]" });
       outChars += 10;
@@ -1635,6 +1674,7 @@ function scanSingleSecretValueEnd(
   allowUrl = false,
   allowComma = false,
   allowQuoted = false,
+  escapeState?: QuoteEscapeState,
 ): number {
   const len = line.length;
   if (p >= len) return p;
@@ -1661,20 +1701,7 @@ function scanSingleSecretValueEnd(
     }
     if (allowQuoted && (line[k] === '"' || line[k] === "'" || line[k] === "`")) {
       sawOnlySimpleNumber = false;
-      const q = line[k]!;
-      k += 1;
-      while (k < len) {
-        if (line[k] === "\\") {
-          k += 2;
-          continue;
-        }
-        if (line[k] === q) {
-          k += 1;
-          break;
-        }
-        k += 1;
-      }
-      if (k > len) k = len;
+      k = scanQuotedLiteralEnd(line, k, line[k]!, escapeState);
       continue;
     }
     if (line[k] === "(" || line[k] === "[" || line[k] === "{") {
@@ -1697,6 +1724,7 @@ function tryScanKeyValueParamEnd(
   p: number,
   isCookie: boolean,
   allowQuoted = false,
+  escapeState?: QuoteEscapeState,
 ): number {
   const len = line.length;
   let k = p;
@@ -1705,14 +1733,34 @@ function tryScanKeyValueParamEnd(
     k = p + 10;
   } else if (allowQuoted && (line[p] === '"' || line[p] === "'" || line[p] === "`")) {
     const q = line[p]!;
+    const useBackslash = escapeState ? escapeState.backslashEscapesQuotes : true;
     k = p + 1;
     const keyLimit = Math.min(len, k + 64);
-    while (k < keyLimit && line[k] !== q) {
-      if (line[k] === "\\") {
-        k += 2;
-        continue;
+    let consecutiveBackslashes = 0;
+    while (k < keyLimit) {
+      if (useBackslash) {
+        if (line[k] === "\\") {
+          const nextCh = k + 1 < len ? line[k + 1] : "";
+          k += nextCh === "\\" || nextCh === q ? 2 : 1;
+          continue;
+        }
+        if (line[k] === q) break;
+        k += 1;
+      } else {
+        if (line[k] === "\\") {
+          consecutiveBackslashes += 1;
+          k += 1;
+          continue;
+        }
+        if (line[k] === q) {
+          if ((consecutiveBackslashes & 1) === 1 && escapeState) {
+            escapeState.sawAmbiguousBackslashQuote = true;
+          }
+          break;
+        }
+        consecutiveBackslashes = 0;
+        k += 1;
       }
-      k += 1;
     }
     if (k >= len || line[k] !== q || k === p + 1) return -1;
     keyLower = line.slice(p + 1, k).toLowerCase();
@@ -1751,7 +1799,7 @@ function tryScanKeyValueParamEnd(
       return vStart + semiRel;
     }
   }
-  let vEnd = scanSingleSecretValueEnd(line, vStart, true, true, isCookie, allowQuoted);
+  let vEnd = scanSingleSecretValueEnd(line, vStart, true, true, isCookie, allowQuoted, escapeState);
   if (vEnd > vStart && line.slice(vStart, vEnd).endsWith("[url]")) {
     let afterUrl = vEnd;
     const afterUrlWsLimit = Math.min(len, vEnd + 16);
@@ -1759,7 +1807,7 @@ function tryScanKeyValueParamEnd(
     if (line[afterUrl] === "=") {
       let val2Start = afterUrl + 1;
       while (val2Start < len && isInlineWs(line[val2Start])) val2Start += 1;
-      const val2End = scanSingleSecretValueEnd(line, val2Start, true, true, isCookie, allowQuoted);
+      const val2End = scanSingleSecretValueEnd(line, val2Start, true, true, isCookie, allowQuoted, escapeState);
       vEnd = val2End > val2Start ? val2End : afterUrl + 1;
     }
   }
@@ -1772,6 +1820,7 @@ function scanContinuationParamsEnd(
   cookieMode: boolean,
   authParamMode: boolean,
   allowQuoted = false,
+  escapeState?: QuoteEscapeState,
 ): number {
   const len = line.length;
   let end = startEnd;
@@ -1794,7 +1843,7 @@ function scanContinuationParamsEnd(
         if (line[ws] === "=") {
           let vStart = ws + 1;
           while (vStart < len && isInlineWs(line[vStart])) vStart += 1;
-          const vEnd = scanSingleSecretValueEnd(line, vStart, true, true, true, allowQuoted);
+          const vEnd = scanSingleSecretValueEnd(line, vStart, true, true, true, allowQuoted, escapeState);
           end = vEnd > vStart ? vEnd : ws + 1;
         } else {
           end = afterUrl;
@@ -1808,7 +1857,7 @@ function scanContinuationParamsEnd(
           continue;
         }
       }
-      const kvNext = tryScanKeyValueParamEnd(line, next, true, allowQuoted);
+      const kvNext = tryScanKeyValueParamEnd(line, next, true, allowQuoted, escapeState);
       if (kvNext !== -1) {
         end = kvNext;
         continue;
@@ -1845,7 +1894,7 @@ function scanContinuationParamsEnd(
         if (line[ws] === "=") {
           let vStart = ws + 1;
           while (vStart < len && isInlineWs(line[vStart])) vStart += 1;
-          const vEnd = scanSingleSecretValueEnd(line, vStart, true, true, false, allowQuoted);
+          const vEnd = scanSingleSecretValueEnd(line, vStart, true, true, false, allowQuoted, escapeState);
           end = vEnd > vStart ? vEnd : ws + 1;
         } else {
           end = afterUrl;
@@ -1859,7 +1908,7 @@ function scanContinuationParamsEnd(
           continue;
         }
       }
-      const kvNext = tryScanKeyValueParamEnd(line, next, false, allowQuoted);
+      const kvNext = tryScanKeyValueParamEnd(line, next, false, allowQuoted, escapeState);
       if (kvNext !== -1) {
         end = kvNext;
         continue;
@@ -1886,21 +1935,22 @@ function scanSecretHeaderOrValueEnd(
   authScheme: string,
   allowRedacted = true,
   allowQuoted = false,
+  escapeState?: QuoteEscapeState,
 ): number {
   const cookieMode = isCookieKey(keyName);
   const authParamMode = isMultiParamAuthHeader(keyName, authScheme);
   const allowUrl = cookieMode || authParamMode;
   let end: number;
   if (cookieMode || authParamMode) {
-    const kvEnd = tryScanKeyValueParamEnd(line, p, cookieMode, allowQuoted);
+    const kvEnd = tryScanKeyValueParamEnd(line, p, cookieMode, allowQuoted, escapeState);
     end = kvEnd !== -1
       ? kvEnd
-      : scanSingleSecretValueEnd(line, p, allowRedacted, allowUrl, cookieMode && !allowQuoted, allowQuoted);
+      : scanSingleSecretValueEnd(line, p, allowRedacted, allowUrl, cookieMode && !allowQuoted, allowQuoted, escapeState);
   } else {
-    end = scanSingleSecretValueEnd(line, p, allowRedacted, false, false, allowQuoted);
+    end = scanSingleSecretValueEnd(line, p, allowRedacted, false, false, allowQuoted, escapeState);
   }
   if (end <= p) return p;
-  return scanContinuationParamsEnd(line, end, cookieMode, authParamMode, allowQuoted);
+  return scanContinuationParamsEnd(line, end, cookieMode, authParamMode, allowQuoted, escapeState);
 }
 
 function tryMatchParameterizedDuckDbType(line: string, pos: number): { text: string; end: number } | null {
