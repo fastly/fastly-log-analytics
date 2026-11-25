@@ -1200,10 +1200,11 @@ describe('Insights page barrel export', () => {
     expect(mod.InsightsClient).toBe(clientMod.InsightsClient)
   })
 
-  it('seeds SSR data even when start_time/end_time/range are in searchParams, and skips when filters are set', async () => {
+  it('seeds SSR data even when start_time/end_time/range are in searchParams, fetches bootstrap once, and skips when filters are set', async () => {
     const upstream = await import('@/lib/ssr/upstream')
     const resolveSpy = vi.spyOn(upstream, 'resolvePageServiceId').mockResolvedValue('svc-1')
     const bootSpy = vi.spyOn(upstream, 'fetchBootstrapServerSide').mockResolvedValue({
+      active_service_id: 'svc-1',
       log_extents: { earliest_log_at: '2026-11-24T00:00:00Z', _is_cached: false, configured: true },
     } as Awaited<ReturnType<typeof upstream.fetchBootstrapServerSide>>)
     const insightsSpy = vi.spyOn(upstream, 'fetchInsightsServerSide').mockResolvedValue({
@@ -1221,6 +1222,11 @@ describe('Insights page barrel export', () => {
         }),
       })
       expect(insightsSpy).toHaveBeenCalledTimes(1)
+      expect(insightsSpy).toHaveBeenCalledWith('svc-1', expect.anything(), null, null)
+      expect(bootSpy).toHaveBeenCalledTimes(1)
+      expect(resolveSpy).not.toHaveBeenCalled()
+      expect(upstream.INSIGHTS_SSR_TIMEOUT_MS).toBeLessThanOrEqual(1000)
+      expect(upstream.SECURITY_SSR_TIMEOUT_MS).toBeLessThanOrEqual(1000)
 
       insightsSpy.mockClear()
       await InsightsPage({

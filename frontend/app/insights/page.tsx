@@ -27,13 +27,18 @@ export default async function InsightsPage({
 }) {
   const params: ReportSearchParams =
     process.env.STATIC_EXPORT === '1' ? {} : await searchParams
-  const serviceId = await resolvePageServiceId(params)
   const initialWindow = firstParam(params.window)
   const initialBaseline = firstParam(params.baseline)
   // Insights does not depend on start_time/end_time/range; seed SSR whenever no
   // report filters are active so cold loads render insight cards at FCP.
   const canSeed = !params.filters && !isCloudMode()
   const bootstrap = canSeed ? await fetchBootstrapServerSide() : null
+  const urlServiceId = firstParam(params.service)
+  const serviceId = canSeed
+    ? (urlServiceId && /^[A-Za-z0-9_-]{1,64}$/.test(urlServiceId)
+        ? urlServiceId
+        : bootstrap?.active_service_id ?? undefined)
+    : await resolvePageServiceId(params)
   const seed = canSeed
     ? await fetchInsightsServerSide(
         serviceId,

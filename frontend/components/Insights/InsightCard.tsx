@@ -26,12 +26,6 @@ import { cn, formatCount, formatCountMaybe, keyByOccurrence } from '@/lib/utils'
 import { useServiceStore } from '@/stores/filterStore'
 import type { InsightCardData } from '@/types/api'
 import {
-  BotFindingModal,
-  CacheCollapseModal,
-  ImpossibleDistanceModal,
-  ScriptedTrafficModal,
-} from './InsightDetailModal'
-import {
   buildInvestigateHref,
   DeltaIndicator,
   InsightCardSkeleton,
@@ -49,15 +43,28 @@ import type {
   ScriptedTrafficData,
 } from './types'
 
+const BotFindingModal = dynamic(
+  () => import('./InsightDetailModal').then((m) => m.BotFindingModal),
+  { ssr: false },
+)
+const CacheCollapseModal = dynamic(
+  () => import('./InsightDetailModal').then((m) => m.CacheCollapseModal),
+  { ssr: false },
+)
+const ImpossibleDistanceModal = dynamic(
+  () => import('./InsightDetailModal').then((m) => m.ImpossibleDistanceModal),
+  { ssr: false },
+)
+const ScriptedTrafficModal = dynamic(
+  () => import('./InsightDetailModal').then((m) => m.ScriptedTrafficModal),
+  { ssr: false },
+)
+
 export {
-  BotFindingModal,
   buildInvestigateHref,
-  CacheCollapseModal,
   DeltaIndicator,
-  ImpossibleDistanceModal,
   InsightCardSkeleton,
   InsightStatCard,
-  ScriptedTrafficModal,
   SEVERITY_BADGE_CLASS,
   SEVERITY_ICON,
   SEVERITY_ICON_COLOR,
@@ -465,41 +472,51 @@ export function InsightCard({ insight, windowHours, baselineHours }: InsightCard
         />
       )}
 
-      <InsightDataModal
-        insight={insight}
-        isOpen={isDataModalOpen}
-        onOpenChange={setIsDataModalOpen}
-        onMapClick={(data) => setSelectedMapItem(data)}
-        onCacheCollapseClick={(url) => setSelectedCollapseUrl(url)}
-        onScriptedTrafficClick={(data) => setSelectedScriptedItem(data)}
-        onBotFindingClick={(data) => setSelectedBotFindingItem(data)}
-      />
+      {isDataModalOpen && (
+        <InsightDataModal
+          insight={insight}
+          isOpen={isDataModalOpen}
+          onOpenChange={setIsDataModalOpen}
+          onMapClick={(data) => setSelectedMapItem(data)}
+          onCacheCollapseClick={(url) => setSelectedCollapseUrl(url)}
+          onScriptedTrafficClick={(data) => setSelectedScriptedItem(data)}
+          onBotFindingClick={(data) => setSelectedBotFindingItem(data)}
+        />
+      )}
 
-      <ImpossibleDistanceModal
-        isOpen={!!selectedMapItem}
-        onOpenChange={(open) => !open && setSelectedMapItem(null)}
-        data={selectedMapItem}
-      />
+      {selectedMapItem && (
+        <ImpossibleDistanceModal
+          isOpen={!!selectedMapItem}
+          onOpenChange={(open) => !open && setSelectedMapItem(null)}
+          data={selectedMapItem}
+        />
+      )}
 
-      <CacheCollapseModal
-        isOpen={!!selectedCollapseUrl}
-        onOpenChange={(open) => !open && setSelectedCollapseUrl(null)}
-        url={selectedCollapseUrl}
-        windowHours={windowHours}
-        baselineHours={baselineHours}
-      />
+      {selectedCollapseUrl && (
+        <CacheCollapseModal
+          isOpen={!!selectedCollapseUrl}
+          onOpenChange={(open) => !open && setSelectedCollapseUrl(null)}
+          url={selectedCollapseUrl}
+          windowHours={windowHours}
+          baselineHours={baselineHours}
+        />
+      )}
 
-      <ScriptedTrafficModal
-        isOpen={!!selectedScriptedItem}
-        onOpenChange={(open) => !open && setSelectedScriptedItem(null)}
-        data={selectedScriptedItem}
-      />
+      {selectedScriptedItem && (
+        <ScriptedTrafficModal
+          isOpen={!!selectedScriptedItem}
+          onOpenChange={(open) => !open && setSelectedScriptedItem(null)}
+          data={selectedScriptedItem}
+        />
+      )}
 
-      <BotFindingModal
-        isOpen={!!selectedBotFindingItem}
-        onOpenChange={(open) => !open && setSelectedBotFindingItem(null)}
-        data={selectedBotFindingItem}
-      />
+      {selectedBotFindingItem && (
+        <BotFindingModal
+          isOpen={!!selectedBotFindingItem}
+          onOpenChange={(open) => !open && setSelectedBotFindingItem(null)}
+          data={selectedBotFindingItem}
+        />
+      )}
     </>
   )
 }

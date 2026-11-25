@@ -1,13 +1,26 @@
 'use client'
 
 import React, { useState, useEffect } from 'react'
+import dynamic from 'next/dynamic'
 import { useSearchParams } from 'next/navigation'
 import { parseAsString, useQueryState } from 'nuqs'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Activity, AlertTriangle, RefreshCw, TriangleAlert } from 'lucide-react'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
-import { DisableRumDialog, EnableRumDialog, RumSettingsDialog } from '@/components/Rum/RumSettingsDialog'
 import { Badge } from '@/components/ui/badge'
+
+const RumSettingsDialog = dynamic(
+  () => import('@/components/Rum/RumSettingsDialog').then((m) => m.RumSettingsDialog),
+  { ssr: false },
+)
+const EnableRumDialog = dynamic(
+  () => import('@/components/Rum/RumLifecycleDialogs').then((m) => m.EnableRumDialog),
+  { ssr: false },
+)
+const DisableRumDialog = dynamic(
+  () => import('@/components/Rum/RumLifecycleDialogs').then((m) => m.DisableRumDialog),
+  { ssr: false },
+)
 import { Button } from '@/components/ui/button'
 import { CopyButton } from '@/components/ui/confirm-dialog'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -80,10 +93,12 @@ export function RumFaroVersionCard({ serviceId }: RumFaroVersionCardProps) {
           RUM Settings
         </Button>
       </div>
-      <RumSettingsDialog
-        serviceId={serviceId} open={isUpgradeOpen} onOpenChange={setIsUpgradeOpen}
-        availableVersions={available} currentVersion={current} latestVersion={latest} onComplete={handleComplete}
-      />
+      {isUpgradeOpen && (
+        <RumSettingsDialog
+          serviceId={serviceId} open={isUpgradeOpen} onOpenChange={setIsUpgradeOpen}
+          availableVersions={available} currentVersion={current} latestVersion={latest} onComplete={handleComplete}
+        />
+      )}
     </>
   )
 }
@@ -245,8 +260,12 @@ export function RumStatusPanel() {
         </AnalyticsCard>
       </div>
 
-      <EnableRumDialog service={currentService} open={isEnableOpen} onOpenChange={setIsEnableOpen} onComplete={async () => { await refetchStatus() }} />
-      <DisableRumDialog service={currentService} open={isDisableOpen} onOpenChange={setIsDisableOpen} onComplete={async () => { await refetchStatus() }} />
+      {isEnableOpen && (
+        <EnableRumDialog service={currentService} open={isEnableOpen} onOpenChange={setIsEnableOpen} onComplete={async () => { await refetchStatus() }} />
+      )}
+      {isDisableOpen && (
+        <DisableRumDialog service={currentService} open={isDisableOpen} onOpenChange={setIsDisableOpen} onComplete={async () => { await refetchStatus() }} />
+      )}
     </div>
   )
 }

@@ -1,6 +1,7 @@
 'use client'
 
 import React from 'react'
+import dynamic from 'next/dynamic'
 import { parseAsStringLiteral, useQueryState } from 'nuqs'
 import { useTimezone, useColumnVisibility } from '@/hooks/useSSE'
 import { useFieldLabel } from '@/hooks/useBootstrap'
@@ -9,17 +10,21 @@ import { useAnalyticsReportQuery, useReportRangeAnchor } from '@/hooks/useDashbo
 import { ReportLayout } from '@/components/ReportLayout'
 import { client, extractApiError } from '@/lib/api'
 import { Shield } from 'lucide-react'
+import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { mergeRollupMeta, RawWindowNote, readRawWindow, readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { hasFilterValues } from '@/lib/cloud-engine/rollup-sections'
 import type { components, operations } from '@/types/api.generated'
 import { BotsSection, type SecurityData, type SummaryQueryState } from './BotsSection'
-import { ProxyWatchdogSection } from './ProxyWatchdogSection'
 import { ThreatIntelPanel, HeaderAnomaliesSection, NetworkSection } from './ThreatIntelSection'
 
+const ProxyWatchdogSection = dynamic(
+  () => import('./ProxyWatchdogSection').then((m) => m.ProxyWatchdogSection),
+  { ssr: false, loading: () => <Skeleton className="w-full h-[420px] rounded-xl" /> },
+)
+
 export { BotsSection } from './BotsSection'
-export { ProxyWatchdogSection } from './ProxyWatchdogSection'
 export { ThreatIntelPanel, HeaderAnomaliesSection, NetworkSection } from './ThreatIntelSection'
 
 const SECURITY_TABS = ['waf-activity', 'threat-intel', 'proxy-watchdog'] as const

@@ -11,7 +11,7 @@ import { Suspense } from 'react';
 import { Metadata } from 'next';
 import { BackToAdminLink } from '@/components/ReportLayout';
 import { PageHeader } from '@/components/ui/confirm-dialog';
-import { RumStatusPanel } from '@/app/rum/page';
+import { RumStatusPanel } from '@/app/rum/_sections/RumStatusSection';
 import { RumPanelFallback } from './loading';
 
 export const dynamic = 'force-dynamic';

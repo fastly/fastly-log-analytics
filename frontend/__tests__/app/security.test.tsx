@@ -12,8 +12,8 @@ import SecurityClient, {
   BotsSection,
   HeaderAnomaliesSection,
   NetworkSection,
-  ProxyWatchdogSection,
 } from '@/app/security/_sections/SecurityClient'
+import { ProxyWatchdogSection } from '@/app/security/_sections/ProxyWatchdogSection'
 import { botColumns, SECURITY_INFO, type WellknownBot } from '@/app/security/_sections/botsSectionConfig'
 import { setCloudModeRuntime } from '@/lib/cloud-engine/mode'
 import type { PlotlyChart } from '@/components/PlotlyChart'

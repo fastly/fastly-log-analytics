@@ -21,34 +21,61 @@ import {
 } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { StatusPanel } from '@/components/SessionScoring/StatusPanel'
 import {
-  StatusPanel,
-  L2EnforcementCard,
-  PerReasonAucCard,
-  RocPrCurves,
-  ComplianceChart,
-  ScoreDistChart,
-  ScorerLatencyChart,
-  ScorerErrorsChart,
-} from '@/components/SessionScoring/StatusPanel'
-import {
-  AuditLogTab,
   ExcludeRegexCard,
-  MatrixVersionsCard,
   RetrainButton,
   RotateKeyButton,
   ScorerFailOpenBreakdownCard,
   ScoringHealthCard,
   ThresholdSlider,
-} from '@/components/SessionScoring/ScoringAdminPanels'
-import { TopFlaggedTable } from '@/components/SessionScoring/TopFlaggedTable'
-import {
   invalidateServiceScoringQueries,
   scoringAnalyticsCompositeOptions,
   scoringConfigCompositeOptions,
 } from '@/components/SessionScoring/ScoringAdminPanels'
 import { useServiceStore } from '@/stores/filterStore'
 import Loading from './loading'
+
+const L2EnforcementCard = dynamic(
+  () => import('@/components/SessionScoring/ScoringEvaluationPanel').then((m) => m.L2EnforcementCard),
+  { ssr: false, loading: () => <Skeleton className="h-64 w-full rounded-xl" /> },
+)
+const RocPrCurves = dynamic(
+  () => import('@/components/SessionScoring/ScoringEvaluationPanel').then((m) => m.RocPrCurves),
+  { ssr: false, loading: () => <Skeleton className="h-72 w-full rounded-xl" /> },
+)
+const PerReasonAucCard = dynamic(
+  () => import('@/components/SessionScoring/ScoringEvaluationPanel').then((m) => m.PerReasonAucCard),
+  { ssr: false, loading: () => <Skeleton className="h-64 w-full rounded-xl" /> },
+)
+const ScorerLatencyChart = dynamic(
+  () => import('@/components/SessionScoring/ScoringOverviewTab').then((m) => m.ScorerLatencyChart),
+  { ssr: false, loading: () => <Skeleton className="h-80 w-full rounded-xl" /> },
+)
+const ScorerErrorsChart = dynamic(
+  () => import('@/components/SessionScoring/ScoringOverviewTab').then((m) => m.ScorerErrorsChart),
+  { ssr: false, loading: () => <Skeleton className="h-80 w-full rounded-xl" /> },
+)
+const ScoreDistChart = dynamic(
+  () => import('@/components/SessionScoring/ScoringOverviewTab').then((m) => m.ScoreDistChart),
+  { ssr: false, loading: () => <Skeleton className="h-80 w-full rounded-xl" /> },
+)
+const ComplianceChart = dynamic(
+  () => import('@/components/SessionScoring/ScoringOverviewTab').then((m) => m.ComplianceChart),
+  { ssr: false, loading: () => <Skeleton className="h-80 w-full rounded-xl" /> },
+)
+const TopFlaggedTable = dynamic(
+  () => import('@/components/SessionScoring/TopFlaggedTable').then((m) => m.TopFlaggedTable),
+  { ssr: false, loading: () => <Skeleton className="h-64 w-full rounded-xl" /> },
+)
+const MatrixVersionsCard = dynamic(
+  () => import('@/components/SessionScoring/ScoringAdminPanels').then((m) => m.MatrixVersionsCard),
+  { ssr: false, loading: () => <Skeleton className="h-48 w-full rounded-xl" /> },
+)
+const AuditLogTab = dynamic(
+  () => import('@/components/SessionScoring/ScoringAdminPanels').then((m) => m.AuditLogTab),
+  { ssr: false, loading: () => <Skeleton className="h-48 w-full rounded-xl" /> },
+)
 
 const PRESETS = [
   { value: 1, label: 'Last 1h', shortLabel: '1h' },

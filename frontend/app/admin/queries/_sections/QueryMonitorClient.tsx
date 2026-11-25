@@ -106,6 +106,7 @@ export function QueryMonitorPage() {
   const lastSeqRef = React.useRef(0)
   const completedRef = React.useRef<Map<number, CompletedRow>>(new Map())
   const resetPendingRef = React.useRef(false)
+  const lastIncludeCompletedRef = React.useRef(includeCompleted)
 
   const invalidateSnapshots = React.useCallback(
     () => queryClient.invalidateQueries({ queryKey: queryKeys.admin.queryMonitorSnapshotAll() }),
@@ -115,8 +116,9 @@ export function QueryMonitorPage() {
   const snapshotQuery = useQuery<SnapshotResponse>({
     queryKey: queryKeys.admin.queryMonitorSnapshot(includeCompleted),
     queryFn: async ({ signal }) => {
-      if (resetPendingRef.current) {
+      if (resetPendingRef.current || lastIncludeCompletedRef.current !== includeCompleted) {
         resetPendingRef.current = false
+        lastIncludeCompletedRef.current = includeCompleted
         lastSeqRef.current = 0
         completedRef.current = new Map()
       }
@@ -150,11 +152,6 @@ export function QueryMonitorPage() {
       (query.state.data as SnapshotResponse | undefined)?.active?.length ? 300 : 1500,
     refetchIntervalInBackground: false,
   })
-
-  React.useEffect(() => {
-    resetPendingRef.current = true
-    void invalidateSnapshots()
-  }, [viewMode, invalidateSnapshots])
 
   const wasVisibleRef = React.useRef(visible)
   React.useEffect(() => {

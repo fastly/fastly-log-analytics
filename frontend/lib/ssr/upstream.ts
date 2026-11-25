@@ -165,6 +165,9 @@ export const SECURITY_SSR_DEFAULTS = {
   bucketSeconds: 3600,
 } as const
 
+export const SECURITY_SSR_TIMEOUT_MS = 900
+export const INSIGHTS_SSR_TIMEOUT_MS = 900
+
 export async function fetchSecurityServerSide(
   serviceId: string | undefined,
   now: Date = new Date(),
@@ -174,7 +177,7 @@ export async function fetchSecurityServerSide(
     path: '/api/security/aggregates',
     logPrefix: 'ssr/security',
     now,
-    timeoutMs: 8000,
+    timeoutMs: SECURITY_SSR_TIMEOUT_MS,
     body: {
       bucket_seconds: SECURITY_SSR_DEFAULTS.bucketSeconds,
       sections: SECURITY_SSR_SECTIONS,
@@ -291,6 +294,7 @@ export async function fetchInsightsServerSide(
       path: '/api/insights',
       logPrefix: 'ssr/insights',
       method: 'POST',
+      timeoutMs: INSIGHTS_SSR_TIMEOUT_MS,
       // Mirror InsightsBody's client request body EXACTLY (app/insights/page.tsx):
       // parseFloat(windowHours) / parseFloat(baselineHours), empty filters.
       body: {

@@ -2,7 +2,6 @@
 
 import React, { useState } from 'react'
 import dynamic from 'next/dynamic'
-import { PopHealthHeatmap } from '@/components/network/PopHealthHeatmap'
 import { approxMark, RawWindowNote, readRawWindow, readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { client, unwrapClient } from '@/lib/api'
@@ -38,7 +37,6 @@ import {
   SHIELDING_COLUMNS,
   SHIELDING_MIN_REQUESTS_DEFAULT,
   SHIELDING_MIN_REQUESTS_OPTIONS,
-  ShieldingSection,
   TransportSection,
   type ShieldingRowInput,
 } from './TransportAndShielding'
@@ -46,8 +44,20 @@ import {
   HEATMAP_LAYOUT,
   NetworkKpiGrid,
   NetworkLeaderboardsSection,
-  NetworkQualitySection,
 } from './NetworkLeaderboardsAndQuality'
+
+const PopHealthHeatmap = dynamic(
+  () => import('@/components/network/PopHealthHeatmap').then((m) => m.PopHealthHeatmap),
+  { ssr: false, loading: () => <Skeleton className="w-full h-[280px] rounded-xl" /> },
+)
+const ShieldingSection = dynamic(
+  () => import('./TransportAndShielding').then((m) => m.ShieldingSection),
+  { ssr: false, loading: () => <Skeleton className="w-full h-[460px] rounded-xl" /> },
+)
+const NetworkQualitySection = dynamic(
+  () => import('./NetworkLeaderboardsAndQuality').then((m) => m.NetworkQualitySection),
+  { ssr: false, loading: () => <Skeleton className="w-full h-[360px] rounded-xl" /> },
+)
 
 export {
   GlobalHealthHelp,

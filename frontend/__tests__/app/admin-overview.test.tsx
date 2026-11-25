@@ -579,6 +579,42 @@ describe('Admin Live Query Monitor (/admin/queries)', () => {
     expect(await screen.findByDisplayValue('COMPACT')).toBeDefined()
     expect(screen.getByRole('tab', { name: /live only/i }).getAttribute('aria-selected')).toBe('true')
   })
+
+  it('fetches /api/admin/queries exactly once on mount without redundant cold_limit=50 invalidation', async () => {
+    const queryRoutes: string[] = []
+    adminJsonSpy.mockImplementation(async (spec: string, route: string) => {
+      if (spec === '/api/admin/app-config/query-monitor' || route === '/api/admin/app-config/query-monitor') {
+        return { enabled: true }
+      }
+      if (spec === '/api/admin/queries' || route.startsWith('/api/admin/queries')) {
+        queryRoutes.push(route)
+        return { last_seq: 42, active: [], completed: [] }
+      }
+      return {}
+    })
+
+    const { unmount } = renderWithQuery(<QueryMonitorPage />, { wrapper: withNuqsTestingAdapter() })
+    expect(await screen.findByText(/No active queries\./i)).toBeDefined()
+    // Flush microtasks/effects to confirm no post-mount invalidation triggers a second cold fetch.
+    await new Promise((r) => setTimeout(r, 50))
+    expect(queryRoutes).toEqual(['/api/admin/queries?include_completed=true&cold_limit=50'])
+
+    // Switching All -> Past only keeps includeCompleted=true and reuses the buffered snapshot.
+    fireEvent.click(screen.getByRole('tab', { name: /past only/i }))
+    await new Promise((r) => setTimeout(r, 50))
+    expect(queryRoutes).toHaveLength(1)
+
+    // Switching Past only -> Live only changes includeCompleted and resets cursor cleanly.
+    fireEvent.click(screen.getByRole('tab', { name: /live only/i }))
+    await waitFor(() => expect(queryRoutes).toHaveLength(2))
+    expect(queryRoutes[1]).toBe('/api/admin/queries')
+
+    // Switching Live only -> All resets cursor and performs a single cold snapshot fetch.
+    fireEvent.click(screen.getByRole('tab', { name: /^all$/i }))
+    await waitFor(() => expect(queryRoutes).toHaveLength(3))
+    expect(queryRoutes[2]).toBe('/api/admin/queries?include_completed=true&cold_limit=50')
+    unmount()
+  })
 })
 
 describe('/admin/clickhouse page & ClickHouseAdminClient', () => {
