@@ -12,7 +12,7 @@ import {
   readsWholeFirst, readWholeParquetFooter, shouldFallbackToWhole, timestampRowGroupFilter, type ParquetFooter,
   type ParquetProjection, type RowGroupFilterPredicate,
 } from "./dashboard/parquet-projection";
-import { wholeFileIdentity } from "./dashboard/projected-read";
+import { prefersWholeForWideProjection, wholeFileIdentity } from "./dashboard/projected-read";
 import { beginCloudLoading } from "./loading-progress";
 import { fetchLanes } from "./fetch-lanes";
 import { CloudBudgetError, MAX_REGISTERED_BYTES, type CloudBudgetDetail } from "./dashboard/budget";
@@ -266,8 +266,10 @@ export async function ensureCloudRange(
       const wholes = new Map<string, Awaited<ReturnType<typeof fetchWhole>>>();
       const skippedKeys = new Set<string>();
       const preferWholeUpToBytes = projection?.preferWholeUpToBytes ?? 0;
+      const rangeWindow = { fromMs: Date.parse(from), toMs: Date.parse(to) };
       const shouldReadWholeFirst = (file: typeof files[number], nowMs: number) =>
         readsWholeFirst(file, nowMs)
+        || (projectedColumns !== null && prefersWholeForWideProjection(file, projectedColumns.size, rangeWindow))
         || (preferWholeUpToBytes > 0 && file.size > 0 && file.size <= preferWholeUpToBytes);
       if (projectedColumns) {
         loading.update({ stage: "files" });

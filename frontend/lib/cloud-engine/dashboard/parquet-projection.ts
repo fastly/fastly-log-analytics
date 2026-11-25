@@ -3,11 +3,14 @@ import { ByteWriter } from "hyparquet-writer";
 import { writeMetadata } from "hyparquet-writer/src/metadata.js";
 import { MAX_REGISTERED_BYTES } from "./budget";
 
+/** Tail probe for multi-MiB 100-column compacts whose Parquet footers exceed 256 KiB. */
+export const LARGE_FOOTER_PROBE_BYTES = 512 * 1024;
 /** One tail read usually covers the whole footer, including 100-column multi-row-group compacts. */
 export const FOOTER_PROBE_BYTES = 256 * 1024;
 /** Smaller tail probe for sub-300 KiB files so footer probes don't download the entire file. */
 export const SMALL_FOOTER_PROBE_BYTES = 64 * 1024;
 export function defaultFooterProbeBytes(size: number): number {
+  if (size >= 4 * 1024 * 1024) return LARGE_FOOTER_PROBE_BYTES;
   return size >= 300 * 1024 ? FOOTER_PROBE_BYTES : SMALL_FOOTER_PROBE_BYTES;
 }
 /**
@@ -54,11 +57,14 @@ export const wholeReadLimits = { anyUpToBytes: 256 * 1024, closedHourUpToBytes: 
 const HOUR_MS = 3_600_000;
 
 /** Whether a projected read of `file` should fetch it whole, per [`wholeReadLimits`]. */
-export function readsWholeFirst(file: { size: number; end: string }, nowMs = Date.now()): boolean {
+export function readsWholeFirst(file: { size: number; end: string; key?: string }, nowMs = Date.now()): boolean {
   if (!(Number.isSafeInteger(file.size) && file.size > 0)) return false;
   if (file.size <= wholeReadLimits.anyUpToBytes) return true;
-  return file.size <= wholeReadLimits.closedHourUpToBytes
-    && Date.parse(file.end) <= Math.floor(nowMs / HOUR_MS) * HOUR_MS;
+  if (file.size <= wholeReadLimits.closedHourUpToBytes) {
+    if (Date.parse(file.end) <= Math.floor(nowMs / HOUR_MS) * HOUR_MS) return true;
+    if (file.key && /(?:^|\/)compact=/.test(file.key)) return true;
+  }
+  return false;
 }
 
 export const WHOLE_FALLBACK_RANGE_RATIO = 0.85;

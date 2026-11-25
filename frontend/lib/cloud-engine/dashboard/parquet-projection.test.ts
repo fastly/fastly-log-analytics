@@ -4,9 +4,10 @@ import { parquetMetadata, type SchemaElement } from "hyparquet";
 import { parquetWriteBuffer } from "hyparquet-writer";
 import { createNodeBackend } from "./duckdb";
 import {
-  assembleProjectedParquet, fetchProjectedRanges, filterRowGroupFilter, FOOTER_PROBE_BYTES, MAX_RANGES_PER_FILE,
-  parquetQuerySchema, planParquetProjection, readParquetFooter, readsWholeFirst, RANGE_MERGE_GAP,
-  RANGE_REQUEST_COST_BYTES, shouldFallbackToWhole, TARGET_RANGES_PER_FILE,
+  assembleProjectedParquet, defaultFooterProbeBytes, fetchProjectedRanges, filterRowGroupFilter, FOOTER_PROBE_BYTES,
+  LARGE_FOOTER_PROBE_BYTES, MAX_RANGES_PER_FILE, parquetQuerySchema, planParquetProjection, readParquetFooter,
+  readsWholeFirst, RANGE_MERGE_GAP, RANGE_REQUEST_COST_BYTES, shouldFallbackToWhole, SMALL_FOOTER_PROBE_BYTES,
+  TARGET_RANGES_PER_FILE,
 } from "./parquet-projection";
 import { prefersWholeForWideProjection, projectedReader } from "./projected-read";
 
@@ -761,5 +762,29 @@ describe("query schemas from footers", () => {
     const [{ n: lowRows }] = await query({ "l.parquet": lowResult.bytes }, "SELECT count(*)::INT AS n FROM 'l.parquet'") as [{ n: number }];
     expect(lowRows).toBeGreaterThan(0);
     expect(lowRows).toBeLessThan(totalRows);
+  });
+
+  it("uses 512 KiB tail probes for >= 4 MiB files and reads open-hour compact= files up to 2 MiB whole-first", () => {
+    expect(defaultFooterProbeBytes(100 * 1024)).toBe(SMALL_FOOTER_PROBE_BYTES);
+    expect(defaultFooterProbeBytes(1024 * 1024)).toBe(FOOTER_PROBE_BYTES);
+    expect(defaultFooterProbeBytes(4 * 1024 * 1024)).toBe(LARGE_FOOTER_PROBE_BYTES);
+
+    const nowMs = Date.parse("2026-11-25T10:53:00Z");
+    const openEnd = "2026-11-25T10:24:00Z";
+    expect(readsWholeFirst({
+      key: "processed/request/year=2026/month=11/day=25/hour=10/compact=1795601880-1795602240-c16-n8012-abc.parquet",
+      end: openEnd,
+      size: 1_200_000,
+    }, nowMs)).toBe(true);
+    expect(readsWholeFirst({
+      key: "processed/request/year=2026/month=11/day=25/hour=10/compact=1795601520-1795602120-c32-n42943-abc.parquet",
+      end: openEnd,
+      size: 3 * 1024 * 1024,
+    }, nowMs)).toBe(false);
+    expect(readsWholeFirst({
+      key: "processed/request/year=2026/month=11/day=25/hour=10/window=1795602240.parquet",
+      end: openEnd,
+      size: 1_200_000,
+    }, nowMs)).toBe(false);
   });
 });

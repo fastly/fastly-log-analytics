@@ -202,6 +202,38 @@ describe('AssetsClient on Cloud', () => {
     expect(one).toEqual([undefined])
     expect(screen.queryByTestId('rollup-data-through-slot')).not.toBeInTheDocument()
   })
+
+  it('renders raw_window fallback inside the reserved rollup slot and keeps stable card heights to prevent CLS', async () => {
+    setCloudModeRuntime(true)
+    const rawWindow = { data_from: '2027-01-15T08:00:00.000Z', data_through: '2027-01-15T09:00:00.000Z' }
+    recordPosts('/api/assets/aggregates', (asked) =>
+      asked?.includes('summary') ? { ...assetsSummary, raw_window: rawWindow } : { large_uncompressed_assets: [], low_ttl_assets: [] },
+    )
+    renderBootstrapped(<AssetsClient />, { withNuqs: true })
+
+    const slot = screen.getByTestId('rollup-data-through-slot')
+    expect(await within(slot).findByTestId('raw-window-note')).toBeInTheDocument()
+    expect(screen.getAllByTestId('raw-window-note')).toHaveLength(1)
+    expect(screen.getByTestId('assets-overview-grid').className).not.toContain('content-visibility:auto')
+    expect(screen.getByTestId('assets-cache-efficiency-card').className).toContain('min-h-[540px]')
+    expect(screen.getByTestId('assets-compression-card').className).toContain('min-h-[540px]')
+  })
+
+  it('places hotspots raw_window inside the hotspots section when summaries already occupy the top slot', async () => {
+    setCloudModeRuntime(true)
+    const rawWindow = { data_from: '2027-01-15T09:00:00.000Z', data_through: '2027-01-15T10:00:00.000Z' }
+    recordPosts('/api/assets/aggregates', (asked) =>
+      asked?.includes('summary')
+        ? { ...assetsSummary, rollup: meta }
+        : { large_uncompressed_assets: [], low_ttl_assets: [], raw_window: rawWindow },
+    )
+    renderBootstrapped(<AssetsClient />, { withNuqs: true })
+
+    const slot = screen.getByTestId('rollup-data-through-slot')
+    expect(await within(slot).findByText(/Data through 09:45/)).toBeInTheDocument()
+    expect(await screen.findByTestId('raw-window-note')).toBeInTheDocument()
+    expect(within(slot).queryByTestId('raw-window-note')).not.toBeInTheDocument()
+  })
 })
 
 const overview = {
@@ -314,5 +346,15 @@ describe('FastlyValueClient on Cloud', () => {
     renderBootstrapped(<FastlyValueClient />)
     expect(await screen.findByText(/logs \+0\.0%/)).toBeInTheDocument()
     expect(screen.queryByText(/−0\.0%/)).not.toBeInTheDocument()
+  })
+
+  it('renders raw_window fallback inside the reserved rollup slot without adding a top banner', async () => {
+    setCloudModeRuntime(true)
+    const rawWindow = { data_from: '2027-01-15T08:00:00.000Z', data_through: '2027-01-15T09:00:00.000Z' }
+    recordPosts('/api/value/summary', () => ({ overview, network, caching: null, raw_window: rawWindow }))
+    renderBootstrapped(<FastlyValueClient />)
+
+    const slot = screen.getByTestId('rollup-data-through-slot')
+    expect(await within(slot).findByTestId('raw-window-note')).toBeInTheDocument()
   })
 })

@@ -119,7 +119,7 @@ export function AssetsOverviewGrid({
   return (
     <div
       data-testid="assets-overview-grid"
-      className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 min-h-[160px] lg:min-h-[304px] [contain-intrinsic-size:160px] [content-visibility:auto]"
+      className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 min-h-[160px] lg:min-h-[304px]"
     >
       {isLoading ? (
         ['Images', 'Documents', 'JavaScript/CSS', 'Fonts', 'Video', 'API/Dynamic'].map((type) => (
@@ -243,7 +243,7 @@ export function AssetsEfficiencySection({
       {/* Cache Efficiency stacked horizontal bars */}
       <div
         data-testid="assets-cache-efficiency-card"
-        className="bg-card text-card-foreground border border-border rounded-xl p-6 shadow-sm min-h-[380px] [contain-intrinsic-size:420px] [content-visibility:auto]"
+        className="bg-card text-card-foreground border border-border rounded-xl p-6 shadow-sm min-h-[540px] [contain-intrinsic-size:540px] [content-visibility:auto]"
       >
         <h3 className="font-bold text-lg mb-6 flex items-center gap-2">
           <Zap className="h-5 w-5 text-primary" />
@@ -337,7 +337,7 @@ export function AssetsEfficiencySection({
       {/* Compression Efficiency stacked horizontal bars */}
       <div
         data-testid="assets-compression-card"
-        className="bg-card text-card-foreground border border-border rounded-xl p-6 shadow-sm min-h-[380px] [contain-intrinsic-size:420px] [content-visibility:auto]"
+        className="bg-card text-card-foreground border border-border rounded-xl p-6 shadow-sm min-h-[540px] [contain-intrinsic-size:540px] [content-visibility:auto]"
       >
         <h3 className="font-bold text-lg mb-6 flex items-center gap-2">
           <Archive className="h-5 w-5 text-primary" />

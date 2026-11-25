@@ -7,7 +7,7 @@ import { client, unwrapClient } from '@/lib/api'
 import type { RangeWire } from '@/lib/utils'
 import { ReportLayout } from '@/components/ReportLayout'
 import { CardErrorState } from '@/components/AnalyticsCard'
-import { RawWindowNote, readRawWindow, readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
+import { readRawWindow, readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Skeleton } from '@/components/ui/skeleton'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
@@ -141,10 +141,10 @@ function FastlyValueBody({ startTime, endTime, activeServiceId, filterPayload }:
   // On a split summary tab the caching cards wait on the raw scan while the overview cards paint.
   const cachingLoading = split && rawSections.length > 0 && valueQuery.isLoading
   const rollup = split ? readRollupMeta(rollupQuery.data) : undefined
+  const rawWindow = readRawWindow(valueQuery.data) ?? readRawWindow(rollupQuery.data)
 
   return (
     <div className="space-y-6">
-      <RawWindowNote window={readRawWindow(valueQuery.data) ?? readRawWindow(rollupQuery.data)} />
       <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as TabId)}>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <TabsList className="flex flex-wrap h-auto gap-1">
@@ -155,7 +155,7 @@ function FastlyValueBody({ startTime, endTime, activeServiceId, filterPayload }:
               </TabsTrigger>
             ))}
           </TabsList>
-          <RollupDataThroughSlot reserve={Boolean(rollup)} meta={rollup} />
+          <RollupDataThroughSlot reserve={split || Boolean(rollup)} meta={rollup} rawWindow={rawWindow} />
         </div>
         <div className="min-h-[820px]">
           {loading ? (

@@ -162,11 +162,16 @@ export function AssetsReportContent({
   const lowTtl = data?.low_ttl_assets || []
   const urlFilterHrefPrefix = `/dashboard?service=${activeServiceId}${getTimeQueryString()}&filter_url=`
   const missingFields = ASSET_LOG_FIELDS.filter((field) => logFields.ready && !logFields.isFieldActive(field))
+  const rollupRawWindow = readRawWindow(rollupQuery.data)
+  const bundleRawWindow = readRawWindow(bundle.data)
 
   return (
     <div className={cn('space-y-8 transition-opacity duration-150', !embedded && 'py-6', isFetching && !isLoading && 'opacity-60 pointer-events-none')}>
-      <RollupDataThroughSlot reserve={embedded ? Boolean(rollup) : rollupFirst} meta={rollup} />
-      <RawWindowNote window={readRawWindow(bundle.data) ?? readRawWindow(rollupQuery.data)} />
+      <RollupDataThroughSlot
+        reserve={embedded ? Boolean(rollup) : rollupFirst}
+        meta={rollup}
+        rawWindow={rollup ? undefined : (rollupRawWindow ?? bundleRawWindow)}
+      />
 
       <AssetsOverviewGrid
         breakdown={breakdown}
@@ -189,6 +194,7 @@ export function AssetsReportContent({
       />
 
       <div ref={hotspotsRef}>
+        {rollup && bundleRawWindow && <RawWindowNote window={bundleRawWindow} className="mb-4" />}
         <AssetsHotspotsSection
           largeUncompressed={largeUncompressed}
           lowTtl={lowTtl}

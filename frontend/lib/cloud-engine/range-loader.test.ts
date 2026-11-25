@@ -1518,4 +1518,69 @@ describe("Cloud first-page analytical range loading", () => {
     expect(networkWholeFetches).toBe(1);
     expect(totalRangeCalls).toBe(0);
   });
+
+  it("reads a >2 MiB compact whole-first on wide projections (>=12 columns, >=50% overlap) without footer probes", async () => {
+    Object.assign(wholeReadLimits, DEFAULT_WHOLE_READ_LIMITS);
+    const rgRows = 500;
+    const rowGroups = 6;
+    const totalRows = rgRows * rowGroups;
+    let seed = 17;
+    const randStr = (len: number) => Array.from({ length: len }, () => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return String.fromCharCode(33 + (seed % 90));
+    }).join("");
+    const startMs = Date.parse("2026-11-25T07:00:00Z");
+    const stepMs = 1000;
+    const endMs = startMs + totalRows * stepMs;
+    const bytes = parquetWriteBuffer({
+      codec: "UNCOMPRESSED",
+      rowGroupSize: rgRows,
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: totalRows }, (_, i) => new Date(startMs + i * stepMs)) },
+        { name: "status", type: "INT32", data: Array.from({ length: totalRows }, () => 200) },
+        { name: "url", type: "STRING", data: Array.from({ length: totalRows }, () => randStr(400)) },
+        { name: "ua", type: "STRING", data: Array.from({ length: totalRows }, () => randStr(400)) },
+      ],
+    });
+    expect(bytes.byteLength).toBeGreaterThan(2 * 1024 * 1024);
+
+    const entry: ManifestFile = {
+      key: "processed/request/year=2026/month=11/day=25/hour=07/compact=1795591080-1795592640-c4-n136953-abc.parquet",
+      start: new Date(startMs).toISOString(),
+      end: new Date(endMs).toISOString(),
+      rows: totalRows,
+      size: bytes.byteLength,
+      etag: "\"etag-wide\"",
+    };
+    vi.mocked(fetchManifest).mockResolvedValue({ files: [entry], complete: true });
+
+    let rangeCalls = 0;
+    let fileCalls = 0;
+    source.fetchRange.mockImplementation(async (_f: ManifestFile, start: number, end: number) => {
+      rangeCalls++;
+      return bytes.slice(start, end);
+    });
+    source.fetchFile.mockImplementation(async () => {
+      fileCalls++;
+      return { bytes: bytes.slice(0), cached: false };
+    });
+
+    const wideColumns = [
+      "timestamp", "status", "cache", "resp_bytes", "edge", "url",
+      "ua", "referer", "ip", "host", "country", "asn",
+    ];
+    const read = await ensureCloudRange(
+      new Date(startMs - 60_000).toISOString(),
+      new Date(endMs + 60_000).toISOString(),
+      signal,
+      ["request"],
+      { projection: { columns: wideColumns } },
+    );
+    const [{ n }] = await read.executeSql("SELECT count(*)::INT AS n FROM requests") as [{ n: number }];
+    expect(n).toBe(totalRows);
+    read.release?.();
+
+    expect(fileCalls).toBe(1);
+    expect(rangeCalls).toBe(0);
+  });
 });

@@ -44,15 +44,16 @@ export function RollupDataThrough({ meta }: { meta: NetworkRollupMeta }) {
  * from summaries, so the note landing (or a raw answer leaving it out) never
  * moves the content below. Two lines until the note fits on one.
  */
-export function RollupDataThroughSlot({ reserve, meta, className }: {
+export function RollupDataThroughSlot({ reserve, meta, rawWindow, className }: {
   reserve: boolean
   meta: NetworkRollupMeta | undefined
+  rawWindow?: RawWindow | undefined
   className?: string
 }) {
-  if (!reserve) return null
+  if (!reserve && !meta && !rawWindow) return null
   return (
-    <div data-testid="rollup-data-through-slot" className={cn('min-h-[2.875rem] lg:min-h-[1.875rem]', className)}>
-      {meta && <RollupDataThrough meta={meta} />}
+    <div data-testid="rollup-data-through-slot" className={cn('min-h-[2.875rem] lg:min-h-[2.25rem]', className)}>
+      {meta ? <RollupDataThrough meta={meta} /> : rawWindow ? <RawWindowNote window={rawWindow} /> : null}
     </div>
   )
 }
