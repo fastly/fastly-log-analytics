@@ -3,7 +3,7 @@ import { parquetWriteBuffer } from "hyparquet-writer";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getDuckDBEngine } from "./dashboard/duckdb";
 import { handleSessionsDetail, handleSessionsList, sessionsListColumns, type SessionsListRequest } from "./sessions";
-import { sessionsLoadFrom } from "./sessions-window";
+import { sessionsEnrichSpans, sessionsLoadFrom } from "./sessions-window";
 
 const engine = getDuckDBEngine();
 const start = "2026-11-01T00:00:00Z";
@@ -390,6 +390,19 @@ describe("Cloud session scans against actual Parquet", () => {
       expect(loads.length).toBeGreaterThan(1);
       expect(loads.length).toBeLessThanOrEqual(9);
       for (const load of loads.slice(1)) expect(load.columns).toEqual(expect.arrayContaining(["ua", "url"]));
+    });
+
+    it("merges enrichment spans within the same UTC hour so hourly catalog1 files are not loaded twice", () => {
+      const hourStart = Date.parse("2026-11-25T07:00:00Z");
+      const spans = sessionsEnrichSpans([
+        { startMs: hourStart + 5 * 60_000, endMs: hourStart + 6 * 60_000 },
+        { startMs: hourStart + 45 * 60_000, endMs: hourStart + 47 * 60_000 },
+        { startMs: hourStart + 3 * 3_600_000 + 10 * 60_000, endMs: hourStart + 3 * 3_600_000 + 12 * 60_000 },
+      ]);
+      expect(spans).toEqual([
+        { startMs: hourStart + 5 * 60_000, endMs: hourStart + 47 * 60_000 },
+        { startMs: hourStart + 3 * 3_600_000 + 10 * 60_000, endMs: hourStart + 3 * 3_600_000 + 12 * 60_000 },
+      ]);
     });
   });
 });

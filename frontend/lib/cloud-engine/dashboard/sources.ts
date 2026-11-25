@@ -1973,9 +1973,9 @@ export function browserSource(
         release();
       }
     },
-    async hasFile(key) {
+    async hasFile(key, mode) {
       const callEpoch = cacheEpoch;
-      const requestScope = fileMemoryIdentity(options);
+      const requestScope = fileMemoryIdentity(options, mode?.identity);
       if (
         memoryFiles.has(key) &&
         memoryFileIdentities.get(key) === requestScope
@@ -1985,7 +1985,7 @@ export function browserSource(
         const cache = await getFileCache();
         if (!cache || callEpoch !== cacheEpoch) return false;
         const url = `${baseUrl}${fileRequestPath(key)}`;
-        const hit = await cache.match(scopedCacheUrl(url, fileOwnerScope(options)));
+        const hit = await cache.match(scopedCacheUrl(url, fileOwnerScope(options), mode?.identity));
         if (callEpoch !== cacheEpoch) {
           await hit?.body?.cancel();
           return false;

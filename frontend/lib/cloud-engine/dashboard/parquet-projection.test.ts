@@ -581,16 +581,21 @@ describe("query schemas from footers", () => {
       ranges: Array.from({ length: rangeCount }, (_, i) => ({ start: i * 100, end: i * 100 + 50 })),
     });
     const fileSize = 4 * 1024 * 1024;
+    const largeFile = 20 * 1024 * 1024;
     expect(shouldFallbackToWhole(planWith(0), fileSize, 0)).toBe(false);
     expect(shouldFallbackToWhole(planWith(1), fileSize, Math.ceil(fileSize * 0.85))).toBe(true);
-    expect(shouldFallbackToWhole(planWith(8), fileSize, Math.ceil(fileSize * 0.50))).toBe(true);
-    expect(shouldFallbackToWhole(planWith(8), fileSize, Math.floor(fileSize * 0.45))).toBe(false);
-    // High fan-out (>= 16 ranges) on medium compacts (<= 8 MiB) or >= 30% byte share falls back to whole.
+    expect(shouldFallbackToWhole(planWith(7), fileSize, Math.floor(fileSize * 0.45))).toBe(false);
+    // Medium compacts (<= 8 MiB) fall back at >= 8 ranges when >= 30% of bytes are read,
+    // while ultra-narrow projections (< 30%, e.g. 5% column slices) stay ranged to preserve byte budgets.
+    expect(shouldFallbackToWhole(planWith(8), fileSize, Math.floor(fileSize * 0.35))).toBe(true);
+    expect(shouldFallbackToWhole(planWith(8), fileSize, Math.floor(fileSize * 0.10))).toBe(false);
+    expect(shouldFallbackToWhole(planWith(13), 1_650_000, Math.floor(1_650_000 * 0.37))).toBe(true);
     expect(shouldFallbackToWhole(planWith(16), fileSize, Math.floor(fileSize * 0.25))).toBe(true);
-    expect(shouldFallbackToWhole(planWith(16), 20 * 1024 * 1024, Math.ceil(20 * 1024 * 1024 * 0.30))).toBe(true);
-    expect(shouldFallbackToWhole(planWith(16), 20 * 1024 * 1024, Math.floor(20 * 1024 * 1024 * 0.20))).toBe(false);
-    // Narrow open-hour projection (e.g. 13 ranges, 37% bytes) stays ranged.
-    expect(shouldFallbackToWhole(planWith(13), 1_650_000, Math.floor(1_650_000 * 0.37))).toBe(false);
+    // Larger files (> 8 MiB) stay ranged unless byte share justifies a whole download.
+    expect(shouldFallbackToWhole(planWith(8), largeFile, Math.ceil(largeFile * 0.50))).toBe(true);
+    expect(shouldFallbackToWhole(planWith(8), largeFile, Math.floor(largeFile * 0.45))).toBe(false);
+    expect(shouldFallbackToWhole(planWith(16), largeFile, Math.ceil(largeFile * 0.30))).toBe(true);
+    expect(shouldFallbackToWhole(planWith(16), largeFile, Math.floor(largeFile * 0.20))).toBe(false);
   });
 
   it("falls back to shared whole-file fetch in projectedReader on high-fan-out multi-row-group compacts", async () => {

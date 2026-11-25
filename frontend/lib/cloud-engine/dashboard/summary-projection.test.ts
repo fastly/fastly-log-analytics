@@ -338,6 +338,32 @@ describe("readSummaryProjection", () => {
     // Only the footer probe was issued before falling back to a single whole-file GET.
     expect(dataRanges(source.net, layoutBytes)).toEqual([]);
   });
+
+  it("bounds concurrent whole-file summary bundle downloads through the summary fetch lane", async () => {
+    let active = 0;
+    let peak = 0;
+    const base = fakeSource(layoutBytes);
+    const source = {
+      ...base,
+      fetchFile: async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        active--;
+        return { bytes: layoutBytes.slice(0), cached: false };
+      },
+    };
+    const files = Array.from({ length: 36 }, (_, i) => ({
+      ...manifestFile(layoutBytes),
+      key: `processed/summary_bundle/request/sha256=bundle-${i}.parquet`,
+      size: 1_200_000,
+    }));
+    const results = await Promise.all(files.map((file) => readSummaryProjection(source, file, FIELDS)));
+    expect(results).toHaveLength(36);
+    expect(results.every((r) => r.whole)).toBe(true);
+    expect(peak).toBeLessThanOrEqual(16);
+    expect(peak).toBeGreaterThan(1);
+  });
 });
 
 describe("summaryLayout", () => {

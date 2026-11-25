@@ -622,13 +622,14 @@ export async function decodeRollup(
   spec?: SummarySpec,
 ): Promise<Rollup | null> {
   const parts = Array.isArray(bytes) ? bytes : [bytes as ArrayBuffer];
-  const version = parquetMetadata(parts[0]).key_value_metadata?.find(
+  const metas = parts.map((part) => parquetMetadata(part));
+  const version = metas[0].key_value_metadata?.find(
     (kv) => kv.key === "flp_summary",
   )?.value;
   if (version !== SUMMARY_VERSION) return null;
   const sumNames = Object.values(SUM_COLUMNS);
   const read = (names: string[]) => (spec ? names.filter((name) => spec.columns.has(name)) : names);
-  const { rows, columns } = await readSummaryColumns(parts, read([...new Set([
+  const textWanted = read([...new Set([
     "bundle",
     "bucket",
     "field",
@@ -644,11 +645,14 @@ export async function decodeRollup(
     ...Object.values(OVERVIEW_COLUMNS),
     ...Object.values(ASSET_COLUMNS),
     ...Object.values(VALUE_COLUMNS),
-  ])]), true, spec);
+  ])]);
   const histWanted = read(Object.values(HIST_COLUMNS));
-  const binary = histWanted.length
-    ? await readSummaryColumns(parts, histWanted, false, spec)
-    : { rows: 0, columns: new Map<string, ArrayLike<unknown>>() };
+  const [{ rows, columns }, binary] = await Promise.all([
+    readSummaryColumns(parts, textWanted, true, spec, metas),
+    histWanted.length
+      ? readSummaryColumns(parts, histWanted, false, spec, metas)
+      : Promise.resolve({ rows: 0, columns: new Map<string, ArrayLike<unknown>>() }),
+  ]);
   // A column the spec left out reads as NaN; one the file lacks (an older summary) as 0.
   const skipped = (name: string) => spec !== undefined && !spec.columns.has(name);
   const colNum = (name: string, i: number) => {

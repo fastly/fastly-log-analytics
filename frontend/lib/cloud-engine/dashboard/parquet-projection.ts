@@ -75,9 +75,12 @@ export function shouldFallbackToWhole(
 ): boolean {
   if (plan.ranges.length === 0 || fileSize <= 0 || fileSize > maxFileBytes) return false;
   if (plannedRangeBytes >= fileSize * WHOLE_FALLBACK_RANGE_RATIO) return true;
-  if (plan.ranges.length >= WHOLE_FALLBACK_MANY_RANGES_MIN
-    && plannedRangeBytes >= fileSize * WHOLE_FALLBACK_MANY_RANGES_RATIO) {
-    return true;
+  if (plan.ranges.length >= WHOLE_FALLBACK_MANY_RANGES_MIN) {
+    if (plannedRangeBytes >= fileSize * WHOLE_FALLBACK_MANY_RANGES_RATIO) return true;
+    if (fileSize <= WHOLE_FALLBACK_HIGH_FANOUT_MAX_BYTES
+      && plannedRangeBytes >= fileSize * WHOLE_FALLBACK_HIGH_FANOUT_RATIO) {
+      return true;
+    }
   }
   return plan.ranges.length >= WHOLE_FALLBACK_HIGH_FANOUT_MIN
     && (plannedRangeBytes >= fileSize * WHOLE_FALLBACK_HIGH_FANOUT_RATIO

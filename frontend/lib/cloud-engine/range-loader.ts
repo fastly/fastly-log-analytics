@@ -286,7 +286,9 @@ export async function ensureCloudRange(
           }
           let whole: Awaited<ReturnType<typeof fetchWhole>> | undefined;
           let footer: ParquetFooter;
-          if (wholeFirst.has(file.scopedKey)) {
+          const hasCachedWhole = wholeFirst.has(file.scopedKey)
+            || Boolean(await fileSource.hasFile?.(file.key, { identity: file.wholeKey }));
+          if (hasCachedWhole) {
             whole = await fetchWhole(file);
             generation.assertCurrent();
             downloads.signal.throwIfAborted();

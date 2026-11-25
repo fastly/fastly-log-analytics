@@ -251,6 +251,10 @@ describe("browserSource", () => {
     expect(await source.hasFile!("in-memory")).toBe(false);
     await source.fetchFile("in-memory");
     expect(await source.hasFile!("in-memory")).toBe(true);
+    await source.fetchFile("with-id", undefined, { identity: "id-a" });
+    expect(await source.hasFile!("with-id", { identity: "id-a" })).toBe(true);
+    expect(await source.hasFile!("with-id", { identity: "id-b" })).toBe(false);
+    expect(await source.hasFile!("with-id")).toBe(false);
   });
 
   it("coalesces concurrent file misses and gives every waiter owned bytes", async () => {

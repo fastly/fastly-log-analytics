@@ -192,7 +192,10 @@ export async function readSummaryProjection(
   };
   const whole = async (): Promise<SummaryProjection> => {
     assertProjectionActive();
-    const { bytes, cached, cdn } = await source.fetchFile(file.key, signal);
+    const { bytes, cached, cdn } = await fetchLanes.run("summary", async () => {
+      assertProjectionActive();
+      return source.fetchFile(file.key, signal, { priority: "high" });
+    });
     assertProjectionActive();
     return { parts: [bytes], whole: true, cached, downloadedBytes: cached ? 0 : bytes.byteLength, cdn };
   };
@@ -282,9 +285,10 @@ async function readSummaryPart(
   wanted: readonly string[],
   utf8: boolean,
   spec: SummarySpec | undefined,
+  parsedMetadata?: FileMetaData,
 ): Promise<DecodedColumns> {
-  if (!spec) return readColumns(part, wanted, utf8);
-  const metadata = parquetMetadata(part);
+  if (!spec) return readColumns(part, wanted, utf8, parsedMetadata ? { metadata: parsedMetadata } : undefined);
+  const metadata = parsedMetadata ?? parquetMetadata(part);
   const layout = summaryLayout(metadata);
   if (!layout) return readColumns(part, wanted, utf8, { metadata });
   const wantedGroups = new Set([...spec.groups].filter((group) => group !== "dim_totals"));
@@ -340,8 +344,9 @@ export async function readSummaryColumns(
   wanted: readonly string[],
   utf8 = true,
   spec?: SummarySpec,
+  metadatas?: readonly FileMetaData[],
 ): Promise<DecodedColumns> {
   if (!wanted.length || !parts.length) return { rows: 0, columns: new Map() };
-  const decoded = await Promise.all(parts.map((part) => readSummaryPart(part, wanted, utf8, spec)));
+  const decoded = await Promise.all(parts.map((part, i) => readSummaryPart(part, wanted, utf8, spec, metadatas?.[i])));
   return mergeDecodedParts(decoded, wanted);
 }

@@ -1330,12 +1330,16 @@ async function prepareCloudScan(
     });
   };
   const firstQueryWindow = queryPlan?.newestFirst ? queryWindow(0) : null;
+  const rowGroupFilters = !insights && scanColumns ? extractRowGroupFilters(params) : [];
   const loadSessions = async (fromMs: number, toMs: number, columns: readonly string[] | null) => {
     assertAdapterEpoch(request, entryMetaEpoch);
     return ensureCloudRange(
       new Date(fromMs).toISOString(), new Date(toMs).toISOString(), request.signal, ["request"], {
         serviceId: decodedServiceId, customFields,
-        ...columns ? { projection: { columns: [...columns] } } : {},
+        ...columns ? { projection: {
+          columns: [...columns],
+          ...rowGroupFilters.length ? { filters: rowGroupFilters } : {},
+        } } : {},
       });
   };
   const sessionsFrom = url.pathname === "/api/sessions"
@@ -1343,7 +1347,6 @@ async function prepareCloudScan(
   const followUp = Boolean(detectors) && url.pathname === "/api/insights";
   const widenFollowUp = followUp && !insightsSummaryWindows.includes(insightsWindowKey(decodedServiceId, end));
   const firstFrom = sessionsFrom > Date.parse(scanStart) ? new Date(sessionsFrom).toISOString() : scanStart;
-  const rowGroupFilters = !insights && scanColumns ? extractRowGroupFilters(params) : [];
   const loadRange = (wider: boolean, from = firstFrom) => ensureCloudRange(
     from, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
     serviceId: decodedServiceId, customFields,

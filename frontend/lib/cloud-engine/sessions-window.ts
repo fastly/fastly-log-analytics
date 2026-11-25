@@ -54,16 +54,21 @@ export function sessionsLoadFrom(body: { sort_by?: unknown; sort_dir?: unknown }
   return sessionsNewestFirst(body) ? sessionsSliceLoadFrom(endMs - SESSIONS_FIRST_SLICE_MS, startMs) : startMs;
 }
 
+const HOUR_MS = 3_600_000;
+
 /**
  * Groups page sessions' [start, end] spans into at most MAX_ENRICH_LOADS
  * disjoint spans, each covering whole sessions, so pass 2 loads a few files.
+ * Spans sharing a UTC hour are merged so hourly catalog1 compacts are never loaded twice.
  */
 export function sessionsEnrichSpans(spans: readonly { startMs: number; endMs: number }[]): { startMs: number; endMs: number }[] {
   const merged: { startMs: number; endMs: number }[] = [];
   for (const span of [...spans].sort((a, b) => a.startMs - b.startMs)) {
     const last = merged.at(-1);
-    if (last && span.startMs <= last.endMs + ENRICH_MERGE_GAP_MS) last.endMs = Math.max(last.endMs, span.endMs);
-    else merged.push({ ...span });
+    const sameHour = last && Math.floor(span.startMs / HOUR_MS) === Math.floor(last.endMs / HOUR_MS);
+    if (last && (span.startMs <= last.endMs + ENRICH_MERGE_GAP_MS || sameHour)) {
+      last.endMs = Math.max(last.endMs, span.endMs);
+    } else merged.push({ ...span });
   }
   while (merged.length > MAX_ENRICH_LOADS) {
     let closest = 0;

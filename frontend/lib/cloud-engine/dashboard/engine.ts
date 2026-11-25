@@ -220,7 +220,7 @@ export type FileSource = {
     priority?: RequestPriority,
   ) => Promise<ArrayBuffer>;
   /** Whether `fetchFile` can serve the bytes without a network request. */
-  hasFile?: (key: string) => Promise<boolean>;
+  hasFile?: (key: string, mode?: { identity?: string }) => Promise<boolean>;
   /** `variant` names the custom fields the rollup also counts (`customFieldsKey`). */
   readRollup?: (key: string, variant?: string) => Promise<FileRollup | null>;
   writeRollup?: (

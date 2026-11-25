@@ -43,7 +43,7 @@ export function dashboardScanColumns(
 }
 
 export type ProjectionSource = Pick<FileSource, "cacheScope" | "fetchRange"> &
-  Partial<Pick<FileSource, "fetchFile">> &
+  Partial<Pick<FileSource, "fetchFile" | "hasFile">> &
   Partial<Pick<BrowserFileSource, "readDerivedFile" | "writeDerivedFile">>;
 
 /** A file's projection, sized before its column ranges are fetched. */
@@ -104,13 +104,14 @@ export function projectedReader(
     const keyOf = (footer: ParquetFooter, rowGroups: number[]) =>
       projectionKey(rowGroups.length < footer.metadata.row_groups.length ? rowGroups : undefined);
     const fetchFile = source.fetchFile;
-    if (fetchFile && readsWholeFirst(file)) {
+    const wholeId = wholeFileIdentity(source.cacheScope, file);
+    if (fetchFile && (readsWholeFirst(file) || Boolean(await source.hasFile?.(file.key, { identity: wholeId })))) {
       return {
         // The whole file is held until its projection is built.
         bytes: file.size,
         read: async () => {
           signal?.throwIfAborted();
-          const whole = await fetchFile(file.key, signal, { identity: wholeFileIdentity(source.cacheScope, file) });
+          const whole = await fetchFile(file.key, signal, { identity: wholeId });
           if (whole.bytes.byteLength !== file.size) {
             throw new Error(`Whole-file read of ${file.key} returned ${whole.bytes.byteLength} bytes, not ${file.size}`);
           }
