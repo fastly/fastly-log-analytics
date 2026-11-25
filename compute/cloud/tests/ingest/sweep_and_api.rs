@@ -1091,6 +1091,19 @@ fn logged_traffic_reports_the_ingest_relay_setting() {
 }
 
 #[test]
+fn logged_traffic_degrades_gracefully_when_fastly_stats_fail() {
+    let fake = Fake::new(BASE);
+    tick_runtime(&fake);
+    *fake.logged_traffic_error.borrow_mut() = Some("fastly_stats_403".into());
+    let (status, body, _) = logs_call(&fake, "GET", "/api/admin/usage/logged-traffic", Value::Null);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["available"], json!(false));
+    assert_eq!(body["reason"], json!("fastly_stats_403"));
+    assert_eq!(body["days"], json!([]));
+    assert_eq!(body["logging"]["ingest_relay"], json!(0));
+}
+
+#[test]
 fn service_stats_sums_the_logged_service_fields_per_whole_hour() {
     let fake = Fake::new(BASE);
     tick_runtime(&fake);

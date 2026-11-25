@@ -574,7 +574,16 @@ fn compute_billing(runtime: &impl Runtime, query: &str) -> Outcome {
     }
     match runtime.compute_billing(from, to) {
         Ok(billing) => done(billing, None),
-        Err(error) => fail(502, &error),
+        Err(error) => done(
+            json!({
+                "available": false,
+                "reason": error,
+                "from": from,
+                "to": to,
+                "services": [],
+            }),
+            None,
+        ),
     }
 }
 
@@ -664,7 +673,19 @@ fn logged_traffic(runtime: &impl Runtime) -> Outcome {
         Err(error) => return fail(503, &error),
     };
     let today = runtime.now() / 86_400 * 86_400;
-    match runtime.logged_traffic(&service.service_id, today - TRAFFIC_DAYS * 86_400, today) {
+    let from = today - TRAFFIC_DAYS * 86_400;
+    let logging = json!({
+        "log_period": service.log_period, "sample_rate": service.sample_rate,
+        "edge_only": service.edge_only, "delete_after": service.delete_after,
+        "log_retention_days": service.log_retention_days,
+        "fos_region": service.fos_region,
+        "rum_enabled": service.rum.enabled, "rum_log_period": service.rum.log_period,
+        "rum_sample_rate": service.rum.sample_rate,
+        "rum_retention_days": service.rum_retention_days,
+        "compaction": service.compaction,
+        "ingest_relay": crate::ingest::coordinator::relay_shards(runtime),
+    });
+    match runtime.logged_traffic(&service.service_id, from, today) {
         Ok(mut traffic) => {
             let store = fos_credentials(runtime, &service).map(|(access_key, secret_key)| Store {
                 runtime,
@@ -715,20 +736,21 @@ fn logged_traffic(runtime: &impl Runtime) -> Outcome {
                     }
                 }
             }
-            traffic["logging"] = json!({
-                "log_period": service.log_period, "sample_rate": service.sample_rate,
-                "edge_only": service.edge_only, "delete_after": service.delete_after,
-                "log_retention_days": service.log_retention_days,
-                "fos_region": service.fos_region,
-                "rum_enabled": service.rum.enabled, "rum_log_period": service.rum.log_period,
-                "rum_sample_rate": service.rum.sample_rate,
-                "rum_retention_days": service.rum_retention_days,
-                "compaction": service.compaction,
-                "ingest_relay": crate::ingest::coordinator::relay_shards(runtime),
-            });
+            traffic["logging"] = logging;
             done(traffic, None)
         }
-        Err(error) => fail(502, &error),
+        Err(error) => done(
+            json!({
+                "service_id": service.service_id,
+                "from": from,
+                "to": today,
+                "days": [],
+                "logging": logging,
+                "available": false,
+                "reason": error,
+            }),
+            None,
+        ),
     }
 }
 

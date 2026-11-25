@@ -91,6 +91,7 @@ pub(super) struct Fake {
     pub(super) config_overrides: RefCell<BTreeMap<String, Option<String>>>,
     /// Status every Fastly API call answers with.
     pub(super) api_status: Cell<u16>,
+    pub(super) logged_traffic_error: RefCell<Option<String>>,
     pub(super) kv_reads: RefCell<Vec<String>>,
     pub(super) seq: std::cell::Cell<u64>,
     pub(super) cache: RefCell<BTreeMap<String, CoreCacheEntry>>,
@@ -235,6 +236,7 @@ impl Fake {
             api_responses: Default::default(),
             config_overrides: Default::default(),
             api_status: Cell::new(200),
+            logged_traffic_error: Default::default(),
             kv_reads: Default::default(),
             seq: Default::default(),
             cache: Default::default(),
@@ -1017,6 +1019,9 @@ impl Runtime for Fake {
         Some(&self.usage)
     }
     fn logged_traffic(&self, _: &str, _: u64, _: u64) -> Result<Value, String> {
+        if let Some(error) = self.logged_traffic_error.borrow().as_ref() {
+            return Err(error.clone());
+        }
         Ok(json!({"days": []}))
     }
     fn service_stats(

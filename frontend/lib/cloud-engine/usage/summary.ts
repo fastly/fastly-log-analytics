@@ -1982,7 +1982,14 @@ export interface ComputeBilling {
 }
 
 export function parseComputeBilling(raw: unknown): ComputeBilling {
-  const body = raw as { services?: unknown };
+  const body = raw as { available?: unknown; reason?: unknown; services?: unknown };
+  if (body?.available === false) {
+    throw new Error(
+      typeof body.reason === "string" && body.reason.length > 0
+        ? body.reason
+        : "compute_billing_unavailable",
+    );
+  }
   if (!Array.isArray(body?.services)) {
     throw new Error("Malformed billing response: services");
   }
