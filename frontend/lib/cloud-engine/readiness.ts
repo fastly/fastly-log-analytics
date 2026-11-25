@@ -1767,14 +1767,12 @@ function consumeChainedUrlEquals(
   return curEnd;
 }
 
-function tryScanKeyValueParamEnd(
+function scanParamKeyEnd(
   line: string,
   p: number,
-  isCookie: boolean,
-  allowQuoted = false,
+  allowQuoted: boolean,
   escapeState?: QuoteEscapeState,
-  rejectDoubleEq = false,
-): number {
+): { end: number; keyLower: string } {
   const len = line.length;
   let k = p;
   let keyLower = "";
@@ -1800,32 +1798,66 @@ function tryScanKeyValueParamEnd(
       if (line[k] === '"' || line[k] === "'" || line[k] === "`") {
         const q = line[k]!;
         const qEnd = scanQuotedLiteralEnd(line, k, q, escapeState);
-        if (qEnd <= k + 1 || line[qEnd - 1] !== q) return -1;
+        if (qEnd <= k + 1 || line[qEnd - 1] !== q) return { end: p, keyLower: "" };
         if (keySegments === 0) keyLower = line.slice(k + 1, qEnd - 1).toLowerCase();
         k = qEnd;
         keySegments += 1;
         continue;
       }
     }
-    const segStart = k;
-    if (isCookie && k === p && line[k] === "$") k += 1;
-    const identStart = k;
-    while (
-      k < len
-      && (isAsciiAlpha(line[k]) || isAsciiDigit(line[k]) || line[k] === "_" || line[k] === "-" || line[k] === ".")
-    ) {
-      k += 1;
-    }
-    if (k > identStart) {
-      if (keySegments === 0) keyLower = line.slice(identStart, k).toLowerCase();
+    if (line[k] === "(" || line[k] === "[" || line[k] === "{") {
+      const grpEnd = scanBalancedGroupEnd(line, k, allowQuoted, escapeState);
+      if (grpEnd <= k) break;
+      k = grpEnd;
       keySegments += 1;
       continue;
     }
-    k = segStart;
+    const identStart = k;
+    while (k < len) {
+      const ch = line[k]!;
+      if (
+        isInlineWs(ch)
+        || ch === "\n"
+        || ch === "\r"
+        || ch === "="
+        || ch === ","
+        || ch === ";"
+        || ch === ")"
+        || ch === "]"
+        || ch === "}"
+        || ch === "("
+        || ch === "["
+        || ch === "{"
+        || (allowQuoted && (ch === '"' || ch === "'" || ch === "`"))
+      ) {
+        break;
+      }
+      k += 1;
+    }
+    if (k > identStart) {
+      if (keySegments === 0) {
+        const raw = line.slice(identStart, k).toLowerCase();
+        keyLower = raw.startsWith("$") ? raw.slice(1) : raw;
+      }
+      keySegments += 1;
+      continue;
+    }
     break;
   }
-  if (keySegments === 0) return -1;
-  if (keySegments > 1) keyLower = "";
+  return { end: k, keyLower: keySegments === 1 ? keyLower : "" };
+}
+
+function tryScanKeyValueParamEnd(
+  line: string,
+  p: number,
+  isCookie: boolean,
+  allowQuoted = false,
+  escapeState?: QuoteEscapeState,
+  rejectDoubleEq = false,
+): number {
+  const len = line.length;
+  const { end: k, keyLower } = scanParamKeyEnd(line, p, allowQuoted, escapeState);
+  if (k <= p) return -1;
   let eqPos = k;
   const wsLimit = Math.min(len, k + 16);
   while (eqPos < wsLimit && isInlineWs(line[eqPos])) eqPos += 1;
@@ -1879,31 +1911,24 @@ function scanContinuationParamsEnd(
         end = kvNext;
         continue;
       }
-      if (line.startsWith("[url]", next)) {
-        end = consumeChainedUrlEquals(line, next, next + 5, true, allowQuoted, escapeState);
-        continue;
-      }
-      if (allowQuoted) {
-        const rawUrlEnd = tryScanRawUrlEnd(line, next);
-        if (rawUrlEnd !== -1) {
-          end = consumeChainedUrlEquals(line, next, rawUrlEnd, true, allowQuoted, escapeState);
+      const { end: itemEnd, keyLower: attrLower } = scanParamKeyEnd(line, next, allowQuoted, escapeState);
+      if (itemEnd > next) {
+        let ws = itemEnd;
+        while (ws < len && isInlineWs(line[ws])) ws += 1;
+        const itemSlice = line.slice(next, itemEnd);
+        const hasSentinelOrQuote = itemSlice.includes("[url]")
+          || itemSlice.includes("[redacted]")
+          || (allowQuoted && (itemSlice.includes("://") || /['"`]/.test(itemSlice)));
+        if (
+          attrLower === "httponly"
+          || attrLower === "secure"
+          || attrLower === "partitioned"
+          || line[ws] === ";"
+          || hasSentinelOrQuote
+        ) {
+          end = consumeChainedUrlEquals(line, next, itemEnd, true, allowQuoted, escapeState);
           continue;
         }
-      }
-      if (line.startsWith("[redacted]", next)) {
-        end = next + 10;
-        continue;
-      }
-      if (allowQuoted && (line[next] === '"' || line[next] === "'" || line[next] === "`")) {
-        end = scanQuotedLiteralEnd(line, next, line[next]!, escapeState);
-        continue;
-      }
-      let attrEnd = next;
-      while (attrEnd < len && (isAsciiAlpha(line[attrEnd]) || line[attrEnd] === "-")) attrEnd += 1;
-      const attrLower = line.slice(next, attrEnd).toLowerCase();
-      if (attrEnd > next && (attrLower === "httponly" || attrLower === "secure" || attrLower === "partitioned" || line[attrEnd] === ";")) {
-        end = attrEnd;
-        continue;
       }
       break;
     }
@@ -1924,32 +1949,14 @@ function scanContinuationParamsEnd(
         end = kvNext;
         continue;
       }
-      if (line.startsWith("[url]", next)) {
-        end = consumeChainedUrlEquals(line, next, next + 5, false, allowQuoted, escapeState);
-        continue;
-      }
-      if (allowQuoted) {
-        const rawUrlEnd = tryScanRawUrlEnd(line, next);
-        if (rawUrlEnd !== -1) {
-          end = consumeChainedUrlEquals(line, next, rawUrlEnd, false, allowQuoted, escapeState);
-          continue;
-        }
-      }
-      if (line.startsWith("[redacted]", next)) {
-        const afterRed = next + 10;
-        let ws = afterRed;
+      const { end: itemEnd } = scanParamKeyEnd(line, next, allowQuoted, escapeState);
+      if (itemEnd > next) {
+        let ws = itemEnd;
         while (ws < len && isInlineWs(line[ws])) ws += 1;
-        if (line[ws] === ",") {
-          end = afterRed;
-          continue;
-        }
-      }
-      if (allowQuoted && (line[next] === '"' || line[next] === "'" || line[next] === "`")) {
-        const afterQ = scanQuotedLiteralEnd(line, next, line[next]!, escapeState);
-        let ws = afterQ;
-        while (ws < len && isInlineWs(line[ws])) ws += 1;
-        if (line[ws] === ",") {
-          end = afterQ;
+        const itemSlice = line.slice(next, itemEnd);
+        const hasUrl = itemSlice.includes("[url]") || (allowQuoted && itemSlice.includes("://"));
+        if (line[ws] === "," || hasUrl) {
+          end = consumeChainedUrlEquals(line, next, itemEnd, false, allowQuoted, escapeState);
           continue;
         }
       }

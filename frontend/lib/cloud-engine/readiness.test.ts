@@ -3173,6 +3173,61 @@ it("SEC-T5-ITER40-FE-03: prevents non-contraction apostrophe mismatch and cross-
         ["100ms", "mode", "server"],
         "Error: Runtime Error: [redacted]",
       ],
+      [
+        "Runtime Error: Cookie: a=1; https://a.com'x'; mode = server",
+        ["a.com", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: \"Cookie\": a=1; https://a.com'x'; mode = server",
+        ["a.com", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: Authorization: Digest realm=a, https://a.com"x", mode = server',
+        ["a.com", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: "Authorization": Digest realm=a, https://a.com"x", mode = server',
+        ["a.com", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Cookie: a=1; \"x\"'y'; mode = server",
+        ["mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Cookie: a=1; a'x'; mode = server",
+        ["mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        'Runtime Error: Authorization: Digest realm=a, "x"https://a.com, mode = server',
+        ["a.com", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Cookie: a=1; a/b = 100ms; mode = server",
+        ["100ms", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Cookie: a=1; a:b = 100ms; mode = server",
+        ["100ms", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Cookie: a=1; a$b = 100ms; mode = server",
+        ["100ms", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
+      [
+        "Runtime Error: Cookie: a=1; (x) = 100ms; mode = server",
+        ["100ms", "mode", "server"],
+        "Error: Runtime Error: [redacted]",
+      ],
     ];
     for (const [msg, forbidden, expectedExact] of cases) {
       const err = new Error(msg);
