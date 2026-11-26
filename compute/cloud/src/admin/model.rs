@@ -89,6 +89,8 @@ pub struct Service {
     pub previous_activated_version: Option<u64>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub feature_enabled_fields: BTreeMap<String, Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ngwaf_workspace_id: Option<String>,
 }
 
 impl Service {
@@ -818,6 +820,7 @@ mod tests {
                     previous_deployed_snapshot: None,
                     previous_activated_version: None,
                     feature_enabled_fields: Default::default(),
+                    ngwaf_workspace_id: None,
                 }
             })
             .unwrap();

@@ -143,8 +143,7 @@ export function getStepsForMode(
   if (!attached) steps.push({ id: "features", label: "Features" })
   steps.push({ id: "storage", label: "Storage" })
   if (!attached && (!config || config.logging_enabled !== false)) {
-    // Cloud has no NGWAF workspace lookup; its server ignores ngwaf_workspace_id.
-    if (!isCloudMode()) steps.push({ id: "ngwaf", label: "NGWAF" })
+    steps.push({ id: "ngwaf", label: "NGWAF" })
     steps.push({ id: "fields", label: "Log Fields" })
   }
   steps.push({ id: "execute", label: "Review" })

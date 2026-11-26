@@ -239,6 +239,98 @@ fn route(
         ("POST", ["api", "admin", "services", sid, "rollback"]) => {
             rollback_service(context, actor, sid, body(request)?)
         }
+        (
+            "GET",
+            ["api", "admin", "provision", "ngwaf-workspaces"]
+            | ["api", "provision", "ngwaf-workspaces"],
+        ) => {
+            let token = request
+                .header("authorization")
+                .and_then(|h| {
+                    h.strip_prefix("Bearer ")
+                        .or_else(|| h.strip_prefix("bearer "))
+                })
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_owned)
+                .or_else(|| {
+                    let sid = url::form_urlencoded::parse(query.as_bytes())
+                        .find(|(k, _)| k == "service_id")
+                        .map(|(_, v)| v.into_owned());
+                    let svc = match sid.as_deref() {
+                        Some(sid) => load_service(context, sid).ok().map(|(_, s)| s),
+                        None => active_service(context.runtime).ok().flatten(),
+                    }?;
+                    context
+                        .runtime
+                        .secret(&svc.fastly_token_ref)
+                        .ok()
+                        .flatten()
+                        .filter(|t| !t.is_empty())
+                })
+                .ok_or_else(|| Error::new(400, "fastly_token_required"))?;
+            let (status, body) = context.api_status("GET", "/ngwaf/v1/workspaces", &token, None)?;
+            if status == 401 || status == 403 {
+                return Err(Error::new(400, "ngwaf_token_invalid"));
+            }
+            if !(200..300).contains(&status) {
+                return Err(Error::new(400, "ngwaf_api_error"));
+            }
+            let workspaces: Vec<Value> = body["data"]
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|w| {
+                            let id = w["id"].as_str().filter(|s| !s.is_empty())?;
+                            let name = w["name"].as_str().unwrap_or(id);
+                            Some(json!({
+                                "id": id,
+                                "name": name,
+                                "description": w["description"].as_str().unwrap_or(""),
+                            }))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut result = json!({"workspaces": workspaces});
+            if workspaces.is_empty() {
+                if let Ok((200..=299, info)) =
+                    context.api_status("GET", "/tokens/self", &token, None)
+                {
+                    if info["user_id"].as_str().is_none_or(|id| id.is_empty()) {
+                        result["error_hint"] = json!(
+                            "You are using an Automation Token (Service Account). Fastly Automation Tokens do not have access to Next-Gen WAF (NGWAF) data. Use a Personal API Token with Security permissions."
+                        );
+                    }
+                }
+            }
+            Ok(result)
+        }
+        (
+            "PATCH",
+            ["api", "admin", "provision", "services", sid, "ngwaf-workspace"]
+            | ["api", "provision", "services", sid, "ngwaf-workspace"],
+        ) => {
+            let input: Value = body(request)?;
+            let workspace_id = input["ngwaf_workspace_id"]
+                .as_str()
+                .map(str::trim)
+                .filter(|w| !w.is_empty())
+                .map(str::to_owned);
+            let (record, mut service) = load_service(context, sid)?;
+            service.ngwaf_workspace_id = workspace_id.clone();
+            service.updated_at = context.runtime.now();
+            service.config_version += 1;
+            save_service_recovery_capped(
+                context,
+                &record,
+                &service,
+                actor,
+                "ngwaf_workspace.updated",
+            )?;
+            Ok(json!({"ok": true, "ngwaf_workspace_id": workspace_id}))
+        }
         ("POST", ["api", "admin", "provision", "services"] | ["api", "provision", "services"]) => {
             let input: Value = body(request)?;
             let token = required(&input, "token")?;
@@ -1682,6 +1774,7 @@ fn provision(
         previous_deployed_snapshot: None,
         previous_activated_version: None,
         feature_enabled_fields: std::collections::BTreeMap::new(),
+        ngwaf_workspace_id: None,
     };
     reconcile_system_fields(&mut service, previous.as_ref())?;
     validate_service(

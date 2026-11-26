@@ -33,6 +33,7 @@ pub mod file_metadata;
 pub mod hist;
 pub mod hll;
 pub mod listing;
+pub mod ngwaf_bots;
 pub mod retention;
 pub mod rum;
 pub mod rum_summary;

@@ -67,6 +67,7 @@ import { cloudLogFieldsCatalog, cloudSchema } from "./log-fields";
 import { parquetColumns, sampleStats } from "./schema";
 import { isNativeCloudRoute } from "./native-routes";
 import { valueStatsDecorator } from "./value-stats";
+import { adminRequest } from "./telemetry/admin";
 import { migrateLegacySavedViews } from "./saved-views";
 import { cloudServiceStatus } from "./service-bridges";
 import {
@@ -976,13 +977,94 @@ type SectionRollup = {
   decorate?: (start: string, end: string, params: Record<string, unknown>) => (answer: unknown) => Promise<unknown>;
 };
 
+type NgwafBotsEdgePayload = {
+  ngwaf_configured?: boolean;
+  ngwaf_verified_bots?: Array<{
+    bot_name: string;
+    wellknown_bot_name: string | null;
+    category: string | null;
+    request_count: number;
+  }>;
+  ngwaf_verified_bots_ts?: Array<{
+    time: string;
+    bot_name: string;
+    count: number;
+  }>;
+  ngwaf_bots?: Array<{
+    bot_name: string;
+    category: string | null;
+    request_count: number;
+  }>;
+};
+
+function securityNgwafBotsDecorator(
+  start: string,
+  end: string,
+  params: Record<string, unknown>,
+): (answer: unknown) => Promise<unknown> {
+  const sections = Array.isArray(params.sections)
+    ? params.sections.map(String)
+    : typeof params.sections === "string"
+      ? params.sections.split(",").map((s) => s.trim()).filter(Boolean)
+      : null;
+  const wantsNgwaf =
+    sections === null ||
+    sections.includes("ngwaf_verified_bots") ||
+    sections.includes("ngwaf_verified_bots_ts") ||
+    sections.includes("top_bots");
+  if (!wantsNgwaf) return async (answer) => answer;
+
+  const serviceId = typeof params.service_id === "string" ? params.service_id : undefined;
+  const bucketSeconds = Math.max(60, Math.trunc(Number(params.bucket_seconds) || 60));
+  const pending: Promise<NgwafBotsEdgePayload | null> = (async () => {
+    try {
+      const svcRes = await fetchCloudMetadata("/api/services", new AbortController().signal);
+      if (!svcRes.ok) return null;
+      const payload = (await svcRes.json()) as {
+        services?: Array<{ service_id?: string; ngwaf_workspace_id?: string | null }>;
+      };
+      const services = payload.services ?? [];
+      const svc = serviceId ? services.find((s) => s.service_id === serviceId) : services[0];
+      if (!svc?.ngwaf_workspace_id) return null;
+      const qs = new URLSearchParams({
+        from: start,
+        to: end,
+        bucket_seconds: String(bucketSeconds),
+      });
+      return await adminRequest<NgwafBotsEdgePayload>(`/api/security/ngwaf-bots?${qs.toString()}`);
+    } catch {
+      return null;
+    }
+  })();
+
+  return async (answer: unknown) => {
+    if (!answer || typeof answer !== "object") return answer;
+    const ngwaf = await pending;
+    if (!ngwaf || !ngwaf.ngwaf_configured) return answer;
+    const record = answer as Record<string, unknown>;
+    return {
+      ...record,
+      ngwaf_configured: true,
+      ...(sections === null || sections.includes("ngwaf_verified_bots")
+        ? { ngwaf_verified_bots: ngwaf.ngwaf_verified_bots ?? [] }
+        : {}),
+      ...(sections === null || sections.includes("ngwaf_verified_bots_ts")
+        ? { ngwaf_verified_bots_ts: ngwaf.ngwaf_verified_bots_ts ?? [] }
+        : {}),
+      ...(sections === null || sections.includes("top_bots")
+        ? { ngwaf_bots: ngwaf.ngwaf_bots ?? [] }
+        : {}),
+    };
+  };
+}
+
 const SECTION_ROLLUPS: Record<string, SectionRollup> = {
   "/api/origin/aggregates": { label: "/origin", eligible: originRollupEligible },
   "/api/origin/shielding-analysis": { label: "/origin", eligible: originRollupEligible },
   "/api/performance": { label: "/performance", eligible: performanceRollupEligible },
   "/api/performance/aggregates": { label: "/performance", eligible: performanceRollupEligible },
-  "/api/security/aggregates": { label: "/security", eligible: securityRollupEligible },
-  "/api/security/bundle": { label: "/security", eligible: securityRollupEligible },
+  "/api/security/aggregates": { label: "/security", eligible: securityRollupEligible, decorate: securityNgwafBotsDecorator },
+  "/api/security/bundle": { label: "/security", eligible: securityRollupEligible, decorate: securityNgwafBotsDecorator },
   "/api/security/threat-intel": { label: "/security", eligible: securityRollupEligible },
   "/api/assets/aggregates": { label: "/assets", eligible: assetsRollupEligible },
   "/api/cmcd/aggregates": { label: "/cmcd", eligible: (_path, params) => cmcdRollupEligible(params as CmcdQueryParams) },
@@ -2979,8 +3061,8 @@ async function dispatchCloudRequest(
     return handlePerformanceRequest(request, pathname, url, read);
   }
 
-  // Page 10: Security Analytics (/api/security/*)
-  if (pathname.startsWith("/api/security/")) {
+  // Page 10: Security Analytics (/api/security/*); /api/security/ngwaf-bots is served by Compute edge.
+  if (pathname.startsWith("/api/security/") && pathname !== "/api/security/ngwaf-bots") {
     return handleSecurityRequest(request, pathname, url, read);
   }
 

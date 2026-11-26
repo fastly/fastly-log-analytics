@@ -1002,7 +1002,11 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
             }
             if matches!(
                 path,
-                "/api/log-extents" | "/api/files" | "/api/file" | "/api/ingest/events"
+                "/api/log-extents"
+                    | "/api/files"
+                    | "/api/file"
+                    | "/api/ingest/events"
+                    | "/api/security/ngwaf-bots"
             ) && (request.method == "GET" || request.method == "HEAD" && path == "/api/file")
             {
                 let user = user.as_ref().ok_or(AuthError::Unauthorized)?;
@@ -1061,6 +1065,44 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
                             }
                             Err((status, detail)) => error(status, detail),
                         }
+                    }
+                    "/api/security/ngwaf-bots" => {
+                        let parse_ts = |name: &str| {
+                            wanted(name).and_then(|raw| {
+                                raw.parse::<i64>().ok().or_else(|| {
+                                    time::OffsetDateTime::parse(
+                                        &raw,
+                                        &time::format_description::well_known::Rfc3339,
+                                    )
+                                    .ok()
+                                    .map(|dt| dt.unix_timestamp())
+                                })
+                            })
+                        };
+                        let to_s = parse_ts("to").unwrap_or(now as i64);
+                        let from_s = parse_ts("from").unwrap_or(to_s - 3600);
+                        let bucket_s = wanted("bucket_seconds")
+                            .and_then(|v| v.parse::<i64>().ok())
+                            .unwrap_or(60)
+                            .max(60);
+                        let result = match crate::admin::fos_credentials(self.runtime, &service) {
+                            Some((access_key, secret_key)) => {
+                                let store = crate::ingest::storage::Store {
+                                    runtime: self.runtime,
+                                    service: &service,
+                                    access_key,
+                                    secret_key,
+                                    started,
+                                    vcpu_start: 0,
+                                };
+                                crate::ingest::ngwaf_bots::query_range(
+                                    &store, from_s, to_s, bucket_s,
+                                )
+                                .map_err(|_| (503, "NGWAF bot summary is unavailable."))
+                            }
+                            None => Err((503, "Storage credentials unavailable.")),
+                        };
+                        api_json(result)
                     }
                     _ => api_json(api::extents(self.runtime, &service, started)),
                 };
@@ -1316,13 +1358,16 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
     }
 
     fn sync_status(&self) -> Value {
-        let (configured, extents) = match crate::admin::active_service(self.runtime) {
-            Ok(Some(service)) => (
-                true,
-                crate::ingest::api::extents(self.runtime, &service, std::time::Instant::now()).ok(),
-            ),
-            _ => (false, None),
-        };
+        let (configured, ngwaf_workspace_id, extents) =
+            match crate::admin::active_service(self.runtime) {
+                Ok(Some(service)) => (
+                    true,
+                    service.ngwaf_workspace_id.clone(),
+                    crate::ingest::api::extents(self.runtime, &service, std::time::Instant::now())
+                        .ok(),
+                ),
+                _ => (false, None, None),
+            };
         let snapshot = crate::admin::cron_audit_snapshot(self.runtime);
         let clock_interval_s = snapshot.clock_interval_s();
         let cron_runs = snapshot.runs;
@@ -1349,7 +1394,7 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
             })
         });
         json!({
-            "configured":configured,"busy":false,
+            "configured":configured,"busy":false,"ngwaf_workspace_id":ngwaf_workspace_id,
             "earliest_log_at":edge("earliest_log_at"),"latest_log_at":latest_log_at,
             "local_rows":total_rows,"request":request,"rum":rum,"storage_mode":null,
             "latest_ingested_file_at":snapshot.last_ingest_at,"latest_available_file_at":null,
@@ -1577,6 +1622,10 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
             None
         };
 
+        let ngwaf_configured = active
+            .and_then(|service| service["ngwaf_workspace_id"].as_str())
+            .is_some_and(|w| !w.trim().is_empty());
+
         Ok(json_response(json!({
             "runtime_mode": "cloud",
             "user": user_json(&user),
@@ -1587,7 +1636,7 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
             "views": views,
             "header_badge": header_badge,
             "build_sha": env!("FLP_BUILD_SHA"),
-            "ngwaf_configured": false,
+            "ngwaf_configured": ngwaf_configured,
             "fastly_bots_available": true,
             "settings": {
                 "needs_login": false,

@@ -304,6 +304,7 @@ fn bootstrap_service(owner_id: String, input: &RecoverInput, now: u64) -> Servic
         previous_deployed_snapshot: None,
         previous_activated_version: None,
         feature_enabled_fields: Default::default(),
+        ngwaf_workspace_id: None,
     }
 }
 
@@ -2921,6 +2922,7 @@ mod tests {
             previous_deployed_snapshot: None,
             previous_activated_version: None,
             feature_enabled_fields: Default::default(),
+            ngwaf_workspace_id: None,
         }
     }
 

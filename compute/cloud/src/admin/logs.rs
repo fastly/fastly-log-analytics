@@ -8,7 +8,7 @@ use crate::{
     admin::{ApiRequest, Service},
     http::{Request, Response},
     ingest::{
-        bundle, compaction,
+        bundle, compaction, ngwaf_bots,
         retention::{self, SWEEP_INTERVAL_S},
         scope,
         storage::Store,
@@ -898,7 +898,7 @@ pub struct TickContext<'a> {
 /// one stage execution, which runs the first of these, from `maint_next` on, that has work.
 /// `request_compact` is listed for its cron row and schedule entry but runs on its own job
 /// ([`compact_execution`]), not in the rotation.
-pub const MAINT_STAGES: [&str; 7] = [
+pub const MAINT_STAGES: [&str; 8] = [
     "retention_sweep",
     "log_compact",
     "delete_history",
@@ -906,6 +906,7 @@ pub const MAINT_STAGES: [&str; 7] = [
     "summary_bundle",
     "request_compact",
     "delete_data",
+    "ngwaf_bots",
 ];
 
 /// Calls kept back for the cron_runs outbox write and the sweep marker after a stage.
@@ -982,7 +983,7 @@ pub(super) fn maintenance_stage(
         if spent || !store.within_wall() {
             break;
         }
-        if index == 5 || (index == 6 && reset_ran) || (fencing && matches!(index, 0 | 3 | 4)) {
+        if index == 5 || (index == 6 && reset_ran) || (fencing && matches!(index, 0 | 3 | 4 | 7)) {
             if index == 4 {
                 outcome.bundle_pending = Some(false);
             }
@@ -995,7 +996,8 @@ pub(super) fn maintenance_stage(
             3 => reconcile_stage(&store, &buffer),
             4 => bundle_stage(&store, &buffer, &mut outcome.worker_executions_metrics),
             6 => reset::reset_stage(&store),
-            _ => unreachable!("MAINT_STAGES has seven entries; request_compact has its own job"),
+            7 => ngwaf_bots_stage(&store),
+            _ => unreachable!("MAINT_STAGES has eight entries; request_compact has its own job"),
         };
         if index == 4 {
             outcome.bundle_pending = Some(row.as_ref().is_some_and(compact_backlog));
@@ -1936,6 +1938,39 @@ fn reconcile_stage<R: Runtime>(store: &Store<'_, R>, buffer: &LogBuffer) -> Opti
             row.outcome = "busy";
             row.more_pending = true;
         }
+        Err(error) => {
+            row.outcome = "error";
+            row.error = Some(error);
+        }
+    }
+    finish_row(runtime, &mut row, before, began, &span);
+    Some(row)
+}
+
+fn ngwaf_bots_stage<R: Runtime>(store: &Store<'_, R>) -> Option<StageRow> {
+    let runtime = store.runtime;
+    caller(runtime, "cron:ngwaf_bots");
+    if !enough(runtime, 5) {
+        return None;
+    }
+    let began = Instant::now();
+    let span = VcpuSpan::start(runtime);
+    let before = runtime.admin_remaining_calls();
+    let mut row = StageRow::new("ngwaf_bots", runtime.now());
+    match ngwaf_bots::sync_step(store, TAIL) {
+        Ok(Some(report)) => {
+            row.listed = report.records;
+            row.rows = report.added;
+            row.files = report.days_written;
+            row.more_pending = report.more_pending;
+            row.outcome = if report.more_pending {
+                "partial"
+            } else {
+                "done"
+            };
+            row.details = Some(json!({"pages": report.pages}));
+        }
+        Ok(None) => return None,
         Err(error) => {
             row.outcome = "error";
             row.error = Some(error);
