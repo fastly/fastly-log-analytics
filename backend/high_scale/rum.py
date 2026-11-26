@@ -277,10 +277,12 @@ def _rum_analytics_compute(
     req_edge_scope = " AND ".join(visible_fact_clauses("request"))
     req_edge_cte = (
         f"req_edge AS (SELECT _cf_rid AS rid, any(toFloat64OrNull(nullIf(_cf_elapsed, ''))) / 1000.0 AS edge_ms, "
-        f"any(_cf_asn) AS req_asn FROM request_facts WHERE {req_edge_scope} "
+        f"any(_cf_asn) AS req_asn FROM request_facts PREWHERE {req_edge_scope} "
         "AND event_timestamp >= ({start:DateTime64(3, 'UTC')} - INTERVAL 10 MINUTE) "
         "AND event_timestamp < ({end:DateTime64(3, 'UTC')} + INTERVAL 10 MINUTE) "
-        "AND _cf_rid != '' GROUP BY _cf_rid)"
+        "AND _cf_rid != '' "
+        f"AND _cf_rid IN (SELECT req_id FROM rum_vitals_facts WHERE {where_ttlb} AND req_id != '') "
+        "GROUP BY _cf_rid)"
     )
     ttlb_agg_select = (
         "toUInt64(round(sum(v.w))) AS requests, "

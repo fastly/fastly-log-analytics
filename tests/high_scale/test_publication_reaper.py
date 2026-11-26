@@ -669,3 +669,41 @@ def test_pending_publication_manifests_and_maybe_reap_clear_old_and_moved_orphan
     assert seed.status(old_sup) == "superseded"
     assert seed.status(old_vis) == "visible"
     assert seed.status(rep) == "visible"
+
+
+def test_reaper_from_environment_defaults_and_stale_request_batch_reaping(
+    seed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("HIGH_SCALE_PUBLICATION_REAPER_ENABLED", raising=False)
+    monkeypatch.delenv("HIGH_SCALE_PUBLICATION_REAPER_GRACE_SECONDS", raising=False)
+    monkeypatch.delenv("HIGH_SCALE_PUBLICATION_REAPER_INTERVAL_SECONDS", raising=False)
+    monkeypatch.delenv("HIGH_SCALE_PUBLICATION_REAPER_MAX_AGE_SECONDS", raising=False)
+
+    # Python __init__ defaults stay 3600.0 / 600.0 for direct callers.
+    direct = PublicationReaper(control=seed.control, visible_receipts=_no_receipts)
+    assert direct.grace_seconds == 3600.0
+    assert direct._interval_seconds == 600.0
+
+    # Environment factory defaults to 300s grace and 60s interval so orphans reap promptly even without deletion.
+    ch = MagicMock()
+    ch.execute.return_value = []
+    env_reaper = publication_reaper.reaper_from_environment(seed.control, ch)
+    assert env_reaper is not None
+    assert env_reaper.grace_seconds == 300.0
+    assert env_reaper._interval_seconds == 60.0
+
+    # A 6-minute-old pending request orphan whose source was republished under a visible replacement is superseded.
+    seed.archive("req-orphan-6m", "request", age_hours=0.1)
+    seed.archive("req-rep-visible", "request", state="manifest_committed", age_hours=0.05)
+    seed.source("req-orphan-6m", "raw/req-6m", status="acknowledged", owner_manifest="req-rep-visible")
+    seed.source("req-rep-visible", "raw/req-6m", status="acknowledged", owner_manifest="req-rep-visible")
+    orphan_batch = publication_batch_id("req-orphan-6m", "request", "request")
+    rep_batch = publication_batch_id("req-rep-visible", "request", "request")
+    seed.publication(orphan_batch, "request", status="pending", age_hours=0.1)
+    seed.publication(rep_batch, "request", status="visible", age_hours=0.05)
+
+    reap_res = env_reaper.maybe_reap(seed.sid)
+    assert reap_res is not None
+    assert orphan_batch in reap_res.superseded
+    assert seed.status(orphan_batch) == "superseded"
+    assert seed.status(rep_batch) == "visible"

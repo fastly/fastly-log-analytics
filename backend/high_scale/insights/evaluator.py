@@ -68,6 +68,7 @@ from backend.repositories.insights.shaping import (
 from backend.repositories.insights.shaping import (
     make_investigate_url_builder as _make_investigate_url,
 )
+from backend.repositories.utils.response_cache import client_cache_token
 from backend.repositories.utils.response_shaping import (
     build_insight_asn_context,
     build_insights_envelope,
@@ -104,9 +105,11 @@ _INSIGHTS_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=200, ttl_seconds=300)
 _INSIGHTS_TELEMETRY_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=200, ttl_seconds=300)
 # Results with error cards are kept briefly so retries and prewarms reuse the cards that did succeed.
 _INSIGHTS_PARTIAL_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=200, ttl_seconds=60)
+_INSIGHTS_HISTORY_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=60)
 _CacheRegistry.register("high_scale.insights._INSIGHTS_CACHE", _INSIGHTS_CACHE)
 _CacheRegistry.register("high_scale.insights._INSIGHTS_TELEMETRY_CACHE", _INSIGHTS_TELEMETRY_CACHE)
 _CacheRegistry.register("high_scale.insights._INSIGHTS_PARTIAL_CACHE", _INSIGHTS_PARTIAL_CACHE)
+_CacheRegistry.register("high_scale.insights._INSIGHTS_HISTORY_CACHE", _INSIGHTS_HISTORY_CACHE)
 # One evaluation scans the whole baseline once per detection (minutes on a busy service), so page requests
 # never run it themselves: they get the last result at once while a single background evaluation per
 # request shape refreshes it, and a cold shape answers with pending cards after a short wait.
@@ -194,6 +197,7 @@ def _evaluate(
     *,
     max_workers: int = _MAX_WORKERS,
     query_settings: Mapping[str, str] | None = None,
+    bypass_history_cache: bool = False,
 ) -> tuple[dict[str, Any], bool]:
     """Run every detection once; returns the envelope and whether any card is an error card.
 
@@ -263,12 +267,32 @@ def _evaluate(
         f"ORDER BY event_timestamp DESC LIMIT {_FIELD_SAMPLE_ROWS})"
     )
     # Pending cards need only history and fields; the coverage read finishes behind them.
+    history_cache_key = (
+        service.service_id,
+        client_cache_token(service.client),
+        use_rollup,
+        filter_clause,
+        tuple(sorted((k, str(v)) for k, v in filter_params.items())),
+        int(baseline_start.timestamp()) // 60,
+        int(window_start.timestamp()) // 60,
+        int(now.timestamp()) // 60,
+    )
+    cached_history = None if bypass_history_cache else _INSIGHTS_HISTORY_CACHE.get(history_cache_key)
     meta_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-insights-meta")
     fut_coverage = None
     try:
-        fut_history = trace.submit(meta_pool, "history", lambda: _exec(history_sql, params), source="fact")
+        fut_history = (
+            trace.submit(meta_pool, "history", lambda: _exec(history_sql, params), source="fact")
+            if cached_history is None
+            else None
+        )
         fut_sample = trace.submit(meta_pool, "fields", lambda: _exec(sample_sql, params), source="fact")
-        history = fut_history.result()
+        if cached_history is None:
+            assert fut_history is not None
+            history = fut_history.result()
+            _INSIGHTS_HISTORY_CACHE[history_cache_key] = history
+        else:
+            history = cached_history
         sample = fut_sample.result()
         earliest = history[0].get("earliest") if history else None
         window_total = int(history[0].get("window_total") or 0) if history else 0
@@ -328,7 +352,7 @@ def _evaluate(
             query_params = {**params, "rollup_start": span[0], "rollup_end": span[1]}
             source = "mixed"
         else:
-            sql = _base_sql(detection, definition.id)
+            sql = _base_sql(detection, definition.id, baseline_hours=baseline_hours)
         if filter_clause:
             sql = sql.replace(
                 "AND event_timestamp < {window_end:DateTime64(3)}",
@@ -548,9 +572,7 @@ def _evaluate(
         for name, members in _MULTIPLEX_GROUPS:
             if unit_key in members:
                 return name
-        if unit_key.startswith("batch_"):
-            return unit_key
-        return "group_raw_standalone"
+        return unit_key
 
     rollup_dependent_groups: set[str] = set()
     for batch, _ in batches:
@@ -748,6 +770,7 @@ def insights_endpoint(
             on_meta,
             max_workers=max_workers,
             query_settings=query_settings,
+            bypass_history_cache=force_refresh,
         )
 
     def evaluate_bg(on_meta: Callable[[dict[str, Any]], None] | None = None) -> tuple[dict[str, Any], bool]:
@@ -759,7 +782,7 @@ def insights_endpoint(
 
     if not isinstance(service, HighScaleService):
         get_queries()
-        payload, _ = evaluate()
+        payload, _ = evaluate_bg() if force_refresh else evaluate()
         return InsightsResponse.with_telemetry(**payload)
     if force_refresh:
         return _job_result(cache_key, _start_or_join(cache_key, evaluate_bg, interactive=False))

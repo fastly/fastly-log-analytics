@@ -513,3 +513,72 @@ def test_worker_loop_runs_archive_flushes_with_configured_interval_and_isolates_
         ("svc-a", "rum_vitals", 60),
         ("svc-a", "rum_errors", 60),
     ]
+
+
+@pytest.mark.no_postgres
+def test_worker_loop_runs_publication_reaper_without_deletion_sweeper_and_avoids_double_run(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    reaper = MagicMock()
+    reaper.maybe_reap.side_effect = [RuntimeError("reaper boom"), None]
+
+    loop = HighScaleWorkerLoop(
+        coordinators=(("svc-a", _Coordinator([])), ("svc-b", _Coordinator([]))),  # type: ignore[arg-type]
+        domains=("request",),
+        interval_seconds=0,
+        deletion_sweepers=(("svc-a", None), ("svc-b", None)),
+        publication_reaper=reaper,
+    )
+    with caplog.at_level(logging.ERROR):
+        results = loop.run_once()
+
+    assert len(results) == 2
+    assert reaper.maybe_reap.call_args_list == [(("svc-a",),), (("svc-b",),)]
+    assert "high-scale publication reaper failed" in caplog.text
+
+    # When a service's deletion sweeper already owns a publication_reaper, run_once must not invoke it a second time.
+    reaper_shared = MagicMock()
+    sweeper_with_reaper = MagicMock(_publication_reaper=reaper_shared)
+    loop_with_sweeper = HighScaleWorkerLoop(
+        coordinators=(("svc-a", _Coordinator([])),),  # type: ignore[arg-type]
+        domains=("request",),
+        interval_seconds=0,
+        deletion_sweepers=(("svc-a", sweeper_with_reaper),),
+        publication_reaper=reaper_shared,
+    )
+    loop_with_sweeper.run_once()
+    loop_with_sweeper.wait_for_deletion_sweep(timeout=2)
+    reaper_shared.maybe_reap.assert_not_called()
+
+
+@pytest.mark.no_postgres
+@pytest.mark.parametrize("deletion_enabled", ["0", "1"])
+def test_build_worker_from_environment_always_wires_publication_reaper(
+    monkeypatch: pytest.MonkeyPatch, deletion_enabled: str
+) -> None:
+    monkeypatch.setenv("HIGH_SCALE_SERVICE_IDS", "svc-test")
+    monkeypatch.setenv("HIGH_SCALE_DELETION_ENABLED", deletion_enabled)
+    monkeypatch.setattr(worker, "from_environment", lambda: _config("local"))
+    monkeypatch.setattr(worker, "ClickHouseClient", lambda _s: MagicMock())
+    monkeypatch.setattr(worker.app_config, "load_clickhouse_config", lambda: MagicMock())
+    monkeypatch.setattr(worker.app_config, "load_config", lambda _sid: {})
+    monkeypatch.setattr("backend.core.metadata.base.ensure_pg_schema", lambda: None)
+    monkeypatch.setattr("backend.utils.runtime_modes.validate_mock_modes", lambda: None)
+    monkeypatch.setattr(
+        "backend.core.fos_client.get_source_for_service",
+        lambda _sid: {"bucket": "bkt", "prefix": "raw/"},
+    )
+    monkeypatch.setattr("backend.core.fos_client._get_fos_client", lambda _src: MagicMock())
+    ctrl_mock = MagicMock()
+    monkeypatch.setattr(worker, "PostgresControlPlane", lambda: ctrl_mock)
+    sentinel_reaper = MagicMock()
+    monkeypatch.setattr(worker, "reaper_from_environment", lambda _c, _ch: sentinel_reaper)
+
+    built = worker.build_worker_from_environment()
+    assert built._publication_reaper is sentinel_reaper
+    if deletion_enabled == "0":
+        assert built._deletion_sweepers == (("svc-test", None),)
+    else:
+        sweeper = dict(built._deletion_sweepers)["svc-test"]
+        assert sweeper is not None
+        assert sweeper._publication_reaper is None

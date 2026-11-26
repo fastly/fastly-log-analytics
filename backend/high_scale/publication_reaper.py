@@ -332,8 +332,9 @@ def reaper_from_environment(control: Any, clickhouse: Any) -> PublicationReaper 
     return PublicationReaper(
         control=control,
         visible_receipts=clickhouse_visible_receipts(clickhouse),
-        grace_seconds=float(os.getenv("HIGH_SCALE_PUBLICATION_REAPER_GRACE_SECONDS", "3600")),
+        grace_seconds=float(os.getenv("HIGH_SCALE_PUBLICATION_REAPER_GRACE_SECONDS", "300")),
         max_age_seconds=float(raw_max_age) if raw_max_age else None,
+        interval_seconds=float(os.getenv("HIGH_SCALE_PUBLICATION_REAPER_INTERVAL_SECONDS", "60")),
     )
 
 

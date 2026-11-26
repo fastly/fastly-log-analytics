@@ -85,6 +85,18 @@ class Detection:
     # query condition cache keys on this exact text, so later evaluations skip non-matching granules.
     prewhere: str = ""
     needs_baseline: bool = True
+    baseline_sampled: bool = False
+
+
+def baseline_sample_stride(baseline_hours: float) -> int:
+    """Granule-skipping 5-minute time-block stride for raw-fact baseline portions (>= 24h)."""
+    if baseline_hours >= 168:
+        return 8
+    if baseline_hours >= 48:
+        return 4
+    if baseline_hours >= 24:
+        return 2
+    return 1
 
 
 @dataclass(frozen=True)
@@ -368,6 +380,26 @@ _CRAWLER_IN_WINDOW = (
     "AND event_timestamp < {window_end:DateTime64(3)} "
     "WHERE custom_fields['ua'] != '' GROUP BY ua"
     ")) WHERE raw_tok != '' AND bot_stem != '' GROUP BY bot_stem HAVING sum(cnt) >= 50)) > 0"
+)
+_STALE_CHROME_WIN_FILTER = (
+    "custom_fields['ua'] != '' AND positionCaseInsensitive(custom_fields['ua'], 'chrome') > 0 "
+    "AND NOT multiSearchAnyCaseInsensitive(custom_fields['ua'], ['bot', 'crawler', 'spider']) "
+    r"AND extract(custom_fields['ua'], 'Chrome/([0-9]+)\.') != '' "
+    r"AND toInt32OrZero(extract(custom_fields['ua'], 'Chrome/([0-9]+)\.')) < 131"
+)
+_STALE_CHROME_IN_WINDOW = (
+    r"chrome_version IN (SELECT extract(custom_fields['ua'], 'Chrome/([0-9]+)\.') FROM request_facts "
+    f"PREWHERE {_CRAWLER_WIN_SCOPE} AND event_timestamp >= {{window_start:DateTime64(3)}} "
+    f"AND event_timestamp < {{window_end:DateTime64(3)}} WHERE {_STALE_CHROME_WIN_FILTER} GROUP BY 1 HAVING count() >= 500)"
+)
+_SHIELD_IN_WINDOW = (
+    "(SELECT count() FROM (SELECT 1 FROM request_facts "
+    f"PREWHERE {_CRAWLER_WIN_SCOPE} AND event_timestamp >= {{window_start:DateTime64(3)}} "
+    "AND event_timestamp < {window_end:DateTime64(3)} "
+    "WHERE custom_fields['edge'] IN ('1', 'true', 'True', 'TRUE') "
+    "AND custom_fields['rid'] != '' AND custom_fields['ottfb'] != '' "
+    "AND toFloat64OrNull(custom_fields['ottfb']) IS NOT NULL "
+    "GROUP BY custom_fields['pop'] HAVING count() >= 5 LIMIT 1)) > 0"
 )
 
 
@@ -717,7 +749,8 @@ DETECTIONS: dict[str, Detection] = {
         FROM edge_logs e LEFT JOIN shield_logs s ON s.prid = e.rid)
     SELECT edge_pop, shield_pop, quantileTDigestIf(0.50)(transit_ms, is_w) AS w_p50, quantileTDigestIf(0.50)(transit_ms, is_b) AS b_p50, countIf(is_w) AS w_cnt
     FROM joined GROUP BY edge_pop, shield_pop HAVING w_cnt >= 5 AND w_p50 > b_p50 * 1.5 ORDER BY (w_p50 / nullIf(b_p50, 0)) DESC LIMIT 20 """,
-        row_filter="custom_fields['ottfb'] != '' AND ottfb IS NOT NULL AND (rid != '' OR prid != '')",
+        row_filter=f"custom_fields['ottfb'] != '' AND ottfb IS NOT NULL AND (rid != '' OR prid != '') AND {_SHIELD_IN_WINDOW}",
+        baseline_sampled=True,
     ),
     "repeated_patterns": Detection(
         ("sec", "ip", "ua"),
@@ -727,15 +760,17 @@ DETECTIONS: dict[str, Detection] = {
     ),
     "stale_browser_version": Detection(
         ("ip", "ua", "chrome_version"),
-        """ , win AS (SELECT chrome_version, countIf(is_w) AS w_reqs, uniqCombinedIf(ip, is_w) AS w_ips, countIf(is_b) AS b_reqs FROM base GROUP BY chrome_version HAVING w_reqs >= 500)
+        """ , win AS (SELECT chrome_version, countIf(is_w) AS w_reqs, uniqCombinedIf(ip, is_w) AS w_ips, countIf(is_b)__B_SCALE__ AS b_reqs FROM base GROUP BY chrome_version HAVING w_reqs >= 500)
     SELECT concat('Chrome ', chrome_version) AS label, w_reqs, w_ips,
         w_reqs * 1.0 / greatest(b_reqs / greatest({baseline_hours:Float64}, 1.0) * {window_hours:Float64}, 1.0) AS surge_ratio
     FROM win WHERE w_reqs > b_reqs / greatest({baseline_hours:Float64}, 1.0) * {window_hours:Float64} * 2.5 ORDER BY surge_ratio DESC LIMIT 10 """,
         row_filter=(
             "positionCaseInsensitive(ua, 'chrome') > 0 "
             "AND NOT multiSearchAnyCaseInsensitive(ua, ['bot', 'crawler', 'spider']) "
-            "AND chrome_version != '' AND toInt32OrZero(chrome_version) < 131"
+            "AND chrome_version != '' AND toInt32OrZero(chrome_version) < 131 "
+            f"AND {_STALE_CHROME_IN_WINDOW}"
         ),
+        baseline_sampled=True,
     ),
     "orphaned_deep_crawl": Detection(
         ("ip", "url", "referer"),
@@ -778,7 +813,7 @@ DETECTIONS: dict[str, Detection] = {
                 lower(extract(ua, '(?i)([a-z0-9]+)-(?:user|externalfetcher)')), ''), ''),
                 lower(extract(referer, '(?i)https?://(?:www\\.)?([^/.:;\\s]+)'))) AS ref_stem
             FROM base
-            WHERE {_CRAWLER_IN_WINDOW} AND ip != ''
+            WHERE ip != ''
               AND ((referer != '' AND referer != '-') OR positionCaseInsensitive(ua, '-user') > 0 OR positionCaseInsensitive(ua, '-externalfetcher') > 0)
               AND NOT multiSearchAnyCaseInsensitive(ua, ['bot', 'crawler', 'spider', 'slurp', 'archiver', 'scraper', 'externalagent', 'extended', 'other', 'preview', 'headless', 'python-', 'go-http-client', 'curl', 'wget', 'scrapy', 'aiohttp', 'httpx', 'okhttp', 'axios']))
         WHERE ref_stem != ''
@@ -799,7 +834,8 @@ DETECTIONS: dict[str, Detection] = {
     FROM combined c
     WHERE c.w_crawls >= 50 AND (c.w_referrals = 0 OR c.w_crawls * 1.0 / greatest(c.w_referrals, 1) >= 100.0 OR c.w_bytes * 1.0 / greatest(c.w_referrals, 1) >= 1048576.0)
     ORDER BY crawls_per_referral DESC, c.w_bytes DESC LIMIT 10 """,
-        row_filter="ua != ''",
+        row_filter=f"ua != '' AND {_CRAWLER_IN_WINDOW}",
+        baseline_sampled=True,
     ),
 }
 
@@ -822,27 +858,38 @@ def _base_sql(
     *,
     use_cf: bool = False,
     params: Mapping[str, Any] | None = None,
+    baseline_hours: float = 0.0,
 ) -> str:
     projection = ", ".join(f"{COLUMNS[column]} AS {column}" for column in detection.columns)
     lower = "{window_start:DateTime64(3)}" if detection.window_only else "{baseline_start:DateTime64(3)}"
     scope = " AND ".join(visible_fact_clauses("request"))
+    b_stride = (
+        baseline_sample_stride(baseline_hours) if (detection.baseline_sampled and not detection.window_only) else 1
+    )
+    b_scale = f" * {b_stride}" if b_stride > 1 else ""
+    baseline_sample = (
+        f" AND (event_timestamp >= {{window_start:DateTime64(3)}} OR intDiv(toUnixTimestamp(event_timestamp), 300) % {b_stride} = 0)"
+        if b_stride > 1
+        else ""
+    )
     if detection.prewhere:
         row_filter = f" AND ({detection.row_filter})" if detection.row_filter else ""
         from_clause = (
             f"FROM request_facts PREWHERE {detection.prewhere} WHERE {scope} AND event_timestamp >= {lower} "
-            f"AND event_timestamp < {{window_end:DateTime64(3)}}{row_filter}"
+            f"AND event_timestamp < {{window_end:DateTime64(3)}}{baseline_sample}{row_filter}"
         )
     else:
         where_clause = f" WHERE ({detection.row_filter})" if detection.row_filter else ""
         from_clause = (
             f"FROM request_facts PREWHERE {scope} AND event_timestamp >= {lower} "
-            f"AND event_timestamp < {{window_end:DateTime64(3)}}{where_clause}"
+            f"AND event_timestamp < {{window_end:DateTime64(3)}}{baseline_sample}{where_clause}"
         )
+    det_sql = detection.sql.replace("__B_SCALE__", b_scale)
     sql = (
         f"/* insight:{insight_id} */ WITH base AS (SELECT {projection}, "
         "event_timestamp < {window_start:DateTime64(3)} AS is_b, "
         "event_timestamp >= {window_start:DateTime64(3)} AS is_w "
-        f"{from_clause}) {detection.sql}"
+        f"{from_clause}) {det_sql}"
     )
     return rewrite_materialized_cf(sql, params, use_cf=use_cf)
 

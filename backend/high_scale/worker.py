@@ -140,6 +140,7 @@ class HighScaleWorkerLoop:
         deletion_sweeper: HighScaleDeletionSweeper | None = None,
         deletion_sweepers: tuple[tuple[str, HighScaleDeletionSweeper | None], ...] | None = None,
         deletion_sweep_limit: int = 100,
+        publication_reaper: Any | None = None,
         pages_per_tick: int | None = None,
         service_weights: Mapping[str, int] | None = None,
         publication_retry_interval_seconds: float = 30.0,
@@ -188,6 +189,7 @@ class HighScaleWorkerLoop:
         else:
             self._deletion_sweepers = tuple((service_id, deletion_sweeper) for service_id in resolved_service_ids)
         self._deletion_sweep_limit = deletion_sweep_limit
+        self._publication_reaper = publication_reaper
         self._deletion_thread: Thread | None = None
         self._last_deletion_sweep = 0.0
         self._last_system_cleanup = 0.0
@@ -272,6 +274,7 @@ class HighScaleWorkerLoop:
         self._run_archive_flushes()
         self._run_publication_retries()
         self._run_deletion_sweeps()
+        self._run_publication_reaper()
         self._run_system_cleanups()
         return tuple(results)
 
@@ -354,6 +357,19 @@ class HighScaleWorkerLoop:
         if self._deletion_thread is not None:
             self._deletion_thread.join(timeout)
         self._last_deletion_sweep = 0.0
+
+    def _run_publication_reaper(self) -> None:
+        if self._publication_reaper is None:
+            return
+        sweeper_map = dict(self._deletion_sweepers)
+        for service_id, _ in self._coordinators:
+            sweeper = sweeper_map.get(service_id)
+            if sweeper is not None and getattr(sweeper, "_publication_reaper", None) is not None:
+                continue
+            try:
+                self._publication_reaper.maybe_reap(service_id)
+            except Exception:
+                _worker_logger.exception("high-scale publication reaper failed", extra={"service_id": service_id})
 
     def _run_system_cleanups(self) -> None:
         now = time.time()
@@ -490,6 +506,7 @@ def build_worker_from_environment(worker_suffix: str = "") -> HighScaleWorkerLoo
         "on",
     }
     archive_prefix = os.getenv("HIGH_SCALE_ARCHIVE_PREFIX", "high-scale/archive")
+    publication_reaper = reaper_from_environment(control, clickhouse)
 
     def _build_service_bindings(
         service_id: str, source: Mapping[str, Any]
@@ -533,7 +550,6 @@ def build_worker_from_environment(worker_suffix: str = "") -> HighScaleWorkerLoo
                 control=control,
                 controller=deletion_controller,
                 archive_expirer=HighScaleArchiveExpirer(control=control, archive=archive),
-                publication_reaper=reaper_from_environment(control, clickhouse),
             )
         return coordinator_obj, sweeper_obj
 
@@ -614,6 +630,7 @@ def build_worker_from_environment(worker_suffix: str = "") -> HighScaleWorkerLoo
         coordinators=tuple(zip(service_ids, coordinators, strict=True)),
         deletion_sweepers=tuple(zip(service_ids, sweepers, strict=True)),
         deletion_sweep_limit=deletion_sweep_limit,
+        publication_reaper=publication_reaper,
         domains=domains,
         interval_seconds=interval_seconds,
         pages_per_tick=pages_per_tick,

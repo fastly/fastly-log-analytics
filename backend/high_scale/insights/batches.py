@@ -17,7 +17,7 @@ from typing import Any, Literal
 from backend.high_scale._common import visible_fact_clauses
 
 from .rollup import ROLLUP_TABLE, _to_rollup
-from .sql_queries import _CACHEABLE, _HIT, _P95, COLUMNS
+from .sql_queries import _CACHEABLE, _HIT, _P95, COLUMNS, baseline_sample_stride
 
 QuerySource = Literal["fact", "mixed"]
 
@@ -44,17 +44,7 @@ def _parse_int(value: Any) -> int | None:
 
 
 _CANDIDATE_LIMIT = 500
-
-
-def _baseline_sample_stride(baseline_hours: float) -> int:
-    """Granule-skipping 5-minute time-block stride for raw-fact baseline portions (>= 24h)."""
-    if baseline_hours >= 168:
-        return 8
-    if baseline_hours >= 48:
-        return 4
-    if baseline_hours >= 24:
-        return 2
-    return 1
+_baseline_sample_stride = baseline_sample_stride
 
 
 def _candidate_in_clause(
@@ -790,7 +780,8 @@ def _build_latency_dim(
     cte, source = _base_cte(
         "latency_dim",
         proj,
-        row_filter="custom_fields['elapsed'] != '' AND elapsed IS NOT NULL",
+        row_filter="elapsed IS NOT NULL",
+        prewhere_clause="custom_fields['elapsed'] != ''",
         filter_clause=filter_clause,
         baseline_sample_stride=b_stride,
     )
@@ -1281,6 +1272,31 @@ def _extract_ip_abuse(
 # ── Batch 10: baseline+window origin perf (2 detections) ─────────────────────
 
 
+def _build_origin_perf_candidates(
+    active: set[str],
+    *,
+    present: set[str],
+    rollup_span: tuple[datetime, datetime] | None,
+    filter_clause: str,
+) -> str:
+    win_from = _window_from(
+        filter_clause=filter_clause,
+        row_filter=f"custom_fields['ottfb'] != '' AND {COLUMNS['ottfb']} IS NOT NULL",
+    )
+    return f"/* insight:batch_origin_perf_candidates */ SELECT 1 AS ok FROM (SELECT 1 {win_from} LIMIT 10) HAVING count() >= 10"
+
+
+def _parse_origin_perf_candidates(
+    active: set[str],
+    rows: list[dict[str, Any]],
+) -> dict[str, list[str] | None] | None:
+    if not rows:
+        return None
+    if "n" in rows[0] and _int(rows[0].get("n")) < 10:
+        return None
+    return {}
+
+
 def _build_origin_perf(
     active: set[str],
     *,
@@ -1288,6 +1304,8 @@ def _build_origin_perf(
     rollup_span: tuple[datetime, datetime] | None,
     filter_clause: str,
     baseline_hours: float = 0.0,
+    candidates: dict[str, list[str] | None] | None = None,
+    candidate_params: dict[str, Any] | None = None,
 ) -> tuple[str, QuerySource]:
     proj = [
         ("ottfb", COLUMNS["ottfb"]),
@@ -1299,7 +1317,8 @@ def _build_origin_perf(
     cte, source = _base_cte(
         "origin_perf",
         proj,
-        row_filter="custom_fields['ottfb'] != '' AND ottfb IS NOT NULL",
+        row_filter="ottfb IS NOT NULL",
+        prewhere_clause="custom_fields['ottfb'] != ''",
         filter_clause=filter_clause,
         baseline_sample_stride=b_stride,
     )
@@ -1354,6 +1373,54 @@ def _extract_origin_perf(
 # ── Batch 11: baseline+window network ASN / metro (3 detections) ─────────────
 
 
+def _build_network_asn_candidates(
+    active: set[str],
+    *,
+    present: set[str],
+    rollup_span: tuple[datetime, datetime] | None,
+    filter_clause: str,
+) -> str:
+    has_asn = bool(active & {"network_asn_health", "asn_metro_performance"})
+    has_metro = bool(active & {"asn_metro_performance", "metro_delivery_degradation"})
+    branches: list[str] = []
+    if has_asn:
+        asn_win_from = _window_from(filter_clause=filter_clause, row_filter="custom_fields['asn'] != ''")
+        branches.append(
+            f"SELECT 'asn' AS kind, custom_fields['asn'] AS k {asn_win_from} "
+            f"GROUP BY custom_fields['asn'] HAVING count() >= 20 LIMIT {_CANDIDATE_LIMIT + 1}"
+        )
+    if has_metro:
+        metro_col = COLUMNS["metro"]
+        metro_win_from = _window_from(filter_clause=filter_clause, row_filter=f"{metro_col} != ''")
+        branches.append(
+            f"SELECT 'metro' AS kind, {metro_col} AS k {metro_win_from} "
+            f"GROUP BY {metro_col} HAVING count() >= 20 LIMIT {_CANDIDATE_LIMIT + 1}"
+        )
+    if len(branches) == 1:
+        return f"/* insight:batch_network_asn_candidates */ {branches[0]}"
+    wrapped = " UNION ALL ".join(f"SELECT kind, k FROM ({b})" for b in branches)
+    return f"/* insight:batch_network_asn_candidates */ {wrapped}"
+
+
+def _parse_network_asn_candidates(
+    active: set[str],
+    rows: list[dict[str, Any]],
+) -> dict[str, list[str] | None] | None:
+    has_asn = bool(active & {"network_asn_health", "asn_metro_performance"})
+    has_metro = bool(active & {"asn_metro_performance", "metro_delivery_degradation"})
+    asn_keys = [str(r["k"]) for r in rows if r.get("kind") == "asn" and r.get("k")]
+    metro_keys = [str(r["k"]) for r in rows if r.get("kind") == "metro" and r.get("k")]
+    can_nah = "network_asn_health" in active and bool(asn_keys)
+    can_mdd = "metro_delivery_degradation" in active and bool(metro_keys)
+    can_amp = "asn_metro_performance" in active and bool(asn_keys) and bool(metro_keys)
+    if not (can_nah or can_mdd or can_amp):
+        return None
+    return {
+        "asn": (None if len(asn_keys) > _CANDIDATE_LIMIT else asn_keys) if has_asn else [],
+        "metro": (None if len(metro_keys) > _CANDIDATE_LIMIT else metro_keys) if has_metro else [],
+    }
+
+
 def _build_network_asn(
     active: set[str],
     *,
@@ -1361,52 +1428,84 @@ def _build_network_asn(
     rollup_span: tuple[datetime, datetime] | None,
     filter_clause: str,
     baseline_hours: float = 0.0,
+    candidates: dict[str, list[str] | None] | None = None,
+    candidate_params: dict[str, Any] | None = None,
 ) -> tuple[str, QuerySource]:
     proj: list[tuple[str, str]] = []
     sets: list[str] = []
     has_asn = bool(active & {"network_asn_health", "asn_metro_performance"})
     has_metro = bool(active & {"asn_metro_performance", "metro_delivery_degradation"})
+    if candidates is not None:
+        if has_asn and candidates.get("asn") == []:
+            has_asn = False
+        if has_metro and candidates.get("metro") == []:
+            has_metro = False
+    effective_active = set(active)
+    if not has_asn:
+        effective_active.discard("network_asn_health")
+        effective_active.discard("asn_metro_performance")
+    if not has_metro:
+        effective_active.discard("asn_metro_performance")
+        effective_active.discard("metro_delivery_degradation")
+
+    prewhere_preds: list[str] = []
+    asn_metro_filters: list[str] = []
     if has_asn:
-        asn_win_from = _window_from(filter_clause=filter_clause, row_filter="custom_fields['asn'] != ''")
-        win_asns = f"SELECT custom_fields['asn'] {asn_win_from} GROUP BY custom_fields['asn'] HAVING count() >= 20"
-        proj.append(
-            (
-                "asn_str",
-                f"if(custom_fields['asn'] != '' AND custom_fields['asn'] IN ({win_asns}), custom_fields['asn'], '')",
+        asn_cands = candidates.get("asn") if candidates is not None else None
+        if isinstance(asn_cands, list) and asn_cands:
+            asn_in = _candidate_in_clause("custom_fields['asn']", asn_cands, "cand_asn", candidate_params)
+            prewhere_preds.append(f"({asn_in})")
+            proj.append(("asn_str", f"if(custom_fields['asn'] != '' AND {asn_in}, custom_fields['asn'], '')"))
+        else:
+            asn_win_from = _window_from(filter_clause=filter_clause, row_filter="custom_fields['asn'] != ''")
+            win_asns = f"SELECT custom_fields['asn'] {asn_win_from} GROUP BY custom_fields['asn'] HAVING count() >= 20"
+            proj.append(
+                (
+                    "asn_str",
+                    f"if(custom_fields['asn'] != '' AND custom_fields['asn'] IN ({win_asns}), custom_fields['asn'], '')",
+                )
             )
-        )
+            asn_metro_filters.append("custom_fields['asn'] != ''")
     if has_metro:
         metro_col = COLUMNS["metro"]
-        metro_win_from = _window_from(filter_clause=filter_clause, row_filter=f"{metro_col} != ''")
-        win_metros = f"SELECT {metro_col} {metro_win_from} GROUP BY {metro_col} HAVING count() >= 20"
-        proj.append(
-            (
-                "metro",
-                f"if({metro_col} != '' AND {metro_col} IN ({win_metros}), {metro_col}, '')",
+        metro_cands = candidates.get("metro") if candidates is not None else None
+        if isinstance(metro_cands, list) and metro_cands:
+            metro_in = _candidate_in_clause(metro_col, metro_cands, "cand_metro", candidate_params)
+            prewhere_preds.append(f"({metro_in})")
+            proj.append(("metro", f"if({metro_col} != '' AND {metro_in}, {metro_col}, '')"))
+        else:
+            metro_win_from = _window_from(filter_clause=filter_clause, row_filter=f"{metro_col} != ''")
+            win_metros = f"SELECT {metro_col} {metro_win_from} GROUP BY {metro_col} HAVING count() >= 20"
+            proj.append(
+                (
+                    "metro",
+                    f"if({metro_col} != '' AND {metro_col} IN ({win_metros}), {metro_col}, '')",
+                )
             )
-        )
-    if "network_asn_health" in active:
+            asn_metro_filters.append("custom_fields['metro'] != ''")
+    if "network_asn_health" in effective_active:
         proj.extend([("ploss", COLUMNS["ploss"]), ("rtt_var", COLUMNS["rtt_var"]), ("retrans", COLUMNS["retrans"])])
         sets.append("(asn_str)")
-    if "asn_metro_performance" in active:
+    if "asn_metro_performance" in effective_active:
         proj.extend([("tcp_rtt", COLUMNS["tcp_rtt"]), ("country", COLUMNS["country"])])
         sets.append("(asn_str, metro)")
-    if "metro_delivery_degradation" in active:
+    if "metro_delivery_degradation" in effective_active:
         proj.append(("delivery_rate", COLUMNS["delivery_rate"]))
         sets.append("(metro)")
 
-    asn_metro_filters: list[str] = []
-    if has_asn:
-        asn_metro_filters.append("custom_fields['asn'] != ''")
-    if has_metro:
-        asn_metro_filters.append("custom_fields['metro'] != ''")
-    row_filter = " OR ".join(asn_metro_filters)
+    if prewhere_preds and not asn_metro_filters:
+        prewhere_clause = " OR ".join(prewhere_preds)
+        row_filter = ""
+    else:
+        prewhere_clause = ""
+        row_filter = " OR ".join([*prewhere_preds, *asn_metro_filters])
     b_stride = _baseline_sample_stride(baseline_hours)
     b_scale = f" * {b_stride}" if b_stride > 1 else ""
     cte, source = _base_cte(
         "network_asn",
         proj,
         row_filter=row_filter,
+        prewhere_clause=prewhere_clause,
         filter_clause=filter_clause,
         baseline_sample_stride=b_stride,
     )
@@ -1419,7 +1518,7 @@ def _build_network_asn(
         "metro" if has_metro else "'' AS metro",
     ]
     having: list[str] = []
-    if "network_asn_health" in active:
+    if "network_asn_health" in effective_active:
         sel.extend(
             [
                 "avgIf(ploss, is_w) AS w_ploss",
@@ -1438,7 +1537,7 @@ def _build_network_asn(
             "OR (w_jitter >= b_jitter * 2 AND w_jitter - b_jitter >= 20000) "
             "OR (coalesce(w_retrans, 0) >= coalesce(b_retrans, 0) * 2 + 0.5)))"
         )
-    if "asn_metro_performance" in active:
+    if "asn_metro_performance" in effective_active:
         amp = "tcp_rtt > 0 AND country = 'US'"
         sel.extend(
             [
@@ -1452,7 +1551,7 @@ def _build_network_asn(
             "(g_asn = 0 AND g_metro = 0 AND toInt64OrNull(asn_str) IS NOT NULL AND metro != '' "
             "AND amp_w_total >= 20 AND amp_b_total >= 50 AND amp_w_med >= amp_b_med * 1.5 AND amp_w_med - amp_b_med >= 20)"
         )
-    if "metro_delivery_degradation" in active:
+    if "metro_delivery_degradation" in effective_active:
         sel.extend(
             [
                 "quantileTDigestIf(0.5)(delivery_rate, is_w AND delivery_rate > 0) AS mdd_w_med",
@@ -1907,12 +2006,16 @@ DETECTION_BATCHES: tuple[DetectionBatch, ...] = (
         member_ids=("origin_latency_spike", "timeout_split"),
         build_sql=_build_origin_perf,
         extract_rows=_extract_origin_perf,
+        build_candidates_sql=_build_origin_perf_candidates,
+        parse_candidates=_parse_origin_perf_candidates,
     ),
     DetectionBatch(
         name="network_asn",
         member_ids=("network_asn_health", "asn_metro_performance", "metro_delivery_degradation"),
         build_sql=_build_network_asn,
         extract_rows=_extract_network_asn,
+        build_candidates_sql=_build_network_asn_candidates,
+        parse_candidates=_parse_network_asn_candidates,
     ),
     DetectionBatch(
         name="fingerprint_spread",

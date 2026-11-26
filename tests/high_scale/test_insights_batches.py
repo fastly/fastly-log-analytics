@@ -85,6 +85,16 @@ class _BatchFakeClient:
                     if row.get("tls_ciphers_sha"):
                         out.append({"kind": "cipher", "k": row["tls_ciphers_sha"]})
                 return out
+            if base == "batch_network_asn":
+                out_nasn: list[dict[str, Any]] = []
+                for row in base_rows:
+                    if row.get("asn_str"):
+                        out_nasn.append({"kind": "asn", "k": str(row["asn_str"])})
+                    if row.get("metro"):
+                        out_nasn.append({"kind": "metro", "k": str(row["metro"])})
+                return out_nasn
+            if base == "batch_origin_perf":
+                return [{"ok": 1}] if base_rows else []
             return [{"k": row.get("ip") or row.get("url") or "cand"} for row in base_rows]
         if name.startswith("group_"):
             tags = re.findall(r"SELECT '(\w+)' AS _q, formatRow\('JSONEachRow', \*\) AS _r", sql)
@@ -108,13 +118,14 @@ def _cards(response: Any) -> dict[str, dict[str, Any]]:
 
 
 def test_full_evaluation_consolidates_queries_by_at_least_half() -> None:
-    """A full 51-detector High-Scale evaluation un-fuses heavy baseline scans and stays <= 16 ClickHouse queries."""
+    """A full 51-detector High-Scale evaluation un-fuses heavy baseline scans and stays <= 20 ClickHouse queries."""
     client = _BatchFakeClient(with_rollup=True)
     cards = _cards(_run(client))
     assert set(cards) == EVERY_CARD
     assert all(card["severity"] == "clean" for card in cards.values())
     queries = client.queries()
-    assert len(client.calls) <= 16, f"Expected <= 16 ClickHouse queries, got {len(client.calls)}: {list(queries)}"
+    assert "group_raw_standalone" not in queries
+    assert len(client.calls) <= 20, f"Expected <= 20 ClickHouse queries, got {len(client.calls)}: {list(queries)}"
     group_map = dict(evaluator._MULTIPLEX_GROUPS)
     assert "group_baseline_perf" not in group_map
     assert "group_ip_abuse" not in group_map
@@ -941,9 +952,12 @@ def test_materialized_cf_columns_used_across_insights_and_cache_collapse_when_en
             continue
         assert "custom_fields[" not in sql, f"Unrewritten custom_fields in {name}: {sql}"
 
-    standalone_sql = cf_queries["group_raw_standalone"][0]
+    assert "group_raw_standalone" not in cf_queries
+    all_cf_sql = "\n".join(
+        sql for name, (sql, _params) in cf_queries.items() if name not in ("history", "fields", "rollup_coverage")
+    )
     for expected in ("`_cf_ja4`", "`_cf_lat`", "`_cf_lon`", "`_cf_tcp_rtt`", "`_cf_pop`", "`_cf_ua`", "`_cf_cache`"):
-        assert expected in standalone_sql
+        assert expected in all_cf_sql
 
     # 3. cache_collapse_detail_endpoint also uses _cf_* and PREWHERE when enabled.
     detail_calls: list[str] = []

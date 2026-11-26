@@ -2413,6 +2413,16 @@ class _InsightsClient:
                     if row.get("tls_ciphers_sha"):
                         out.append({"kind": "cipher", "k": row["tls_ciphers_sha"]})
                 return out
+            if base == "batch_network_asn":
+                out_nasn: list[dict[str, Any]] = []
+                for row in base_rows:
+                    if row.get("asn_str"):
+                        out_nasn.append({"kind": "asn", "k": str(row["asn_str"])})
+                    if row.get("metro"):
+                        out_nasn.append({"kind": "metro", "k": str(row["metro"])})
+                return out_nasn
+            if base == "batch_origin_perf":
+                return [{"ok": 1}] if base_rows else []
             return [{"k": row.get("ip") or row.get("url") or "cand"} for row in base_rows]
         if name.startswith("group_"):
             tags = re.findall(r"SELECT '(\w+)' AS _q, formatRow\('JSONEachRow', \*\) AS _r", sql)

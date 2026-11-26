@@ -1242,14 +1242,14 @@ def network_quality(
                 sql = (
                     f"SELECT {group_expr} AS label, avg({_RTT} / 1000.0) AS rtt_ms, count() AS reqs "
                     f"FROM request_facts PREWHERE {_BASE_WHERE}{filter_sql}{extra_where}{hash_clause} "
-                    f"AND {group_expr} != '' AND custom_fields['tcp_rtt'] != '' "
+                    f"AND {group_expr} != '' AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0' "
                     f"WHERE {_RTT} > 0 GROUP BY label ORDER BY reqs DESC LIMIT 25"
                 )
             elif is_real_ch:
                 sql = (
                     f"SELECT {group_expr} AS label, avg({_RTT} / 1000.0) AS rtt_ms, count() AS reqs "
                     f"FROM request_facts PREWHERE {_BASE_WHERE}{filter_sql}{extra_where}{hash_clause} "
-                    f"AND custom_fields['asn'] != '' AND custom_fields['tcp_rtt'] != '' "
+                    f"AND custom_fields['asn'] != '' AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0' "
                     f"WHERE {group_expr} IS NOT NULL AND {_RTT} > 0 GROUP BY label ORDER BY reqs DESC LIMIT 25"
                 )
             else:
@@ -1288,17 +1288,18 @@ def network_quality(
                 "coalesce(sum(tcp_rtt_sum), sum(tcp_rtt_p50_us * tcp_rtt_count)) / nullIf(sum(tcp_rtt_count), 0) / 1000.0 AS rtt_ms, "
                 "toUInt64(sum(tcp_rtt_count)) AS reqs "
                 "FROM network_minute_dimensions "
-                "WHERE service_id={service_id:String} AND dimension IN ('country', 'asn', 'pop') "
+                "PREWHERE service_id={service_id:String} "
                 "AND bucket_start >= {start:DateTime64(3)} AND bucket_start < {end:DateTime64(3)} "
-                f"AND tcp_rtt_count > 0 AND value != '' AND {fence} "
+                "AND dimension IN ('country', 'asn', 'pop') AND value != '' "
+                f"WHERE tcp_rtt_count > 0 AND {fence} "
                 "GROUP BY dimension, label HAVING reqs > 0 "
                 "ORDER BY dimension ASC, reqs DESC LIMIT 25 BY dimension) "
                 "UNION ALL "
                 "SELECT dimension, label, rtt_ms, reqs FROM ("
                 f"SELECT 'region' AS dimension, custom_fields['region'] AS label, avg({_RTT} / 1000.0) AS rtt_ms, "
                 f"toUInt64(count() * {region_scale}) AS reqs "
-                f"FROM request_facts PREWHERE {_BASE_WHERE} AND country = {{region_country:String}}{region_hash} "
-                "AND custom_fields['region'] != '' AND custom_fields['tcp_rtt'] != '' "
+                f"FROM request_facts PREWHERE {_BASE_WHERE}{region_hash} AND country = {{region_country:String}} "
+                "AND custom_fields['region'] != '' AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0' "
                 f"WHERE {_RTT} > 0 GROUP BY label ORDER BY reqs DESC LIMIT 25)"
             )
             out: dict[str, list[dict]] = {"country": [], "asn": [], "pop": [], "region": []}
@@ -1334,7 +1335,8 @@ def network_quality(
                         f"SELECT {_RTT} / 1000.0 AS rtt_ms, {_TTFB} * 1000.0 AS ttfb_ms, "
                         "if(custom_fields['cache'] = '', 'UNKNOWN', custom_fields['cache']) AS cache_state "
                         f"FROM request_facts PREWHERE {_BASE_WHERE}{filter_sql} "
-                        f"AND custom_fields['tcp_rtt'] != '' AND custom_fields['ttfb'] != ''{sample_clause} "
+                        f"AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0' "
+                        f"AND custom_fields['ttfb'] != '' AND custom_fields['ttfb'] != '0'{sample_clause} "
                         f"WHERE {_RTT} > 0 AND {_TTFB} > 0 LIMIT {_SCATTER_SAMPLE}"
                     )
 
@@ -1453,7 +1455,7 @@ def get_pop_health(
         base_where = f"{_BASE_WHERE}{filter_sql}"
         if is_real_ch:
             pop_span_s = (end - start).total_seconds()
-            pop_stride = 1 if filter_sql else _network_sample_stride(pop_span_s)
+            pop_stride = _network_sample_stride(pop_span_s)
             hash_clause = _network_time_sample_clause(pop_stride, start=start, end=end)
             cache_hit_pred = "(startsWith(custom_fields['cache'], 'HIT') OR startsWith(custom_fields['cache'], 'hit'))"
             fact_sql = (
@@ -1476,8 +1478,10 @@ def get_pop_health(
                     "sum(ttfb_p95_us * requests) / nullIf(sumIf(requests, ttfb_p95_us IS NOT NULL), 0) * 1000.0 AS p95_ttfb_ms, "
                     "toUInt64(0) AS cache_hits, toInt64(0) AS bandwidth_bytes "
                     "FROM network_minute_dimensions "
-                    "WHERE service_id={service_id:String} AND dimension='pop' AND value != '' "
-                    f"AND bucket_start >= {{start:DateTime64(3)}} AND bucket_start < {{end:DateTime64(3)}} AND {fence} "
+                    "PREWHERE service_id={service_id:String} "
+                    "AND bucket_start >= {start:DateTime64(3)} AND bucket_start < {end:DateTime64(3)} "
+                    "AND dimension='pop' AND value != '' "
+                    f"WHERE {fence} "
                     "GROUP BY pop "
                     "UNION ALL "
                     "SELECT 'fact' AS kind, custom_fields['pop'] AS pop, toUInt64(count()) AS req_count, "
@@ -1508,17 +1512,49 @@ def get_pop_health(
                         fact_rows.append({**cr, "requests": cr.get("req_count", cr.get("requests"))})
                 if not fact_rows or (not rollup_by_pop and pop_stride == 1):
                     pop_stride = 1
-                    fact_rows = trace.run(
-                        "pop_health_fallback",
-                        lambda: service.client.execute(fact_sql.replace(hash_clause, ""), params),
-                        source="fact",
-                    )
+                    if rollup_by_pop:
+                        light_fb_sql = (
+                            "SELECT custom_fields['pop'] AS pop, count() AS requests, "
+                            f"countIf({cache_hit_pred}) AS cache_hits, "
+                            "sum(toInt64OrZero(custom_fields['resp_bytes'])) AS bandwidth_bytes "
+                            f"FROM request_facts PREWHERE {base_where} AND custom_fields['pop'] != '' "
+                            "GROUP BY pop ORDER BY requests DESC"
+                        )
+                        fact_rows = trace.run(
+                            "pop_health_fallback",
+                            lambda: service.client.execute(light_fb_sql, params),
+                            source="fact",
+                        )
+                    else:
+                        fact_rows = trace.run(
+                            "pop_health_fallback",
+                            lambda: service.client.execute(fact_sql.replace(hash_clause, ""), params),
+                            source="fact",
+                        )
             else:
                 fact_rows = trace.run(
                     "pop_health",
                     lambda: service.client.execute(fact_sql, params),
                     source="fact",
                 )
+                if pop_stride > 1 and not fact_rows:
+                    pop_stride = 1
+                    fact_rows = trace.run(
+                        "pop_health_fallback",
+                        lambda: service.client.execute(fact_sql.replace(hash_clause, ""), params),
+                        source="fact",
+                    )
+                elif pop_stride > 1:
+                    fact_rows = [
+                        {
+                            **r,
+                            "requests": int(r.get("requests") or 0) * pop_stride,
+                            "errors": int(r.get("errors") or 0) * pop_stride,
+                            "cache_hits": int(r.get("cache_hits") or 0) * pop_stride,
+                            "bandwidth_bytes": int(r.get("bandwidth_bytes") or 0) * pop_stride,
+                        }
+                        for r in fact_rows
+                    ]
             rows = []
             for r in fact_rows:
                 pop_key = str(r["pop"])
@@ -1808,7 +1844,7 @@ def network_bundle(
                 lambda: get_transport_metrics(service, start_time, end_time, req.filters),
             ),
         )
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-net-bundle") as pool:
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="hs-net-bundle") as pool:
             futs = [(k, pool.submit(contextvars.copy_context().run, fn)) for k, want, fn in bundle_specs if want]
             res = {k: fut.result() for k, fut in futs}
         health_resp, quality_resp, pop_response, transport_resp = (
