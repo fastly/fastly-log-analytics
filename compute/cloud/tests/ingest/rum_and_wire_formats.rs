@@ -3394,6 +3394,67 @@ mod request_compaction {
         );
     }
 
+    #[test]
+    fn clean_closed_hours_and_days_skip_block_walks_until_late_commit() {
+        let fake = Fake::new(NOW);
+        let old_day_base = HOUR - 3 * 86_400;
+        for h in 0..12 {
+            window(&fake, old_day_base + h * 3600, &["x"]);
+        }
+        for _ in 0..20 {
+            let report = run(&fake, TARGET);
+            assert!(report.errors.is_empty(), "{:?}", report.errors);
+            if !report.more_pending {
+                break;
+            }
+        }
+        let state: compaction::State =
+            serde_json::from_value(fake.kv.borrow()[compaction::STATE_KEY].1.clone()).unwrap();
+        assert!(
+            !state.clean_hours.is_empty() || !state.clean_days.is_empty(),
+            "settled closed hours must be recorded as clean"
+        );
+
+        // Next scan sees all 12 closed hours clean (and promotes closed days to clean_days),
+        // then subsequent idle scans skip them without fetching any catalog block.
+        let promote = run(&fake, TARGET);
+        assert!(promote.errors.is_empty(), "{:?}", promote.errors);
+        assert!(!promote.more_pending);
+        let state: compaction::State =
+            serde_json::from_value(fake.kv.borrow()[compaction::STATE_KEY].1.clone()).unwrap();
+        assert!(
+            !state.clean_days.is_empty(),
+            "a closed day whose hours are all clean must be cached in clean_days"
+        );
+
+        let idle = run(&fake, TARGET);
+        assert!(idle.errors.is_empty(), "{:?}", idle.errors);
+        assert!(!idle.more_pending);
+        assert_eq!(idle.compacts, 0);
+        assert!(
+            fake.calls.get() <= 10,
+            "clean closed days must be skipped without walking blocks, used {} calls",
+            fake.calls.get()
+        );
+
+        // A late-arriving window into one of those cached closed hours bumps that hour's
+        // generation and day index key, so compaction automatically re-enters and merges it.
+        window(&fake, old_day_base + 120, &["late"]);
+        let mut compacted = 0u32;
+        for _ in 0..20 {
+            let report = run(&fake, TARGET);
+            assert!(report.errors.is_empty(), "{:?}", report.errors);
+            compacted += report.compacts;
+            if !report.more_pending && report.compacts == 0 {
+                break;
+            }
+        }
+        assert_eq!(
+            compacted, 1,
+            "late commit into a clean closed hour must invalidate its cache entry and compact"
+        );
+    }
+
     fn ticks(fake: &Fake, enabled: bool) -> Vec<String> {
         tick_runtime(fake);
         if enabled {

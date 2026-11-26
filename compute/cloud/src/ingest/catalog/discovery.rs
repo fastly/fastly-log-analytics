@@ -60,6 +60,9 @@ struct State {
     /// A fork after the first of its day, whose day bundle an earlier fork lists.
     #[serde(default)]
     day_bundle_listed: bool,
+    /// Closed hours already verified clean at this head generation (skipped on entry).
+    #[serde(default)]
+    skip_hours: BTreeMap<i64, u64>,
 }
 
 pub struct Page {
@@ -68,6 +71,8 @@ pub struct Page {
     pub next: Option<String>,
     pub generation: u64,
     pub open_hour: Option<i64>,
+    pub completed_hours: BTreeMap<i64, u64>,
+    pub clean_days: BTreeMap<i64, String>,
 }
 
 fn bounds(file: &Output) -> Option<(i64, i64)> {
@@ -133,6 +138,9 @@ pub fn page<R: Runtime>(
 
 /// Like [`page`], stopping catalog reads while at least `reserve` backend calls remain so callers
 /// (such as request compaction) always keep budget for their own writes and state persistence.
+/// Days matching `skip_days` and hours matching `skip_hours` (by head generation) are skipped
+/// without fetching their catalog objects.
+#[allow(clippy::too_many_arguments)]
 pub fn page_reserving<R: Runtime>(
     store: &Store<'_, R>,
     from: i64,
@@ -141,11 +149,20 @@ pub fn page_reserving<R: Runtime>(
     include_summaries: bool,
     checkpoint: Option<&str>,
     reserve: u32,
+    skip_days: &BTreeMap<i64, String>,
+    skip_hours: &BTreeMap<i64, u64>,
 ) -> Result<Page, String> {
     let state = if let Some(token) = checkpoint {
         load(store, token, from, to, summary, (from, to))?
     } else {
-        fresh(store, None, from, to, summary, (from, to))?
+        let mut state = fresh(store, None, from, to, summary, (from, to))?;
+        if !skip_days.is_empty() {
+            state
+                .days
+                .retain(|(day, key)| skip_days.get(day) != Some(key));
+        }
+        state.skip_hours = skip_hours.clone();
+        state
     };
     walk(
         store,
@@ -392,7 +409,11 @@ fn enter_day(
     state.hours = index
         .hours
         .into_iter()
-        .filter(|(hour, _)| *hour < to && hour.saturating_add(3600) > from.saturating_sub(3600))
+        .filter(|(hour, reference)| {
+            *hour < to
+                && hour.saturating_add(3600) > from.saturating_sub(3600)
+                && state.skip_hours.get(hour) != Some(&reference.generation)
+        })
         .collect();
     state.hour = 0;
     state.current = state.hours.first().map(|(_, r)| r.clone());
@@ -417,6 +438,8 @@ fn walk<R: Runtime>(
     let (from, to, summary) = (state.from, state.to, state.summary);
     let mut files = Vec::new();
     let mut summaries = Vec::new();
+    let mut completed_hours = BTreeMap::new();
+    let mut clean_days = BTreeMap::new();
     let affordable = |prefetched: &Prefetched, key: &str| {
         (already_sent(store, prefetched, key) || store.runtime.admin_remaining_calls() > reserve)
             && admitted(store)
@@ -446,6 +469,7 @@ fn walk<R: Runtime>(
             enter_day(&mut state, day, index, include_summaries, summary_bounds);
             state.day += 1;
             if state.hours.is_empty() {
+                clean_days.insert(day, key);
                 continue;
             }
         }
@@ -617,6 +641,11 @@ fn walk<R: Runtime>(
         if state.offset == outputs.len() && state.summary_offset == manifest.summaries.len() {
             state.visited_blocks.insert(reference.key.clone());
             state.current = manifest.previous;
+            if state.current.is_none() {
+                if let Some((done_hour, head_ref)) = state.hours.get(state.hour) {
+                    completed_hours.insert(*done_hour, head_ref.generation);
+                }
+            }
             if state.current.as_ref().is_some_and(|parent| {
                 parent.generation > reference.generation
                     || parent.key == reference.key
@@ -664,6 +693,8 @@ fn walk<R: Runtime>(
         next,
         generation: state.generation,
         open_hour,
+        completed_hours,
+        clean_days,
     })
 }
 

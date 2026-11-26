@@ -339,6 +339,18 @@ pub struct State {
     pub catalog_carry: Vec<Object>,
     #[serde(default)]
     pub catalog_open_hour: Option<i64>,
+    /// Request compaction: closed days whose every hour is clean at this day-index key.
+    #[serde(default)]
+    pub clean_days: BTreeMap<i64, String>,
+    /// Request compaction: closed hours with no remaining compaction work at this head generation.
+    #[serde(default)]
+    pub clean_hours: BTreeMap<i64, u64>,
+    /// Request compaction: `target` byte size for which `clean_days` / `clean_hours` were recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean_target: Option<u64>,
+    /// Request compaction: hours completed by the current catalog page awaiting processing.
+    #[serde(default)]
+    pub catalog_completed_hours: BTreeMap<i64, u64>,
     #[serde(default)]
     pub group_limit: usize,
     /// The maintenance turn pass the lease was handed on to, as `turn:pass`. That pass takes
@@ -677,6 +689,7 @@ pub fn compact_pass<R: Runtime>(
                 run.state.catalog_carry.clear();
                 run.state.catalog_cursor = None;
                 run.state.catalog_to = None;
+                run.state.catalog_completed_hours.clear();
                 run.report.more_pending = true;
                 false
             }
@@ -712,6 +725,7 @@ pub fn compact_pass<R: Runtime>(
             run.state.catalog_carry.clear();
             run.state.catalog_cursor = None;
             run.state.catalog_to = None;
+            run.state.catalog_completed_hours.clear();
         }
         if committed {
             run.finish_job();
@@ -1289,6 +1303,12 @@ impl<R: Runtime> Run<'_, '_, R> {
         if let Dataset::Rum(_) = self.dataset {
             return self.rum_scan();
         }
+        if self.state.clean_target != Some(self.target) {
+            self.state.clean_days.clear();
+            self.state.clean_hours.clear();
+            self.state.clean_target = Some(self.target);
+            self.changed = true;
+        }
         let mut pending = Vec::new();
         loop {
             if let Some(stop) = self.limit_stop(4) {
@@ -1306,6 +1326,8 @@ impl<R: Runtime> Run<'_, '_, R> {
                     false,
                     self.state.catalog_cursor.as_deref(),
                     self.tail + COMMIT_RESERVE,
+                    &self.state.clean_days,
+                    &self.state.clean_hours,
                 ) {
                     Ok(page) => page,
                     Err(error) if error == "catalog_cursor_expired" => {
@@ -1313,15 +1335,28 @@ impl<R: Runtime> Run<'_, '_, R> {
                         self.state.catalog_to = None;
                         self.state.catalog_carry.clear();
                         self.state.catalog_open_hour = None;
+                        self.state.catalog_completed_hours.clear();
                         self.changed = true;
                         self.report.more_pending = true;
                         break;
                     }
                     Err(error) => return Err(error),
                 };
+                for (day, key) in page.clean_days {
+                    if (day + 86_400).saturating_add(MIN_AGE_S as i64) <= self.now as i64 {
+                        self.state.clean_days.insert(day, key);
+                        self.state
+                            .clean_hours
+                            .retain(|hour, _| *hour < day || *hour >= day + 86_400);
+                    }
+                }
+                while self.state.clean_days.len() > 400 {
+                    self.state.clean_days.pop_first();
+                }
                 self.state.catalog_cursor = page.next;
                 self.state.catalog_open_hour = page.open_hour;
                 self.state.catalog_generation = Some(page.generation);
+                self.state.catalog_completed_hours = page.completed_hours;
                 self.state.catalog_objects = page
                     .files
                     .into_iter()
@@ -1342,10 +1377,24 @@ impl<R: Runtime> Run<'_, '_, R> {
                 }
             }
             for (hour, objects) in hours {
+                let pending_before = pending.len();
                 if !self.hour(hour, &objects, &mut pending)? {
                     self.changed = true;
                     self.report.more_pending = true;
                     return Ok(pending);
+                }
+                let compacted = pending.len() > pending_before || self.state.job.is_some();
+                if !compacted
+                    && self.state.group_limit == 0
+                    && self.state.catalog_open_hour != Some(hour)
+                {
+                    if let Some(generation) = self.state.catalog_completed_hours.remove(&hour) {
+                        if (hour + 3600).saturating_add(MIN_AGE_S as i64) <= self.now as i64 {
+                            self.state.clean_hours.insert(hour, generation);
+                        }
+                    }
+                } else {
+                    self.state.catalog_completed_hours.remove(&hour);
                 }
                 if self.state.catalog_open_hour == Some(hour) {
                     let mut carry = objects
@@ -1368,6 +1417,16 @@ impl<R: Runtime> Run<'_, '_, R> {
                 self.state
                     .catalog_objects
                     .retain(|object| file_hour(&object.key) != Some(hour));
+            }
+            for (hour, generation) in std::mem::take(&mut self.state.catalog_completed_hours) {
+                if self.state.catalog_open_hour != Some(hour)
+                    && (hour + 3600).saturating_add(MIN_AGE_S as i64) <= self.now as i64
+                {
+                    self.state.clean_hours.insert(hour, generation);
+                }
+            }
+            while self.state.clean_hours.len() > 2000 {
+                self.state.clean_hours.pop_first();
             }
             self.changed = true;
             if self.state.catalog_cursor.is_none() {
