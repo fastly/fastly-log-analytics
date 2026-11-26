@@ -178,7 +178,7 @@ describe('R18-FE-01: SSR upstream timeout budgets and bootstrap admin TTL', () =
     }
   })
 
-  it('serves stale cache immediately between 10s and 60s with deduped background SWR refresh, and blocks past 60s', async () => {
+  it('serves stale cache immediately between 10s and 600s with deduped background SWR refresh, and blocks past 600s', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-11-26T01:00:00Z'))
     try {
@@ -198,7 +198,7 @@ describe('R18-FE-01: SSR upstream timeout budgets and bootstrap admin TTL', () =
       expect(await fetchBootstrapServerSide()).toEqual({ active_service_id: 'svc-v1' })
       expect(mockSsrUpstreamGet).toHaveBeenCalledTimes(1)
 
-      // Between 10s and 60s: returns stale v1 immediately while background refresh is in flight.
+      // Between 10s and 600s: returns stale v1 immediately while background refresh is in flight.
       let resolveRefresh!: (resp: { statusCode: number; body: string }) => void
       mockSsrUpstreamGet.mockImplementationOnce(
         () =>
@@ -231,14 +231,22 @@ describe('R18-FE-01: SSR upstream timeout budgets and bootstrap admin TTL', () =
       await Promise.resolve()
       expect(mockSsrUpstreamGet).toHaveBeenCalledTimes(3)
 
-      // Past 60s stale TTL: synchronous fetch blocks until upstream resolves.
-      vi.advanceTimersByTime(50_000) // t = 80s (65s since v2 cached)
+      // Still within 600s stale TTL (past old 60s window): continues serving stale v2 immediately.
+      vi.advanceTimersByTime(100_000) // t = 130s (115s since v2 cached)
+      mockSsrUpstreamGet.mockResolvedValueOnce(null)
+      expect(await fetchBootstrapServerSide()).toEqual({ active_service_id: 'svc-v2' })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(mockSsrUpstreamGet).toHaveBeenCalledTimes(4)
+
+      // Past 600s stale TTL: synchronous fetch blocks until upstream resolves.
+      vi.advanceTimersByTime(490_000) // t = 620s (605s since v2 cached)
       mockSsrUpstreamGet.mockResolvedValueOnce({
         statusCode: 200,
         body: JSON.stringify({ active_service_id: 'svc-v3' }),
       })
       expect(await fetchBootstrapServerSide()).toEqual({ active_service_id: 'svc-v3' })
-      expect(mockSsrUpstreamGet).toHaveBeenCalledTimes(4)
+      expect(mockSsrUpstreamGet).toHaveBeenCalledTimes(5)
     } finally {
       vi.useRealTimers()
       vi.mocked(headers).mockImplementation(async () => new Headers())

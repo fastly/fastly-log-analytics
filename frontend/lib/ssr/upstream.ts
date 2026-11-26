@@ -322,7 +322,7 @@ export async function fetchInsightsServerSide(
 type BootstrapResponse = components['schemas']['BootstrapResponse']
 
 const _ADMIN_SSR_TTL_MS = 10_000
-const _ADMIN_SSR_STALE_TTL_MS = 60_000
+const _ADMIN_SSR_STALE_TTL_MS = 600_000
 const _adminInflightMap = new Map<string, Promise<BootstrapResponse | null>>()
 const _adminCachedMap = new Map<string, { at: number; value: BootstrapResponse | null }>()
 
