@@ -171,20 +171,20 @@ def test_assets_aggregates_uses_prewhere_explicit_columns_and_rewrites_cf() -> N
 def test_crawler_disparity_window_sampling_and_cutwww_domain_referer(monkeypatch: pytest.MonkeyPatch) -> None:
     assert window_sample_stride(0.0) == 1
     assert window_sample_stride(12.0) == 1
-    assert window_sample_stride(24.0) == 2
-    assert window_sample_stride(48.0) == 2
+    assert window_sample_stride(24.0) == 4
+    assert window_sample_stride(48.0) == 6
     assert DETECTIONS["crawler_disparity"].window_sampled is True
 
     sql_24h_168h = _base_sql(
         DETECTIONS["crawler_disparity"], "crawler_disparity", baseline_hours=168.0, window_hours=24.0
     )
     assert (
-        "((event_timestamp >= {window_start:DateTime64(3)} AND intDiv(toUnixTimestamp(event_timestamp), 300) % 2 = 0)"
+        "((event_timestamp >= {window_start:DateTime64(3)} AND intDiv(toUnixTimestamp(event_timestamp), 300) % 4 = 0)"
         " OR (event_timestamp < {window_start:DateTime64(3)} AND intDiv(toUnixTimestamp(event_timestamp), 300) % 8 = 0))"
         in sql_24h_168h
     )
-    assert "countIf(is_w) * 2 AS w_cnt" in sql_24h_168h
-    assert "sumIf(coalesce(resp_bytes, 0), is_w) * 2 AS w_b" in sql_24h_168h
+    assert "countIf(is_w) * 4 AS w_cnt" in sql_24h_168h
+    assert "sumIf(coalesce(resp_bytes, 0), is_w) * 4 AS w_b" in sql_24h_168h
     assert "countIf(is_b) * 8 AS b_cnt" in sql_24h_168h
     assert "sumIf(coalesce(resp_bytes, 0), is_b) * 8 AS b_b" in sql_24h_168h
     assert "splitByChar('.', lower(cutWWW(domain(referer))))[1]" in sql_24h_168h
@@ -208,10 +208,10 @@ def test_crawler_disparity_window_sampling_and_cutwww_domain_referer(monkeypatch
         DETECTIONS["crawler_disparity"], "crawler_disparity", baseline_hours=12.0, window_hours=24.0
     )
     assert (
-        "AND (event_timestamp < {window_start:DateTime64(3)} OR intDiv(toUnixTimestamp(event_timestamp), 300) % 2 = 0)"
+        "AND (event_timestamp < {window_start:DateTime64(3)} OR intDiv(toUnixTimestamp(event_timestamp), 300) % 4 = 0)"
         in sql_24h_12h
     )
-    assert "countIf(is_w) * 2 AS w_cnt" in sql_24h_12h
+    assert "countIf(is_w) * 4 AS w_cnt" in sql_24h_12h
     assert "countIf(is_b) AS b_cnt" in sql_24h_12h
 
     # Evaluator automatically passes window_hours to standalone detections.
@@ -231,13 +231,13 @@ def test_crawler_disparity_window_sampling_and_cutwww_domain_referer(monkeypatch
         force_refresh=True,
     )
     crawler_q = next(q for q, _, _ in client.calls if "/* insight:crawler_disparity */" in q)
-    assert "countIf(is_w) * 2 AS w_cnt" in crawler_q
+    assert "countIf(is_w) * 4 AS w_cnt" in crawler_q
 
 
 def test_batch_window_and_baseline_sampling_across_four_heavy_batches() -> None:
     present = set(ALL_FIELDS)
     combined_pred = (
-        "((event_timestamp >= {window_start:DateTime64(3)} AND intDiv(toUnixTimestamp(event_timestamp), 300) % 2 = 0)"
+        "((event_timestamp >= {window_start:DateTime64(3)} AND intDiv(toUnixTimestamp(event_timestamp), 300) % 4 = 0)"
         " OR (event_timestamp < {window_start:DateTime64(3)} AND intDiv(toUnixTimestamp(event_timestamp), 300) % 8 = 0))"
     )
 
@@ -258,8 +258,8 @@ def test_batch_window_and_baseline_sampling_across_four_heavy_batches() -> None:
         window_hours=24.0,
     )
     assert combined_pred in orig_sampled
-    assert "countIf(is_w) * 2 AS w_reqs" in orig_sampled
-    assert "countIf(is_w AND oconnect_ms IS NOT NULL) * 2 AS ts_w_total" in orig_sampled
+    assert "countIf(is_w) * 4 AS w_reqs" in orig_sampled
+    assert "countIf(is_w AND oconnect_ms IS NOT NULL) * 4 AS ts_w_total" in orig_sampled
     assert "countIf(is_b AND oconnect_ms IS NOT NULL) * 8 AS ts_b_total" in orig_sampled
 
     # 2. network_asn
@@ -281,11 +281,11 @@ def test_batch_window_and_baseline_sampling_across_four_heavy_batches() -> None:
         window_hours=24.0,
     )
     assert combined_pred in nasn_sampled
-    assert "countIf(is_w) * 2 AS nah_w_total" in nasn_sampled
+    assert "countIf(is_w) * 4 AS nah_w_total" in nasn_sampled
     assert "countIf(is_b) * 8 AS nah_b_total" in nasn_sampled
-    assert "countIf(is_w AND tcp_rtt > 0 AND country = 'US') * 2 AS amp_w_total" in nasn_sampled
+    assert "countIf(is_w AND tcp_rtt > 0 AND country = 'US') * 4 AS amp_w_total" in nasn_sampled
     assert "countIf(is_b AND tcp_rtt > 0 AND country = 'US') * 8 AS amp_b_total" in nasn_sampled
-    assert "countIf(is_w AND delivery_rate > 0) * 2 AS mdd_w_total" in nasn_sampled
+    assert "countIf(is_w AND delivery_rate > 0) * 4 AS mdd_w_total" in nasn_sampled
     assert "countIf(is_b AND delivery_rate > 0) * 8 AS mdd_b_total" in nasn_sampled
 
     # 3. url_perf
@@ -304,9 +304,9 @@ def test_batch_window_and_baseline_sampling_across_four_heavy_batches() -> None:
         window_hours=24.0,
     )
     assert combined_pred in url_sampled
-    assert "countIf(is_w AND elapsed IS NOT NULL) * 2 AS l_w_total" in url_sampled
+    assert "countIf(is_w AND elapsed IS NOT NULL) * 4 AS l_w_total" in url_sampled
     assert "countIf(is_b AND elapsed IS NOT NULL) * 8 AS l_b_total" in url_sampled
-    assert " * 2 AS c_w_total" in url_sampled
+    assert " * 4 AS c_w_total" in url_sampled
     assert " * 8 AS c_b_total" in url_sampled
 
     # 4. latency_dim
@@ -328,7 +328,7 @@ def test_batch_window_and_baseline_sampling_across_four_heavy_batches() -> None:
         window_hours=24.0,
     )
     assert combined_pred in lat_sampled
-    assert "countIf(is_w) * 2 AS w_total" in lat_sampled
+    assert "countIf(is_w) * 4 AS w_total" in lat_sampled
     assert "countIf(is_b) * 8 AS b_total" in lat_sampled
 
 

@@ -2573,6 +2573,8 @@ def test_every_detection_runs_and_query_is_visible_scoped_and_parameterized() ->
 
 @pytest.mark.parametrize("insight_id", ["low_and_slow", "new_probe_urls"])
 def test_probe_detections_filter_in_a_time_free_prewhere(insight_id: str) -> None:
+    from backend.high_scale.insights.sql_queries import _PROBE_PREWHERE
+
     # ClickHouse's query condition cache keys on the exact filter; a PREWHERE free of the
     # moving time bounds lets later evaluations skip granules that never matched the regex.
     client = _InsightsClient()
@@ -2580,7 +2582,7 @@ def test_probe_detections_filter_in_a_time_free_prewhere(insight_id: str) -> Non
     sql, _ = client.queries()[insight_id]
     prewhere = re.search(r"FROM request_facts PREWHERE (.*?) WHERE ", sql)
     assert prewhere, sql
-    assert prewhere.group(1) == "match(url, {probe_regex:String})"
+    assert prewhere.group(1) == _PROBE_PREWHERE
     assert sql.count("{probe_regex:String}") == 1
 
 

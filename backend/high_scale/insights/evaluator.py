@@ -96,10 +96,12 @@ _INSIGHTS_TELEMETRY_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=200, ttl_se
 # Results with error cards are kept briefly so retries and prewarms reuse the cards that did succeed.
 _INSIGHTS_PARTIAL_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=200, ttl_seconds=60)
 _INSIGHTS_HISTORY_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=60)
+_INSIGHTS_COVERAGE_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=120)
 _CacheRegistry.register("high_scale.insights._INSIGHTS_CACHE", _INSIGHTS_CACHE)
 _CacheRegistry.register("high_scale.insights._INSIGHTS_TELEMETRY_CACHE", _INSIGHTS_TELEMETRY_CACHE)
 _CacheRegistry.register("high_scale.insights._INSIGHTS_PARTIAL_CACHE", _INSIGHTS_PARTIAL_CACHE)
 _CacheRegistry.register("high_scale.insights._INSIGHTS_HISTORY_CACHE", _INSIGHTS_HISTORY_CACHE)
+_CacheRegistry.register("high_scale.insights._INSIGHTS_COVERAGE_CACHE", _INSIGHTS_COVERAGE_CACHE)
 # One evaluation scans the whole baseline once per detection (minutes on a busy service), so page requests
 # never run it themselves: they get the last result at once while a single background evaluation per
 # request shape refreshes it, and a cold shape answers with pending cards after a short wait.
@@ -244,12 +246,14 @@ def _evaluate(
     coverage_start, coverage_end = baseline_hours_span(baseline_start, window_start)
     coverage_params = {**params, "coverage_start": coverage_start, "coverage_end": coverage_end}
 
-    def read_coverage() -> list[dict[str, Any]]:
+    def read_coverage(cache_key: tuple[Any, ...]) -> list[dict[str, Any]]:
         try:
-            return _exec(coverage_sql(), coverage_params)
+            rows = _exec(coverage_sql(), coverage_params)
         except Exception as exc:
             logger.warning("insights rollup coverage unavailable for %s: %s", service.service_id, exc)
             return []
+        _INSIGHTS_COVERAGE_CACHE[cache_key] = rows
+        return rows
 
     sample_sql = (
         "/* insight:fields */ SELECT groupUniqArrayArray(mapKeys(custom_fields)) AS fields FROM ("
@@ -270,6 +274,7 @@ def _evaluate(
     cached_history = None if bypass_history_cache else _INSIGHTS_HISTORY_CACHE.get(history_cache_key)
     meta_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="hs-insights-meta")
     fut_coverage = None
+    cached_coverage: list[dict[str, Any]] | None = None
     try:
         fut_history = (
             trace.submit(meta_pool, "history", lambda: _exec(history_sql, params), source="fact")
@@ -287,7 +292,21 @@ def _evaluate(
         window_total = int(history[0].get("window_total") or 0) if history else 0
         history_hours = compute_available_history_hours(now, earliest)
         if use_rollup and coverage_start < coverage_end and history_hours >= baseline_hours and history[0].get("hours"):
-            fut_coverage = trace.submit(meta_pool, "rollup_coverage", read_coverage, source="projection")
+            coverage_cache_key = (
+                service.service_id,
+                client_cache_token(service.client),
+                int(coverage_start.timestamp()),
+                int(coverage_end.timestamp()),
+                tuple(zip(history[0].get("hours") or [], history[0].get("hour_checksums") or [])),
+            )
+            cached_coverage = None if bypass_history_cache else _INSIGHTS_COVERAGE_CACHE.get(coverage_cache_key)
+            if cached_coverage is None:
+                fut_coverage = trace.submit(
+                    meta_pool,
+                    "rollup_coverage",
+                    lambda: read_coverage(coverage_cache_key),
+                    source="projection",
+                )
     finally:
         meta_pool.shutdown(wait=False)
     present = set(_BASE_FIELDS)
@@ -337,7 +356,9 @@ def _evaluate(
         query_params = params
         source: Literal["fact", "mixed"] = "fact"
         if shape and span:
-            sql = rollup_base_sql(detection, definition.id, shape, baseline_hours=baseline_hours)
+            sql = rollup_base_sql(
+                detection, definition.id, shape, baseline_hours=baseline_hours, window_hours=window_hours
+            )
             query_params = {**params, "rollup_start": span[0], "rollup_end": span[1]}
             source = "mixed"
         else:
@@ -595,7 +616,7 @@ def _evaluate(
         futures = [
             pool.submit(contextvars.copy_context().run, partial(_run_group, g, u)) for g, u in early_grouped.items()
         ]
-        coverage = fut_coverage.result() if fut_coverage is not None else []
+        coverage = fut_coverage.result() if fut_coverage is not None else (cached_coverage or [])
         rollup_spans = _rollup_spans(history[0] if history else {}, coverage, baseline_start, window_start)
 
         deferred_grouped: dict[str, list[_QueryUnit]] = {}

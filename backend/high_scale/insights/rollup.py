@@ -18,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 
 from backend.high_scale._common import visible_fact_clauses
 
-from .sql_queries import COLUMNS, Detection, baseline_sample_stride
+from .sql_queries import COLUMNS, Detection, baseline_sample_stride, window_sample_stride
 
 ROLLUP_TABLE = "request_insight_hourly"
 
@@ -173,25 +173,48 @@ SAMPLED_ROLLUP_DETECTIONS: frozenset[str] = frozenset(
 )
 
 
-def rollup_base_sql(detection: Detection, insight_id: str, shape: str, *, baseline_hours: float = 0.0) -> str:
+def rollup_base_sql(
+    detection: Detection,
+    insight_id: str,
+    shape: str,
+    *,
+    baseline_hours: float = 0.0,
+    window_hours: float = 0.0,
+) -> str:
     """Like ``_base_sql`` but baseline hours in [rollup_start, rollup_end) come from the rollup."""
     if problems := rollup_problems(detection, shape):
         raise ValueError(f"{insight_id} cannot use the {shape} rollup: {'; '.join(problems)}")
     raw_projection = ", ".join(f"{COLUMNS[c]} AS {c}" for c in detection.columns)
     rollup_projection = ", ".join(f"{_to_rollup(COLUMNS[c])} AS {c}" for c in detection.columns)
     row_filter = f" AND ({detection.row_filter})" if detection.row_filter else ""
-    raw_prewhere = f" PREWHERE {detection.prewhere}" if detection.prewhere else ""
     rollup_prewhere = f" PREWHERE {_to_rollup(detection.prewhere)}" if detection.prewhere else ""
     scope = " AND ".join(visible_fact_clauses("request"))
-    b_stride = baseline_sample_stride(baseline_hours) if insight_id in SAMPLED_ROLLUP_DETECTIONS else 1
-    baseline_sample = (
-        f" AND (event_timestamp >= {{window_start:DateTime64(3)}} OR intDiv(toUnixTimestamp(event_timestamp), 300) % {b_stride} = 0)"
-        if b_stride > 1
-        else ""
-    )
+    sampled = insight_id in SAMPLED_ROLLUP_DETECTIONS
+    w_stride = window_sample_stride(window_hours) if sampled else 1
+    b_stride = baseline_sample_stride(baseline_hours) if sampled else 1
+    if w_stride > 1 and b_stride > 1:
+        sample_clause = (
+            f"((event_timestamp >= {{window_start:DateTime64(3)}} AND intDiv(toUnixTimestamp(event_timestamp), 300) % {w_stride} = 0)"
+            f" OR (event_timestamp < {{window_start:DateTime64(3)}} AND intDiv(toUnixTimestamp(event_timestamp), 300) % {b_stride} = 0))"
+        )
+    elif b_stride > 1:
+        sample_clause = f"(event_timestamp >= {{window_start:DateTime64(3)}} OR intDiv(toUnixTimestamp(event_timestamp), 300) % {b_stride} = 0)"
+    elif w_stride > 1:
+        sample_clause = f"(event_timestamp < {{window_start:DateTime64(3)}} OR intDiv(toUnixTimestamp(event_timestamp), 300) % {w_stride} = 0)"
+    else:
+        sample_clause = ""
+    if detection.prewhere:
+        raw_prewhere = f" PREWHERE {detection.prewhere}"
+        raw_sample = f" AND {sample_clause}" if sample_clause else ""
+    elif sample_clause:
+        raw_prewhere = f" PREWHERE {sample_clause}"
+        raw_sample = ""
+    else:
+        raw_prewhere = ""
+        raw_sample = ""
     raw_weight = (
-        f"if(event_timestamp < {{window_start:DateTime64(3)}}, toUInt64({b_stride}), toUInt64(1)) AS n"
-        if b_stride > 1
+        f"if(event_timestamp < {{window_start:DateTime64(3)}}, toUInt64({b_stride}), toUInt64({w_stride})) AS n"
+        if (b_stride > 1 or w_stride > 1)
         else "toUInt64(1) AS n"
     )
     raw = (
@@ -201,7 +224,7 @@ def rollup_base_sql(detection: Detection, insight_id: str, shape: str, *, baseli
         f"FROM request_facts{raw_prewhere} WHERE {scope} AND event_timestamp >= {{baseline_start:DateTime64(3)}} "
         f"AND event_timestamp < {{window_end:DateTime64(3)}}{row_filter} "
         "AND (event_timestamp < {rollup_start:DateTime64(3)} OR event_timestamp >= {rollup_end:DateTime64(3)})"
-        f"{baseline_sample}"
+        f"{raw_sample}"
     )
     rollup = (
         f"SELECT {rollup_projection}, toUInt8(1) AS is_b, toUInt8(0) AS is_w, request_count AS n "

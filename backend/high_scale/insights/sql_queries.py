@@ -10,6 +10,7 @@ from typing import Any
 
 from backend.core.clickhouse.client import rewrite_materialized_cf_sql
 from backend.high_scale._common import visible_fact_clauses
+from backend.repositories.insights.shaping import NEW_PROBES
 from backend.repositories.insights.shaping import fingerprint_column as _fingerprint_column
 
 # Logical column name -> ClickHouse expression over request_facts.
@@ -102,7 +103,17 @@ def baseline_sample_stride(baseline_hours: float) -> int:
 
 def window_sample_stride(window_hours: float) -> int:
     """Granule-skipping 5-minute time-block stride for raw-fact window portions (>= 24h)."""
-    return 2 if window_hours >= 24 else 1
+    if window_hours >= 48:
+        return 6
+    if window_hours >= 24:
+        return 4
+    return 1
+
+
+_PROBE_SUBSTRINGS_SQL = (
+    "[" + ", ".join("'" + p.replace("\\", "\\\\").replace("'", "\\'") + "'" for p in NEW_PROBES) + "]"
+)
+_PROBE_PREWHERE = f"multiSearchAnyCaseInsensitive(url, {_PROBE_SUBSTRINGS_SQL}) AND match(url, {{probe_regex:String}})"
 
 
 @dataclass(frozen=True)
@@ -443,7 +454,7 @@ DETECTIONS: dict[str, Detection] = {
             order_by="w_cnt DESC",
             limit=25,
         ),
-        prewhere="match(url, {probe_regex:String})",
+        prewhere=_PROBE_PREWHERE,
     ),
     "proxy_surge": Detection(
         ("p_type",),
@@ -667,7 +678,7 @@ DETECTIONS: dict[str, Detection] = {
             limit=15,
         ),
         row_filter="ip != '' AND url != ''",
-        prewhere="match(url, {probe_regex:String})",
+        prewhere=_PROBE_PREWHERE,
     ),
     "credential_enumeration": Detection(
         ("ip", "url", "status"),

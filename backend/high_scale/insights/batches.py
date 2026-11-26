@@ -46,6 +46,7 @@ def _parse_int(value: Any) -> int | None:
 _CANDIDATE_LIMIT = 500
 _URL_PERF_CANDIDATE_LIMIT = 2000
 _IP_ABUSE_CANDIDATE_LIMIT = 2000
+_FP_SPREAD_CANDIDATE_LIMIT = 2000
 _baseline_sample_stride = baseline_sample_stride
 _window_sample_stride = window_sample_stride
 
@@ -1044,6 +1045,7 @@ def _build_ip_outlier(
     rollup_span: tuple[datetime, datetime] | None,
     filter_clause: str,
     baseline_hours: float = 0.0,
+    window_hours: float = 0.0,
     candidates: dict[str, list[str] | None] | None = None,
     candidate_params: dict[str, Any] | None = None,
 ) -> tuple[str, QuerySource]:
@@ -1080,6 +1082,8 @@ def _build_ip_outlier(
         )
     b_stride = _baseline_sample_stride(baseline_hours)
     b_scale = f" * {b_stride}" if b_stride > 1 else ""
+    w_stride = _window_sample_stride(window_hours)
+    w_scale = f" * {w_stride}" if w_stride > 1 else ""
     cte, source = _base_cte(
         "ip_outlier",
         proj,
@@ -1087,17 +1091,18 @@ def _build_ip_outlier(
         prewhere_clause=prewhere_clause,
         filter_clause=filter_clause,
         baseline_sample_stride=b_stride,
+        window_sample_stride=w_stride,
     )
     sql = (
         f"{cte} SELECT ip, "
         "maxIf(req_header_bytes, is_w AND req_header_bytes > 0) AS max_bytes, "
         "avgIf(req_header_bytes, is_w AND req_header_bytes > 0) AS avg_bytes, "
-        "countIf(is_w AND req_header_bytes > 0) AS rs_w_total, "
+        f"countIf(is_w AND req_header_bytes > 0){w_scale} AS rs_w_total, "
         "quantileTDigestIf(0.95)(req_header_bytes, is_b AND req_header_bytes > 0) AS rs_b_p95, "
         f"countIf(is_b AND req_header_bytes > 0){b_scale} AS rs_b_total, "
         "maxIf(conn_requests, is_w AND conn_requests > 0) AS max_reqs, "
         "avgIf(conn_requests, is_w AND conn_requests > 0) AS avg_reqs, "
-        "countIf(is_w AND conn_requests > 0) AS ca_w_total, "
+        f"countIf(is_w AND conn_requests > 0){w_scale} AS ca_w_total, "
         "quantileTDigestIf(0.95)(conn_requests, is_b AND conn_requests > 0) AS ca_b_p95, "
         f"countIf(is_b AND conn_requests > 0){b_scale} AS ca_b_total "
         "FROM base GROUP BY ip HAVING "
@@ -1706,7 +1711,7 @@ def _build_fingerprint_spread_candidates(
         fp_win_from = _window_from(filter_clause=filter_clause, row_filter=f"{fp_col} != '' AND client_ip != ''")
         branches.append(
             f"SELECT 'fp' AS kind, {fp_col} AS k {fp_win_from} "
-            f"GROUP BY {fp_col} HAVING uniqCombined(client_ip) >= 4 LIMIT {_CANDIDATE_LIMIT + 1}"
+            f"GROUP BY {fp_col} HAVING uniqCombined(client_ip) >= 5 LIMIT {_FP_SPREAD_CANDIDATE_LIMIT + 1}"
         )
     if has_cipher:
         cipher_col = COLUMNS["tls_ciphers_sha"]
@@ -1715,7 +1720,7 @@ def _build_fingerprint_spread_candidates(
         )
         branches.append(
             f"SELECT 'cipher' AS kind, {cipher_col} AS k {cipher_win_from} "
-            f"GROUP BY {cipher_col} HAVING uniqCombined(client_ip) >= 4 LIMIT {_CANDIDATE_LIMIT + 1}"
+            f"GROUP BY {cipher_col} HAVING uniqCombined(client_ip) >= 5 LIMIT {_FP_SPREAD_CANDIDATE_LIMIT + 1}"
         )
     if len(branches) == 1:
         return f"/* insight:batch_fingerprint_spread_candidates */ {branches[0]}"
@@ -1734,8 +1739,8 @@ def _parse_fingerprint_spread_candidates(
     if (not has_fp or not fp_keys) and (not has_cipher or not cipher_keys):
         return None
     return {
-        "fp": (None if len(fp_keys) > _CANDIDATE_LIMIT else fp_keys) if has_fp else [],
-        "cipher": (None if len(cipher_keys) > _CANDIDATE_LIMIT else cipher_keys) if has_cipher else [],
+        "fp": (None if len(fp_keys) > _FP_SPREAD_CANDIDATE_LIMIT else fp_keys) if has_fp else [],
+        "cipher": (None if len(cipher_keys) > _FP_SPREAD_CANDIDATE_LIMIT else cipher_keys) if has_cipher else [],
     }
 
 
@@ -1756,7 +1761,7 @@ def _build_fingerprint_spread(
             has_fp = False
         if has_cipher and candidates.get("cipher") == []:
             has_cipher = False
-    proj: list[tuple[str, str]] = [("ip", COLUMNS["ip"])]
+    proj: list[tuple[str, str]] = [("ip_h", "cityHash64(client_ip)")]
     if has_fp:
         proj.append((fp, COLUMNS[fp]))
     if has_fp and "residential_fingerprint_dispersion" in active:
@@ -1817,9 +1822,9 @@ def _build_fingerprint_spread(
         f"{g_cipher} AS g_cipher",
         f"{fp} AS fp_val" if has_fp else "'' AS fp_val",
         "tls_ciphers_sha" if has_cipher else "'' AS tls_ciphers_sha",
-        "uniqCombinedIf(ip, is_w) AS w_ips",
+        "uniqCombinedIf(ip_h, is_w) AS w_ips",
         "countIf(is_w) AS w_reqs",
-        "uniqCombinedIf(ip, is_b) AS b_ips",
+        "uniqCombinedIf(ip_h, is_b) AS b_ips",
     ]
     having: list[str] = []
     if has_fp and "botnet_grouping" in active:
@@ -1835,10 +1840,10 @@ def _build_fingerprint_spread(
     if has_fp and "residential_fingerprint_dispersion" in active:
         sel.extend(
             [
-                "uniqCombinedIf(ip, is_w AND p_type != 'hosting') AS res_w_ips",
+                "uniqCombinedIf(ip_h, is_w AND p_type != 'hosting') AS res_w_ips",
                 "uniqCombinedIf(asn, is_w AND p_type != 'hosting') AS res_w_asns",
                 "countIf(is_w AND p_type != 'hosting') AS res_w_reqs",
-                "uniqCombinedIf(ip, is_b AND p_type != 'hosting') AS res_b_ips",
+                "uniqCombinedIf(ip_h, is_b AND p_type != 'hosting') AS res_b_ips",
                 "uniqCombinedIf(asn, is_b AND p_type != 'hosting') AS res_b_asns",
             ]
         )
