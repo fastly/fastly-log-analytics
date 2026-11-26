@@ -318,11 +318,18 @@ def impossible_distance(
     """Fingerprints whose client sits farther from the serving POP than the measured RTT physically allows."""
     if fingerprint_column not in ("ja4", "ja3"):
         raise ValueError("fingerprint column must be ja4 or ja3")
-    pops = []
-    for code, (lat, lon) in pop_coordinates.items():
+    codes: list[str] = []
+    lats: list[str] = []
+    lons: list[str] = []
+    for code, (lat, lon) in sorted(pop_coordinates.items()):
         if not POP_CODE.fullmatch(code):
             raise ValueError("invalid POP code")
-        pops.append(f"('{code}', {float(lat)!r}, {float(lon)!r})")
+        codes.append(f"'{code}'")
+        lats.append(repr(float(lat)))
+        lons.append(repr(float(lon)))
+    keys_sql = ", ".join(codes)
+    lats_sql = ", ".join(lats)
+    lons_sql = ", ".join(lons)
     edge = " AND edge IN ('1', 'true', 'True', 'TRUE')" if edge_only else ""
     prewhere_parts: list[str] = []
     if edge_only:
@@ -341,13 +348,19 @@ def impossible_distance(
     columns: tuple[str, ...] = ("ip", "pop", "lat", "lon", "tcp_rtt", "country", "city", fingerprint_column)
     if edge_only:
         columns += ("edge",)
-    sql = f""" , pop_coords AS (SELECT t.1 AS pop_code, t.2 AS pop_lat, t.3 AS pop_lon FROM (SELECT arrayJoin([{", ".join(pops)}]) AS t)),
-    flagged AS (SELECT {fingerprint_column} AS fp, b.ip AS ip, b.pop AS pop, round(b.lat, 3) AS client_lat, round(b.lon, 3) AS client_lon,
-               c.pop_lat AS pop_lat, c.pop_lon AS pop_lon, b.tcp_rtt AS tcp_rtt, b.country AS country, b.city AS city,
-               round(2 * 6371 * asin(sqrt(pow(sin(radians(b.lat - c.pop_lat) / 2), 2)
-                   + cos(radians(b.lat)) * cos(radians(c.pop_lat)) * pow(sin(radians(b.lon - c.pop_lon) / 2), 2))), 1) AS distance_km,
-               round((b.tcp_rtt / 2.0 / 1e6) * 200000 * 2, 1) AS max_km
-        FROM base b INNER JOIN pop_coords c ON b.pop = c.pop_code)
+    sql = f""" , with_pops AS (SELECT {fingerprint_column} AS fp, ip, pop, lat, lon,
+               transform(pop, [{keys_sql}], [{lats_sql}], 999.0) AS pop_lat,
+               transform(pop, [{keys_sql}], [{lons_sql}], 999.0) AS pop_lon,
+               tcp_rtt, country, city,
+               round((tcp_rtt / 2.0 / 1e6) * 200000 * 2, 1) AS max_km
+        FROM base
+        WHERE transform(pop, [{keys_sql}], [{lats_sql}], 999.0) <= 90.0),
+    flagged AS (SELECT fp, ip, pop, round(lat, 3) AS client_lat, round(lon, 3) AS client_lon,
+               pop_lat, pop_lon, tcp_rtt, country, city,
+               round(2 * 6371 * asin(sqrt(pow(sin(radians(lat - pop_lat) / 2), 2)
+                   + cos(radians(lat)) * cos(radians(pop_lat)) * pow(sin(radians(lon - pop_lon) / 2), 2))), 1) AS distance_km,
+               max_km
+        FROM with_pops)
     SELECT fp, count() AS hits, max(distance_km - max_km) AS worst_excess_km, max(distance_km) AS max_dist_km,
            min(max_km) AS min_allowed_km, any(pop) AS pop, any(ip) AS sample_ip, any(client_lat), any(client_lon),
            any(pop_lat), any(pop_lon), any(tcp_rtt), any(country), any(city)
@@ -369,15 +382,22 @@ def impossible_distance(
 _CRAWLER_TOKEN = "'([a-z0-9_.-]*(?:bot|crawler|spider|slurp|archiver|scraper|externalagent|extended|other|preview)[a-z0-9_.-]*|headless[a-z0-9_.-]*|python-[a-z0-9_.-]+|go-http-client|curl|wget|scrapy|aiohttp|httpx|okhttp|axios)'"
 _BOT_STEM_SUFFIX = "'(-searchbot|-assistbot|-externalagent|-extended|-user|searchbot|assistbot|externalagent|extended|crawler|spider|slurp|archiver|scraper|preview|other|bot).*$'"
 _BOT_STEM = f"if(replaceRegexpOne(raw_tok, {_BOT_STEM_SUFFIX}, '') != '', replaceRegexpOne(raw_tok, {_BOT_STEM_SUFFIX}, ''), raw_tok)"
+_CRAWLER_UA_NEEDLES = (
+    "['bot', 'crawler', 'spider', 'slurp', 'archiver', 'scraper', 'externalagent', 'extended', "
+    "'other', 'preview', 'headless', 'python-', 'go-http-client', 'curl', 'wget', 'scrapy', "
+    "'aiohttp', 'httpx', 'okhttp', 'axios']"
+)
+_CRAWLER_WINDOW_SAMPLE_STRIDE = 4
 # crawler_traffic is non-empty exactly when a bot stem has 50+ window requests; deciding that
-# from window rows alone avoids re-running crawler_traffic's full-range scan for the guard.
+# from sampled window blocks avoids re-running a full-range scan for the guard.
 _CRAWLER_WIN_SCOPE = " AND ".join(visible_fact_clauses("request"))
 _CRAWLER_IN_WINDOW = (
     f"(SELECT count() FROM (SELECT {_BOT_STEM} AS bot_stem FROM ("
-    f"SELECT extract(lower(ua), {_CRAWLER_TOKEN}) AS raw_tok, cnt FROM ("
+    f"SELECT extract(lower(ua), {_CRAWLER_TOKEN}) AS raw_tok, cnt * {_CRAWLER_WINDOW_SAMPLE_STRIDE} AS cnt FROM ("
     "SELECT custom_fields['ua'] AS ua, count() AS cnt FROM request_facts "
     f"PREWHERE {_CRAWLER_WIN_SCOPE} AND event_timestamp >= {{window_start:DateTime64(3)}} "
     "AND event_timestamp < {window_end:DateTime64(3)} "
+    f"AND intDiv(toUnixTimestamp(event_timestamp), 300) % {_CRAWLER_WINDOW_SAMPLE_STRIDE} = 0 "
     "WHERE custom_fields['ua'] != '' GROUP BY ua"
     ")) WHERE raw_tok != '' AND bot_stem != '' GROUP BY bot_stem HAVING sum(cnt) >= 50)) > 0"
 )
@@ -794,37 +814,45 @@ DETECTIONS: dict[str, Detection] = {
     ),
     "crawler_disparity": Detection(
         ("ua", "referer", "ip", "resp_bytes"),
-        f""" , ua_groups AS (SELECT ua, countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt,
+        f""" , tagged AS (SELECT ua, ip, resp_bytes, is_w, is_b,
+            if(multiSearchAnyCaseInsensitive(ua, {_CRAWLER_UA_NEEDLES}),
+                extract(lower(ua), {_CRAWLER_TOKEN}), '') AS raw_tok,
+            if(multiSearchAnyCaseInsensitive(ua, {_CRAWLER_UA_NEEDLES}),
+                extract(lower(ua), 'https?://(?:www\\.)?([^/.:;\\s)]+)'), '') AS ua_dom,
+            if(ip != ''
+               AND ((referer != '' AND referer != '-') OR positionCaseInsensitive(ua, '-user') > 0 OR positionCaseInsensitive(ua, '-externalfetcher') > 0)
+               AND NOT multiSearchAnyCaseInsensitive(ua, {_CRAWLER_UA_NEEDLES}),
+               ifNull(nullIf(if(positionCaseInsensitive(ua, '-user') > 0 OR positionCaseInsensitive(ua, '-externalfetcher') > 0,
+                   lower(extract(ua, '(?i)([a-z0-9]+)-(?:user|externalfetcher)')), ''), ''),
+                   lower(extract(referer, '(?i)https?://(?:www\\.)?([^/.:;\\s]+)'))),
+               '') AS ref_stem
+        FROM base),
+    classified AS (SELECT ip, resp_bytes, is_w, is_b, raw_tok, ua_dom, ref_stem,
+            if(raw_tok != '', {_BOT_STEM}, '') AS bot_stem
+        FROM tagged),
+    gs AS (SELECT grouping(bot_stem) AS g_bot, grouping(ref_stem) AS g_ref,
+            bot_stem, ref_stem, is_w, is_b,
+            minIf(raw_tok, raw_tok != '') AS raw_tok, max(ua_dom) AS ua_dom,
+            countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt,
             sumIf(coalesce(resp_bytes, 0), is_w) AS w_b, sumIf(coalesce(resp_bytes, 0), is_b) AS b_b,
-            greatest(sum(sumIf(coalesce(resp_bytes, 0), is_w)) OVER (), 1) AS site_resp_total FROM base GROUP BY ua),
-    ua_tagged AS (SELECT w_cnt, b_cnt, w_b, b_b, site_resp_total,
-            extract(lower(ua), {_CRAWLER_TOKEN}) AS raw_tok,
-            extract(lower(ua), 'https?://(?:www\\.)?([^/.:;\\s)]+)') AS ua_dom FROM ua_groups),
-    ua_classified AS (SELECT w_cnt, b_cnt, w_b, b_b, site_resp_total, raw_tok, ua_dom,
-            {_BOT_STEM} AS bot_stem
-            FROM ua_tagged WHERE raw_tok != ''),
-    crawler_traffic AS (SELECT bot_stem, replaceRegexpAll(bot_stem, '[aeiou]', '') AS bot_cons,
-               min(raw_tok) AS raw_tok, max(ua_dom) AS ua_dom, sum(w_cnt) AS w_crawls, sum(b_cnt) AS b_crawls,
-               sum(w_b) AS w_bytes, sum(b_b) AS b_bytes, any(site_resp_total) AS site_resp_total FROM ua_classified WHERE bot_stem != '' GROUP BY bot_stem HAVING w_crawls >= 50),
-    human_refs AS (SELECT ref_stem, replaceRegexpAll(ref_stem, '[aeiou]', '') AS ref_cons,
-            is_w, is_b, uniqCombinedState(ip) AS ip_state
-        FROM (SELECT ip, is_w, is_b,
-            ifNull(nullIf(if(positionCaseInsensitive(ua, '-user') > 0 OR positionCaseInsensitive(ua, '-externalfetcher') > 0,
-                lower(extract(ua, '(?i)([a-z0-9]+)-(?:user|externalfetcher)')), ''), ''),
-                lower(extract(referer, '(?i)https?://(?:www\\.)?([^/.:;\\s]+)'))) AS ref_stem
-            FROM base
-            WHERE ip != ''
-              AND ((referer != '' AND referer != '-') OR positionCaseInsensitive(ua, '-user') > 0 OR positionCaseInsensitive(ua, '-externalfetcher') > 0)
-              AND NOT multiSearchAnyCaseInsensitive(ua, ['bot', 'crawler', 'spider', 'slurp', 'archiver', 'scraper', 'externalagent', 'extended', 'other', 'preview', 'headless', 'python-', 'go-http-client', 'curl', 'wget', 'scrapy', 'aiohttp', 'httpx', 'okhttp', 'axios']))
-        WHERE ref_stem != ''
-        GROUP BY ref_stem, is_w, is_b
-        UNION ALL SELECT '' AS ref_stem, '' AS ref_cons, toUInt8(0) AS is_w, toUInt8(0) AS is_b,
-            uniqCombinedState(ip) AS ip_state FROM (SELECT CAST('' AS String) AS ip WHERE 0)),
-    combined AS (SELECT c.bot_stem AS bot_stem, any(c.raw_tok) AS raw_tok, any(c.w_crawls) AS w_crawls, any(c.b_crawls) AS b_crawls,
-            any(c.w_bytes) AS w_bytes, any(c.b_bytes) AS b_bytes, any(c.site_resp_total) AS site_resp_total,
-            uniqCombinedMergeIf(h.ip_state, toBool(h.is_w) AND h.ref_stem != '' AND (c.bot_stem = h.ref_stem OR (length(c.bot_cons) >= 3 AND c.bot_cons = h.ref_cons) OR (length(c.bot_stem) >= 3 AND length(h.ref_stem) >= 3 AND (position(h.ref_stem, c.bot_stem) > 0 OR position(c.bot_stem, h.ref_stem) > 0)) OR (c.ua_dom != '' AND c.ua_dom = h.ref_stem))) AS w_referrals,
-            uniqCombinedMergeIf(h.ip_state, toBool(h.is_b) AND h.ref_stem != '' AND (c.bot_stem = h.ref_stem OR (length(c.bot_cons) >= 3 AND c.bot_cons = h.ref_cons) OR (length(c.bot_stem) >= 3 AND length(h.ref_stem) >= 3 AND (position(h.ref_stem, c.bot_stem) > 0 OR position(c.bot_stem, h.ref_stem) > 0)) OR (c.ua_dom != '' AND c.ua_dom = h.ref_stem))) AS b_referrals
-        FROM crawler_traffic c CROSS JOIN human_refs h GROUP BY c.bot_stem)
+            uniqCombinedStateIf(ip, ref_stem != '') AS ip_state
+        FROM classified
+        GROUP BY GROUPING SETS ((), (bot_stem), (ref_stem, is_w, is_b))
+        HAVING (g_bot = 1 AND g_ref = 1) OR (g_bot = 0 AND bot_stem != '' AND w_cnt >= 50) OR (g_ref = 0 AND ref_stem != '')),
+    with_bots AS (SELECT g_ref, ref_stem, replaceRegexpAll(ref_stem, '[aeiou]', '') AS ref_cons,
+            is_w, is_b, ip_state,
+            groupArrayIf((bot_stem, replaceRegexpAll(bot_stem, '[aeiou]', ''), raw_tok, ua_dom, w_cnt, b_cnt, w_b, b_b), g_bot = 0 AND bot_stem != '' AND w_cnt >= 50) OVER () AS bots,
+            greatest(maxIf(w_b, g_bot = 1 AND g_ref = 1) OVER (), 1) AS site_resp_total
+        FROM gs),
+    expanded AS (SELECT g_ref, ref_stem, ref_cons, is_w, is_b, ip_state, site_resp_total,
+            b.1 AS bot_stem, b.2 AS bot_cons, b.3 AS raw_tok, b.4 AS ua_dom,
+            b.5 AS w_crawls, b.6 AS b_crawls, b.7 AS w_bytes, b.8 AS b_bytes
+        FROM with_bots ARRAY JOIN bots AS b),
+    combined AS (SELECT bot_stem, any(raw_tok) AS raw_tok, any(w_crawls) AS w_crawls, any(b_crawls) AS b_crawls,
+            any(w_bytes) AS w_bytes, any(b_bytes) AS b_bytes, any(site_resp_total) AS site_resp_total,
+            uniqCombinedMergeIf(ip_state, g_ref = 0 AND ref_stem != '' AND toBool(is_w) AND (bot_stem = ref_stem OR (length(bot_cons) >= 3 AND bot_cons = ref_cons) OR (length(bot_stem) >= 3 AND length(ref_stem) >= 3 AND (position(ref_stem, bot_stem) > 0 OR position(bot_stem, ref_stem) > 0)) OR (ua_dom != '' AND ua_dom = ref_stem))) AS w_referrals,
+            uniqCombinedMergeIf(ip_state, g_ref = 0 AND ref_stem != '' AND toBool(is_b) AND (bot_stem = ref_stem OR (length(bot_cons) >= 3 AND bot_cons = ref_cons) OR (length(bot_stem) >= 3 AND length(ref_stem) >= 3 AND (position(ref_stem, bot_stem) > 0 OR position(bot_stem, ref_stem) > 0)) OR (ua_dom != '' AND ua_dom = ref_stem))) AS b_referrals
+        FROM expanded GROUP BY bot_stem)
     SELECT c.raw_tok AS label, c.w_crawls, c.w_referrals, c.w_bytes,
         c.w_crawls * 1.0 / greatest(c.w_referrals, 1) AS crawls_per_referral,
         c.b_crawls * 1.0 / greatest(c.b_referrals, 1) AS baseline_crawls_per_referral,

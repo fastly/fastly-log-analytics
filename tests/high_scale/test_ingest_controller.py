@@ -3040,7 +3040,7 @@ _CMCD_CANNED: dict[str, list[dict[str, Any]]] = {
             "positive_duration_count": 0,
         },
     ],
-    "cmcd:breakdowns": [
+    "cmcd:session_breakdowns": [
         {
             "kind": "content",
             "k": "movie-1",
@@ -3068,6 +3068,8 @@ _CMCD_CANNED: dict[str, list[dict[str, Any]]] = {
             "avg_bl": 8.0,
             "median_mtp": None,
         },
+    ],
+    "cmcd:breakdowns": [
         {
             "kind": "ot",
             "k": "v",
@@ -3536,10 +3538,10 @@ def test_probe_and_asn_enrichment_are_disjoint_overhead(monkeypatch: pytest.Monk
     client = TimedClient()
     result = _run(client, sections={"rebuffer_by_asn"})
     timings = {row["section"]: row for row in result["section_timings"]}
-    assert set(timings) == {"cmcd.probe", "cmcd.breakdowns", "cmcd.asn_labels"}
+    assert set(timings) == {"cmcd.probe", "cmcd.session_breakdowns", "cmcd.asn_labels"}
     assert timings["cmcd.probe"]["activity"] == "overhead" and timings["cmcd.probe"]["time_ms"] == pytest.approx(10)
-    assert timings["cmcd.breakdowns"]["activity"] == "compute"
-    assert timings["cmcd.breakdowns"]["time_ms"] == pytest.approx(20)
+    assert timings["cmcd.session_breakdowns"]["activity"] == "compute"
+    assert timings["cmcd.session_breakdowns"]["time_ms"] == pytest.approx(20)
     assert timings["cmcd.asn_labels"]["activity"] == "overhead"
     assert timings["cmcd.asn_labels"]["time_ms"] == pytest.approx(30)
     assert timings["cmcd.asn_labels"]["source"] == "unknown"
@@ -3549,7 +3551,7 @@ def test_probe_and_asn_enrichment_are_disjoint_overhead(monkeypatch: pytest.Monk
     assert all(row["source"] == "projected_fact" for row in client.scopes)
     assert {row["section_id"] for row in client.scopes} == {
         timings["cmcd.probe"]["section_id"],
-        timings["cmcd.breakdowns"]["section_id"],
+        timings["cmcd.session_breakdowns"]["section_id"],
     }
     assert result["rebuffer_by_asn"][0]["label"] == "Example Network (7922)"
     assert result["_response_cache"]["state"] == "miss" and result["_response_cache"]["single_flight"] == "leader"
@@ -3576,7 +3578,7 @@ def test_asn_enrichment_failure_is_overhead_and_not_cached(monkeypatch: pytest.M
     with pytest.raises(RuntimeError, match="metadata unavailable"):
         _run(client, sections={"rebuffer_by_asn"})
     by_section = {row["section"]: row for row in observations}
-    assert by_section["cmcd.breakdowns"]["outcome"] == "success"
+    assert by_section["cmcd.session_breakdowns"]["outcome"] == "success"
     assert (
         by_section["cmcd.asn_labels"]["outcome"] == "error" and by_section["cmcd.asn_labels"]["activity"] == "overhead"
     )
@@ -3598,6 +3600,7 @@ def test_all_cmcd_tasks_preserve_request_and_page_correlation() -> None:
         "cmcd.probe",
         "cmcd.timeseries",
         "cmcd.sessions",
+        "cmcd.session_breakdowns",
         "cmcd.breakdowns",
         "cmcd.asn_labels",
     }

@@ -87,17 +87,7 @@ _MAX_WORKERS = 3
 _BACKGROUND_MAX_WORKERS = 2
 _BACKGROUND_QUERY_MAX_THREADS = str(max(1, int(os.getenv("INSIGHTS_BG_MAX_THREADS", "2") or "2")))
 _INSIGHT_MARKER_RE = re.compile(r"^\s*/\*\s*insight:\w+\s*\*/\s*")
-_MULTIPLEX_GROUPS: tuple[tuple[str, frozenset[str]], ...] = (
-    ("group_rollup_batches", frozenset({"batch_misc", "batch_geo", "batch_asn", "batch_url_cache"})),
-    (
-        "group_rollup_standalone",
-        frozenset({"error_spikes", "new_probe_urls", "ua_monoculture", "referer_monoculture", "waf_signal_spikes"}),
-    ),
-    (
-        "group_window_perf",
-        frozenset({"batch_window_url", "batch_beaconing"}),
-    ),
-)
+_MULTIPLEX_GROUPS: tuple[tuple[str, frozenset[str]], ...] = ()
 _FIELD_SAMPLE_ROWS = 1000
 _BASE_FIELDS = frozenset({"timestamp", "url", "country", "ip"})
 _ASN_INSIGHT_MARKERS = ("asn", "metro")
@@ -347,7 +337,7 @@ def _evaluate(
         query_params = params
         source: Literal["fact", "mixed"] = "fact"
         if shape and span:
-            sql = rollup_base_sql(detection, definition.id, shape)
+            sql = rollup_base_sql(detection, definition.id, shape, baseline_hours=baseline_hours)
             query_params = {**params, "rollup_start": span[0], "rollup_end": span[1]}
             source = "mixed"
         else:

@@ -2588,10 +2588,12 @@ def test_crawler_disparity_guard_reads_only_window_rows() -> None:
     client = _InsightsClient()
     _run_insights(client)
     sql, _ = client.queries()["crawler_disparity"]
-    # Each reference to the full-range crawler_traffic CTE is another full baseline scan.
-    assert sql.count("FROM crawler_traffic") == 1
+    # Single scan of base via GROUPING SETS, plus sampled window-only pre-filter guard.
+    assert sql.count("FROM base") == 1
+    assert "GROUP BY GROUPING SETS" in sql
     assert "SELECT custom_fields['ua'] AS ua, count() AS cnt FROM request_facts PREWHERE " in sql
     assert "event_timestamp >= {window_start:DateTime64(3)}" in sql
+    assert "intDiv(toUnixTimestamp(event_timestamp), 300) % 4 = 0" in sql
     assert "HAVING sum(cnt) >= 50" in sql
 
 

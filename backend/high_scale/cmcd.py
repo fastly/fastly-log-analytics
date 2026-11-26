@@ -561,7 +561,7 @@ def _cmcd_aggregates_compute(
 
         tasks.append(("session_duration", _run_session_duration))
 
-    # Consolidate requested breakdown queries into one CTE + UNION ALL query.
+    # Split session-level breakdowns (single-scan GROUPING SETS) from flat dimension breakdowns.
     req_content = wanted("top_content")
     req_country = wanted("rebuffer_by_country")
     req_asn = wanted("rebuffer_by_asn")
@@ -573,58 +573,189 @@ def _cmcd_aggregates_compute(
         "kind, k, session_count, request_count, rebuffer_rate, "
         "avg_br, avg_br_all, avg_bl, avg_bl_all, median_mtp, median_mtp_all"
     )
-    breakdown_branches: list[str] = []
+
+    sess_dims: list[str] = []
     if req_content:
-        breakdown_branches.append(
-            f"SELECT {breakdown_cols} FROM (SELECT 'content' AS kind, cid AS k, toUInt64(count()) AS session_count, "
-            "toUInt64(0) AS request_count, "
-            "toNullable(sum(had_rebuffer) * 100.0 / nullIf(count(), 0)) AS rebuffer_rate, "
-            "toNullable(sumIf(avg_br * br_reqs, avg_br IS NOT NULL) / nullIf(sumIf(br_reqs, avg_br IS NOT NULL), 0)) AS avg_br, "
-            "toNullable(sumIf(avg_br_all * br_reqs_all, avg_br_all IS NOT NULL) / nullIf(sumIf(br_reqs_all, avg_br_all IS NOT NULL), 0)) AS avg_br_all, "
-            "toNullable(sumIf(avg_bl * bl_reqs, avg_bl IS NOT NULL) / nullIf(sumIf(bl_reqs, avg_bl IS NOT NULL), 0)) AS avg_bl, "
-            "toNullable(sumIf(avg_bl_all * bl_reqs_all, avg_bl_all IS NOT NULL) / nullIf(sumIf(bl_reqs_all, avg_bl_all IS NOT NULL), 0)) AS avg_bl_all, "
-            "CAST(NULL, 'Nullable(Float64)') AS median_mtp, CAST(NULL, 'Nullable(Float64)') AS median_mtp_all FROM ("
-            "SELECT cid, sid, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
-            f"avgIf(br, {_VIDEO}) AS avg_br, countIf({_VIDEO} AND br IS NOT NULL) AS br_reqs, "
-            "avg(br) AS avg_br_all, countIf(br IS NOT NULL) AS br_reqs_all, "
-            f"avgIf(bl, {_VIDEO}) AS avg_bl, countIf({_VIDEO} AND bl IS NOT NULL) AS bl_reqs, "
-            "avg(bl) AS avg_bl_all, countIf(bl IS NOT NULL) AS bl_reqs_all "
-            "FROM events WHERE cid != '' GROUP BY cid, sid) "
-            "GROUP BY cid ORDER BY session_count DESC, k LIMIT {top_n:UInt32})"
-        )
+        sess_dims.append("content")
     if req_country:
-        breakdown_branches.append(
-            f"SELECT {breakdown_cols} FROM (SELECT 'country' AS kind, country AS k, toUInt64(count()) AS session_count, "
-            "toUInt64(0) AS request_count, "
-            "toNullable(sum(had_rebuffer) * 100.0 / nullIf(count(), 0)) AS rebuffer_rate, "
-            "CAST(NULL, 'Nullable(Float64)') AS avg_br, CAST(NULL, 'Nullable(Float64)') AS avg_br_all, "
-            "CAST(NULL, 'Nullable(Float64)') AS avg_bl, CAST(NULL, 'Nullable(Float64)') AS avg_bl_all, "
-            "toNullable(sumIf(median_mtp * mtp_reqs, median_mtp IS NOT NULL) / nullIf(sumIf(mtp_reqs, median_mtp IS NOT NULL), 0)) AS median_mtp, "
-            "toNullable(sumIf(median_mtp_all * mtp_reqs_all, median_mtp_all IS NOT NULL) / nullIf(sumIf(mtp_reqs_all, median_mtp_all IS NOT NULL), 0)) AS median_mtp_all FROM ("
-            "SELECT country, sid, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
-            f"quantileTDigestIf(0.5)(mtp, {_VIDEO}) AS median_mtp, countIf({_VIDEO} AND mtp IS NOT NULL) AS mtp_reqs, "
-            "quantileTDigest(0.5)(mtp) AS median_mtp_all, countIf(mtp IS NOT NULL) AS mtp_reqs_all "
-            "FROM events WHERE country != '' GROUP BY country, sid) "
-            "GROUP BY country ORDER BY session_count DESC, k LIMIT {top_n:UInt32})"
-        )
+        sess_dims.append("country")
     if req_asn:
-        breakdown_branches.append(
-            f"SELECT {breakdown_cols} FROM (SELECT 'asn' AS kind, toString(asn) AS k, toUInt64(count()) AS session_count, "
-            "toUInt64(0) AS request_count, "
+        sess_dims.append("asn")
+
+    if len(sess_dims) >= 2:
+        g_cid = "grouping(cid)" if req_content else "toUInt8(1)"
+        g_country = "grouping(country)" if req_country else "toUInt8(1)"
+        g_asn = "grouping(asn)" if req_asn else "toUInt8(1)"
+        dim_cols: list[str] = []
+        gsets: list[str] = []
+        where_parts: list[str] = []
+        having_parts: list[str] = []
+        kind_cases: list[str] = []
+        k_cases: list[str] = []
+        if req_content:
+            dim_cols.append("cid")
+            gsets.append("(cid, sid)")
+            where_parts.append("cid != ''")
+            having_parts.append("(g_cid = 0 AND cid != '')")
+            kind_cases.append("g_cid = 0, 'content'")
+            k_cases.append("g_cid = 0, cid")
+        if req_country:
+            dim_cols.append("country")
+            gsets.append("(country, sid)")
+            where_parts.append("country != ''")
+            having_parts.append("(g_country = 0 AND country != '')")
+            kind_cases.append("g_country = 0, 'country'")
+            k_cases.append("g_country = 0, country")
+        if req_asn:
+            dim_cols.append("asn")
+            gsets.append("(asn, sid)")
+            where_parts.append("asn IS NOT NULL")
+            having_parts.append("(g_asn = 0 AND asn IS NOT NULL)")
+            kind_cases.append("g_asn = 0, 'asn'")
+            k_cases.append("g_asn = 0, toString(asn)")
+        need_br_bl = req_content or req_asn
+        need_mtp = req_country
+        inner_aggs = ["max(if(bs = 1, 1, 0)) AS had_rebuffer"]
+        tagged_cols = [
+            f"multiIf({', '.join(kind_cases)}, '') AS kind",
+            f"multiIf({', '.join(k_cases)}, '') AS k",
+            "had_rebuffer",
+        ]
+        if need_br_bl:
+            inner_aggs.extend(
+                [
+                    f"avgIf(br, {_VIDEO}) AS avg_br",
+                    f"countIf({_VIDEO} AND br IS NOT NULL) AS br_reqs",
+                    "avg(br) AS avg_br_all",
+                    "countIf(br IS NOT NULL) AS br_reqs_all",
+                    f"avgIf(bl, {_VIDEO}) AS avg_bl",
+                    f"countIf({_VIDEO} AND bl IS NOT NULL) AS bl_reqs",
+                    "avg(bl) AS avg_bl_all",
+                    "countIf(bl IS NOT NULL) AS bl_reqs_all",
+                ]
+            )
+            tagged_cols.extend(
+                ["avg_br", "br_reqs", "avg_br_all", "br_reqs_all", "avg_bl", "bl_reqs", "avg_bl_all", "bl_reqs_all"]
+            )
+            br_bl_outer = (
+                "if(kind = 'country', CAST(NULL, 'Nullable(Float64)'), "
+                "toNullable(sumIf(avg_br * br_reqs, avg_br IS NOT NULL) / nullIf(sumIf(br_reqs, avg_br IS NOT NULL), 0))) AS avg_br, "
+                "if(kind = 'country', CAST(NULL, 'Nullable(Float64)'), "
+                "toNullable(sumIf(avg_br_all * br_reqs_all, avg_br_all IS NOT NULL) / nullIf(sumIf(br_reqs_all, avg_br_all IS NOT NULL), 0))) AS avg_br_all, "
+                "if(kind = 'country', CAST(NULL, 'Nullable(Float64)'), "
+                "toNullable(sumIf(avg_bl * bl_reqs, avg_bl IS NOT NULL) / nullIf(sumIf(bl_reqs, avg_bl IS NOT NULL), 0))) AS avg_bl, "
+                "if(kind = 'country', CAST(NULL, 'Nullable(Float64)'), "
+                "toNullable(sumIf(avg_bl_all * bl_reqs_all, avg_bl_all IS NOT NULL) / nullIf(sumIf(bl_reqs_all, avg_bl_all IS NOT NULL), 0))) AS avg_bl_all"
+            )
+        else:
+            br_bl_outer = (
+                "CAST(NULL, 'Nullable(Float64)') AS avg_br, CAST(NULL, 'Nullable(Float64)') AS avg_br_all, "
+                "CAST(NULL, 'Nullable(Float64)') AS avg_bl, CAST(NULL, 'Nullable(Float64)') AS avg_bl_all"
+            )
+        if need_mtp:
+            inner_aggs.extend(
+                [
+                    f"quantileTDigestIf(0.5)(mtp, {_VIDEO}) AS median_mtp",
+                    f"countIf({_VIDEO} AND mtp IS NOT NULL) AS mtp_reqs",
+                    "quantileTDigest(0.5)(mtp) AS median_mtp_all",
+                    "countIf(mtp IS NOT NULL) AS mtp_reqs_all",
+                ]
+            )
+            tagged_cols.extend(["median_mtp", "mtp_reqs", "median_mtp_all", "mtp_reqs_all"])
+            mtp_outer = (
+                "if(kind = 'country', "
+                "toNullable(sumIf(median_mtp * mtp_reqs, median_mtp IS NOT NULL) / nullIf(sumIf(mtp_reqs, median_mtp IS NOT NULL), 0)), "
+                "CAST(NULL, 'Nullable(Float64)')) AS median_mtp, "
+                "if(kind = 'country', "
+                "toNullable(sumIf(median_mtp_all * mtp_reqs_all, median_mtp_all IS NOT NULL) / nullIf(sumIf(mtp_reqs_all, median_mtp_all IS NOT NULL), 0)), "
+                "CAST(NULL, 'Nullable(Float64)')) AS median_mtp_all"
+            )
+        else:
+            mtp_outer = (
+                "CAST(NULL, 'Nullable(Float64)') AS median_mtp, CAST(NULL, 'Nullable(Float64)') AS median_mtp_all"
+            )
+        session_breakdown_sql = (
+            f"/* cmcd:session_breakdowns */ WITH events AS ({events}), "
+            "sess_agg AS ("
+            f"SELECT {g_cid} AS g_cid, {g_country} AS g_country, {g_asn} AS g_asn, "
+            f"{', '.join(dim_cols)}, sid, {', '.join(inner_aggs)} "
+            f"FROM events WHERE {' OR '.join(where_parts)} "
+            f"GROUP BY GROUPING SETS ({', '.join(gsets)}) "
+            f"HAVING {' OR '.join(having_parts)}) "
+            f"SELECT {breakdown_cols} FROM ("
+            "SELECT kind, k, session_count, toUInt64(0) AS request_count, rebuffer_rate, "
+            "avg_br, avg_br_all, avg_bl, avg_bl_all, median_mtp, median_mtp_all, "
+            "row_number() OVER (PARTITION BY kind ORDER BY session_count DESC, k ASC) AS rn FROM ("
+            "SELECT kind, k, toUInt64(count()) AS session_count, "
             "toNullable(sum(had_rebuffer) * 100.0 / nullIf(count(), 0)) AS rebuffer_rate, "
-            "toNullable(sumIf(avg_br * br_reqs, avg_br IS NOT NULL) / nullIf(sumIf(br_reqs, avg_br IS NOT NULL), 0)) AS avg_br, "
-            "toNullable(sumIf(avg_br_all * br_reqs_all, avg_br_all IS NOT NULL) / nullIf(sumIf(br_reqs_all, avg_br_all IS NOT NULL), 0)) AS avg_br_all, "
-            "toNullable(sumIf(avg_bl * bl_reqs, avg_bl IS NOT NULL) / nullIf(sumIf(bl_reqs, avg_bl IS NOT NULL), 0)) AS avg_bl, "
-            "toNullable(sumIf(avg_bl_all * bl_reqs_all, avg_bl_all IS NOT NULL) / nullIf(sumIf(bl_reqs_all, avg_bl_all IS NOT NULL), 0)) AS avg_bl_all, "
-            "CAST(NULL, 'Nullable(Float64)') AS median_mtp, CAST(NULL, 'Nullable(Float64)') AS median_mtp_all FROM ("
-            "SELECT asn, sid, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
-            f"avgIf(br, {_VIDEO}) AS avg_br, countIf({_VIDEO} AND br IS NOT NULL) AS br_reqs, "
-            "avg(br) AS avg_br_all, countIf(br IS NOT NULL) AS br_reqs_all, "
-            f"avgIf(bl, {_VIDEO}) AS avg_bl, countIf({_VIDEO} AND bl IS NOT NULL) AS bl_reqs, "
-            "avg(bl) AS avg_bl_all, countIf(bl IS NOT NULL) AS bl_reqs_all "
-            "FROM events WHERE asn IS NOT NULL GROUP BY asn, sid) "
-            "GROUP BY asn ORDER BY session_count DESC, k LIMIT {top_n:UInt32})"
+            f"{br_bl_outer}, {mtp_outer} "
+            f"FROM (SELECT {', '.join(tagged_cols)} FROM sess_agg) "
+            "GROUP BY kind, k)) WHERE rn <= {top_n:UInt32}"
         )
+
+        def _run_session_breakdowns() -> dict[str, Any]:
+            return {"_session_breakdown_rows": execute(session_breakdown_sql, params)}
+
+        tasks.append(("session_breakdowns", _run_session_breakdowns))
+    elif sess_dims:
+        if req_content:
+            single_sess_branch = (
+                f"SELECT {breakdown_cols} FROM (SELECT 'content' AS kind, cid AS k, toUInt64(count()) AS session_count, "
+                "toUInt64(0) AS request_count, "
+                "toNullable(sum(had_rebuffer) * 100.0 / nullIf(count(), 0)) AS rebuffer_rate, "
+                "toNullable(sumIf(avg_br * br_reqs, avg_br IS NOT NULL) / nullIf(sumIf(br_reqs, avg_br IS NOT NULL), 0)) AS avg_br, "
+                "toNullable(sumIf(avg_br_all * br_reqs_all, avg_br_all IS NOT NULL) / nullIf(sumIf(br_reqs_all, avg_br_all IS NOT NULL), 0)) AS avg_br_all, "
+                "toNullable(sumIf(avg_bl * bl_reqs, avg_bl IS NOT NULL) / nullIf(sumIf(bl_reqs, avg_bl IS NOT NULL), 0)) AS avg_bl, "
+                "toNullable(sumIf(avg_bl_all * bl_reqs_all, avg_bl_all IS NOT NULL) / nullIf(sumIf(bl_reqs_all, avg_bl_all IS NOT NULL), 0)) AS avg_bl_all, "
+                "CAST(NULL, 'Nullable(Float64)') AS median_mtp, CAST(NULL, 'Nullable(Float64)') AS median_mtp_all FROM ("
+                "SELECT cid, sid, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
+                f"avgIf(br, {_VIDEO}) AS avg_br, countIf({_VIDEO} AND br IS NOT NULL) AS br_reqs, "
+                "avg(br) AS avg_br_all, countIf(br IS NOT NULL) AS br_reqs_all, "
+                f"avgIf(bl, {_VIDEO}) AS avg_bl, countIf({_VIDEO} AND bl IS NOT NULL) AS bl_reqs, "
+                "avg(bl) AS avg_bl_all, countIf(bl IS NOT NULL) AS bl_reqs_all "
+                "FROM events WHERE cid != '' GROUP BY cid, sid) "
+                "GROUP BY cid ORDER BY session_count DESC, k LIMIT {top_n:UInt32})"
+            )
+        elif req_country:
+            single_sess_branch = (
+                f"SELECT {breakdown_cols} FROM (SELECT 'country' AS kind, country AS k, toUInt64(count()) AS session_count, "
+                "toUInt64(0) AS request_count, "
+                "toNullable(sum(had_rebuffer) * 100.0 / nullIf(count(), 0)) AS rebuffer_rate, "
+                "CAST(NULL, 'Nullable(Float64)') AS avg_br, CAST(NULL, 'Nullable(Float64)') AS avg_br_all, "
+                "CAST(NULL, 'Nullable(Float64)') AS avg_bl, CAST(NULL, 'Nullable(Float64)') AS avg_bl_all, "
+                "toNullable(sumIf(median_mtp * mtp_reqs, median_mtp IS NOT NULL) / nullIf(sumIf(mtp_reqs, median_mtp IS NOT NULL), 0)) AS median_mtp, "
+                "toNullable(sumIf(median_mtp_all * mtp_reqs_all, median_mtp_all IS NOT NULL) / nullIf(sumIf(mtp_reqs_all, median_mtp_all IS NOT NULL), 0)) AS median_mtp_all FROM ("
+                "SELECT country, sid, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
+                f"quantileTDigestIf(0.5)(mtp, {_VIDEO}) AS median_mtp, countIf({_VIDEO} AND mtp IS NOT NULL) AS mtp_reqs, "
+                "quantileTDigest(0.5)(mtp) AS median_mtp_all, countIf(mtp IS NOT NULL) AS mtp_reqs_all "
+                "FROM events WHERE country != '' GROUP BY country, sid) "
+                "GROUP BY country ORDER BY session_count DESC, k LIMIT {top_n:UInt32})"
+            )
+        else:
+            single_sess_branch = (
+                f"SELECT {breakdown_cols} FROM (SELECT 'asn' AS kind, toString(asn) AS k, toUInt64(count()) AS session_count, "
+                "toUInt64(0) AS request_count, "
+                "toNullable(sum(had_rebuffer) * 100.0 / nullIf(count(), 0)) AS rebuffer_rate, "
+                "toNullable(sumIf(avg_br * br_reqs, avg_br IS NOT NULL) / nullIf(sumIf(br_reqs, avg_br IS NOT NULL), 0)) AS avg_br, "
+                "toNullable(sumIf(avg_br_all * br_reqs_all, avg_br_all IS NOT NULL) / nullIf(sumIf(br_reqs_all, avg_br_all IS NOT NULL), 0)) AS avg_br_all, "
+                "toNullable(sumIf(avg_bl * bl_reqs, avg_bl IS NOT NULL) / nullIf(sumIf(bl_reqs, avg_bl IS NOT NULL), 0)) AS avg_bl, "
+                "toNullable(sumIf(avg_bl_all * bl_reqs_all, avg_bl_all IS NOT NULL) / nullIf(sumIf(bl_reqs_all, avg_bl_all IS NOT NULL), 0)) AS avg_bl_all, "
+                "CAST(NULL, 'Nullable(Float64)') AS median_mtp, CAST(NULL, 'Nullable(Float64)') AS median_mtp_all FROM ("
+                "SELECT asn, sid, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
+                f"avgIf(br, {_VIDEO}) AS avg_br, countIf({_VIDEO} AND br IS NOT NULL) AS br_reqs, "
+                "avg(br) AS avg_br_all, countIf(br IS NOT NULL) AS br_reqs_all, "
+                f"avgIf(bl, {_VIDEO}) AS avg_bl, countIf({_VIDEO} AND bl IS NOT NULL) AS bl_reqs, "
+                "avg(bl) AS avg_bl_all, countIf(bl IS NOT NULL) AS bl_reqs_all "
+                "FROM events WHERE asn IS NOT NULL GROUP BY asn, sid) "
+                "GROUP BY asn ORDER BY session_count DESC, k LIMIT {top_n:UInt32})"
+            )
+
+        def _run_session_breakdowns() -> dict[str, Any]:
+            sql = f"/* cmcd:session_breakdowns */ WITH events AS ({events}) {single_sess_branch}"
+            return {"_session_breakdown_rows": execute(sql, params)}
+
+        tasks.append(("session_breakdowns", _run_session_breakdowns))
+
     flat_dims: list[tuple[str, str]] = []
     if req_ot:
         flat_dims.append(("ot", "ot"))
@@ -634,10 +765,11 @@ def _cmcd_aggregates_compute(
         flat_dims.append(("ladder", "ladder_k"))
     if req_st:
         flat_dims.append(("st", "st"))
+    flat_sql: str | None = None
     if len(flat_dims) >= 2:
-        gsets = ", ".join(f"({col})" for _, col in flat_dims)
-        kind_cases = ", ".join(f"grouping({col}) = 0, '{kind}'" for kind, col in flat_dims)
-        k_cases = ", ".join(f"grouping({col}) = 0, {col}" for _, col in flat_dims)
+        flat_gsets = ", ".join(f"({col})" for _, col in flat_dims)
+        flat_kind_cases = ", ".join(f"grouping({col}) = 0, '{kind}'" for kind, col in flat_dims)
+        flat_k_cases = ", ".join(f"grouping({col}) = 0, {col}" for _, col in flat_dims)
         sess_cases: list[str] = []
         for kind, col in flat_dims:
             if kind == "ot":
@@ -663,15 +795,15 @@ def _cmcd_aggregates_compute(
             if req_ladder
             else ""
         )
-        breakdown_branches.append(
-            f"SELECT multiIf({kind_cases}, '') AS kind, multiIf({k_cases}, '') AS k, "
+        flat_sql = (
+            f"SELECT multiIf({flat_kind_cases}, '') AS kind, multiIf({flat_k_cases}, '') AS k, "
             f"multiIf({', '.join(sess_cases)}, toUInt64(0)) AS session_count, "
             f"toUInt64(count()) AS request_count, {reb_expr}{br_expr}"
             "CAST(NULL, 'Nullable(Float64)') AS avg_br_all, "
             "CAST(NULL, 'Nullable(Float64)') AS avg_bl, CAST(NULL, 'Nullable(Float64)') AS avg_bl_all, "
             "CAST(NULL, 'Nullable(Float64)') AS median_mtp, CAST(NULL, 'Nullable(Float64)') AS median_mtp_all "
             f"FROM (SELECT sid, ot, sf, st, br, bs{ladder_col} FROM events) "
-            f"GROUP BY GROUPING SETS ({gsets}) HAVING k != ''"
+            f"GROUP BY GROUPING SETS ({flat_gsets}) HAVING k != ''"
         )
     else:
         null_extras = (
@@ -680,20 +812,20 @@ def _cmcd_aggregates_compute(
             "CAST(NULL, 'Nullable(Float64)') AS median_mtp, CAST(NULL, 'Nullable(Float64)') AS median_mtp_all"
         )
         if req_ot:
-            breakdown_branches.append(
+            flat_sql = (
                 "SELECT 'ot' AS kind, ot AS k, toUInt64(count()) AS session_count, toUInt64(count()) AS request_count, "
                 "CAST(NULL, 'Nullable(Float64)') AS rebuffer_rate, CAST(NULL, 'Nullable(Float64)') AS avg_br, "
                 f"{null_extras} FROM events WHERE ot != '' GROUP BY ot"
             )
-        if req_sf:
-            breakdown_branches.append(
+        elif req_sf:
+            flat_sql = (
                 "SELECT 'sf' AS kind, sf AS k, toUInt64(uniqExact(sid)) AS session_count, toUInt64(count()) AS request_count, "
                 "CAST(NULL, 'Nullable(Float64)') AS rebuffer_rate, CAST(NULL, 'Nullable(Float64)') AS avg_br, "
                 f"{null_extras} FROM events WHERE sf != '' GROUP BY sf"
             )
-        if req_ladder:
+        elif req_ladder:
             tier_expr = "toString(multiIf(br < 1000, 1, br < 2500, 2, br < 5000, 3, br < 10000, 4, 5))"
-            breakdown_branches.append(
+            flat_sql = (
                 "SELECT 'ladder' AS kind, "
                 f"if({_VIDEO}, {tier_expr}, concat('all:', {tier_expr})) AS k, "
                 "toUInt64(uniqExactIf(sid, sid != '')) AS session_count, toUInt64(count()) AS request_count, "
@@ -701,17 +833,17 @@ def _cmcd_aggregates_compute(
                 f"toNullable(avg(br)) AS avg_br, {null_extras} "
                 f"FROM events WHERE (({_VIDEO}) OR ot = '') AND br IS NOT NULL AND br > 0 GROUP BY k"
             )
-        if req_st:
-            breakdown_branches.append(
+        elif req_st:
+            flat_sql = (
                 "SELECT 'st' AS kind, st AS k, toUInt64(uniqExactIf(sid, sid != '')) AS session_count, "
                 "toUInt64(count()) AS request_count, "
                 "CAST(NULL, 'Nullable(Float64)') AS rebuffer_rate, CAST(NULL, 'Nullable(Float64)') AS avg_br, "
                 f"{null_extras} FROM events WHERE st != '' GROUP BY st"
             )
-    if breakdown_branches:
+    if flat_sql is not None:
 
         def _run_breakdowns() -> dict[str, Any]:
-            sql = f"/* cmcd:breakdowns */ WITH events AS ({events}) " + " UNION ALL ".join(breakdown_branches)
+            sql = f"/* cmcd:breakdowns */ WITH events AS ({events}) {flat_sql}"
             return {"_breakdown_rows": execute(sql, params)}
 
         tasks.append(("breakdowns", _run_breakdowns))
@@ -826,9 +958,12 @@ def _cmcd_aggregates_compute(
     if "session_duration_dist" in raw_results:
         result["session_duration_dist"] = raw_results["session_duration_dist"]
 
-    if "_breakdown_rows" in raw_results:
+    if "_session_breakdown_rows" in raw_results or "_breakdown_rows" in raw_results:
         by_kind: dict[str, list[dict[str, Any]]] = {}
-        for row in raw_results["_breakdown_rows"]:
+        for row in [
+            *(raw_results.get("_session_breakdown_rows") or []),
+            *(raw_results.get("_breakdown_rows") or []),
+        ]:
             by_kind.setdefault(str(row.get("kind") or ""), []).append(row)
 
         def _pick_bd(row: dict[str, Any], col: str) -> Any:

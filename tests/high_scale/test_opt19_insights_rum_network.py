@@ -163,7 +163,10 @@ def test_standalone_crawler_stale_shield_use_baseline_sampling_and_window_guards
 
     crawler_sql = _base_sql(DETECTIONS["crawler_disparity"], "crawler_disparity", baseline_hours=168.0)
     assert sample_clause in crawler_sql
-    assert crawler_sql.index("HAVING sum(cnt) >= 50") < crawler_sql.index("ua_groups AS")
+    assert "intDiv(toUnixTimestamp(event_timestamp), 300) % 4 = 0" in crawler_sql
+    assert crawler_sql.count("FROM base") == 1
+    assert "GROUP BY GROUPING SETS" in crawler_sql
+    assert crawler_sql.index("HAVING sum(cnt) >= 50") < crawler_sql.index("GROUPING SETS")
 
     stale_sql = _base_sql(DETECTIONS["stale_browser_version"], "stale_browser_version", baseline_hours=168.0)
     assert sample_clause in stale_sql

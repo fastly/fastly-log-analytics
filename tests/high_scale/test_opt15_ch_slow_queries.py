@@ -94,10 +94,7 @@ def test_pop_health_uses_rollup_even_for_short_spans(monkeypatch: pytest.MonkeyP
 
 
 def test_insights_multiplex_groups_bound_raw_fact_branches() -> None:
-    raw_groups = {name: members for name, members in _MULTIPLEX_GROUPS if not name.startswith("group_rollup_")}
-    assert raw_groups, "expected raw-fact multiplex groups"
-    for name, members in raw_groups.items():
-        assert len(members) <= 3, f"{name} has too many raw-fact branches: {len(members)}"
+    assert _MULTIPLEX_GROUPS == ()
 
 
 def test_insights_batches_use_prewhere_uniq_combined_and_single_pass_quantiles() -> None:

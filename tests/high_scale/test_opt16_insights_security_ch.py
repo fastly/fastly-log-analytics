@@ -208,8 +208,10 @@ def test_insights_standalone_queries_use_prewhere_and_avoid_expensive_scans() ->
     assert "FROM request_facts PREWHERE " in crawler_sql
     assert "GROUP BY ua)" in crawler_sql
     assert "IN (SELECT lower(ua) FROM base" not in crawler_sql
-    assert "uniqCombinedState(ip) AS ip_state" in crawler_sql
-    assert "uniqCombinedMergeIf(h.ip_state," in crawler_sql
+    assert crawler_sql.count("FROM base") == 1
+    assert "GROUP BY GROUPING SETS" in crawler_sql
+    assert "uniqCombinedStateIf(ip, ref_stem != '') AS ip_state" in crawler_sql
+    assert "uniqCombinedMergeIf(ip_state," in crawler_sql
     assert "replaceRegexpAll(c.bot_stem" not in crawler_sql.split("combined AS")[1]
     assert "multiSearchAnyCaseInsensitive(ua," in crawler_sql
 

@@ -86,15 +86,25 @@ def _base_cte(
         extra_where_parts.append(f"({row_filter})")
     raw_where = f" WHERE {' AND '.join(extra_where_parts)}" if extra_where_parts else ""
     raw_proj = ", ".join(f"{expr} AS {alias}" for alias, expr in projections)
+    baseline_sample = (
+        f" AND (event_timestamp >= {{window_start:DateTime64(3)}} OR intDiv(toUnixTimestamp(event_timestamp), 300) % {baseline_sample_stride} = 0)"
+        if (baseline_sample_stride > 1 and not window_only)
+        else ""
+    )
+    raw_weight = (
+        f"if(event_timestamp < {{window_start:DateTime64(3)}}, toUInt64({baseline_sample_stride}), toUInt64(1)) AS n"
+        if (baseline_sample_stride > 1 and not window_only)
+        else "toUInt64(1) AS n"
+    )
     if rollup_shape and rollup_span and not filter_clause and not window_only:
         rollup_proj = ", ".join(f"{_to_rollup(expr)} AS {alias}" for alias, expr in projections)
         raw = (
             f"SELECT {raw_proj}, "
             "event_timestamp < {window_start:DateTime64(3)} AS is_b, "
-            "event_timestamp >= {window_start:DateTime64(3)} AS is_w, toUInt64(1) AS n "
+            f"event_timestamp >= {{window_start:DateTime64(3)}} AS is_w, {raw_weight} "
             f"FROM request_facts PREWHERE {fact_scope} AND event_timestamp >= {{baseline_start:DateTime64(3)}} "
             "AND event_timestamp < {window_end:DateTime64(3)} "
-            "AND (event_timestamp < {rollup_start:DateTime64(3)} OR event_timestamp >= {rollup_end:DateTime64(3)})"
+            f"AND (event_timestamp < {{rollup_start:DateTime64(3)}} OR event_timestamp >= {{rollup_end:DateTime64(3)}}){baseline_sample}"
             f"{raw_where}"
         )
         rollup = (
@@ -106,12 +116,7 @@ def _base_cte(
         return f"/* insight:batch_{name} */ WITH base AS ({raw} UNION ALL {rollup})", "mixed"
 
     lower = "{window_start:DateTime64(3)}" if window_only else "{baseline_start:DateTime64(3)}"
-    weight_col = ", toUInt64(1) AS n" if (weighted or rollup_shape) else ""
-    baseline_sample = (
-        f" AND (event_timestamp >= {{window_start:DateTime64(3)}} OR intDiv(toUnixTimestamp(event_timestamp), 300) % {baseline_sample_stride} = 0)"
-        if (baseline_sample_stride > 1 and not window_only)
-        else ""
-    )
+    weight_col = f", {raw_weight}" if (weighted or rollup_shape) else ""
     prewhere_extra = f" AND ({prewhere_clause})" if prewhere_clause else ""
     raw = (
         f"SELECT {raw_proj}, "
@@ -178,6 +183,7 @@ def _build_misc(
     present: set[str],
     rollup_span: tuple[datetime, datetime] | None,
     filter_clause: str,
+    baseline_hours: float = 0.0,
 ) -> tuple[str, QuerySource]:
     proj: list[tuple[str, str]] = []
     if "cache_hit_cliff" in active:
@@ -194,8 +200,15 @@ def _build_misc(
         proj.append(("c_type", COLUMNS["c_type"]))
         proj.append(("c_speed", COLUMNS["c_speed"]))
 
+    b_stride = _baseline_sample_stride(baseline_hours)
     cte, source = _base_cte(
-        "misc", proj, rollup_shape="misc", rollup_span=rollup_span, filter_clause=filter_clause, weighted=True
+        "misc",
+        proj,
+        rollup_shape="misc",
+        rollup_span=rollup_span,
+        filter_clause=filter_clause,
+        weighted=True,
+        baseline_sample_stride=b_stride,
     )
     sets: list[str] = []
     if "cache_hit_cliff" in active or "http3_fallback" in active:
@@ -557,7 +570,9 @@ def _build_url_cache(
     present: set[str],
     rollup_span: tuple[datetime, datetime] | None,
     filter_clause: str,
+    baseline_hours: float = 0.0,
 ) -> tuple[str, QuerySource]:
+    b_stride = _baseline_sample_stride(baseline_hours)
     cte, source = _base_cte(
         "url_cache",
         [("url", COLUMNS["url"]), ("cache", COLUMNS["cache"])],
@@ -565,6 +580,7 @@ def _build_url_cache(
         rollup_span=rollup_span,
         filter_clause=filter_clause,
         weighted=True,
+        baseline_sample_stride=b_stride,
     )
     sql = (
         f"{cte} SELECT url, "

@@ -94,7 +94,7 @@ _CANNED: dict[str, list[dict[str, Any]]] = {
             "positive_duration_count": 3,
         },
     ],
-    "cmcd:breakdowns": [
+    "cmcd:session_breakdowns": [
         {
             "kind": "content",
             "k": "movie-1",
@@ -122,6 +122,8 @@ _CANNED: dict[str, list[dict[str, Any]]] = {
             "avg_bl": 8.0,
             "median_mtp": None,
         },
+    ],
+    "cmcd:breakdowns": [
         {
             "kind": "ot",
             "k": "v",
@@ -221,8 +223,14 @@ def test_cmcd_consolidates_overview_into_probe_timeseries_and_session_duration()
 
     res = cmcd_aggregates(svc, req, "2026-09-14T10:00:00Z", "2026-09-14T10:20:00Z", ALL_SECTIONS, False)
     markers = [sql.split("*/")[0].split("/*")[1].strip() for sql, _ in client.calls]
-    assert len(markers) == 4
-    assert set(markers) == {"cmcd:probe", "cmcd:timeseries", "cmcd:sessions", "cmcd:breakdowns"}
+    assert len(markers) == 5
+    assert set(markers) == {
+        "cmcd:probe",
+        "cmcd:timeseries",
+        "cmcd:sessions",
+        "cmcd:session_breakdowns",
+        "cmcd:breakdowns",
+    }
     assert res["overview"] == {
         "active_sessions": 4,
         "rebuffer_rate": 25.0,
@@ -267,6 +275,10 @@ def test_cmcd_breakdowns_consolidate_flat_dimensions_with_grouping_sets_and_no_s
     req = CmcdRequest(bucket_seconds=300, top_n=10)
 
     cmcd_aggregates(svc, req, "2026-09-14T10:00:00Z", "2026-09-14T10:20:00Z", ALL_SECTIONS, False)
+    sess_breakdown_sql = next(sql for sql, _ in client.calls if "/* cmcd:session_breakdowns */" in sql)
+    assert "GROUP BY GROUPING SETS ((cid, sid), (country, sid), (asn, sid))" in sess_breakdown_sql
+    assert "WITH events AS (" in sess_breakdown_sql
+    assert sess_breakdown_sql.count("FROM cmcd_projection_facts") == 1
     breakdown_sql = next(sql for sql, _ in client.calls if "/* cmcd:breakdowns */" in sql)
     assert "SELECT * FROM (" not in breakdown_sql
     assert "GROUP BY GROUPING SETS ((ot), (sf))" in breakdown_sql
@@ -283,11 +295,20 @@ def test_cmcd_breakdowns_consolidate_flat_dimensions_with_grouping_sets_and_no_s
 def test_cmcd_probe_runs_in_parallel_wave_with_queries_and_preserves_ot_and_bs_gating() -> None:
     import threading
 
-    barrier = threading.Barrier(4, timeout=2.0)
+    barrier = threading.Barrier(5, timeout=2.0)
 
     class _ParallelProbeClient(_FakeCmcdClient):
         def execute(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-            if any(m in sql for m in ("cmcd:probe", "cmcd:timeseries", "cmcd:sessions", "cmcd:breakdowns")):
+            if any(
+                m in sql
+                for m in (
+                    "cmcd:probe",
+                    "cmcd:timeseries",
+                    "cmcd:sessions",
+                    "cmcd:session_breakdowns",
+                    "cmcd:breakdowns",
+                )
+            ):
                 barrier.wait()
             if "cmcd:probe" in sql:
                 return [{**_PROBE_ROW, "has_ot": 0, "has_bs": 0, "has_bl": 0}]

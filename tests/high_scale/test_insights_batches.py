@@ -118,19 +118,18 @@ def _cards(response: Any) -> dict[str, dict[str, Any]]:
 
 
 def test_full_evaluation_consolidates_queries_by_at_least_half() -> None:
-    """A full 51-detector High-Scale evaluation un-fuses heavy baseline scans and stays <= 20 ClickHouse queries."""
+    """A full 51-detector High-Scale evaluation disables multiplex union groups and stays <= 27 ClickHouse queries."""
     client = _BatchFakeClient(with_rollup=True)
     cards = _cards(_run(client))
     assert set(cards) == EVERY_CARD
     assert all(card["severity"] == "clean" for card in cards.values())
     queries = client.queries()
     assert "group_raw_standalone" not in queries
-    assert len(client.calls) <= 20, f"Expected <= 20 ClickHouse queries, got {len(client.calls)}: {list(queries)}"
-    group_map = dict(evaluator._MULTIPLEX_GROUPS)
-    assert "group_baseline_perf" not in group_map
-    assert "group_ip_abuse" not in group_map
-    assert "group_network_fp" not in group_map
-    assert group_map["group_window_perf"] == frozenset({"batch_window_url", "batch_beaconing"})
+    assert "group_rollup_batches" not in queries
+    assert "group_rollup_standalone" not in queries
+    assert "group_window_perf" not in queries
+    assert len(client.calls) <= 27, f"Expected <= 27 ClickHouse queries, got {len(client.calls)}: {list(queries)}"
+    assert evaluator._MULTIPLEX_GROUPS == ()
     assert evaluator._MAX_WORKERS == 3
     assert evaluator._BACKGROUND_MAX_WORKERS == 2
     assert evaluator._COLD_POOL._max_workers == 1
@@ -219,19 +218,19 @@ def test_batched_rollup_queries_use_rollup_table_and_preserve_visibility_fence()
     client = _BatchFakeClient(with_rollup=True)
     _run(client)
     queries = client.queries()
-    assert "group_rollup_batches" in queries
-    sql, params = queries["group_rollup_batches"]
+    assert "group_rollup_batches" not in queries
     for batch_name, shape in {
         "batch_misc": "misc",
         "batch_geo": "geo",
         "batch_asn": "asn",
         "batch_url_cache": "url_cache",
     }.items():
-        assert f"SELECT '{batch_name}' AS _q" in sql
+        assert batch_name in queries
+        sql, params = queries[batch_name]
         assert f"shape = '{shape}'" in sql
-    assert "FROM request_insight_hourly" in sql
-    assert "svc-opt" not in sql
-    assert all(name in params for name in re.findall(r"\{(\w+):", sql))
+        assert "FROM request_insight_hourly" in sql
+        assert "svc-opt" not in sql
+        assert all(name in params for name in re.findall(r"\{(\w+):", sql))
 
 
 def test_batch_misc_extracts_all_six_detectors_with_exact_semantics() -> None:
@@ -791,7 +790,7 @@ def test_non_rollup_detector_groups_overlap_rollup_coverage_read() -> None:
             name = marker.group(1) if marker else ""
             if name == "rollup_coverage":
                 barrier.wait()
-            elif name == "group_window_perf" and not non_rollup_started.is_set():
+            elif name == "batch_window_url" and not non_rollup_started.is_set():
                 non_rollup_started.set()
                 barrier.wait()
             return super().execute(sql, params)

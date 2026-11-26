@@ -18,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 
 from backend.high_scale._common import visible_fact_clauses
 
-from .sql_queries import COLUMNS, Detection
+from .sql_queries import COLUMNS, Detection, baseline_sample_stride
 
 ROLLUP_TABLE = "request_insight_hourly"
 
@@ -168,7 +168,12 @@ def rollup_problems(detection: Detection, shape: str) -> list[str]:
     return problems
 
 
-def rollup_base_sql(detection: Detection, insight_id: str, shape: str) -> str:
+SAMPLED_ROLLUP_DETECTIONS: frozenset[str] = frozenset(
+    {"error_spikes", "ua_monoculture", "referer_monoculture", "waf_signal_spikes"}
+)
+
+
+def rollup_base_sql(detection: Detection, insight_id: str, shape: str, *, baseline_hours: float = 0.0) -> str:
     """Like ``_base_sql`` but baseline hours in [rollup_start, rollup_end) come from the rollup."""
     if problems := rollup_problems(detection, shape):
         raise ValueError(f"{insight_id} cannot use the {shape} rollup: {'; '.join(problems)}")
@@ -178,13 +183,25 @@ def rollup_base_sql(detection: Detection, insight_id: str, shape: str) -> str:
     raw_prewhere = f" PREWHERE {detection.prewhere}" if detection.prewhere else ""
     rollup_prewhere = f" PREWHERE {_to_rollup(detection.prewhere)}" if detection.prewhere else ""
     scope = " AND ".join(visible_fact_clauses("request"))
+    b_stride = baseline_sample_stride(baseline_hours) if insight_id in SAMPLED_ROLLUP_DETECTIONS else 1
+    baseline_sample = (
+        f" AND (event_timestamp >= {{window_start:DateTime64(3)}} OR intDiv(toUnixTimestamp(event_timestamp), 300) % {b_stride} = 0)"
+        if b_stride > 1
+        else ""
+    )
+    raw_weight = (
+        f"if(event_timestamp < {{window_start:DateTime64(3)}}, toUInt64({b_stride}), toUInt64(1)) AS n"
+        if b_stride > 1
+        else "toUInt64(1) AS n"
+    )
     raw = (
         f"SELECT {raw_projection}, "
         "event_timestamp < {window_start:DateTime64(3)} AS is_b, "
-        "event_timestamp >= {window_start:DateTime64(3)} AS is_w, toUInt64(1) AS n "
+        f"event_timestamp >= {{window_start:DateTime64(3)}} AS is_w, {raw_weight} "
         f"FROM request_facts{raw_prewhere} WHERE {scope} AND event_timestamp >= {{baseline_start:DateTime64(3)}} "
         f"AND event_timestamp < {{window_end:DateTime64(3)}}{row_filter} "
         "AND (event_timestamp < {rollup_start:DateTime64(3)} OR event_timestamp >= {rollup_end:DateTime64(3)})"
+        f"{baseline_sample}"
     )
     rollup = (
         f"SELECT {rollup_projection}, toUInt8(1) AS is_b, toUInt8(0) AS is_w, request_count AS n "

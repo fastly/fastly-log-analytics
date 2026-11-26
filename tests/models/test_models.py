@@ -326,7 +326,7 @@ class TestWireCmcd:
                     "positive_duration_count": 3,
                 },
             ],
-            "cmcd:breakdowns": [
+            "cmcd:session_breakdowns": [
                 {
                     "kind": "content",
                     "k": "c1",
@@ -354,6 +354,8 @@ class TestWireCmcd:
                     "avg_bl": 9.0,
                     "median_mtp": None,
                 },
+            ],
+            "cmcd:breakdowns": [
                 {
                     "kind": "ot",
                     "k": "v",
