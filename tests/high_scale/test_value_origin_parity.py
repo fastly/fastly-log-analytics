@@ -360,3 +360,39 @@ def test_value_summary_prunes_unused_bucket_columns_and_reuses_matching_reported
     assert res2.fastly_reported is not None
     assert res2.fastly_reported.logged_requests == 25
     assert res2.fastly_reported.logged_bandwidth_bytes == 2500
+
+
+def test_value_summary_io_url_extension_fallback_and_ctype_precedence() -> None:
+    calls: list[str] = []
+
+    class _Client:
+        def execute(self, sql: str, params: dict | None = None) -> list[dict[str, Any]]:
+            calls.append(sql)
+            if "value:combined_buckets" in sql:
+                return [{"bucket": "2026-11-24T16:00:00Z", "total": 10}]
+            if "value:io_summary" in sql:
+                return [{"image_requests": 4, "image_bytes": 120000, "io_count": 0}]
+            return []
+
+    svc = _empty_service(_Client(), service_id="svc-io-fallback")
+    req = ValueSummaryRequest(
+        filters={},
+        sections=["io"],
+        start_time="2026-11-24T16:00:00Z",
+        end_time="2026-11-24T18:00:00Z",
+    )
+    value_summary(svc, req, "2026-11-24T16:00:00Z", "2026-11-24T18:00:00Z", sections={"io"})
+
+    io_summary_sql = next(sql for sql in calls if "value:io_summary" in sql)
+    io_formats_sql = next(sql for sql in calls if "value:io_formats" in sql)
+    io_opps_sql = next(sql for sql in calls if "value:io_opportunities" in sql)
+
+    for ext in (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico"):
+        assert f"endsWith(lower(url), '{ext}')" in io_summary_sql
+        assert f"endsWith(lower(url), '{ext}')" in io_formats_sql
+    assert "= '' AND" in io_summary_sql
+    assert "THEN 'jpeg'" in io_formats_sql
+    for ext in (".jpg", ".jpeg", ".png", ".gif"):
+        assert f"endsWith(lower(url), '{ext}')" in io_opps_sql
+    assert "endsWith(lower(url), '.svg')" not in io_opps_sql
+    assert "= '' AND" in io_opps_sql

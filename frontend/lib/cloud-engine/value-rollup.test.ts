@@ -12,6 +12,7 @@ import { VALUE_ROLLUP_SECTIONS } from "./rollup-sections";
 import {
   VALUE_FILTERED_SUMMARY_SPEC,
   VALUE_SUMMARY_SPEC,
+  VALUE_SUMMARY_TAB_SPEC,
   valueFromRollup,
   valueRollupEligible,
   valueSummaryFromRollup,
@@ -423,5 +424,67 @@ describe("valueFromRollup", () => {
     expect([...(VALUE_SUMMARY_SPEC.only.get("count") ?? [])].sort()).toEqual(["all_fields", "value"]);
     expect([...(VALUE_FILTERED_SUMMARY_SPEC.only.get("requests") ?? [])]).toEqual(["filtered_rollups"]);
     expect([...(VALUE_FILTERED_SUMMARY_SPEC.only.get("resp_bytes_sum") ?? [])]).toEqual(["filtered_rollups"]);
+    expect(VALUE_SUMMARY_SPEC.groups.has("assets")).toBe(true);
+    expect([...(VALUE_SUMMARY_SPEC.only.get("resp_bytes_sum") ?? [])]).toContain("assets");
+    expect([...(VALUE_SUMMARY_SPEC.only.get("requests") ?? [])]).toContain("assets");
+    expect([...(VALUE_SUMMARY_SPEC.fields?.get("series5") ?? [])].sort()).toEqual(["overall", "proto"]);
+    expect([...(VALUE_SUMMARY_SPEC.fields?.get("bins") ?? [])]).toEqual(["verified_bot"]);
+    expect(VALUE_SUMMARY_SPEC.fields?.get("all_fields")?.has("ua")).toBe(true);
+
+    expect(VALUE_SUMMARY_TAB_SPEC.columns.has("elapsed_hist")).toBe(false);
+    expect(VALUE_SUMMARY_TAB_SPEC.groups.has("bins")).toBe(false);
+    expect(VALUE_SUMMARY_TAB_SPEC.groups.has("assets")).toBe(false);
+    expect(VALUE_SUMMARY_TAB_SPEC.fields?.get("all_fields")?.has("ua")).toBe(false);
+    expect([...(VALUE_SUMMARY_TAB_SPEC.fields?.get("value") ?? [])].sort()).toEqual(["cache", "shield"]);
+  });
+
+  it("FV-07: falls back io section to raw scan when rollup.assets has Images or is truncated", async () => {
+    const sv = await rollupOf("securityValue", FIXTURES.securityValue.files("window"));
+    const withAssets = (assets: Map<string, { requests: number; respBytes: number; ttfbSum: number; originWaitSum: number; originRequests: number }>) => ({
+      ...sv,
+      rollup: { ...sv.rollup, assets },
+    });
+    expect(
+      valueSummaryFromRollup(
+        withAssets(new Map([['["Images","HIT","uncompressed",0,0]', { requests: 1, respBytes: 500, ttfbSum: 1, originWaitSum: 0, originRequests: 0 }]])),
+        body({ sections: ["io"] }),
+      ),
+    ).toBeNull();
+    expect(
+      valueSummaryFromRollup(
+        { ...sv, rollup: { ...sv.rollup, truncated: new Set([...sv.rollup.truncated, "assets/asset"]) } },
+        body({ sections: ["io"] }),
+      ),
+    ).toBeNull();
+    const zeroImages = valueSummaryFromRollup(
+      withAssets(new Map([['["Images","HIT","uncompressed",0,0]', { requests: 0, respBytes: 0, ttfbSum: 0, originWaitSum: 0, originRequests: 0 }]])),
+      body({ sections: ["io"] }),
+    );
+    expect(zeroImages?.io?.image_request_count).toBe(0);
+    expect(zeroImages?.io?.image_bandwidth_bytes).toBeNull();
+  });
+
+  it("uses VALUE_SUMMARY_TAB_SPEC by default for unfiltered Summary-tab section subsets", async () => {
+    const net = FIXTURES.network;
+    const windowFiles = net.files("window");
+    const editedBuffers: Record<string, ArrayBuffer> = { ...net.buffers };
+    const editedWindows = await Promise.all(windowFiles.map(async (f) => {
+      const bytes = await editSummaryRows(net.buffers[f.key], (rows) => {
+        const bucket = rows.find((row) => row.bundle === "overview")?.bucket ?? BigInt(T0 * 1000);
+        return [
+          ...rows,
+          { bundle: "all_fields", bucket, field: "ua", value: "Mozilla/5.0", count: BigInt(10) },
+          { bundle: "assets", bucket, field: "asset", value: '["Images","HIT","uncompressed",0,0]', requests: BigInt(5), resp_bytes_sum: BigInt(1000) },
+        ];
+      });
+      editedBuffers[f.key] = bytes;
+      return { ...f, size: bytes.byteLength };
+    }));
+    const src = fixtureSource([fixturePage(net.files("raw"))], editedBuffers, { json: [], files: [] }, [fixturePage(editedWindows)]);
+    const tabRes = await valueFromRollup("/api/value/summary", body({ sections: ["overview", "caching", "network"] }), src);
+    expect(tabRes?.overview?.total_requests).toBeGreaterThan(0);
+    // When io is requested and assets has Images > 0, valueFromRollup uses VALUE_SUMMARY_SPEC (which loads assets) and falls back to null.
+    const ioRes = await valueFromRollup("/api/value/summary", body({ sections: ["io"] }), src);
+    expect(ioRes).toBeNull();
   });
 });

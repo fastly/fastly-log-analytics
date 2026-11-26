@@ -146,7 +146,7 @@ export function LatencyHeatmap({
       isFetching={cfg.query.isFetching}
       loadingMessage={cfg.loadingMessage}
       error={cfg.query.error as AnalyticsCardError | null}
-      className="min-h-[480px] [contain-intrinsic-size:480px] [content-visibility:auto]"
+      className="min-h-[480px]"
       contentClassName="p-0"
       helpContent={<p>{cfg.help}</p>}
       headerAction={
@@ -227,7 +227,7 @@ export function LatencyHeatmap({
           isFetching={summary.isFetching}
           loadingMessage="Loading origin payload size..."
           error={summary.error as AnalyticsCardError | null}
-          className="min-h-[220px] [contain-intrinsic-size:220px] [content-visibility:auto]"
+          className="min-h-[220px]"
           helpContent={<p>The median size of the response body transferred from the origin to Fastly.</p>}
         >
           <div className="flex flex-col items-center justify-center py-4 text-center">

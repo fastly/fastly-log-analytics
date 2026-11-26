@@ -1218,6 +1218,28 @@ describe('Performance, Fastly-Value & Origin smoke tests', () => {
       expect(screen.queryByText(/Image Optimizer is not enabled on this service/i)).toBeNull()
       expect(screen.getByText(/Image Optimizer fields are enabled/i)).toBeTruthy()
     })
+
+    it('renders Avg Image Size fallback when estimated_savings_bytes is null and updates subtitle from contentTypeLogged', () => {
+      const upsellData = {
+        ...baseIOData,
+        image_request_count: 4,
+        image_bandwidth_bytes: 4096,
+        estimated_savings_bytes: null,
+      } as unknown as IOData
+      const { rerender } = render(<IOValueTab data={upsellData} ioFieldsEnabled={false} contentTypeLogged={false} />)
+      expect(screen.getByText('Avg Image Size')).toBeInTheDocument()
+      expect(screen.queryByText('Potential Savings')).toBeNull()
+      expect(screen.getByText('1 KB')).toBeInTheDocument()
+      expect(screen.getByText('mean unoptimized payload')).toBeInTheDocument()
+      expect(screen.getByText('detected via URL pattern')).toBeInTheDocument()
+
+      rerender(<IOValueTab data={upsellData} ioFieldsEnabled={false} contentTypeLogged={true} />)
+      expect(screen.getByText('detected via Content-Type or URL pattern')).toBeInTheDocument()
+
+      rerender(<IOValueTab data={{ ...upsellData, estimated_savings_bytes: 2048 } as unknown as IOData} ioFieldsEnabled={false} />)
+      expect(screen.getByText('Potential Savings')).toBeInTheDocument()
+      expect(screen.queryByText('Avg Image Size')).toBeNull()
+    })
   })
 
   const MOCK_ORIGIN_DATA = {
@@ -1245,6 +1267,16 @@ describe('Performance, Fastly-Value & Origin smoke tests', () => {
     ]) {
       expect(await screen.findByText(title)).toBeInTheDocument()
     }
+    for (const title of ['Slowest URLs at Origin', 'Origin Performance by POP', 'Origin IP Health']) {
+      const card = screen.getByText(title).closest('.min-h-\\[480px\\]')
+      expect(card).not.toBeNull()
+      expect(card?.className).not.toContain('[content-visibility:auto]')
+      expect(card?.className).not.toContain('[contain-intrinsic-size:480px]')
+    }
+    const payloadCard = screen.getByText('Origin Payload Size').closest('.min-h-\\[220px\\]')
+    expect(payloadCard).not.toBeNull()
+    expect(payloadCard?.className).not.toContain('[content-visibility:auto]')
+    expect(payloadCard?.className).not.toContain('[contain-intrinsic-size:220px]')
     expect(errorSpy).not.toHaveBeenCalled()
   })
 

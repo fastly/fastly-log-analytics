@@ -47,6 +47,9 @@ function FastlyValueBody({ startTime, endTime, activeServiceId, filterPayload }:
   const ioFieldsEnabled = ioFieldsReady
     ? isFieldActive('io_input_format') || isFieldActive('io_output_format')
     : undefined
+  const contentTypeLogged = ioFieldsReady
+    ? isFieldActive('content_type') || isFieldActive('resp_header_content_type')
+    : undefined
   const [activeTab, setActiveTab] = useState<TabId>('summary')
   const sections = React.useMemo(() => {
     if (activeTab === 'summary') return [...SUMMARY_SECTIONS]
@@ -226,7 +229,13 @@ function FastlyValueBody({ startTime, endTime, activeServiceId, filterPayload }:
                 />
               </TabsContent>
               <TabsContent value="io">
-                <IOValueTab data={data?.io} loading={loading} rollup={rollup} ioFieldsEnabled={ioFieldsEnabled} />
+                <IOValueTab
+                  data={data?.io}
+                  loading={loading}
+                  rollup={rollup}
+                  ioFieldsEnabled={ioFieldsEnabled}
+                  contentTypeLogged={contentTypeLogged}
+                />
               </TabsContent>
             </div>
           )}

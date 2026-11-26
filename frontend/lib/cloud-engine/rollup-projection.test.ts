@@ -23,7 +23,7 @@ import { SECURITY_ROLLUP_SECTIONS, VALUE_ROLLUP_SECTIONS } from "./rollup-sectio
 import {
   SECURITY_THREAT_INTEL_SUMMARY_SPEC, securityFromRollup, type SecurityRollupBody, securitySummarySpec,
 } from "./security-rollup";
-import { VALUE_SUMMARY_SPEC, valueFromRollup, type ValueRollupBody } from "./value-rollup";
+import { VALUE_SUMMARY_SPEC, VALUE_SUMMARY_TAB_SPEC, valueFromRollup, type ValueRollupBody } from "./value-rollup";
 
 const HOUR = 3_600_000;
 const T0 = FIXTURE_START * 1000;
@@ -368,4 +368,41 @@ describe("a rollup decoded for a spec", () => {
       expect(() => structuredClone(rollup)).not.toThrow();
     }
   });
+});
+
+describe("VALUE_SUMMARY_TAB_SPEC projection", () => {
+  it.each(["network", "origin", "securityValue", "preValue"] as const)(
+    "equals the whole-file answer for Summary-tab sections on %s",
+    async (name) => {
+      for (const set of ["window", "hour"] as const) {
+        for (const layout of ["legacy", "layout"] as const) {
+          const listing = LISTINGS[`${name}/${set}/${layout}`];
+          const whole = await valueFromRollup(
+            "/api/value/summary",
+            { ...range, sections: ["overview", "caching", "network"], chart_interval: "1 day" },
+            sourceOf(listing),
+            undefined,
+            null,
+          );
+          const src = sourceOf(listing);
+          const projected = await valueFromRollup(
+            "/api/value/summary",
+            { ...range, sections: ["overview", "caching", "network"], chart_interval: "1 day" },
+            src,
+            undefined,
+            VALUE_SUMMARY_TAB_SPEC,
+          );
+          const defaulted = await valueFromRollup(
+            "/api/value/summary",
+            { ...range, sections: ["overview", "caching", "network"], chart_interval: "1 day" },
+            sourceOf(listing),
+          );
+          expect(projected).toEqual(whole);
+          expect(defaulted).toEqual(whole);
+          expect(src.log.files).toEqual([]);
+        }
+      }
+    },
+    30_000,
+  );
 });

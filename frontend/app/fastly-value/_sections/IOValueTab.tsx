@@ -163,7 +163,15 @@ function OpportunitiesTable({ opps }: { opps: IOOpportunity[] }) {
   )
 }
 
-function IOUpsellView({ data, ioNotEnabled }: { data: IOData; ioNotEnabled: boolean }) {
+function IOUpsellView({
+  data,
+  ioNotEnabled,
+  contentTypeLogged = false,
+}: {
+  data: IOData
+  ioNotEnabled: boolean
+  contentTypeLogged?: boolean
+}) {
   const opps = data.optimization_opportunities ?? []
   return (
     <div className="space-y-6 pt-4">
@@ -187,7 +195,7 @@ function IOUpsellView({ data, ioNotEnabled }: { data: IOData; ioNotEnabled: bool
           title="Image Requests"
           icon={ImageIcon}
           value={data.image_request_count != null ? formatCompactCount(data.image_request_count) : '—'}
-          sub="detected via URL pattern"
+          sub={contentTypeLogged ? 'detected via Content-Type or URL pattern' : 'detected via URL pattern'}
         />
         <StatCard
           title="Image Bandwidth"
@@ -195,12 +203,25 @@ function IOUpsellView({ data, ioNotEnabled }: { data: IOData; ioNotEnabled: bool
           value={data.image_bandwidth_bytes != null ? formatBytes(data.image_bandwidth_bytes) : '—'}
           sub="serving unoptimized images"
         />
-        <StatCard
-          title="Potential Savings"
-          icon={TrendingDown}
-          value={data.estimated_savings_bytes != null ? formatBytes(data.estimated_savings_bytes) : '—'}
-          sub="estimated at ~40% compression"
-        />
+        {data.estimated_savings_bytes != null ? (
+          <StatCard
+            title="Potential Savings"
+            icon={TrendingDown}
+            value={formatBytes(data.estimated_savings_bytes)}
+            sub="estimated at ~40% compression"
+          />
+        ) : (
+          <StatCard
+            title="Avg Image Size"
+            icon={TrendingDown}
+            value={
+              data.image_request_count && data.image_bandwidth_bytes != null
+                ? formatBytes(Math.round(data.image_bandwidth_bytes / data.image_request_count))
+                : '—'
+            }
+            sub="mean unoptimized payload"
+          />
+        )}
         <StatCard
           title="Optimization Candidates"
           icon={Zap}
@@ -400,17 +421,21 @@ function IOEnabledView({ data, rollup }: { data: IOData; rollup?: NetworkRollupM
 function IOValueTabWithActiveFields({
   data,
   rollup,
+  contentTypeLogged: contentTypeLoggedProp,
 }: {
   data: IOData
   rollup?: NetworkRollupMeta
+  contentTypeLogged?: boolean
 }) {
   const { ready, isFieldActive } = useActiveLogFields()
   const ioActive = isFieldActive('io_input_format') || isFieldActive('io_output_format')
   const ioNotEnabled = ready ? !ioActive : true
+  const contentTypeLogged =
+    contentTypeLoggedProp ?? (ready ? isFieldActive('content_type') || isFieldActive('resp_header_content_type') : false)
   if (data.io_transforms != null) {
     return <IOEnabledView data={data} rollup={rollup} />
   }
-  return <IOUpsellView data={data} ioNotEnabled={ioNotEnabled} />
+  return <IOUpsellView data={data} ioNotEnabled={ioNotEnabled} contentTypeLogged={contentTypeLogged} />
 }
 
 export function IOValueTab({
@@ -418,11 +443,13 @@ export function IOValueTab({
   loading,
   rollup,
   ioFieldsEnabled,
+  contentTypeLogged,
 }: {
   data?: IOData | null
   loading?: boolean
   rollup?: NetworkRollupMeta
   ioFieldsEnabled?: boolean
+  contentTypeLogged?: boolean
 }) {
   const queryClient = React.useContext(QueryClientContext)
   if (loading) {
@@ -445,10 +472,10 @@ export function IOValueTab({
     return <IOEnabledView data={data} rollup={rollup} />
   }
   if (ioFieldsEnabled !== undefined) {
-    return <IOUpsellView data={data} ioNotEnabled={!ioFieldsEnabled} />
+    return <IOUpsellView data={data} ioNotEnabled={!ioFieldsEnabled} contentTypeLogged={Boolean(contentTypeLogged)} />
   }
   if (queryClient) {
-    return <IOValueTabWithActiveFields data={data} rollup={rollup} />
+    return <IOValueTabWithActiveFields data={data} rollup={rollup} contentTypeLogged={contentTypeLogged} />
   }
-  return <IOUpsellView data={data} ioNotEnabled={true} />
+  return <IOUpsellView data={data} ioNotEnabled={true} contentTypeLogged={Boolean(contentTypeLogged)} />
 }

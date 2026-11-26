@@ -946,6 +946,28 @@ def value_summary(
             ctype_expr = (
                 "lower(coalesce(nullIf(custom_fields['resp_header_content_type'], ''), custom_fields['content_type']))"
             )
+            url_lc = "lower(url)"
+            url_img_ext_expr = (
+                f"(endsWith({url_lc}, '.png') OR endsWith({url_lc}, '.jpg') "
+                f"OR endsWith({url_lc}, '.jpeg') OR endsWith({url_lc}, '.gif') "
+                f"OR endsWith({url_lc}, '.svg') OR endsWith({url_lc}, '.webp') "
+                f"OR endsWith({url_lc}, '.ico'))"
+            )
+            is_img_expr = f"(startsWith({ctype_expr}, 'image/') OR ({ctype_expr} = '' AND {url_img_ext_expr}))"
+            url_img_fmt_expr = (
+                f"CASE "
+                f"WHEN endsWith({url_lc}, '.png') THEN 'png' "
+                f"WHEN endsWith({url_lc}, '.jpg') OR endsWith({url_lc}, '.jpeg') THEN 'jpeg' "
+                f"WHEN endsWith({url_lc}, '.gif') THEN 'gif' "
+                f"WHEN endsWith({url_lc}, '.svg') THEN 'svg' "
+                f"WHEN endsWith({url_lc}, '.webp') THEN 'webp' "
+                f"WHEN endsWith({url_lc}, '.ico') THEN 'ico' "
+                f"ELSE NULL END"
+            )
+            url_raster_ext_expr = (
+                f"(endsWith({url_lc}, '.jpg') OR endsWith({url_lc}, '.jpeg') "
+                f"OR endsWith({url_lc}, '.png') OR endsWith({url_lc}, '.gif'))"
+            )
             ofmt_expr = "nullIf(coalesce(nullIf(custom_fields['io_output_format'], ''), custom_fields['ofmt']), '')"
             ifmt_expr = "nullIf(coalesce(nullIf(custom_fields['io_input_format'], ''), custom_fields['ifmt']), '')"
             io_in_expr = "toInt64OrNull(nullIf(custom_fields['io_input_bytes'], ''))"
@@ -956,8 +978,8 @@ def value_summary(
                         "io_summary",
                         lambda: service.client.execute(
                             f"/* value:io_summary */ SELECT "
-                            f"countIf(startsWith({ctype_expr}, 'image/')) AS image_requests, "
-                            f"sumIf({bytes_expr}, startsWith({ctype_expr}, 'image/')) AS image_bytes, "
+                            f"countIf({is_img_expr}) AS image_requests, "
+                            f"sumIf({bytes_expr}, {is_img_expr}) AS image_bytes, "
                             f"countIf({ofmt_expr} IS NOT NULL) AS io_count, "
                             f"sumIf({bytes_expr}, {ofmt_expr} IS NOT NULL) AS io_bytes, "
                             f"sumIf({bytes_expr}, {ofmt_expr} IS NOT NULL AND {shield_cond}) AS io_shield_bytes, "
@@ -972,9 +994,13 @@ def value_summary(
                     (
                         "io_formats",
                         lambda: service.client.execute(
-                            f"/* value:io_formats */ SELECT coalesce({ofmt_expr}, nullIf(splitByChar('/', {ctype_expr})[2], '')) AS format, "
+                            f"/* value:io_formats */ SELECT coalesce("
+                            f"{ofmt_expr}, "
+                            f"if(startsWith({ctype_expr}, 'image/'), nullIf(splitByChar('/', {ctype_expr})[2], ''), NULL), "
+                            f"if({ctype_expr} = '', {url_img_fmt_expr}, NULL)"
+                            f") AS format, "
                             f"count() AS cnt FROM request_facts "
-                            f"WHERE {where} AND ({ofmt_expr} IS NOT NULL OR startsWith({ctype_expr}, 'image/')) "
+                            f"WHERE {where} AND ({ofmt_expr} IS NOT NULL OR {is_img_expr}) "
                             f"GROUP BY format HAVING format IS NOT NULL AND format != '' ORDER BY cnt DESC",
                             params,
                         ),
@@ -985,7 +1011,8 @@ def value_summary(
                             f"/* value:io_opportunities */ SELECT url, count() AS request_count, "
                             f"sum({bytes_expr}) AS total_bytes, avg({bytes_expr}) / 1024.0 AS avg_kb "
                             f"FROM request_facts WHERE {where} "
-                            f"AND {ctype_expr} IN ('image/jpeg', 'image/jpg', 'image/png', 'image/gif') "
+                            f"AND ({ctype_expr} IN ('image/jpeg', 'image/jpg', 'image/png', 'image/gif') "
+                            f"OR ({ctype_expr} = '' AND {url_raster_ext_expr})) "
                             f"AND {ofmt_expr} IS NULL AND {bytes_expr} > 51200 "
                             f"GROUP BY url ORDER BY total_bytes DESC LIMIT 20",
                             params,

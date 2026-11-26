@@ -136,7 +136,7 @@ export async function queryValueSummary(params: ValueQueryParams = {}): Promise<
   const needBuckets = want("caching") || want("performance") || want("network") || want("security") || want("io");
 
   const normCols: string[] = [`EPOCH_MS(CAST(ts_ms AS BIGINT)) AS "timestamp"`];
-  if (needIo) normCols.push("url");
+  if (needIo) normCols.push("url", "LOWER(COALESCE(url, '')) AS url_lc");
   if (needCache) normCols.push(`UPPER(COALESCE(NULLIF(cache_status, ''), cache, '')) AS cache_state`);
   if (needBytes) normCols.push(`COALESCE(resp_body_size, resp_body_bytes, resp_bytes) AS body_bytes`);
   if (needLatency) normCols.push(`COALESCE(time_elapsed_usec, elapsed) / 1000.0 AS latency_ms`);
@@ -265,11 +265,13 @@ export async function queryValueSummary(params: ValueQueryParams = {}): Promise<
       `COUNT(*) FILTER (WHERE ipv6_flag) AS ipv6_count`,
     );
   }
+  const urlImgExt = `(${[".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico"].map((ext) => `ends_with(url_lc, '${ext}')`).join(" OR ")})`;
+  const isImageExpr = `(starts_with(content_type, 'image/') OR (content_type = '' AND ${urlImgExt}))`;
   if (needIo) {
     aggCols.push(
-      `COUNT(*) FILTER (WHERE starts_with(content_type, 'image/')) AS images`,
-      `COUNT(body_bytes) FILTER (WHERE starts_with(content_type, 'image/')) AS image_byte_samples`,
-      `SUM(body_bytes) FILTER (WHERE starts_with(content_type, 'image/')) AS image_bytes`,
+      `COUNT(*) FILTER (WHERE ${isImageExpr}) AS images`,
+      `COUNT(body_bytes) FILTER (WHERE ${isImageExpr}) AS image_byte_samples`,
+      `SUM(body_bytes) FILTER (WHERE ${isImageExpr}) AS image_bytes`,
       `COUNT(*) FILTER (WHERE output_format IS NOT NULL) AS io_count`,
       `COUNT(body_bytes) FILTER (WHERE output_format IS NOT NULL) AS io_byte_samples`,
       `SUM(body_bytes) FILTER (WHERE output_format IS NOT NULL) AS io_bytes`,
@@ -429,9 +431,21 @@ export async function queryValueSummary(params: ValueQueryParams = {}): Promise<
       .map((row) => ({ signal: String(row.signal), count: count(row, "count") }));
   }
   if (want("io")) {
-    const formats = await query(`SELECT COALESCE(output_format, NULLIF(split_part(content_type, '/', 2), '')) AS format,
-      COUNT(*) AS count FROM normalized WHERE output_format IS NOT NULL OR starts_with(content_type, 'image/')
-      GROUP BY 1 ORDER BY count DESC`);
+    const urlImgFmt = `CASE
+      WHEN ends_with(url_lc, '.png') THEN 'png'
+      WHEN ends_with(url_lc, '.jpg') OR ends_with(url_lc, '.jpeg') THEN 'jpeg'
+      WHEN ends_with(url_lc, '.gif') THEN 'gif'
+      WHEN ends_with(url_lc, '.svg') THEN 'svg'
+      WHEN ends_with(url_lc, '.webp') THEN 'webp'
+      WHEN ends_with(url_lc, '.ico') THEN 'ico'
+      ELSE NULL END`;
+    const formats = await query(`SELECT COALESCE(
+      output_format,
+      CASE WHEN starts_with(content_type, 'image/') THEN NULLIF(split_part(content_type, '/', 2), '') END,
+      CASE WHEN content_type = '' THEN ${urlImgFmt} END
+    ) AS format,
+      COUNT(*) AS count FROM normalized WHERE output_format IS NOT NULL OR ${isImageExpr}
+      GROUP BY 1 HAVING format IS NOT NULL AND format != '' ORDER BY count DESC`);
     const formatTotal = formats.reduce((sum, row) => sum + count(row, "count"), 0);
     result.io.format_distribution = formats.map((row) => ({
       format: String(row.format), count: count(row, "count"), pct: roundTo(count(row, "count") * 100 / formatTotal),
@@ -439,9 +453,11 @@ export async function queryValueSummary(params: ValueQueryParams = {}): Promise<
     result.io.modern_format_pct = formatTotal ? roundTo(formats
       .filter((row) => ["webp", "avif", "jpegxl", "jxl"].includes(String(row.format).toLowerCase()))
       .reduce((sum, row) => sum + count(row, "count"), 0) * 100 / formatTotal) : null;
+    const urlRasterExt = `(${[".jpg", ".jpeg", ".png", ".gif"].map((ext) => `ends_with(url_lc, '${ext}')`).join(" OR ")})`;
     result.io.optimization_opportunities = (await query(`SELECT url, COUNT(*) AS request_count,
       SUM(body_bytes) AS total_bytes, AVG(body_bytes) / 1024.0 AS avg_kb FROM normalized
-      WHERE content_type IN ('image/jpeg', 'image/jpg', 'image/png', 'image/gif')
+      WHERE (content_type IN ('image/jpeg', 'image/jpg', 'image/png', 'image/gif')
+          OR (content_type = '' AND ${urlRasterExt}))
         AND output_format IS NULL AND body_bytes > ${IO_LARGE_IMAGE_THRESHOLD_BYTES}
       GROUP BY url ORDER BY total_bytes DESC LIMIT 20`))
       .map((row) => ({ url: String(row.url ?? ""), request_count: count(row, "request_count"),

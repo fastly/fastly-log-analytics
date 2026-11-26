@@ -43,6 +43,10 @@ const RAW_ALIASES = [
   "ofmt", "ifmt",
 ];
 
+export const VALUE_ALL_FIELDS_BASE = [
+  ...RAW_ALIASES, "waf", "cache", "proto", "tls", "is_ipv6", "io_output_format",
+] as const;
+
 /** The `value` fields each section reads; summaries without one leave the section to the raw scan. */
 const VALUE_FIELDS: Partial<Record<keyof ValueSummary, readonly string[]>> = {
   caching: ["cache", "shield"],
@@ -348,6 +352,12 @@ export function valueSummaryFromRollup(
   }
 
   if (want("io")) {
+    if (truncated.has("assets/asset")) return null;
+    let imageRequests = 0;
+    for (const [key, asset] of rollup.assets ?? []) {
+      if ((JSON.parse(key) as unknown[])[0] === "Images") imageRequests += asset.requests;
+    }
+    if (imageRequests > 0) return null;
     const legs = valueTotals(rollup, "io");
     const io = sumOf(legs.values());
     const shieldLeg = legs.get("false");
@@ -478,31 +488,56 @@ function filteredValueOverview(
   };
 }
 
+const VALUE_SUMMARY_ONLY = {
+  count: ["all_fields", "value"],
+  requests: ["overview", "series5", "dim_totals", "value", "bins", "assets"],
+  resp_bytes_sum: ["series5", "value", "assets"],
+  total_bandwidth_bytes: ["overview"],
+  threats_blocked: ["overview"],
+  hit_elapsed_sum: ["overview"],
+  hit_elapsed_count: ["overview"],
+  miss_elapsed_sum: ["overview"],
+  miss_elapsed_count: ["overview"],
+  elapsed_sum: ["value"],
+  elapsed_count: ["value"],
+  io_in_sum: ["value"],
+  io_out_sum: ["value"],
+  ratio_sum: ["value"],
+  ratio_count: ["value"],
+} as const;
+
 /** The summary groups and columns /fastly-value reads unfiltered. */
 export const VALUE_SUMMARY_SPEC = defineSummarySpec({
-  groups: ["overview", "series5", "all_fields", "field_totals", "dim_totals", "value", "bins"],
+  groups: ["overview", "series5", "all_fields", "field_totals", "dim_totals", "value", "bins", "assets"],
   columns: [
     "count", "requests", "resp_bytes_sum", "total_bandwidth_bytes", "threats_blocked",
     "hit_elapsed_sum", "hit_elapsed_count", "miss_elapsed_sum", "miss_elapsed_count",
     "elapsed_hist", "elapsed_sum", "elapsed_count", "io_in_sum", "io_out_sum", "ratio_sum", "ratio_count",
   ],
   only: {
-    count: ["all_fields", "value"],
-    requests: ["overview", "series5", "dim_totals", "value", "bins"],
-    resp_bytes_sum: ["series5", "value"],
-    total_bandwidth_bytes: ["overview"],
-    threats_blocked: ["overview"],
-    hit_elapsed_sum: ["overview"],
-    hit_elapsed_count: ["overview"],
-    miss_elapsed_sum: ["overview"],
-    miss_elapsed_count: ["overview"],
+    ...VALUE_SUMMARY_ONLY,
     elapsed_hist: ["series5"],
-    elapsed_sum: ["value"],
-    elapsed_count: ["value"],
-    io_in_sum: ["value"],
-    io_out_sum: ["value"],
-    ratio_sum: ["value"],
-    ratio_count: ["value"],
+  },
+  fields: {
+    series5: ["overall", "proto"],
+    all_fields: [...VALUE_ALL_FIELDS_BASE, "ua"],
+    bins: ["verified_bot"],
+  },
+});
+
+/** Narrower summary spec for unfiltered Summary-tab reads (`overview`, `caching`, `network`). */
+export const VALUE_SUMMARY_TAB_SPEC = defineSummarySpec({
+  groups: ["overview", "series5", "all_fields", "field_totals", "dim_totals", "value"],
+  columns: [
+    "count", "requests", "resp_bytes_sum", "total_bandwidth_bytes", "threats_blocked",
+    "hit_elapsed_sum", "hit_elapsed_count", "miss_elapsed_sum", "miss_elapsed_count",
+    "elapsed_sum", "elapsed_count", "io_in_sum", "io_out_sum", "ratio_sum", "ratio_count",
+  ],
+  only: VALUE_SUMMARY_ONLY,
+  fields: {
+    series5: ["overall", "proto"],
+    all_fields: VALUE_ALL_FIELDS_BASE,
+    value: ["cache", "shield"],
   },
 });
 
@@ -531,8 +566,8 @@ export async function valueFromRollup(
   body: ValueRollupBody,
   source: Parameters<typeof queryRollup>[0],
   signal?: AbortSignal,
-  /** Null reads whole files. */
-  spec: SummarySpec | null = VALUE_SUMMARY_SPEC,
+  /** Null reads whole files; undefined picks the summary-tab, unfiltered, or filtered spec. */
+  spec?: SummarySpec | null,
 ) {
   if (!valueRollupEligible(path, body)) return null;
   const fromMs = parseEpochMs(body.start_time ?? undefined);
@@ -541,11 +576,17 @@ export async function valueFromRollup(
   if (hasFilterValues(body.filters, body.custom_filters)) {
     const filter = singleLowCardFilter(body.filters, body.custom_filters, body);
     if (!filter) return null;
-    const filteredSpec = spec === VALUE_SUMMARY_SPEC ? VALUE_FILTERED_SUMMARY_SPEC : spec;
+    const filteredSpec = spec === undefined ? VALUE_FILTERED_SUMMARY_SPEC : spec;
     const result = await queryRollup(source, { fromMs, toMs, signal, spec: filteredSpec ?? undefined });
     return result ? filteredValueOverview(result, filter) : null;
   }
+  const effectiveSpec = spec === undefined
+    ? (Array.isArray(body.sections) && body.sections.length > 0 &&
+        body.sections.every((s) => s === "overview" || s === "caching" || s === "network")
+      ? VALUE_SUMMARY_TAB_SPEC
+      : VALUE_SUMMARY_SPEC)
+    : spec;
   const preloadedBots = body.sections?.includes("bots") ? await loadWellKnownBots() : undefined;
-  const result = await queryRollup(source, { fromMs, toMs, signal, spec: spec ?? undefined });
+  const result = await queryRollup(source, { fromMs, toMs, signal, spec: effectiveSpec ?? undefined });
   return result ? valueSummaryFromRollup(result, body, preloadedBots) : null;
 }

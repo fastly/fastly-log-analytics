@@ -292,4 +292,43 @@ describe("Feature F22 — Fastly Value cloud-engine", () => {
       await engine.reset();
     }
   });
+
+  it("FV-07: detects images by URL extension only when content_type is empty and normalizes jpg to jpeg", async () => {
+    expect(valueScanColumns({ sections: ["io"] })).toContain("url");
+    const engine = new DuckDBAnalyticalEngine();
+    try {
+      await engine.executeSql(`
+        INSERT INTO requests (
+          scoped_key, ts_ms, "timestamp", resp_bytes, content_type, url, io_output_format
+        ) VALUES
+          ('fv07', 1700000000000, epoch_ms(1700000000000), 70000, NULL, '/hero.JPG', NULL),
+          ('fv07', 1700000001000, epoch_ms(1700000001000), 20000, '', '/thumb.jpeg', NULL),
+          ('fv07', 1700000002000, epoch_ms(1700000002000), 60000, '', '/diagram.svg', NULL),
+          ('fv07', 1700000003000, epoch_ms(1700000003000), 10000, NULL, '/badge.png', NULL),
+          ('fv07', 1700000004000, epoch_ms(1700000004000), 90000, 'text/html', '/trap.png', NULL),
+          ('fv07', 1700000005000, epoch_ms(1700000005000), 80000, '', '/index.html', NULL)
+      `);
+      const res = await queryValueSummary({
+        engine,
+        start_time: "2023-11-14T22:00:00Z",
+        end_time: "2023-11-14T23:00:00Z",
+        sections: ["io"],
+      });
+      expect(res.io?.image_request_count).toBe(4);
+      expect(res.io?.image_bandwidth_bytes).toBe(160000);
+      expect(res.io?.format_distribution).toHaveLength(3);
+      expect(res.io?.format_distribution).toEqual(
+        expect.arrayContaining([
+          { format: "jpeg", count: 2, pct: 50 },
+          { format: "png", count: 1, pct: 25 },
+          { format: "svg", count: 1, pct: 25 },
+        ]),
+      );
+      expect(res.io?.optimization_opportunities).toEqual([
+        { url: "/hero.JPG", request_count: 1, total_bytes: 70000, avg_kb: 68.36 },
+      ]);
+    } finally {
+      await engine.reset();
+    }
+  });
 });
