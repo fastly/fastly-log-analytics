@@ -20,6 +20,42 @@ const WIDE_PROJECTION_MIN_COLUMNS = 16;
 const WIDE_PROJECTION_MIN_OVERLAP = 0.5;
 const WIDE_PROJECTION_MAX_BYTES = 32 * 1024 * 1024;
 
+const PROJECTED_COLUMN_ALIAS_GROUPS: readonly (readonly string[])[] = [
+  ["timestamp", "ts_ms"],
+  ["cache_status", "cache"],
+  ["resp_body_size", "resp_body_bytes", "resp_bytes"],
+  ["time_elapsed_usec", "elapsed"],
+  ["fastly_is_shield", "is_shield", "edge"],
+  ["protocol", "proto"],
+  ["is_ssl", "tls_version", "tls"],
+  ["is_ipv6", "ipv6"],
+  ["content_type", "resp_header_content_type"],
+  ["waf_action", "ngwaf_decision"],
+  ["bot_verified", "verified_bot"],
+  ["_bot_name", "ngwaf_bot_name", "bot_category"],
+  ["io_output_format", "ofmt"],
+  ["io_input_format", "ifmt"],
+];
+
+const PROJECTED_COLUMN_CANONICAL = new Map<string, string>(
+  PROJECTED_COLUMN_ALIAS_GROUPS.flatMap((group) =>
+    group.map((alias) => [alias, group[0]] as const),
+  ),
+);
+
+/**
+ * Counts distinct logical columns in a projection set, collapsing mutually-aliased
+ * schema names to 1 each when checking wide-projection thresholds while keeping
+ * every alias in `wanted` for Parquet footer projection.
+ */
+export function effectiveProjectedColumnCount(columns: Iterable<string>): number {
+  const canonical = new Set<string>();
+  for (const column of columns) {
+    canonical.add(PROJECTED_COLUMN_CANONICAL.get(column) ?? column);
+  }
+  return canonical.size;
+}
+
 /**
  * Wide projections (dashboard cards, security residual) covering most of a multi-row-group
  * compact's span coalesce past `shouldFallbackToWhole` anyway. Fetching whole-first skips
@@ -100,6 +136,7 @@ export function projectedReader(
   const fetchFrom = source.fetchRange;
   if (!fetchFrom) throw new Error("Projected Cloud reads need a range-capable file source");
   const wanted = new Set(columns);
+  const effectiveColumnCount = effectiveProjectedColumnCount(wanted);
   const columnsKey = [...wanted].sort();
   let slots = RANGE_CONCURRENCY;
   const waiting: (() => void)[] = [];
@@ -139,7 +176,7 @@ export function projectedReader(
     const wholeId = wholeFileIdentity(source.cacheScope, file);
     if (fetchFile && (
       readsWholeFirst(file)
-      || prefersWholeForWideProjection(file, wanted.size, window)
+      || prefersWholeForWideProjection(file, effectiveColumnCount, window)
       || Boolean(await source.hasFile?.(file.key, { identity: wholeId }))
     )) {
       return {

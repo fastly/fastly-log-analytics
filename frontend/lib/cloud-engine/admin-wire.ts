@@ -423,13 +423,13 @@ async function usage(
     return Response.json({ detail: { error: "invalid_time_range" } }, { status: 422 });
   }
   const range = { from: start, to: end };
-  const fos = await queryOpsLogs("fos_usage", range, { signal: request.signal });
+  const fos = await queryOpsLogs("fos_usage", range, { signal: request.signal, rangeProject: false, sort: false });
   assertAdminWireEpoch(request, entryMetaEpoch, entryOpsEpoch);
   if (fos.liveTruncated) throw new Error("Cloud usage history is incomplete; choose a smaller range");
   let source = fos.rows as unknown as FosUsageRow[];
   let basis = "native_fos_usage";
   if (!source.length) {
-    const cron = await queryOpsLogs("cron_runs", range, { signal: request.signal });
+    const cron = await queryOpsLogs("cron_runs", range, { signal: request.signal, rangeProject: false, sort: false });
     assertAdminWireEpoch(request, entryMetaEpoch, entryOpsEpoch);
     if (cron.liveTruncated) throw new Error("Cloud usage history is incomplete; choose a smaller range");
     const settings = await fetchUsageSettings(request.signal);

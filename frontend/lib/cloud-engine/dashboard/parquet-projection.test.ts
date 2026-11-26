@@ -9,7 +9,8 @@ import {
   readsWholeFirst, RANGE_MERGE_GAP, RANGE_REQUEST_COST_BYTES, shouldFallbackToWhole, SMALL_FOOTER_PROBE_BYTES,
   TARGET_RANGES_PER_FILE, wholeReadLimits,
 } from "./parquet-projection";
-import { prefersWholeForWideProjection, projectedReader } from "./projected-read";
+import { effectiveProjectedColumnCount, prefersWholeForWideProjection, projectedReader } from "./projected-read";
+import { valueScanColumns } from "../value";
 import { fetchLanes } from "../fetch-lanes";
 
 const tableRows = (table: unknown) => (table as { toArray(): Record<string, unknown>[] }).toArray();
@@ -1013,5 +1014,122 @@ describe("query schemas from footers", () => {
 
     expect(peak).toBe(2);
     expect(priorities).toEqual(["low", "low", "low", "low"]);
+  });
+
+  it("effectiveProjectedColumnCount collapses mutually-aliased schema names while keeping raw names for projection", () => {
+    expect(effectiveProjectedColumnCount([
+      "timestamp", "ts_ms",
+      "cache_status", "cache",
+      "resp_body_size", "resp_body_bytes", "resp_bytes",
+      "time_elapsed_usec", "elapsed",
+      "fastly_is_shield", "is_shield", "edge",
+      "protocol", "proto",
+      "is_ssl", "tls_version", "tls",
+      "is_ipv6", "ipv6",
+      "content_type", "resp_header_content_type",
+      "waf_action", "ngwaf_decision",
+      "bot_verified", "verified_bot",
+      "_bot_name", "ngwaf_bot_name", "bot_category",
+      "io_output_format", "ofmt",
+      "io_input_format", "ifmt",
+    ])).toBe(14);
+
+    const summaryFilteredCols = valueScanColumns({
+      sections: ["overview", "caching", "network"],
+      filters: { status: { mode: "include", values: ["200"] } },
+    })!;
+    expect(summaryFilteredCols.length).toBe(25);
+    expect(effectiveProjectedColumnCount(summaryFilteredCols)).toBe(13);
+
+    const splitSummaryRawCols = valueScanColumns({
+      sections: ["caching", "network"],
+      filters: { status: { mode: "include", values: ["200"] } },
+    })!;
+    expect(splitSummaryRawCols.length).toBe(19);
+    expect(effectiveProjectedColumnCount(splitSummaryRawCols)).toBe(9);
+
+    const fullSevenSectionCols = valueScanColumns({})!;
+    expect(fullSevenSectionCols.length).toBe(41);
+    expect(effectiveProjectedColumnCount(fullSevenSectionCols)).toBe(23);
+
+    const startMs = Date.parse("2026-11-25T04:00:00Z");
+    const endMs = Date.parse("2026-11-25T05:00:00Z");
+    const compact20Mib = {
+      size: 20 * 1024 * 1024,
+      start: new Date(startMs).toISOString(),
+      end: new Date(endMs).toISOString(),
+    };
+    const window = { fromMs: startMs, toMs: endMs };
+    expect(prefersWholeForWideProjection(compact20Mib, effectiveProjectedColumnCount(summaryFilteredCols), window)).toBe(false);
+    expect(prefersWholeForWideProjection(compact20Mib, effectiveProjectedColumnCount(splitSummaryRawCols), window)).toBe(false);
+    expect(prefersWholeForWideProjection(compact20Mib, effectiveProjectedColumnCount(fullSevenSectionCols), window)).toBe(true);
+  });
+
+  it("keeps >6 MiB compacts projected via ranges for filtered Summary valueScanColumns while preserving aliases", async () => {
+    const prevClosedLimit = wholeReadLimits.closedHourUpToBytes;
+    wholeReadLimits.closedHourUpToBytes = 2 * 1024 * 1024;
+    try {
+      const rgRows = 500;
+      const rowGroups = 6;
+      const totalRows = rgRows * rowGroups;
+      const startMs = Date.parse("2026-11-25T04:00:00Z");
+      const endMs = startMs + totalRows * 1000;
+      const bytes = parquetWriteBuffer({
+        codec: "UNCOMPRESSED",
+        rowGroupSize: rgRows,
+        columnData: [
+          { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: totalRows }, (_, i) => new Date(startMs + i * 1000)) },
+          { name: "status", type: "INT32", data: Array.from({ length: totalRows }, () => 200) },
+          { name: "cache_status", type: "STRING", data: Array.from({ length: totalRows }, () => "HIT") },
+          { name: "resp_body_size", type: "INT32", data: Array.from({ length: totalRows }, () => 512) },
+          { name: "time_elapsed_usec", type: "INT32", data: Array.from({ length: totalRows }, () => 1200) },
+          { name: "protocol", type: "STRING", data: Array.from({ length: totalRows }, () => "HTTP/2") },
+          { name: "tls_version", type: "STRING", data: Array.from({ length: totalRows }, () => "TLSv1.3") },
+          { name: "ipv6", type: "BOOLEAN", data: Array.from({ length: totalRows }, () => false) },
+          { name: "fastly_is_shield", type: "BOOLEAN", data: Array.from({ length: totalRows }, () => false) },
+          { name: "waf_action", type: "STRING", data: Array.from({ length: totalRows }, () => "ALLOW") },
+          { name: "url", type: "STRING", data: Array.from({ length: totalRows }, () => noise(400)) },
+          { name: "ua", type: "STRING", data: Array.from({ length: totalRows }, () => noise(400)) },
+        ],
+      });
+      expect(bytes.byteLength).toBeGreaterThan(2 * 1024 * 1024);
+      const entry = {
+        key: "processed/request/year=2026/month=11/day=25/hour=04/compact=summary-filtered.parquet",
+        start: new Date(startMs).toISOString(),
+        end: new Date(endMs).toISOString(),
+        size: bytes.byteLength,
+        rows: totalRows,
+        etag: "\"etag-summary\"",
+      };
+      const summaryCols = valueScanColumns({
+        sections: ["overview", "caching", "network"],
+        filters: { status: { mode: "include", values: ["200"] } },
+      })!;
+      let rangeCalls = 0;
+      let fileCalls = 0;
+      const source = {
+        cacheScope: "fixture-session:svc-value-summary",
+        fetchRange: async (_file: unknown, start: number, end: number) => {
+          rangeCalls++;
+          return bytes.slice(start, end);
+        },
+        fetchFile: async () => {
+          fileCalls++;
+          return { bytes: bytes.slice(0), cached: false };
+        },
+      };
+
+      const reader = projectedReader(source, summaryCols, undefined, { fromMs: startMs, toMs: endMs });
+      const projected = await (await reader(entry)).read();
+      expect(fileCalls).toBe(0);
+      expect(rangeCalls).toBeGreaterThan(0);
+      expect(projected.downloaded).toBeLessThan(bytes.byteLength * 0.45);
+      // Legacy alias columns in the file must still be retained in the projection.
+      expect(await query({ "v.parquet": projected.bytes },
+        "SELECT count(*)::INT AS n, any_value(cache_status) AS cs, any_value(protocol) AS proto FROM 'v.parquet'"))
+        .toEqual([{ n: totalRows, cs: "HIT", proto: "HTTP/2" }]);
+    } finally {
+      wholeReadLimits.closedHourUpToBytes = prevClosedLimit;
+    }
   });
 });

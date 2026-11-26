@@ -12,7 +12,7 @@ import {
   readsWholeFirst, readWholeParquetFooter, shouldFallbackToWhole, timestampRowGroupFilter,
   type ParquetFooter, type ParquetProjection, type RowGroupFilterPredicate,
 } from "./dashboard/parquet-projection";
-import { prefersWholeForWideProjection, wholeFileIdentity } from "./dashboard/projected-read";
+import { effectiveProjectedColumnCount, prefersWholeForWideProjection, wholeFileIdentity } from "./dashboard/projected-read";
 import { beginCloudLoading } from "./loading-progress";
 import { fetchLanes, rawLaneForBytes } from "./fetch-lanes";
 import { CloudBudgetError, MAX_REGISTERED_BYTES, type CloudBudgetDetail } from "./dashboard/budget";
@@ -413,9 +413,10 @@ export async function ensureCloudRange(
       const skippedKeys = new Set<string>();
       const preferWholeUpToBytes = projection?.preferWholeUpToBytes ?? 0;
       const rangeWindow = { fromMs: Date.parse(from), toMs: Date.parse(to) };
+      const effectiveColumnCount = projectedColumns !== null ? effectiveProjectedColumnCount(projectedColumns) : 0;
       const shouldReadWholeFirst = (file: typeof files[number], nowMs: number) =>
         readsWholeFirst(file, nowMs)
-        || (projectedColumns !== null && prefersWholeForWideProjection(file, projectedColumns.size, rangeWindow))
+        || (projectedColumns !== null && prefersWholeForWideProjection(file, effectiveColumnCount, rangeWindow))
         || (preferWholeUpToBytes > 0 && file.size > 0 && file.size <= preferWholeUpToBytes);
       if (projectedColumns) {
         loading.update({ stage: "files" });
@@ -431,7 +432,7 @@ export async function ensureCloudRange(
         const candidates = requiredAnyColumns ? [] : unknown.filter((file) => shouldReadWholeFirst(file, now));
         const hasWideProjectionFile =
           !requiredAnyColumns &&
-          files.some((file) => prefersWholeForWideProjection(file, projectedColumns.size, rangeWindow));
+          files.some((file) => prefersWholeForWideProjection(file, effectiveColumnCount, rangeWindow));
         const candidateBytes = candidates.reduce((total, file) => total + file.size, 0);
         if (residentPriorBytes + candidateBytes <= byteLimit) {
           for (const file of candidates) wholeFirst.add(file.scopedKey);

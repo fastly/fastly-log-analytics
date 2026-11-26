@@ -375,7 +375,7 @@ describe("Cloud administrative wire parity", () => {
     expect(await csv!.text()).toContain(`"'=formula"`);
     expect(queryOpsLogs).toHaveBeenCalledWith("fos_usage", {
       from: "2026-01-01T00:00:00Z", to: "2026-01-02T00:00:00Z",
-    }, expect.anything());
+    }, expect.objectContaining({ rangeProject: false, sort: false }));
   });
 
   it("uses native purge actions and never treats numeric evidence IDs as native record keys", async () => {

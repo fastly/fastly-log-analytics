@@ -29,6 +29,7 @@ import { insightsBaselineFromRollup } from "./insights-rollup";
 import { mergeRollups } from "./dashboard/rollup-query";
 import { dashboardManifestCacheScope } from "./dashboard/sources";
 import { planParquetProjection, readWholeParquetFooter, wholeReadLimits } from "./dashboard/parquet-projection";
+import { valueScanColumns } from "./value";
 import { MAX_REGISTERED_BYTES } from "./dashboard/budget";
 
 const DEFAULT_WHOLE_READ_LIMITS = { ...wholeReadLimits };
@@ -2128,5 +2129,70 @@ describe("Cloud first-page analytical range loading", () => {
     expect(rangedKeys.has(unknownEntries[0].key)).toBe(true);
     expect(rangedKeys.has(unknownEntries[1].key)).toBe(false);
     expect(rangedKeys.has(residentEntry.key)).toBe(false);
+  });
+
+  it("keeps filtered Summary valueScanColumns projected in ensureCloudRange while full 7-section reads fetch whole-first", async () => {
+    wholeReadLimits.closedHourUpToBytes = 2 * 1024 * 1024;
+    let seed = 31;
+    const randStr = (len: number) => Array.from({ length: len }, () => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return String.fromCharCode(33 + (seed % 90));
+    }).join("");
+    const rgRows = 500;
+    const totalRows = rgRows * 6;
+    const baseStartMs = Date.parse("2026-11-25T04:00:00Z");
+    const bytes = parquetWriteBuffer({
+      codec: "UNCOMPRESSED",
+      rowGroupSize: rgRows,
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: totalRows }, (_, i) => new Date(baseStartMs + i * 1000)) },
+        { name: "status", type: "INT32", data: Array.from({ length: totalRows }, () => 200) },
+        { name: "cache", type: "STRING", data: Array.from({ length: totalRows }, () => "HIT") },
+        { name: "resp_bytes", type: "INT32", data: Array.from({ length: totalRows }, () => 512) },
+        { name: "elapsed", type: "INT32", data: Array.from({ length: totalRows }, () => 1000) },
+        { name: "proto", type: "STRING", data: Array.from({ length: totalRows }, () => "HTTP/2") },
+        { name: "tls", type: "STRING", data: Array.from({ length: totalRows }, () => "TLSv1.3") },
+        { name: "is_ipv6", type: "BOOLEAN", data: Array.from({ length: totalRows }, () => false) },
+        { name: "edge", type: "BOOLEAN", data: Array.from({ length: totalRows }, () => true) },
+        { name: "url", type: "STRING", data: Array.from({ length: totalRows }, () => randStr(400)) },
+        { name: "ua", type: "STRING", data: Array.from({ length: totalRows }, () => randStr(400)) },
+      ],
+    });
+    expect(bytes.byteLength).toBeGreaterThan(2 * 1024 * 1024);
+    const entry: ManifestFile = {
+      key: "processed/request/year=2026/month=11/day=25/hour=04/compact=c4-val.parquet",
+      start: new Date(baseStartMs).toISOString(),
+      end: new Date(baseStartMs + totalRows * 1000).toISOString(),
+      rows: totalRows,
+      size: bytes.byteLength,
+      etag: "\"etag-val-summary\"",
+    };
+    vi.mocked(fetchManifest).mockResolvedValue({ files: [entry], complete: true });
+    source.fetchFile.mockImplementation(async () => ({ bytes: bytes.slice(0), cached: false }));
+    source.fetchRange.mockImplementation(async (_file: ManifestFile, start: number, end: number) => bytes.slice(start, end));
+
+    const summaryCols = valueScanColumns({
+      sections: ["overview", "caching", "network"],
+      filters: { status: { mode: "include", values: ["200"] } },
+    })!;
+    const summaryRead = await ensureCloudRange(entry.start, entry.end, signal, ["request"], {
+      projection: { columns: summaryCols },
+    });
+    expect(source.fetchFile).not.toHaveBeenCalled();
+    expect(source.fetchRange).toHaveBeenCalled();
+    expect(await summaryRead.executeSql("SELECT count(*)::INT AS n FROM requests")).toEqual([{ n: totalRows }]);
+    summaryRead.release?.();
+
+    // Full 7-section valueScanColumns has 23 effective columns (>= 16) and reads whole-first.
+    source.fetchFile.mockClear();
+    source.fetchRange.mockClear();
+    derived.clear();
+    const fullCols = valueScanColumns({})!;
+    const fullRead = await ensureCloudRange(entry.start, entry.end, signal, ["request"], {
+      projection: { columns: fullCols },
+    });
+    expect(source.fetchFile).toHaveBeenCalledTimes(1);
+    expect(source.fetchRange).not.toHaveBeenCalled();
+    fullRead.release?.();
   });
 });

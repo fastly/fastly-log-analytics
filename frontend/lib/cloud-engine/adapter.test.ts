@@ -24,6 +24,7 @@ import { performanceFromRollup } from "./performance-rollup";
 import { insightsBaselineFromRollup, insightsFromRollup } from "./insights-rollup";
 import { securityFromRollup } from "./security-rollup";
 import { mergeRollups } from "./dashboard/rollup-query";
+import { resetCloudMetadataCache } from "./metadata-cache";
 import { SCORING_CORE_COLUMNS } from "./scoring-reads";
 
 vi.mock("./range-loader", async (importOriginal) => ({
@@ -2106,6 +2107,54 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect(vi.mocked(ensureCloudRange).mock.calls[0][4]?.projection).toEqual({
       columns: insightScanColumns([], ["credential_enumeration"]),
     });
+  });
+
+  it("starts cloudActiveLogFieldIds concurrently with /api/log-extents in cloudInsightsRollup", async () => {
+    resetCloudMetadataCache();
+    let releaseExtents!: (res: Response) => void;
+    const extentsGate = new Promise<Response>((resolve) => {
+      releaseExtents = resolve;
+    });
+    const origFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes("/api/log-extents")) {
+        return extentsGate;
+      }
+      return origFetch(input, init);
+    }));
+    vi.mocked(cloudActiveLogFieldIds).mockClear().mockResolvedValueOnce(new Set(["status", "url"]));
+    vi.mocked(insightsFromRollup).mockClear().mockResolvedValueOnce({
+      insights: [],
+      window_start: "2026-11-05T00:00:00.000Z",
+      window_end: "2026-11-06T00:00:00.000Z",
+      baseline_start: "2026-10-29T00:00:00.000Z",
+      baseline_end: "2026-11-05T00:00:00.000Z",
+      computed_at: "2026-11-06T00:00:00.000Z",
+      window_hours: 24,
+      baseline_hours: 168,
+      window_total_requests: 0,
+      rollup: { data_from: "2026-10-29T00:00:00.000Z", data_through: "2026-11-06T00:00:00.000Z", approximate: [], lower_bound: [] },
+      deferred_detectors: [],
+      unsupported_detectors: [],
+      unavailable_detectors: [],
+    } as never);
+
+    const pending = handleCloudAnalyticalRequest(new Request("http://localhost/api/insights", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-service-id": "svc-parallel" },
+      body: JSON.stringify({ window_size_hrs: 24, baseline_hours: 168, filters: {} }),
+    }));
+
+    // Wait a tick for cloudInsightsRollup to reach the extents fetch; cloudActiveLogFieldIds must already be started.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(cloudActiveLogFieldIds).toHaveBeenCalledTimes(1);
+
+    releaseExtents(Response.json({
+      earliest_log_at: "2026-10-20T00:00:00Z",
+      latest_log_at: "2026-11-06T00:00:00Z",
+    }));
+    const res = await pending;
+    expect(res?.status).toBe(200);
   });
 
   it("reads only the Insights window raw when summaries answer its unfiltered baseline", async () => {

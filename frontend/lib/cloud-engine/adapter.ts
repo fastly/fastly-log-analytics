@@ -1169,6 +1169,10 @@ async function cloudInsightsRollup(
   if (filters.length) return null;
   let end = String(body.end_time ?? body.end ?? body.clamp_end ?? "");
   let earliestLogAt: string | null = null;
+  const rawServiceId = body.service_id ?? request.headers.get("x-service-id");
+  const serviceId = rawServiceId ? decodeUriStrict(String(rawServiceId)) : undefined;
+  const activeFieldsPromise = cloudActiveLogFieldIds(serviceId, request.signal);
+  activeFieldsPromise.catch(() => {});
   const extentsRes = await withLoading("range", () =>
     fetchCloudMetadata("/api/log-extents", request.signal),
   ).catch((error: unknown) => {
@@ -1189,13 +1193,11 @@ async function cloudInsightsRollup(
   } else if (!end) {
     return null;
   }
-  const rawServiceId = body.service_id ?? request.headers.get("x-service-id");
-  const serviceId = rawServiceId ? decodeUriStrict(String(rawServiceId)) : undefined;
   const headerRole = request.headers.get("x-session-role");
   const maskIps = Boolean(body.mask_ips) || request.headers.get("x-mask-ips") === "1" ||
     headerRole === "analyst-no-pii" || useSessionRoleStore.getState().isRemoteAnalyst;
   try {
-    const enabledLogFields = [...await cloudActiveLogFieldIds(serviceId, request.signal)];
+    const enabledLogFields = [...await activeFieldsPromise];
     assertAdapterEpoch(request, entryMetaEpoch);
     const answer = await rollupAnswer("/api/insights/rollup", {
       ...body,
