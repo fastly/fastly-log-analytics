@@ -92,8 +92,9 @@ def _stub_config_and_clear_caches(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_probe_prewhere_uses_multi_search_before_match() -> None:
     assert _PROBE_PREWHERE.startswith("multiSearchAnyCaseInsensitive(url, [")
-    assert _PROBE_PREWHERE.endswith("]) AND match(url, {probe_regex:String})")
-    assert _PROBE_PREWHERE.count("{probe_regex:String}") == 1
+    assert _PROBE_PREWHERE.endswith("])")
+    assert "match(" not in _PROBE_PREWHERE
+    assert "{probe_regex:String}" not in _PROBE_PREWHERE
     assert "{window_start" not in _PROBE_PREWHERE
     assert "{window_end" not in _PROBE_PREWHERE
     for needle in NEW_PROBES:
@@ -101,11 +102,13 @@ def test_probe_prewhere_uses_multi_search_before_match() -> None:
 
     for insight_id in ("new_probe_urls", "low_and_slow"):
         assert DETECTIONS[insight_id].prewhere == _PROBE_PREWHERE
+        assert "match(url, {probe_regex:String})" in DETECTIONS[insight_id].row_filter
         sql = _base_sql(DETECTIONS[insight_id], insight_id)
         pre = re.search(r"FROM request_facts PREWHERE (.*?) WHERE ", sql)
         assert pre is not None
         assert pre.group(1) == _PROBE_PREWHERE
         assert sql.count("{probe_regex:String}") == 1
+        assert sql.index("WHERE ") < sql.index("{probe_regex:String}")
 
 
 def test_rollup_base_sql_samples_window_and_pushes_sample_to_prewhere() -> None:

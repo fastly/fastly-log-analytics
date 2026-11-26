@@ -113,7 +113,7 @@ def window_sample_stride(window_hours: float) -> int:
 _PROBE_SUBSTRINGS_SQL = (
     "[" + ", ".join("'" + p.replace("\\", "\\\\").replace("'", "\\'") + "'" for p in NEW_PROBES) + "]"
 )
-_PROBE_PREWHERE = f"multiSearchAnyCaseInsensitive(url, {_PROBE_SUBSTRINGS_SQL}) AND match(url, {{probe_regex:String}})"
+_PROBE_PREWHERE = f"multiSearchAnyCaseInsensitive(url, {_PROBE_SUBSTRINGS_SQL})"
 
 
 @dataclass(frozen=True)
@@ -454,6 +454,7 @@ DETECTIONS: dict[str, Detection] = {
             order_by="w_cnt DESC",
             limit=25,
         ),
+        row_filter="match(url, {probe_regex:String})",
         prewhere=_PROBE_PREWHERE,
     ),
     "proxy_surge": Detection(
@@ -677,7 +678,7 @@ DETECTIONS: dict[str, Detection] = {
             order_by="distinct_paths DESC, span_s DESC",
             limit=15,
         ),
-        row_filter="ip != '' AND url != ''",
+        row_filter="ip != '' AND url != '' AND match(url, {probe_regex:String})",
         prewhere=_PROBE_PREWHERE,
     ),
     "credential_enumeration": Detection(
@@ -784,10 +785,11 @@ DETECTIONS: dict[str, Detection] = {
     joined AS (SELECT e.pop AS edge_pop, if(ifNull(s.prid, '') = '', 'Direct to Origin', s.pop) AS shield_pop,
                (e.ottfb - ifNull(s.ottfb, 0)) / 1000.0 AS transit_ms, e.is_w AS is_w, e.is_b AS is_b
         FROM edge_logs e LEFT JOIN shield_logs s ON s.prid = e.rid)
-    SELECT edge_pop, shield_pop, quantileTDigestIf(0.50)(transit_ms, is_w) AS w_p50, quantileTDigestIf(0.50)(transit_ms, is_b) AS b_p50, countIf(is_w) AS w_cnt
+    SELECT edge_pop, shield_pop, quantileTDigestIf(0.50)(transit_ms, is_w) AS w_p50, quantileTDigestIf(0.50)(transit_ms, is_b) AS b_p50, countIf(is_w)__W_SCALE__ AS w_cnt
     FROM joined GROUP BY edge_pop, shield_pop HAVING w_cnt >= 5 AND w_p50 > b_p50 * 1.5 ORDER BY (w_p50 / nullIf(b_p50, 0)) DESC LIMIT 20 """,
         row_filter=f"custom_fields['ottfb'] != '' AND ottfb IS NOT NULL AND (rid != '' OR prid != '') AND {_SHIELD_IN_WINDOW}",
         baseline_sampled=True,
+        window_sampled=True,
     ),
     "repeated_patterns": Detection(
         ("sec", "ip", "ua"),

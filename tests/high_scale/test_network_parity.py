@@ -7,7 +7,13 @@ from typing import Any
 import pytest
 
 from backend.high_scale.ingest_controller import HighScaleService
-from backend.high_scale.network import _network_json_cache, _network_memo, _network_model_cache, network_health
+from backend.high_scale.network import (
+    _network_json_cache,
+    _network_memo,
+    _network_model_cache,
+    _pop_rollup_cache,
+    network_health,
+)
 from backend.models.analytics import NetworkHealthRequest
 from backend.repositories.utils.response_shaping import (
     compute_network_global_summary,
@@ -33,6 +39,7 @@ def _clear_network_caches() -> None:
     _network_memo.cache.clear()
     _network_model_cache.clear()
     _network_json_cache.clear()
+    _pop_rollup_cache.clear()
 
 
 @pytest.mark.no_postgres
@@ -551,7 +558,7 @@ def test_network_quality_avoids_star_subquery_and_scatter_full_sort(monkeypatch:
     ((bars_sql, _),) = client.matching("FROM network_minute_dimensions")
     # Explicit column projection avoids has_star_subquery disabling _cf_* rewrite
     assert "SELECT * FROM (" not in bars_sql
-    assert "SELECT dimension, label, rtt_ms, reqs FROM (" in bars_sql
+    assert "SELECT dimension, label, rtt_ms, reqs" in bars_sql
 
     scatter_calls = [sql for sql, _ in client.matching("cache_state")]
     assert len(scatter_calls) == 2

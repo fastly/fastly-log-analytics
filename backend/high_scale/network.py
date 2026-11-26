@@ -181,7 +181,7 @@ def _fmt_ts(ts: int) -> str:
 
 def _network_sample_stride(span_s: float) -> int:
     if span_s >= 1209600:
-        return 250
+        return 500
     if span_s >= 604800:
         return 100
     if span_s >= 172800:
@@ -1250,8 +1250,8 @@ def network_quality(
         (
             service.service_id,
             client_cache_token(service.client),
-            _cache_minute_bound(start_time),
-            _cache_minute_bound(end_time),
+            _cache_minute_bound(start),
+            _cache_minute_bound(end),
         )
         if is_real_ch and start_time is not None and end_time is not None and not getattr(req, "filters", None)
         else None
@@ -1345,7 +1345,9 @@ def network_quality(
                 q_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
                 region_scale = _network_sample_stride(q_span_s)
                 region_hash = _network_time_sample_clause(region_scale, start=start, end=end)
-                want_pop_rollup = pop_rollup_sink is not None
+                want_pop_rollup = pop_rollup_sink is not None or (
+                    pop_rollup_cache_key is not None and _pop_rollup_cache.get(pop_rollup_cache_key) is None
+                )
                 pop_cols = (
                     ", toUInt64(sum(requests)) AS pop_reqs, "
                     "toUInt64(sum(errors)) AS pop_errors, "
@@ -1585,7 +1587,15 @@ def get_pop_health(
             )
             rollup_by_pop: dict[str, tuple[int, int, Any, Any]] = {}
             if not filter_sql:
+                pop_rollup_cache_key = (
+                    service.service_id,
+                    client_cache_token(service.client),
+                    int(start.timestamp()) // 60,
+                    int(end.timestamp()) // 60,
+                )
                 shared_rollup = pop_rollup_fut.result() if pop_rollup_fut is not None else None
+                if shared_rollup is None:
+                    shared_rollup = _pop_rollup_cache.get(pop_rollup_cache_key)
                 shared_fact = pop_fact_fut.result() if pop_fact_fut is not None else None
                 light_sql = (
                     "SELECT custom_fields['pop'] AS pop, count() AS requests, "
@@ -1648,6 +1658,8 @@ def get_pop_health(
                                 )
                         else:
                             fact_rows.append({**cr, "requests": cr.get("req_count", cr.get("requests"))})
+                    if rollup_by_pop:
+                        _pop_rollup_cache[pop_rollup_cache_key] = rollup_by_pop
                 if (not fact_rows and (shared_fact is None or pop_stride > 1)) or (
                     not rollup_by_pop and pop_stride == 1 and shared_fact is None
                 ):

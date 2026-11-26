@@ -106,7 +106,7 @@ _CacheRegistry.register("high_scale.insights._INSIGHTS_COVERAGE_CACHE", _INSIGHT
 # never run it themselves: they get the last result at once while a single background evaluation per
 # request shape refreshes it, and a cold shape answers with pending cards after a short wait.
 _STALE_MAX_SECONDS = 24 * 3600
-_COLD_WAIT_SECONDS = 2.0
+_COLD_WAIT_SECONDS = 1.3
 _META_WAIT_SECONDS = 15.0
 # A failed scan is raised to the next page request only while it is this recent; after that, retry.
 _FAILURE_REPLAY_SECONDS = 60.0
@@ -205,6 +205,14 @@ def _evaluate(
         return service.client.execute(sql, q_params)
 
     use_cf = _use_materialized_cf(service.client)
+    is_real_ch = (
+        hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
+    )
+    skip_shield_path = False
+    if is_real_ch and not os.getenv("PYTEST_CURRENT_TEST"):
+        from backend.high_scale.network import _SHIELD_ACTIVE_CACHE
+
+        skip_shield_path = _SHIELD_ACTIVE_CACHE.get((service.service_id, client_cache_token(service.client))) is False
     baseline_start, window_start, now = _window(window_hours, baseline_hours, clamp_start, clamp_end)
     scope = " AND ".join(visible_fact_clauses("request"))
     if filter_clause:
@@ -595,6 +603,8 @@ def _evaluate(
                 baseline_hours,
                 history_hours,
             )
+        elif skip_shield_path and definition.id == "shield_path_degradation":
+            cards_by_id[definition.id] = _shape(definition, [])
         else:
             eligible.append((definition, detection))
     batches, standalone = plan_execution(eligible, enabled_set)

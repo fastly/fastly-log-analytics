@@ -591,8 +591,10 @@ def _build_url_cache(
     rollup_span: tuple[datetime, datetime] | None,
     filter_clause: str,
     baseline_hours: float = 0.0,
+    window_hours: float = 0.0,
 ) -> tuple[str, QuerySource]:
     b_stride = _baseline_sample_stride(baseline_hours)
+    w_stride = _window_sample_stride(window_hours)
     cte, source = _base_cte(
         "url_cache",
         [("url", COLUMNS["url"]), ("cache", COLUMNS["cache"])],
@@ -601,6 +603,7 @@ def _build_url_cache(
         filter_clause=filter_clause,
         weighted=True,
         baseline_sample_stride=b_stride,
+        window_sample_stride=w_stride,
     )
     sql = (
         f"{cte} SELECT url, "

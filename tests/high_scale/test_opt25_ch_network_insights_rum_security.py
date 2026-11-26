@@ -80,6 +80,7 @@ def _stub_and_clear_caches(monkeypatch: pytest.MonkeyPatch) -> None:
     hs_network._network_memo._telemetry_cache.clear()
     hs_network._network_model_cache.clear()
     hs_network._network_json_cache.clear()
+    hs_network._pop_rollup_cache.clear()
     hs_network._SHIELD_ACTIVE_CACHE.clear()
     evaluator._INSIGHTS_CACHE.clear()
     evaluator._INSIGHTS_TELEMETRY_CACHE.clear()
@@ -96,8 +97,8 @@ def _stub_and_clear_caches(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_network_sample_stride_14d_tier() -> None:
     assert hs_network._network_sample_stride(604800) == 100
     assert hs_network._network_sample_stride(1209599) == 100
-    assert hs_network._network_sample_stride(1209600) == 250
-    assert hs_network._network_sample_stride(2592000) == 250
+    assert hs_network._network_sample_stride(1209600) == 500
+    assert hs_network._network_sample_stride(2592000) == 500
 
 
 def test_shield_active_cache_caches_false_and_samples_probe(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -240,7 +241,7 @@ def test_network_bundle_shares_rollup_and_fact_and_stays_under_8_queries(monkeyp
     assert sjc.cache_hit_rate == 60.0
     assert sjc.bandwidth_bytes == 480000
     assert resp.quality is not None and resp.quality.by_pop[0].value == "SJC"
-    assert resp.transport is not None and resp.transport.total_requests == 2500
+    assert resp.transport is not None and resp.transport.total_requests == 5000
 
     # When sections=["quality", "pop_health"] (without transport), pop_health skips network_minute_dimensions.
     hs_network._network_memo.cache.clear()
