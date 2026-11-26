@@ -505,4 +505,15 @@ describe("originFromRollup", () => {
     expect(originRollupEligible("/api/origin/aggregates", { ...reqBody, sections: ["summary", "slow_urls"] })).toBe(false);
     expect(originRollupEligible("/api/origin/aggregates", { ...reqBody, custom_filters: [{ field: "x", value: "y" }] })).toBe(false);
   });
+
+  it("narrows decoded rollup groups and fields for ORIGIN_SUMMARY_SPEC and ORIGIN_FILTERED_SUMMARY_SPEC", async () => {
+    const { decodeRollup } = await import("./dashboard/rollup-query");
+    const { ORIGIN_FILTERED_SUMMARY_SPEC, ORIGIN_SUMMARY_SPEC } = await import("./origin-rollup");
+    expect(ORIGIN_SUMMARY_SPEC.groups.has("filtered_rollups")).toBe(false);
+    expect(ORIGIN_FILTERED_SUMMARY_SPEC.groups.has("filtered_rollups")).toBe(true);
+    const decoded = (await decodeRollup(BUFFERS[WINDOWS[0].key], 300_000, ORIGIN_SUMMARY_SPEC))!;
+    expect([...decoded.fields.keys()]).toEqual(["ost"]);
+    expect([...decoded.dims.keys()]).toEqual(["oip"]);
+    expect([...decoded.series.keys()].sort()).toEqual(["origin", "overall"]);
+  });
 });

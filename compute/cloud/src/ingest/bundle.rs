@@ -138,15 +138,17 @@ const PACKED_HEAD: usize = PACKED_MAGIC.len() + 4 + 8;
 /// A raw partial is a few times its bundle; larger means a corrupt length.
 const PARTIAL_RAW_MAX: u64 = 256 << 20;
 
-/// Compresses an encoded partial and splits it into objects of at most `limit` bytes, head first.
-fn pack_partial(raw: &[u8], limit: usize) -> Result<Vec<Vec<u8>>, String> {
-    let packed = zstd::bulk::compress(raw, 1).map_err(|_| "partial_encode_failed")?;
+fn pack_partial_split(
+    raw_len: usize,
+    packed: Vec<u8>,
+    limit: usize,
+) -> Result<Vec<Vec<u8>>, String> {
     let mut rest = packed.as_slice();
     let mut objects = Vec::new();
     let mut head = Vec::with_capacity(limit.min(PACKED_HEAD + rest.len()));
     head.extend_from_slice(PACKED_MAGIC);
     head.extend_from_slice(&[0; 4]);
-    head.extend_from_slice(&(raw.len() as u64).to_le_bytes());
+    head.extend_from_slice(&(raw_len as u64).to_le_bytes());
     let mut object = head;
     loop {
         let take = rest.len().min(limit - object.len());
@@ -161,6 +163,21 @@ fn pack_partial(raw: &[u8], limit: usize) -> Result<Vec<Vec<u8>>, String> {
     let count = u32::try_from(objects.len()).map_err(|_| "partial_encode_failed")?;
     objects[0][PACKED_MAGIC.len()..PACKED_MAGIC.len() + 4].copy_from_slice(&count.to_le_bytes());
     Ok(objects)
+}
+
+/// Compresses an encoded partial and splits it into objects of at most `limit` bytes, head first.
+#[allow(dead_code)]
+fn pack_partial(raw: &[u8], limit: usize) -> Result<Vec<Vec<u8>>, String> {
+    let packed = zstd::bulk::compress(raw, 1).map_err(|_| "partial_encode_failed")?;
+    pack_partial_split(raw.len(), packed, limit)
+}
+
+/// Compresses an owned encoded partial, dropping `raw` before splitting `packed` across objects.
+fn pack_partial_owned(raw: Vec<u8>, limit: usize) -> Result<Vec<Vec<u8>>, String> {
+    let raw_len = raw.len();
+    let packed = zstd::bulk::compress(&raw, 1).map_err(|_| "partial_encode_failed")?;
+    drop(raw);
+    pack_partial_split(raw_len, packed, limit)
 }
 
 /// The object count of a packed partial head.
@@ -1579,6 +1596,70 @@ impl Acc {
         acc.sources >= self.sources
     }
 
+    fn summary_layout(&self) -> Vec<&'static [&'static str]> {
+        let mut layout = Vec::new();
+        if !self.overview.is_empty() || !self.minutes.is_empty() {
+            layout.push(["overview", "time_series"].as_slice());
+        }
+        if self.fields.iter().any(|(f, a)| self.covered(f, a)) {
+            layout.push(["field_totals", "all_fields", "all_fields_ip"].as_slice());
+        }
+        if self.pivots.values().any(|a| self.pivot_covered(a)) {
+            layout.push(SLICE_GROUPS);
+        }
+        if !self.sessions.is_empty() {
+            layout.push(["sessions"].as_slice());
+        }
+        let mut tail_non_empty = false;
+        for (group, fields) in GROUPS.iter().zip(&self.groups) {
+            if fields.iter().any(|(f, a)| self.group_covered(group, f, a)) {
+                tail_non_empty = true;
+            }
+            match group.name {
+                "dims" if tail_non_empty => {
+                    layout.push(["dims"].as_slice());
+                    tail_non_empty = false;
+                }
+                "series5" if tail_non_empty => {
+                    layout.push(["series5"].as_slice());
+                    tail_non_empty = false;
+                }
+                MINUTE_GROUP if tail_non_empty => {
+                    layout.push([MINUTE_GROUP].as_slice());
+                    tail_non_empty = false;
+                }
+                "origin" if tail_non_empty => {
+                    layout.push(["bins", "assets", "transport", "origin"].as_slice());
+                    tail_non_empty = false;
+                }
+                _ => {}
+            }
+        }
+        if tail_non_empty || !self.sample.is_empty() {
+            layout.push(
+                [
+                    "urls",
+                    "quality",
+                    "header_ip",
+                    "bot_ua",
+                    "tls_fp",
+                    "value",
+                    "proxy",
+                    "ins_url",
+                    "ins_ip",
+                    "asset_urls",
+                    "ins_lat",
+                    "ins_asn",
+                    "shield_routes",
+                    "filtered_rollups",
+                    "sample",
+                ]
+                .as_slice(),
+            );
+        }
+        layout
+    }
+
     fn slice_acc(&mut self, cols: &Cols<'_>, i: usize) -> Option<&mut SliceAcc> {
         let pivot = cols.s(C::Pivot, i)?;
         let value = cols.s(C::PivotValue, i)?;
@@ -2277,21 +2358,48 @@ impl Acc {
     }
 
     /// A final bundle of `unit` or a partial (`None`: the whole state, flags as folded).
-    fn write(&self, start: i64, unit: Option<Unit>, label: &str) -> Result<Vec<u8>, String> {
+    /// Consumes `self` and streams each row group into Parquet so prior sections drop from the
+    /// heap before subsequent Arrow arrays or ZSTD compression buffers are allocated.
+    fn write(mut self, start: i64, unit: Option<Unit>, label: &str) -> Result<Vec<u8>, String> {
         let bucket = start * 1000;
         let fin = unit.is_some();
         let top_k = unit.map(Unit::top_k);
+        let sources = self.sources;
+        let foreign = self.foreign;
+        let expected_layout = self.summary_layout();
+        let layout_json = serde_json::json!({ "v": 1, "rg": expected_layout }).to_string();
+        let mut writer = super::convert::SummaryBatchWriter::try_new(
+            summary::schema(),
+            vec![
+                KeyValue::new(
+                    "flp_summary".into(),
+                    if foreign {
+                        "mixed".to_owned()
+                    } else {
+                        summary::SUMMARY_VERSION.to_string()
+                    },
+                ),
+                KeyValue::new(
+                    "flp_bundle".into(),
+                    if fin {
+                        label.to_owned()
+                    } else {
+                        format!("{label}_partial")
+                    },
+                ),
+                KeyValue::new("flp_summary_layout".into(), layout_json),
+            ],
+        )?;
         let mut out = Out::new();
-        let mut groups_out: Vec<arrow_array::RecordBatch> = Vec::new();
         let mut layout_rg: Vec<&'static [&'static str]> = Vec::new();
         let flush_group = |out: &mut Out,
                            groups: &'static [&'static str],
-                           groups_out: &mut Vec<arrow_array::RecordBatch>,
+                           writer: &mut super::convert::SummaryBatchWriter,
                            layout_rg: &mut Vec<&'static [&'static str]>|
          -> Result<(), String> {
             if !out.is_empty() {
                 let batch = std::mem::replace(out, Out::new()).finish()?;
-                groups_out.push(batch);
+                writer.write_row_group(&batch)?;
                 layout_rg.push(groups);
             }
             Ok(())
@@ -2324,14 +2432,14 @@ impl Acc {
             );
             out.push(&values);
         };
-        for (hour, (cells, hll, capped)) in &self.overview {
+        for (hour, (cells, hll, capped)) in std::mem::take(&mut self.overview) {
             let observed = fin.then(|| hll.count());
             let blob = hll.to_bytes();
             row(
                 &mut out,
                 &[
                     (C::Bundle, V::S("overview")),
-                    (C::Bucket, V::I(*hour)),
+                    (C::Bucket, V::I(hour)),
                     (C::IpSketch, V::Bin(&blob)),
                     (
                         C::IpCountObserved,
@@ -2339,28 +2447,28 @@ impl Acc {
                     ),
                     (
                         C::SampleCapped,
-                        V::B(*capped || observed.is_some_and(|o| o >= summary::IP_SAMPLE_CAP)),
+                        V::B(capped || observed.is_some_and(|o| o >= summary::IP_SAMPLE_CAP)),
                     ),
                 ],
                 OV_COLS,
-                cells,
+                &cells,
             );
         }
-        for (minute, cells) in &self.minutes {
+        for (minute, cells) in std::mem::take(&mut self.minutes) {
             row(
                 &mut out,
-                &[(C::Bundle, V::S("time_series")), (C::Bucket, V::I(*minute))],
+                &[(C::Bundle, V::S("time_series")), (C::Bucket, V::I(minute))],
                 TS_COLS,
-                cells,
+                &cells,
             );
         }
         flush_group(
             &mut out,
             &["overview", "time_series"],
-            &mut groups_out,
+            &mut writer,
             &mut layout_rg,
         )?;
-        let ordered = |names: Vec<&String>, known: &[&str]| -> Vec<String> {
+        let ordered = |names: Vec<String>, known: &[&str]| -> Vec<String> {
             let mut out: Vec<String> = known
                 .iter()
                 .filter(|k| names.iter().any(|n| n == *k))
@@ -2369,19 +2477,27 @@ impl Acc {
             let mut rest: Vec<String> = names
                 .into_iter()
                 .filter(|n| !known.contains(&n.as_str()))
-                .cloned()
                 .collect();
             rest.sort_unstable();
             out.extend(rest);
             out
         };
-        for field in ordered(self.fields.keys().collect(), FIELDS) {
-            let acc = &self.fields[&field];
-            if !self.covered(&field, acc) {
+        let mut fields_map = std::mem::take(&mut self.fields);
+        let covered_fields: BTreeSet<String> = fields_map
+            .iter()
+            .filter(|(field, acc)| FIELDS.contains(&field.as_str()) || acc.sources >= sources)
+            .map(|(field, _)| field.clone())
+            .collect();
+        let field_keys: Vec<String> = fields_map.keys().cloned().collect();
+        for field in ordered(field_keys, FIELDS) {
+            let Some(acc) = fields_map.remove(&field) else {
+                continue;
+            };
+            if !covered_fields.contains(&field) {
                 continue;
             }
-            let mut ranked: Vec<(&String, &FieldVal)> = acc.values.iter().collect();
-            ranked.sort_unstable_by(|a, b| b.1.count.cmp(&a.1.count).then_with(|| a.0.cmp(b.0)));
+            let mut ranked: Vec<(String, FieldVal)> = acc.values.into_iter().collect();
+            ranked.sort_unstable_by(|a, b| b.1.count.cmp(&a.1.count).then_with(|| a.0.cmp(&b.0)));
             let cut = top_k.unwrap_or(ranked.len());
             let truncated = acc.truncated || ranked.len() > cut;
             ranked.truncate(cut);
@@ -2423,27 +2539,28 @@ impl Acc {
                 ]);
             }
         }
+        drop(fields_map);
         flush_group(
             &mut out,
             &["field_totals", "all_fields", "all_fields_ip"],
-            &mut groups_out,
+            &mut writer,
             &mut layout_rg,
         )?;
-        for (pivot, acc) in &self.pivots {
-            if !self.pivot_covered(acc) {
+        for (pivot, acc) in std::mem::take(&mut self.pivots) {
+            if acc.sources < sources {
                 continue;
             }
             out.push(&[
                 (C::Bundle, V::S("pivot_totals")),
                 (C::Bucket, V::I(bucket)),
-                (C::Pivot, V::S(pivot)),
+                (C::Pivot, V::S(&pivot)),
                 (C::Count, V::I(acc.total)),
                 (C::Truncated, V::B(acc.truncated)),
             ]);
-            let mut values: Vec<(&String, &SliceAcc)> = acc.values.iter().collect();
-            values.sort_unstable_by(|a, b| a.0.cmp(b.0));
+            let mut values: Vec<(String, SliceAcc)> = acc.values.into_iter().collect();
+            values.sort_unstable_by(|a, b| a.0.cmp(&b.0));
             for (value, slice) in values {
-                let head = [(C::Pivot, V::S(pivot)), (C::PivotValue, V::S(value))];
+                let head = [(C::Pivot, V::S(&pivot)), (C::PivotValue, V::S(&value))];
                 let blob = slice.ips.to_bytes();
                 out.push(&[
                     (C::Bundle, V::S("slice_overview")),
@@ -2453,29 +2570,25 @@ impl Acc {
                     (C::Requests, V::I(slice.requests)),
                     (C::IpSketch, V::Bin(&blob)),
                 ]);
-                for (minute, cells) in &slice.minutes {
+                for (minute, cells) in slice.minutes {
                     row(
                         &mut out,
                         &[
                             (C::Bundle, V::S("slice_ts")),
-                            (C::Bucket, V::I(*minute)),
+                            (C::Bucket, V::I(minute)),
                             head[0],
                             head[1],
                         ],
                         TS_COLS,
-                        cells,
+                        &cells,
                     );
                 }
-                for (field, f) in &slice.fields {
-                    if !self
-                        .fields
-                        .get(field)
-                        .is_some_and(|main| self.covered(field, main))
-                    {
+                for (field, f) in slice.fields {
+                    if !covered_fields.contains(&field) {
                         continue;
                     }
-                    let mut ranked: Vec<(&String, &i64)> = f.values.iter().collect();
-                    ranked.sort_unstable_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+                    let mut ranked: Vec<(String, i64)> = f.values.into_iter().collect();
+                    ranked.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
                     let cut = top_k.unwrap_or(ranked.len());
                     let truncated = f.truncated || ranked.len() > cut;
                     ranked.truncate(cut);
@@ -2484,7 +2597,7 @@ impl Acc {
                         (C::Bucket, V::I(bucket)),
                         head[0],
                         head[1],
-                        (C::FieldName, V::S(field)),
+                        (C::FieldName, V::S(&field)),
                         (C::Count, V::I(f.total)),
                         (C::Truncated, V::B(truncated)),
                     ]);
@@ -2494,20 +2607,22 @@ impl Acc {
                             (C::Bucket, V::I(bucket)),
                             head[0],
                             head[1],
-                            (C::FieldName, V::S(field)),
-                            (C::Value, V::S(v)),
-                            (C::Count, V::I(*n)),
+                            (C::FieldName, V::S(&field)),
+                            (C::Value, V::S(&v)),
+                            (C::Count, V::I(n)),
                         ]);
                     }
                 }
             }
         }
-        flush_group(&mut out, SLICE_GROUPS, &mut groups_out, &mut layout_rg)?;
-        let mut sessions: Vec<(&SessionKey, &Vec<Cell>)> = self.sessions.iter().collect();
+        drop(covered_fields);
+        flush_group(&mut out, SLICE_GROUPS, &mut writer, &mut layout_rg)?;
+        let mut sessions: Vec<(SessionKey, Vec<Cell>)> =
+            std::mem::take(&mut self.sessions).into_iter().collect();
         sessions.sort_unstable_by(|a, b| {
             int(&b.1[SESSION_REQS])
                 .cmp(&int(&a.1[SESSION_REQS]))
-                .then_with(|| a.0.cmp(b.0))
+                .then_with(|| a.0.cmp(&b.0))
         });
         sessions.truncate(summary::SESSION_K);
         for ((ip, ja4), cells) in sessions {
@@ -2516,18 +2631,23 @@ impl Acc {
                 &[
                     (C::Bundle, V::S("sessions")),
                     (C::Bucket, V::I(bucket)),
-                    (C::Ip, V::S(ip)),
+                    (C::Ip, V::S(&ip)),
                     (C::Ja4, ja4.as_deref().map_or(V::Null, V::S)),
                 ],
                 SESSION_COLS,
-                cells,
+                &cells,
             );
         }
-        flush_group(&mut out, &["sessions"], &mut groups_out, &mut layout_rg)?;
-        for (group, fields) in GROUPS.iter().zip(&self.groups) {
-            for field in ordered(fields.keys().collect(), group.fields) {
-                let acc = &fields[&field];
-                if !self.group_covered(group, &field, acc) {
+        flush_group(&mut out, &["sessions"], &mut writer, &mut layout_rg)?;
+        let mut groups_arr = std::mem::take(&mut self.groups);
+        for (group, fields_slot) in GROUPS.iter().zip(groups_arr.iter_mut()) {
+            let mut fields = std::mem::take(fields_slot);
+            let field_keys: Vec<String> = fields.keys().cloned().collect();
+            for field in ordered(field_keys, group.fields) {
+                let Some(acc) = fields.remove(&field) else {
+                    continue;
+                };
+                if group.gated.contains(&field.as_str()) && acc.sources < sources {
                     continue;
                 }
                 let cut = unit.map_or(acc.values.len(), |u| group.written(&field, u));
@@ -2562,33 +2682,35 @@ impl Acc {
                     }
                 }
             }
+            drop(fields);
             match group.name {
-                "dims" => flush_group(&mut out, &["dims"], &mut groups_out, &mut layout_rg)?,
-                "series5" => flush_group(&mut out, &["series5"], &mut groups_out, &mut layout_rg)?,
+                "dims" => flush_group(&mut out, &["dims"], &mut writer, &mut layout_rg)?,
+                "series5" => flush_group(&mut out, &["series5"], &mut writer, &mut layout_rg)?,
                 MINUTE_GROUP => {
-                    flush_group(&mut out, &[MINUTE_GROUP], &mut groups_out, &mut layout_rg)?
+                    flush_group(&mut out, &[MINUTE_GROUP], &mut writer, &mut layout_rg)?
                 }
                 "origin" => flush_group(
                     &mut out,
                     &["bins", "assets", "transport", "origin"],
-                    &mut groups_out,
+                    &mut writer,
                     &mut layout_rg,
                 )?,
                 _ => {}
             }
         }
-        let mut sample: Vec<&SampleRow> = self.sample.iter().collect();
+        drop(groups_arr);
+        let mut sample = std::mem::take(&mut self.sample);
         sample.sort_by_key(|r| (r.0, r.1));
         for (key, ts, cells) in sample.into_iter().take(summary::SAMPLE_K) {
             row(
                 &mut out,
                 &[
                     (C::Bundle, V::S("sample")),
-                    (C::Bucket, V::I(*ts)),
-                    (C::SampleKey, V::I(*key)),
+                    (C::Bucket, V::I(ts)),
+                    (C::SampleKey, V::I(key)),
                 ],
                 SAMPLE_COLS,
-                cells,
+                &cells,
             );
         }
         flush_group(
@@ -2610,34 +2732,11 @@ impl Acc {
                 "filtered_rollups",
                 "sample",
             ],
-            &mut groups_out,
+            &mut writer,
             &mut layout_rg,
         )?;
-        let batch_refs: Vec<&arrow_array::RecordBatch> = groups_out.iter().collect();
-        let layout_json = serde_json::json!({ "v": 1, "rg": layout_rg }).to_string();
-        super::convert::write_summary_batches(
-            summary::schema(),
-            &batch_refs,
-            vec![
-                KeyValue::new(
-                    "flp_summary".into(),
-                    if self.foreign {
-                        "mixed".to_owned()
-                    } else {
-                        summary::SUMMARY_VERSION.to_string()
-                    },
-                ),
-                KeyValue::new(
-                    "flp_bundle".into(),
-                    if fin {
-                        label.to_owned()
-                    } else {
-                        format!("{label}_partial")
-                    },
-                ),
-                KeyValue::new("flp_summary_layout".into(), layout_json),
-            ],
-        )
+        debug_assert_eq!(layout_rg, expected_layout);
+        writer.finish()
     }
 }
 
@@ -2662,7 +2761,7 @@ trait Fold: Sized {
     /// A raw partial, starting with [`PARTIAL_MAGIC`].
     fn encode(&self) -> Result<Vec<u8>, String>;
     fn decode(raw: &[u8], unit: Unit) -> Result<Self, String>;
-    fn finish(&self, start: i64, unit: Unit) -> Result<Vec<u8>, String>;
+    fn finish(self, start: i64, unit: Unit) -> Result<Vec<u8>, String>;
     /// What a partial's bytes mean; it names the partial (see [`partial_fp`]).
     fn layout() -> String;
 }
@@ -2683,7 +2782,7 @@ impl Fold for Acc {
     fn decode(raw: &[u8], unit: Unit) -> Result<Self, String> {
         Acc::decode_partial(raw, unit)
     }
-    fn finish(&self, start: i64, unit: Unit) -> Result<Vec<u8>, String> {
+    fn finish(self, start: i64, unit: Unit) -> Result<Vec<u8>, String> {
         self.write(start, Some(unit), unit.label())
     }
     fn layout() -> String {
@@ -2724,7 +2823,7 @@ impl Fold for cmcd_summary::BundleAcc {
         acc.fold(body.to_vec())?;
         Ok(acc)
     }
-    fn finish(&self, _: i64, _: Unit) -> Result<Vec<u8>, String> {
+    fn finish(self, _: i64, _: Unit) -> Result<Vec<u8>, String> {
         self.write()
     }
     /// The partial is bundle Parquet that folds by column name.
@@ -2758,7 +2857,7 @@ impl Fold for rum_summary::BundleAcc {
         acc.fold(body.to_vec())?;
         Ok(acc)
     }
-    fn finish(&self, _: i64, _: Unit) -> Result<Vec<u8>, String> {
+    fn finish(self, _: i64, _: Unit) -> Result<Vec<u8>, String> {
         self.write()
     }
     /// The partial is bundle Parquet that folds by column name.
@@ -3183,17 +3282,25 @@ impl<R: Runtime> Ctx<'_, '_, R> {
         if defer_final && self.report.stopped.is_none() {
             self.report.stopped = Some("vcpu");
         }
+        let mut acc = Some(acc);
         let mut wrote_partial = false;
         let (key, mut objects, is_final) = match job
             .final_key
             .filter(|_| done == sources.len() && !defer_final)
         {
             Some(final_key) => {
-                let body = acc.finish(job.start, job.unit)?;
+                let body = acc
+                    .take()
+                    .ok_or("bundle_acc_missing")?
+                    .finish(job.start, job.unit)?;
                 (Some(final_key.to_owned()), vec![body], true)
             }
             None if done > resumed => {
-                let objects = pack_partial(&acc.encode()?, CDN_READ_LIMIT)?;
+                let raw = acc.as_ref().ok_or("bundle_acc_missing")?.encode()?;
+                if open.is_none() {
+                    acc = None;
+                }
+                let objects = pack_partial_owned(raw, CDN_READ_LIMIT)?;
                 if !self.room(objects.len() as u32) {
                     return Ok(Step::Pending);
                 }
@@ -3276,7 +3383,10 @@ impl<R: Runtime> Ctx<'_, '_, R> {
                     .max()
                     .unwrap_or(job.start * 1000);
                 let open_key = open_bundle_key(&self.bundles, job.start, end_ms, &sources[..done]);
-                let body = acc.finish(job.start, Unit::Hour)?;
+                let body = acc
+                    .take()
+                    .ok_or("bundle_acc_missing")?
+                    .finish(job.start, Unit::Hour)?;
                 self.report.bytes_written += body.len() as u64;
                 if self.catalog.version == super::catalog::VERSION {
                     let hash = hex::encode(Sha256::digest(&body));
@@ -4876,12 +4986,13 @@ mod tests {
             acc.prune();
         }
         assert!(acc.sessions.len() == summary::SESSION_K && acc.fields["url"].truncated);
+        let partial = acc.encode_partial();
         let bundle = acc.write(1_800_000_000, Some(Unit::Hour), "hour").unwrap();
         assert_eq!(
             hex::encode(Sha256::digest(&bundle)),
             "30c06dc5f496883ad541c57292562716a771753a1e7aba8c1c6bce7c5dd963be"
         );
-        let resumed = Acc::decode_partial(&acc.encode_partial(), Unit::Hour).unwrap();
+        let resumed = Acc::decode_partial(&partial, Unit::Hour).unwrap();
         assert_eq!(
             resumed
                 .write(1_800_000_000, Some(Unit::Hour), "hour")
@@ -5511,5 +5622,37 @@ mod tests {
             ranked_day.iter().map(|(u, _)| u.as_str()).collect();
         assert!(day_names.contains("/z_slow_elapsed"));
         assert!(day_names.contains("/z_slow_ttfb"));
+    }
+
+    #[test]
+    fn streaming_write_emits_valid_layout_metadata_and_packs_owned_partials() {
+        let win = rich_window(0);
+        let start = 1_800_000_000;
+        for unit in [Some(Unit::Hour), None] {
+            let mut acc = Acc::new(Unit::Hour);
+            acc.fold(win.clone(), 1).unwrap();
+            acc.prune();
+            let raw = acc.encode_partial();
+            let packed = pack_partial_owned(raw.clone(), 4096).unwrap();
+            assert_eq!(unpack_partial(&packed).unwrap(), raw);
+            let bytes = acc.write(start, unit, "hour").unwrap();
+            let reader =
+                ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(bytes)).unwrap();
+            let meta = reader
+                .metadata()
+                .file_metadata()
+                .key_value_metadata()
+                .unwrap();
+            let layout = meta
+                .iter()
+                .find(|kv| kv.key == "flp_summary_layout")
+                .and_then(|kv| kv.value.as_deref())
+                .unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(layout).unwrap();
+            assert_eq!(
+                parsed["rg"].as_array().unwrap().len(),
+                reader.metadata().num_row_groups()
+            );
+        }
     }
 }

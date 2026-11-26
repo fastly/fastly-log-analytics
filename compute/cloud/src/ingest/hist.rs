@@ -103,6 +103,73 @@ pub fn slot(v: i64) -> u16 {
     }
 }
 
+/// One non-zero log-spaced histogram bucket: 2-byte slot plus 48-bit saturating count (`8` bytes total).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Bucket {
+    slot: u16,
+    c0: u16,
+    c1: u16,
+    c2: u16,
+}
+
+const MAX_BUCKET_COUNT: u64 = (1u64 << 48) - 1;
+
+impl Bucket {
+    const ZERO: Self = Self {
+        slot: 0,
+        c0: 0,
+        c1: 0,
+        c2: 0,
+    };
+
+    #[inline]
+    pub fn new(slot: u16, count: u64) -> Self {
+        let c = count.min(MAX_BUCKET_COUNT);
+        Self {
+            slot,
+            c0: c as u16,
+            c1: (c >> 16) as u16,
+            c2: (c >> 32) as u16,
+        }
+    }
+
+    #[inline]
+    pub fn slot(self) -> u16 {
+        self.slot
+    }
+
+    #[inline]
+    pub fn count(self) -> u64 {
+        u64::from(self.c0) | (u64::from(self.c1) << 16) | (u64::from(self.c2) << 32)
+    }
+
+    #[inline]
+    fn add_saturating(&mut self, n: u64) {
+        let sum = self.count().saturating_add(n).min(MAX_BUCKET_COUNT);
+        self.c0 = sum as u16;
+        self.c1 = (sum >> 16) as u16;
+        self.c2 = (sum >> 32) as u16;
+    }
+}
+
+#[inline]
+fn grow_buckets(buckets: &mut Vec<Bucket>, min_cap: usize) {
+    if min_cap <= buckets.capacity() {
+        return;
+    }
+    let doubled = buckets.capacity().saturating_mul(2).max(4);
+    let target = doubled.max(min_cap);
+    if target > BUCKETS {
+        buckets.reserve_exact(
+            BUCKETS
+                .saturating_sub(buckets.len())
+                .max(min_cap - buckets.len()),
+        );
+    } else {
+        buckets.reserve_exact(target - buckets.len());
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hist {
     pub under: u64,
@@ -110,7 +177,7 @@ pub struct Hist {
     pub min: i64,
     pub max: i64,
     /// Ascending, non-zero.
-    pub buckets: Vec<(u16, u64)>,
+    pub buckets: Vec<Bucket>,
 }
 
 impl Default for Hist {
@@ -156,7 +223,7 @@ fn unzigzag(v: u64) -> i64 {
 
 /// Reads a [`Hist::to_bytes`] blob (v2 or legacy v1) into `buckets`: `([under, over], [min, max], buckets used)`,
 /// or `None` unless it is a well-formed, non-empty histogram.
-fn parse(blob: &[u8], buckets: &mut [(u16, u64); BUCKETS]) -> Option<([u64; 2], [i64; 2], usize)> {
+fn parse(blob: &[u8], buckets: &mut [Bucket; BUCKETS]) -> Option<([u64; 2], [i64; 2], usize)> {
     let ver = *blob.first()?;
     if ver != VERSION && ver != VERSION_V1 {
         return None;
@@ -196,10 +263,10 @@ fn parse(blob: &[u8], buckets: &mut [(u16, u64); BUCKETS]) -> Option<([u64; 2], 
         } else {
             raw_s as u16
         };
-        if n > 0 && buckets[n - 1].0 == mapped_s {
-            buckets[n - 1].1 = buckets[n - 1].1.saturating_add(c);
+        if n > 0 && buckets[n - 1].slot() == mapped_s {
+            buckets[n - 1].add_saturating(c);
         } else {
-            buckets[n] = (mapped_s, c);
+            buckets[n] = Bucket::new(mapped_s, c);
             n += 1;
         }
     }
@@ -225,9 +292,13 @@ impl Hist {
         match s {
             UNDER => self.under = self.under.saturating_add(n),
             OVER => self.over = self.over.saturating_add(n),
-            _ => match self.buckets.binary_search_by_key(&s, |b| b.0) {
-                Ok(at) => self.buckets[at].1 = self.buckets[at].1.saturating_add(n),
-                Err(at) => self.buckets.insert(at, (s, n)),
+            _ => match self.buckets.binary_search_by_key(&s, |b| b.slot()) {
+                Ok(at) => self.buckets[at].add_saturating(n),
+                Err(at) => {
+                    let next_len = self.buckets.len() + 1;
+                    grow_buckets(&mut self.buckets, next_len);
+                    self.buckets.insert(at, Bucket::new(s, n));
+                }
             },
         }
     }
@@ -236,7 +307,7 @@ impl Hist {
         self.buckets
             .iter()
             .fold(self.under.saturating_add(self.over), |a, b| {
-                a.saturating_add(b.1)
+                a.saturating_add(b.count())
             })
     }
 
@@ -257,7 +328,7 @@ impl Hist {
     /// Merges a blob from [`Hist::to_bytes`] without decoding it into a [`Hist`]; false (and no
     /// change) if it is not one.
     pub fn merge_bytes(&mut self, blob: &[u8]) -> bool {
-        let mut buckets = [(0, 0); BUCKETS];
+        let mut buckets = [Bucket::ZERO; BUCKETS];
         let Some((counts, range, n)) = parse(blob, &mut buckets) else {
             return false;
         };
@@ -265,40 +336,39 @@ impl Hist {
         true
     }
 
-    fn merge_parts(
-        &mut self,
-        [under, over]: [u64; 2],
-        [min, max]: [i64; 2],
-        theirs: &[(u16, u64)],
-    ) {
+    fn merge_parts(&mut self, [under, over]: [u64; 2], [min, max]: [i64; 2], theirs: &[Bucket]) {
         self.min = self.min.min(min);
         self.max = self.max.max(max);
         self.under = self.under.saturating_add(under);
         self.over = self.over.saturating_add(over);
-        // Both sides ascend: count the new slots, grow once, then merge from the back in place.
+        // Both sides ascend: count the new slots, grow once (capped at BUCKETS), then merge in place.
         let mine = &self.buckets;
         let (mut a, mut fresh) = (0, 0);
-        for &(s, _) in theirs {
-            while a < mine.len() && mine[a].0 < s {
+        for b in theirs {
+            let s = b.slot();
+            while a < mine.len() && mine[a].slot() < s {
                 a += 1;
             }
-            if a == mine.len() || mine[a].0 != s {
+            if a == mine.len() || mine[a].slot() != s {
                 fresh += 1;
             }
         }
         let (mut a, mut b) = (self.buckets.len(), theirs.len());
-        self.buckets.resize(a + fresh, (0, 0));
+        let target = a + fresh;
+        grow_buckets(&mut self.buckets, target);
+        self.buckets.resize(target, Bucket::ZERO);
         let mut at = self.buckets.len();
         while b > 0 {
             at -= 1;
-            let y = theirs[b - 1];
+            let mut y = theirs[b - 1];
             match a.checked_sub(1).map(|i| self.buckets[i]) {
-                Some(x) if x.0 > y.0 => {
+                Some(x) if x.slot() > y.slot() => {
                     self.buckets[at] = x;
                     a -= 1;
                 }
-                Some(x) if x.0 == y.0 => {
-                    self.buckets[at] = (x.0, x.1.saturating_add(y.1));
+                Some(x) if x.slot() == y.slot() => {
+                    y.add_saturating(x.count());
+                    self.buckets[at] = y;
                     a -= 1;
                     b -= 1;
                 }
@@ -321,15 +391,15 @@ impl Hist {
         put_varint(&mut out, self.over);
         put_varint(&mut out, zigzag(self.min));
         put_varint(&mut out, zigzag(self.max));
-        for &(s, n) in &self.buckets {
-            put_varint(&mut out, u64::from(s));
-            put_varint(&mut out, n);
+        for b in &self.buckets {
+            put_varint(&mut out, u64::from(b.slot()));
+            put_varint(&mut out, b.count());
         }
         Some(out)
     }
 
     pub fn from_bytes(blob: &[u8]) -> Option<Self> {
-        let mut buckets = [(0, 0); BUCKETS];
+        let mut buckets = [Bucket::ZERO; BUCKETS];
         let ([under, over], [min, max], n) = parse(blob, &mut buckets)?;
         Some(Hist {
             under,
@@ -359,10 +429,11 @@ impl Hist {
         if rank <= seen {
             return Some(self.min as f64);
         }
-        for &(s, c) in &self.buckets {
-            seen += c;
+        for b in &self.buckets {
+            seen += b.count();
             if rank <= seen {
-                let (lo, hi) = (BOUNDS[s as usize] as f64, BOUNDS[s as usize + 1] as f64);
+                let s = b.slot() as usize;
+                let (lo, hi) = (BOUNDS[s] as f64, BOUNDS[s + 1] as f64);
                 return Some((lo * hi).sqrt().clamp(self.min as f64, self.max as f64));
             }
         }
@@ -533,5 +604,49 @@ mod tests {
         assert_eq!(h.count(), 12);
         let roundtrip = Hist::from_bytes(&h.to_bytes().unwrap()).unwrap();
         assert_eq!(roundtrip, h);
+    }
+
+    #[test]
+    fn compact_bucket_layout_and_bounded_capacity_at_full_672_slots() {
+        assert_eq!(std::mem::size_of::<Bucket>(), 8);
+        assert_eq!(std::mem::align_of::<Bucket>(), 2);
+
+        let mut via_add = Hist::default();
+        for &b in BOUNDS.iter().take(BUCKETS) {
+            via_add.add(b);
+        }
+        assert_eq!(via_add.buckets.len(), BUCKETS);
+        assert!(
+            via_add.buckets.capacity() <= BUCKETS,
+            "add capacity {} exceeded BUCKETS {}",
+            via_add.buckets.capacity(),
+            BUCKETS
+        );
+
+        let mut via_merge = Hist::default();
+        let half_a = {
+            let mut h = Hist::default();
+            for i in (0..BUCKETS).step_by(2) {
+                h.add(BOUNDS[i]);
+            }
+            h.to_bytes().unwrap()
+        };
+        let half_b = {
+            let mut h = Hist::default();
+            for i in (1..BUCKETS).step_by(2) {
+                h.add(BOUNDS[i]);
+            }
+            h.to_bytes().unwrap()
+        };
+        assert!(via_merge.merge_bytes(&half_a));
+        assert!(via_merge.merge_bytes(&half_b));
+        assert_eq!(via_merge.buckets.len(), BUCKETS);
+        assert!(
+            via_merge.buckets.capacity() <= BUCKETS,
+            "merge capacity {} exceeded BUCKETS {}",
+            via_merge.buckets.capacity(),
+            BUCKETS
+        );
+        assert_eq!(via_merge.to_bytes(), via_add.to_bytes());
     }
 }

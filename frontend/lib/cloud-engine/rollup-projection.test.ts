@@ -14,7 +14,9 @@ import {
   INSIGHTS_SUMMARY_SPEC, insightsBaselineFromRollup, insightsBaselineRollup, rollupInsightsBaseline,
 } from "./insights-rollup";
 import { NETWORK_FILTERED_SUMMARY_SPEC, NETWORK_SUMMARY_SPEC, networkFromRollup } from "./network-rollup";
-import { ORIGIN_SUMMARY_SPEC, originFromRollup, type OriginRollupBody } from "./origin-rollup";
+import {
+  ORIGIN_FILTERED_SUMMARY_SPEC, ORIGIN_SUMMARY_SPEC, originFromRollup, type OriginRollupBody,
+} from "./origin-rollup";
 import { PERFORMANCE_SUMMARY_SPEC, performanceFromRollup, type PerformanceRollupBody } from "./performance-rollup";
 import type { RollupAnswerSource } from "./rollup-answer";
 import { SECURITY_ROLLUP_SECTIONS, VALUE_ROLLUP_SECTIONS } from "./rollup-sections";
@@ -145,6 +147,12 @@ const PAGES: Record<string, Page> = {
       origin({ timeseries_metric: "ttfb", timeseries_percentile: "p50", split_by_leg: true, bucket_minutes: 5 }),
       origin({ slow_urls_min_requests: 1, slow_urls_limit: 100, sections: ["slow_urls", "summary"] }),
       (source, spec) => originFromRollup("/api/origin/shielding-analysis", { ...range, top_n: 30 } as OriginRollupBody, source, undefined, spec),
+    ],
+  },
+  originFiltered: {
+    spec: ORIGIN_FILTERED_SUMMARY_SPEC,
+    fixtures: ["origin", "dashboard"],
+    answers: [
       origin({ sections: ["summary"], filters: { status: { mode: "include", values: ["200"] } } }),
     ],
   },
@@ -282,6 +290,9 @@ describe.each(Object.entries(PAGES))("%s from projected summaries", (_name, page
           groups: [...page.spec.groups].filter((g) => g !== group),
           columns: [...page.spec.columns],
           only: Object.fromEntries([...page.spec.only].map(([column, of]) => [column, [...of]])),
+          ...(page.spec.fields
+            ? { fields: Object.fromEntries([...page.spec.fields].map(([g, names]) => [g, [...names]])) }
+            : {}),
         }),
       })),
       ...[...page.spec.columns].filter((column) => !BASE.has(column) && !(column in (page.inert ?? {}))).map((column) => ({
@@ -290,6 +301,9 @@ describe.each(Object.entries(PAGES))("%s from projected summaries", (_name, page
           groups: [...page.spec.groups],
           columns: [...page.spec.columns].filter((c) => c !== column),
           only: Object.fromEntries([...page.spec.only].filter(([c]) => c !== column).map(([c, of]) => [c, [...of]])),
+          ...(page.spec.fields
+            ? { fields: Object.fromEntries([...page.spec.fields].map(([g, names]) => [g, [...names]])) }
+            : {}),
         }),
       })),
     ];

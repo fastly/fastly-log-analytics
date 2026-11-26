@@ -451,13 +451,68 @@ const ORIGIN_COLUMNS = [
   "count", "requests", "ost_5xx_count", "ost_total_count", "lat_us_count", "miss_requests", "pass_requests",
   "ttfb_hist", "ottfb_hist", "ottlb_hist", "overhead_hist", "obytes_hist",
 ];
-const ORIGIN_GROUPS = ["dims", "all_fields", "field_totals", "origin", "urls", "shield_routes", "filtered_rollups", "dim_totals"];
+const ORIGIN_GROUPS = ["dims", "all_fields", "field_totals", "origin", "urls", "shield_routes", "dim_totals"];
+const ORIGIN_ONLY_BASE = {
+  count: ["all_fields"],
+  requests: ["dims", "origin", "shield_routes"],
+  ost_5xx_count: ["dims", "origin"],
+  ost_total_count: ["dims", "origin"],
+  lat_us_count: ["dims"],
+  miss_requests: ["origin"],
+  pass_requests: ["origin"],
+  ottfb_hist: ["dims"],
+  overhead_hist: ["origin", "shield_routes"],
+  obytes_hist: ["origin"],
+};
+const ORIGIN_FIELDS_BASE = {
+  all_fields: ["ost"],
+  dims: ["oip"],
+  urls: ["url"],
+};
 
-/** The summary groups and columns /origin reads. */
-export const ORIGIN_SUMMARY_SPEC = defineSummarySpec({ groups: [...ORIGIN_GROUPS, "series5"], columns: ORIGIN_COLUMNS });
+/** The summary groups and columns unfiltered /origin reads. */
+export const ORIGIN_SUMMARY_SPEC = defineSummarySpec({
+  groups: [...ORIGIN_GROUPS, "series5"],
+  columns: ORIGIN_COLUMNS,
+  only: {
+    ...ORIGIN_ONLY_BASE,
+    ttfb_hist: ["dims", "origin", "urls", "series5"],
+    ottlb_hist: ["origin", "series5"],
+  },
+  fields: {
+    ...ORIGIN_FIELDS_BASE,
+    series5: ["origin", "overall"],
+  },
+});
 
 /** `ORIGIN_SUMMARY_SPEC` for a series whose bucket doesn't tile 5 minutes: per-minute rows instead. */
-export const ORIGIN_MINUTE_SUMMARY_SPEC = defineSummarySpec({ groups: [...ORIGIN_GROUPS, "series1"], columns: ORIGIN_COLUMNS });
+export const ORIGIN_MINUTE_SUMMARY_SPEC = defineSummarySpec({
+  groups: [...ORIGIN_GROUPS, "series1"],
+  columns: ORIGIN_COLUMNS,
+  only: {
+    ...ORIGIN_ONLY_BASE,
+    ttfb_hist: ["dims", "origin", "urls", "series1"],
+    ottlb_hist: ["origin", "series1"],
+  },
+  fields: {
+    ...ORIGIN_FIELDS_BASE,
+    series1: ["origin"],
+  },
+});
+
+/** Summary spec for single-filter /origin summary reads (`filtered_rollups` only). */
+export const ORIGIN_FILTERED_SUMMARY_SPEC = defineSummarySpec({
+  groups: ["filtered_rollups", "dim_totals"],
+  columns: ["miss_requests", "pass_requests", "ost_5xx_count", "ost_total_count", "ottfb_hist", "ottlb_hist"],
+  only: {
+    miss_requests: ["filtered_rollups"],
+    pass_requests: ["filtered_rollups"],
+    ost_5xx_count: ["filtered_rollups"],
+    ost_total_count: ["filtered_rollups"],
+    ottfb_hist: ["filtered_rollups"],
+    ottlb_hist: ["filtered_rollups"],
+  },
+});
 
 /**
  * Answers a Cloud /origin aggregates or shielding-analysis read from
@@ -470,17 +525,22 @@ export async function originFromRollup(
   body: OriginRollupBody & { limit?: number },
   source: Parameters<typeof queryRollup>[0],
   signal?: AbortSignal,
-  /** Null reads whole files. */
-  spec: SummarySpec | null = ORIGIN_SUMMARY_SPEC,
+  /** Null reads whole files; undefined picks the unfiltered, minute, or filtered spec. */
+  spec?: SummarySpec | null,
 ) {
   if (!originRollupEligible(path, body)) return null;
   const fromMs = parseEpochMs(body.start_time);
   const toMs = parseEpochMs(body.end_time);
   if (fromMs === null || toMs === null || fromMs >= toMs) return null;
-  if (spec === ORIGIN_SUMMARY_SPEC && body.sections?.includes("timeseries") && minuteSeries(body)) {
-    spec = ORIGIN_MINUTE_SUMMARY_SPEC;
-  }
-  const result = await queryRollup(source, { fromMs, toMs, signal, spec: spec ?? undefined });
+  const filtered = hasFilterValues(body.filters, body.custom_filters);
+  const effectiveSpec = spec === undefined
+    ? (filtered
+      ? ORIGIN_FILTERED_SUMMARY_SPEC
+      : body.sections?.includes("timeseries") && minuteSeries(body)
+        ? ORIGIN_MINUTE_SUMMARY_SPEC
+        : ORIGIN_SUMMARY_SPEC)
+    : spec;
+  const result = await queryRollup(source, { fromMs, toMs, signal, spec: effectiveSpec ?? undefined });
   if (!result) return null;
   if (hasFilterValues(body.filters, body.custom_filters)) {
     const filter = singleLowCardFilter(body.filters, body.custom_filters, body);

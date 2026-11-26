@@ -1267,8 +1267,38 @@ pub(crate) fn write_with_metadata(
     write_with(schema, batches, metadata, None, false)
 }
 
+/// Streaming Parquet writer for summary bundles: writes and flushes one row group at a time
+/// so the caller can drop each `RecordBatch` before building the next, keeping Wasm heap bounded.
+pub(crate) struct SummaryBatchWriter {
+    writer: ArrowWriter<Vec<u8>>,
+}
+
+impl SummaryBatchWriter {
+    pub(crate) fn try_new(schema: SchemaRef, metadata: Vec<KeyValue>) -> Result<Self, String> {
+        let properties = writer_properties(&schema, metadata, None, true)?;
+        let writer = ArrowWriter::try_new(Vec::new(), schema, Some(properties))
+            .map_err(|_| "parquet_writer")?;
+        Ok(Self { writer })
+    }
+
+    pub(crate) fn write_row_group(&mut self, batch: &RecordBatch) -> Result<(), String> {
+        if batch.num_rows() == 0 {
+            return Ok(());
+        }
+        self.writer.write(batch).map_err(|_| "parquet_write")?;
+        self.writer.flush().map_err(|_| "parquet_flush".to_owned())
+    }
+
+    pub(crate) fn finish(self) -> Result<Vec<u8>, String> {
+        self.writer
+            .into_inner()
+            .map_err(|_| "parquet_finish".into())
+    }
+}
+
 /// Summary bundle output: one row group per batch, lean stats on `bundle`, `bucket` and `field`,
 /// no page index.
+#[allow(dead_code)]
 pub(crate) fn write_summary_batches(
     schema: SchemaRef,
     batches: &[&RecordBatch],
@@ -1277,13 +1307,12 @@ pub(crate) fn write_summary_batches(
     write_with(schema, batches, metadata, None, true)
 }
 
-fn write_with(
-    schema: SchemaRef,
-    batches: &[&RecordBatch],
+fn writer_properties(
+    schema: &SchemaRef,
     metadata: Vec<KeyValue>,
     sorting: Option<Vec<SortingColumn>>,
     lean_summary_stats: bool,
-) -> Result<Vec<u8>, String> {
+) -> Result<WriterProperties, String> {
     let level = ZstdLevel::try_new(1).map_err(|_| "parquet_zstd_level")?;
     let mut builder = WriterProperties::builder()
         .set_compression(Compression::ZSTD(level))
@@ -1322,7 +1351,17 @@ fn write_with(
             _ => {}
         }
     }
-    let properties = builder.build();
+    Ok(builder.build())
+}
+
+fn write_with(
+    schema: SchemaRef,
+    batches: &[&RecordBatch],
+    metadata: Vec<KeyValue>,
+    sorting: Option<Vec<SortingColumn>>,
+    lean_summary_stats: bool,
+) -> Result<Vec<u8>, String> {
+    let properties = writer_properties(&schema, metadata, sorting, lean_summary_stats)?;
     let mut writer =
         ArrowWriter::try_new(Vec::new(), schema, Some(properties)).map_err(|_| "parquet_writer")?;
     for batch in batches {
