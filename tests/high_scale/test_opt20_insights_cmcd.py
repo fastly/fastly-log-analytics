@@ -215,7 +215,7 @@ def test_rollup_uncovered_baseline_sampling_and_new_probe_urls_unchanged() -> No
 def test_crawler_disparity_single_scan_grouping_sets_and_sampled_guard() -> None:
     sql = _base_sql(DETECTIONS["crawler_disparity"], "crawler_disparity", baseline_hours=168.0)
     assert sql.count("FROM base") == 1
-    assert "GROUP BY GROUPING SETS ((), (bot_stem), (ref_stem, is_w, is_b))" in sql
+    assert "GROUP BY GROUPING SETS ((bot_stem), (ref_stem, is_w, is_b))" in sql
     assert "ARRAY JOIN bots AS b" in sql
     assert "intDiv(toUnixTimestamp(event_timestamp), 300) % 4 = 0" in sql
     assert "cnt * 4 AS cnt" in sql

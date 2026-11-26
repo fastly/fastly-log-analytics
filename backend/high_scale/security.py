@@ -136,7 +136,7 @@ def _scope(service: HighScaleService, req: Any, start_time: str | None, end_time
 def _run(service: HighScaleService, scope: _Scope, tag: str, sql: str, **extra: Any) -> list[dict[str, Any]]:
     source: Literal["fact", "projection"] = (
         "projection"
-        if tag in {"ngwaf_bots", "ngwaf_verified_bots_ts", "top_bots_ua"} and not scope.filtered
+        if tag in {"ngwaf_bots", "ngwaf_verified_bots_ts", "ngwaf_combined", "top_bots_ua"} and not scope.filtered
         else "fact"
     )
     is_real_ch = (
@@ -531,6 +531,73 @@ _COMBINED_OVERVIEW_KEYS = (
 )
 
 
+def _populate_sec_memo_bundle(sec_base_key: str | None, bundle: dict[str, Any]) -> None:
+    if sec_base_key is None:
+        return
+    from backend.core.request_telemetry.tracker import current_clickhouse_scope
+    from backend.utils.telemetry import get_queries
+
+    sec_id = current_clickhouse_scope().get("section_id")
+    sec_queries = [
+        {**q, "is_cached": True}
+        for q in get_queries()
+        if isinstance(q, dict) and (sec_id is None or q.get("clickhouse", {}).get("section_id") == sec_id)
+    ]
+    for k, val in bundle.items():
+        s_key = f"{sec_base_key}:{k}"
+        _security_memo.cache[s_key] = val
+        if sec_queries:
+            _security_memo._telemetry_cache[s_key] = sec_queries
+
+
+def _sec_combined_ngwaf(
+    service: HighScaleService, scope: _Scope, bucket_seconds: int, sec_base_key: str | None
+) -> dict[str, Any]:
+    sql = (
+        f"SELECT intDiv(toUnixTimestamp(event_timestamp), {bucket_seconds}) * {bucket_seconds} AS bucket_ts, "
+        "custom_fields['ngwaf_bot'] AS bot_name, "
+        "anyIf(custom_fields['ngwaf_wellknown_bot'], custom_fields['ngwaf_wellknown_bot'] != '') AS wk_name, "
+        "anyIf(custom_fields['ngwaf_bot_category'], custom_fields['ngwaf_bot_category'] != '') AS bot_cat, "
+        "count() AS count "
+        "FROM request_facts WHERE __WHERE__ AND custom_fields['ngwaf_bot'] != '' "
+        "GROUP BY bucket_ts, bot_name ORDER BY bucket_ts, bot_name"
+        if scope.filtered
+        else f"SELECT intDiv(toUnixTimestamp(bucket_start), {bucket_seconds}) * {bucket_seconds} AS bucket_ts, "
+        "value AS bot_name, "
+        "anyIf(wellknown_bot_name, wellknown_bot_name != '') AS wk_name, "
+        "anyIf(bot_category, bot_category != '') AS bot_cat, "
+        "sum(requests) AS count "
+        f"FROM security_minute_dimensions WHERE {_NGWAF_PROJECTION_WHERE} "
+        "GROUP BY bucket_ts, bot_name ORDER BY bucket_ts, bot_name"
+    )
+    rows = _run(service, scope, "ngwaf_combined", sql)
+    ts_rows: list[dict[str, Any]] = []
+    bot_totals: dict[str, int] = defaultdict(int)
+    bot_wk: dict[str, str] = {}
+    bot_cat: dict[str, str] = {}
+    for r in rows:
+        bot_name = r["bot_name"]
+        cnt = int(r["count"] or 0)
+        ts_rows.append({"time": _sec_iso(r["bucket_ts"]), "bot_name": bot_name, "count": cnt})
+        bot_totals[bot_name] += cnt
+        wk = str(r.get("wk_name") or "")
+        if wk and bot_name not in bot_wk:
+            bot_wk[bot_name] = wk
+        cat = str(r.get("bot_cat") or "")
+        if cat and bot_name not in bot_cat:
+            bot_cat[bot_name] = cat
+    bots_rows = [
+        shape_security_ngwaf_bot_row(name, bot_wk.get(name, ""), bot_cat.get(name, ""), total)
+        for name, total in sorted(bot_totals.items(), key=lambda kv: kv[1], reverse=True)
+    ]
+    bundle = {
+        "ngwaf_verified_bots": bots_rows,
+        "ngwaf_verified_bots_ts": ts_rows,
+    }
+    _populate_sec_memo_bundle(sec_base_key, bundle)
+    return bundle
+
+
 def _sec_combined_overview(service: HighScaleService, scope: _Scope, sec_base_key: str | None) -> dict[str, Any]:
     h_case = _bucket_case("h", _REQ_HEADER_BUCKETS, _REQ_HEADER_LAST)
     c_case = _bucket_case("c", _CONN_REUSE_BUCKETS, _CONN_REUSE_LAST)
@@ -580,21 +647,7 @@ def _sec_combined_overview(service: HighScaleService, scope: _Scope, sec_base_ke
             {"type": k, "count": v} for k, v in sorted(p_counts.items(), key=lambda kv: kv[1], reverse=True) if v > 0
         ],
     }
-    if sec_base_key is not None:
-        from backend.core.request_telemetry.tracker import current_clickhouse_scope
-        from backend.utils.telemetry import get_queries
-
-        sec_id = current_clickhouse_scope().get("section_id")
-        sec_queries = [
-            {**q, "is_cached": True}
-            for q in get_queries()
-            if isinstance(q, dict) and (sec_id is None or q.get("clickhouse", {}).get("section_id") == sec_id)
-        ]
-        for k, val in bundle.items():
-            s_key = f"{sec_base_key}:{k}"
-            _security_memo.cache[s_key] = val
-            if sec_queries:
-                _security_memo._telemetry_cache[s_key] = sec_queries
+    _populate_sec_memo_bundle(sec_base_key, bundle)
     return bundle
 
 
@@ -696,6 +749,18 @@ def security_aggregates(
             if want(k) and (sec_base_key is None or f"{sec_base_key}:{k}" not in _security_memo.cache)
         ]
         use_combined_overview = is_real_ch and len(wanted_overview) >= 2
+        want_any_ngwaf = want("ngwaf_verified_bots") or want("ngwaf_verified_bots_ts")
+        use_combined_ngwaf = (
+            is_real_ch
+            and want_any_ngwaf
+            and (
+                sec_base_key is None
+                or (
+                    f"{sec_base_key}:ngwaf_verified_bots" not in _security_memo.cache
+                    and f"{sec_base_key}:ngwaf_verified_bots_ts" not in _security_memo.cache
+                )
+            )
+        )
         candidates: tuple[tuple[str, bool, Callable[[], Any]], ...] = (
             ("tls_fingerprints", want("tls_fingerprints"), lambda: _tls_fingerprints(service, scope)),
             (
@@ -736,17 +801,22 @@ def security_aggregates(
             ("verified_bots_ts", want("verified_bots_ts"), lambda: _verified_bots_ts(service, scope, bucket_seconds)),
             (
                 "ngwaf_configured",
-                want("ngwaf_verified_bots") or want("ngwaf_verified_bots_ts"),
+                want_any_ngwaf,
                 lambda: _ngwaf_configured(service),
             ),
             (
+                "_combined_ngwaf",
+                use_combined_ngwaf,
+                lambda: _sec_combined_ngwaf(service, scope, bucket_seconds, sec_base_key),
+            ),
+            (
                 "ngwaf_verified_bots",
-                want("ngwaf_verified_bots") or want("ngwaf_verified_bots_ts"),
+                want_any_ngwaf and not use_combined_ngwaf,
                 lambda: _ngwaf_verified_bots(service, scope),
             ),
             (
                 "ngwaf_verified_bots_ts",
-                want("ngwaf_verified_bots") or want("ngwaf_verified_bots_ts"),
+                want_any_ngwaf and not use_combined_ngwaf,
                 lambda: _ngwaf_verified_bots_ts(service, scope, bucket_seconds),
             ),
             ("wellknown_bots", want("wellknown_bots"), lambda: _wellknown_bots(service, scope)),
@@ -754,7 +824,11 @@ def security_aggregates(
             ("_top_bots", want("top_bots"), lambda: _top_bots(service, scope)),
             ("_proxies", want("proxies"), lambda: _proxies(service, scope, mask_ips)),
         )
-        tasks = [(k, fn if k == "_combined_overview" else _wrap_sec(k, fn)) for k, w, fn in candidates if w]
+        tasks = [
+            (k, fn if k in ("_combined_overview", "_combined_ngwaf") else _wrap_sec(k, fn))
+            for k, w, fn in candidates
+            if w
+        ]
 
         trace = HighScaleSections(service.service_id, "security")
 
@@ -763,7 +837,11 @@ def security_aggregates(
                 return "unknown"
             if key == "_top_bots" and not scope.filtered:
                 return "mixed"
-            return "projection" if key.startswith("ngwaf_") and not scope.filtered else "fact"
+            return (
+                "projection"
+                if (key.startswith("ngwaf_") or key == "_combined_ngwaf") and not scope.filtered
+                else "fact"
+            )
 
         res: dict[str, Any] = {}
         for k, val in trace.run_parallel(
@@ -781,6 +859,8 @@ def security_aggregates(
                 for ok in _COMBINED_OVERVIEW_KEYS:
                     if want(ok):
                         res[ok] = val[ok]
+            elif k == "_combined_ngwaf":
+                res.update(val)
             else:
                 res[k] = val
         res["section_timings"] = trace.timings()

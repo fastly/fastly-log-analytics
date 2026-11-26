@@ -230,8 +230,8 @@ def test_pop_health_quality_transport_and_shielding_use_granule_skipping_and_fas
 
 def test_insights_baseline_sampling_pushed_pre_filters_and_standalone_fixes() -> None:
     assert _baseline_sample_stride(12.0) == 1
-    assert _baseline_sample_stride(24.0) == 2
-    assert _baseline_sample_stride(48.0) == 4
+    assert _baseline_sample_stride(24.0) == 4
+    assert _baseline_sample_stride(48.0) == 6
     assert _baseline_sample_stride(168.0) == 8
 
     present = {

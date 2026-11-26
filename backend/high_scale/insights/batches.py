@@ -1020,6 +1020,7 @@ def _build_ip_outlier(
     present: set[str],
     rollup_span: tuple[datetime, datetime] | None,
     filter_clause: str,
+    baseline_hours: float = 0.0,
     candidates: dict[str, list[str] | None] | None = None,
     candidate_params: dict[str, Any] | None = None,
 ) -> tuple[str, QuerySource]:
@@ -1054,12 +1055,15 @@ def _build_ip_outlier(
             "(custom_fields['req_header_bytes'] != '' OR custom_fields['conn_requests'] != '') AND "
             "(req_header_bytes > 0 OR conn_requests > 0)"
         )
+    b_stride = _baseline_sample_stride(baseline_hours)
+    b_scale = f" * {b_stride}" if b_stride > 1 else ""
     cte, source = _base_cte(
         "ip_outlier",
         proj,
         row_filter=row_filter,
         prewhere_clause=prewhere_clause,
         filter_clause=filter_clause,
+        baseline_sample_stride=b_stride,
     )
     sql = (
         f"{cte} SELECT ip, "
@@ -1067,12 +1071,12 @@ def _build_ip_outlier(
         "avgIf(req_header_bytes, is_w AND req_header_bytes > 0) AS avg_bytes, "
         "countIf(is_w AND req_header_bytes > 0) AS rs_w_total, "
         "quantileTDigestIf(0.95)(req_header_bytes, is_b AND req_header_bytes > 0) AS rs_b_p95, "
-        "countIf(is_b AND req_header_bytes > 0) AS rs_b_total, "
+        f"countIf(is_b AND req_header_bytes > 0){b_scale} AS rs_b_total, "
         "maxIf(conn_requests, is_w AND conn_requests > 0) AS max_reqs, "
         "avgIf(conn_requests, is_w AND conn_requests > 0) AS avg_reqs, "
         "countIf(is_w AND conn_requests > 0) AS ca_w_total, "
         "quantileTDigestIf(0.95)(conn_requests, is_b AND conn_requests > 0) AS ca_b_p95, "
-        "countIf(is_b AND conn_requests > 0) AS ca_b_total "
+        f"countIf(is_b AND conn_requests > 0){b_scale} AS ca_b_total "
         "FROM base GROUP BY ip HAVING "
         "(rs_w_total >= 3 AND rs_b_total > 0 AND max_bytes > rs_b_p95 * 3) "
         "OR (ca_w_total >= 5 AND ca_b_total > 0 AND max_reqs >= 50 AND max_reqs > ca_b_p95 * 3)"
@@ -1343,7 +1347,8 @@ def _build_origin_perf(
         f"{_P95}({read_ms}, is_w AND {has_conn}) AS w_read, {_P95}({read_ms}, is_b AND {has_conn}) AS b_read, "
         f"countIf(is_w AND {has_conn}) AS ts_w_total, countIf(is_b AND {has_conn}){b_scale} AS ts_b_total "
         "FROM keyed GROUP BY GROUPING SETS ((), (w_url)) "
-        "HAVING g_url = 1 OR w_reqs >= 10"
+        "HAVING g_url = 1 OR w_reqs >= 10 "
+        "ORDER BY g_url DESC, url_p95_ms DESC LIMIT 11"
     )
     return sql, source
 

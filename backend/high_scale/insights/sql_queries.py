@@ -93,9 +93,9 @@ def baseline_sample_stride(baseline_hours: float) -> int:
     if baseline_hours >= 168:
         return 8
     if baseline_hours >= 48:
-        return 4
+        return 6
     if baseline_hours >= 24:
-        return 2
+        return 4
     return 1
 
 
@@ -833,16 +833,16 @@ DETECTIONS: dict[str, Detection] = {
     gs AS (SELECT grouping(bot_stem) AS g_bot, grouping(ref_stem) AS g_ref,
             bot_stem, ref_stem, is_w, is_b,
             minIf(raw_tok, raw_tok != '') AS raw_tok, max(ua_dom) AS ua_dom,
-            countIf(is_w) AS w_cnt, countIf(is_b) AS b_cnt,
-            sumIf(coalesce(resp_bytes, 0), is_w) AS w_b, sumIf(coalesce(resp_bytes, 0), is_b) AS b_b,
+            countIf(is_w) AS w_cnt, countIf(is_b)__B_SCALE__ AS b_cnt,
+            sumIf(coalesce(resp_bytes, 0), is_w) AS w_b, sumIf(coalesce(resp_bytes, 0), is_b)__B_SCALE__ AS b_b,
             uniqCombinedStateIf(ip, ref_stem != '') AS ip_state
         FROM classified
-        GROUP BY GROUPING SETS ((), (bot_stem), (ref_stem, is_w, is_b))
-        HAVING (g_bot = 1 AND g_ref = 1) OR (g_bot = 0 AND bot_stem != '' AND w_cnt >= 50) OR (g_ref = 0 AND ref_stem != '')),
+        GROUP BY GROUPING SETS ((bot_stem), (ref_stem, is_w, is_b))
+        HAVING (g_bot = 0 AND bot_stem != '' AND w_cnt >= 50) OR (g_ref = 0 AND ref_stem != '')),
     with_bots AS (SELECT g_ref, ref_stem, replaceRegexpAll(ref_stem, '[aeiou]', '') AS ref_cons,
             is_w, is_b, ip_state,
             groupArrayIf((bot_stem, replaceRegexpAll(bot_stem, '[aeiou]', ''), raw_tok, ua_dom, w_cnt, b_cnt, w_b, b_b), g_bot = 0 AND bot_stem != '' AND w_cnt >= 50) OVER () AS bots,
-            greatest(maxIf(w_b, g_bot = 1 AND g_ref = 1) OVER (), 1) AS site_resp_total
+            greatest((SELECT sum(toInt64OrZero(custom_fields['resp_bytes'])) FROM request_facts PREWHERE {_CRAWLER_WIN_SCOPE} AND event_timestamp >= {{window_start:DateTime64(3)}} AND event_timestamp < {{window_end:DateTime64(3)}}), 1) AS site_resp_total
         FROM gs),
     expanded AS (SELECT g_ref, ref_stem, ref_cons, is_w, is_b, ip_state, site_resp_total,
             b.1 AS bot_stem, b.2 AS bot_cons, b.3 AS raw_tok, b.4 AS ua_dom,
@@ -864,7 +864,7 @@ DETECTIONS: dict[str, Detection] = {
     ORDER BY crawls_per_referral DESC, c.w_bytes DESC LIMIT 10 """,
         row_filter=(
             f"ua != '' AND {_CRAWLER_IN_WINDOW} "
-            "AND (event_timestamp >= {window_start:DateTime64(3)} OR (referer != '' AND referer != '-') "
+            "AND ((referer != '' AND referer != '-') "
             f"OR multiSearchAnyCaseInsensitive(ua, {_CRAWLER_UA_NEEDLES}) "
             "OR positionCaseInsensitive(ua, '-user') > 0 OR positionCaseInsensitive(ua, '-externalfetcher') > 0)"
         ),
