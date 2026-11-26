@@ -937,14 +937,12 @@ impl Runtime for FastlyRuntime {
                                         self.kv_coord_put(key, &state);
                                         return Ok(true);
                                     }
-                                    Ok(None) => {
-                                        let mut state = coord.unwrap_or_default();
-                                        if state.record_dead(g_str, now()) {
-                                            self.kv_coord_put(key, &state);
-                                        }
-                                        return Ok(false);
-                                    }
-                                    Err(err) => return Err(err),
+                                    // If the conditional REST PUT also got 412 (dead/stale gen) or
+                                    // failed transiently, fall through so monotonic local-POP
+                                    // stale-cache healing (`allow_stale_pop_overwrite`) can still
+                                    // recover after >=2s, or record `dead_generation` and return
+                                    // `Ok(false)` cleanly.
+                                    Ok(None) | Err(_) => {}
                                 }
                             }
                             let now_ms = now();
