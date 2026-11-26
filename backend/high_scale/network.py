@@ -1638,7 +1638,11 @@ def _with_transport_settings(service_id: str, payload: Mapping[str, Any]) -> dic
     """Name the transport fields the service's log field settings leave off; outside the memo so an edit shows at once."""
     from backend import config as svcconfig
 
-    enabled = set(svcconfig.active_log_field_ids(svcconfig.load_config(service_id) or {}))
+    try:
+        cfg = svcconfig.load_config(service_id) or {}
+    except Exception:
+        cfg = {}
+    enabled = set(svcconfig.active_log_field_ids(cfg))
     missing = [f for f in _TRANSPORT_FIELDS if f not in enabled]
     return {**payload, "missing_fields": missing, "has_transport_data": len(missing) < len(_TRANSPORT_FIELDS)}
 
