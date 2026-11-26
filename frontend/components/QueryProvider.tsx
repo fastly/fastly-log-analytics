@@ -8,7 +8,7 @@ import dynamic from 'next/dynamic'
 import { usePathname } from 'next/navigation'
 import { useReportWebVitals } from 'next/web-vitals'
 import { NuqsAdapter } from 'nuqs/adapters/next/app'
-import { hydrateFilterStoreFromUrl } from '@/lib/utils'
+import { getInitialDocumentSearch, hydrateFilterStoreFromUrl } from '@/lib/utils'
 import { getApiBase } from '@/lib/api'
 import { useBootstrap } from '@/hooks/useBootstrap'
 import { useServiceStore } from '@/stores/filterStore'
@@ -66,7 +66,8 @@ function clearHistory() {
 }
 
 function currentLoadKey(): string {
-  return window.location.pathname + window.location.search
+  const pathname = window.location.pathname
+  return pathname + (getInitialDocumentSearch(pathname) ?? window.location.search)
 }
 
 // Record one document load. Called from subscribe() (once per mount); the

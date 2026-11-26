@@ -81,6 +81,7 @@ export function quantizeAnchor(iso?: string | null, now: Date = new Date()): str
 }
 
 let hydrated = false
+let initialDocumentHref: { pathname: string; search: string } | null = null
 
 export function rangeLabelToHours(label: string): number | null {
   const m = /^(\d+)([mhd])$/.exec(label)
@@ -114,6 +115,7 @@ export function applyUrlFiltersJsonToStore(
 export function hydrateFilterStoreFromUrl(): void {
   if (hydrated || typeof window === 'undefined') return
   hydrated = true
+  initialDocumentHref = { pathname: window.location.pathname, search: window.location.search }
   const params = new URLSearchParams(window.location.search)
   const qsRange = params.get('range')
   const qsStart = params.get('start_time') ?? params.get('start')
@@ -155,6 +157,13 @@ export function hydrateFilterStoreFromUrl(): void {
 
 export function _resetUrlHydrationFlag(): void {
   hydrated = false
+  initialDocumentHref = null
+}
+
+export function getInitialDocumentSearch(pathname: string): string | null {
+  return initialDocumentHref?.pathname === pathname && initialDocumentHref.search
+    ? initialDocumentHref.search
+    : null
 }
 
 export function normalizeTabKey(tab: string | null | undefined): string {

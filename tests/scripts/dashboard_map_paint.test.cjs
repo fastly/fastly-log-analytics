@@ -34,7 +34,11 @@ async function observeMap({
       width,
       height,
     });
-    if (prepare) await prepare(page);
+    if (prepare) {
+      await prepare(page);
+      await page.evaluate(() => new Promise(resolve =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    }
     const result = await measureCompositedResults(page, {
       target: '#map-action',
       timeoutMs: 20000,

@@ -62,6 +62,9 @@ def isolated_share_env(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("REMOTE_SHARE_DB_DIR", str(tmp_path / "system"))
     monkeypatch.setattr(svcconfig, "DATA_DIR", data_dir)
     monkeypatch.setattr(svcconfig, "load_config", lambda sid: {"service_id": sid} if sid == "svcA" else None)
+    monkeypatch.setattr(svcconfig, "get_cdn_service_id_map", lambda: {})
+    monkeypatch.setattr(svcconfig, "list_service_ids", lambda: ["svcA"])
+    monkeypatch.setattr(svcconfig, "list_configs", lambda: [{"service_id": "svcA"}])
     con = sqlite3.connect(str(tmp_path / "share.sqlite"), check_same_thread=False)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys = ON")

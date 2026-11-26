@@ -19,7 +19,7 @@ import { InsightCard, InsightItemRow, type ScriptedTrafficData } from '@/compone
 import { CacheCollapseModal, ScriptedTrafficModal } from '@/components/Insights/InsightDetailModal'
 import { getSecurityContent } from '@/components/Insights/InsightHelpModal/sections/security'
 import { getPerformanceContent, getTrafficContent } from '@/components/Insights/InsightHelpModal'
-import { INTERVALS } from '@/lib/utils'
+import { INTERVALS, _resetUrlHydrationFlag, hydrateFilterStoreFromUrl } from '@/lib/utils'
 import { useServiceStore, useTimezoneStore, useDebugStore } from '@/stores/filterStore'
 import { useBootstrap } from '@/hooks/useBootstrap'
 import type { BootstrapResponse, InsightCardData } from '@/types/api'
@@ -493,6 +493,13 @@ describe('ReloadLoopGuard', () => {
   beforeEach(() => {
     window.localStorage.clear()
     sessionStorage.clear()
+    _resetUrlHydrationFlag()
+    window.history.replaceState({}, '', '/')
+  })
+
+  afterEach(() => {
+    _resetUrlHydrationFlag()
+    window.history.replaceState({}, '', '/')
   })
 
   test('renders the app subtree under the reload threshold', () => {
@@ -560,6 +567,30 @@ describe('ReloadLoopGuard', () => {
       searchSpy.mockRestore()
       pathSpy.mockRestore()
     }
+  })
+
+  test('does not trip when hydrateFilterStoreFromUrl strips range search before mount', () => {
+    let last: ReturnType<typeof loadGuard> | null = null
+    for (const query of ['', '?range=1h', '?range=1h', '?range=6h', '?range=6h', '?range=24h', '?range=24h']) {
+      window.history.replaceState({}, '', `/dashboard${query}`)
+      _resetUrlHydrationFlag()
+      hydrateFilterStoreFromUrl()
+      expect(window.location.search).toBe('')
+      last?.unmount()
+      last = loadGuard()
+      expect(screen.getByText(CHILD)).toBeInTheDocument()
+    }
+    last?.unmount()
+    sessionStorage.clear()
+    for (let i = 0; i < 6; i++) {
+      window.history.replaceState({}, '', '/dashboard?range=6h')
+      _resetUrlHydrationFlag()
+      hydrateFilterStoreFromUrl()
+      last?.unmount()
+      last = loadGuard()
+    }
+    expect(screen.queryByText(CHILD)).not.toBeInTheDocument()
+    expect(screen.getByText(/kept reloading/i)).toBeInTheDocument()
   })
 })
 

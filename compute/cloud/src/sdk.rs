@@ -929,20 +929,19 @@ impl Runtime for FastlyRuntime {
                                 let rest_ts = now();
                                 let mut rest_val = value.clone();
                                 rest_val["_kv_written_ms"] = rest_ts.into();
-                                match self.admin_cas_fresh(key, g, &rest_val.to_string(), &token) {
-                                    Ok(Some(new_gen)) => {
-                                        self.admin_writes.borrow_mut().insert(key.into(), rest_ts);
-                                        let mut state = coord.unwrap_or_default();
-                                        state.record_rest_commit(rest_ts, rest_val, new_gen);
-                                        self.kv_coord_put(key, &state);
-                                        return Ok(true);
-                                    }
-                                    // If the conditional REST PUT also got 412 (dead/stale gen) or
-                                    // failed transiently, fall through so monotonic local-POP
-                                    // stale-cache healing (`allow_stale_pop_overwrite`) can still
-                                    // recover after >=2s, or record `dead_generation` and return
-                                    // `Ok(false)` cleanly.
-                                    Ok(None) | Err(_) => {}
+                                // If the conditional REST PUT also got 412 (dead/stale gen) or
+                                // failed transiently, fall through so monotonic local-POP
+                                // stale-cache healing (`allow_stale_pop_overwrite`) can still
+                                // recover after >=2s, or record `dead_generation` and return
+                                // `Ok(false)` cleanly.
+                                if let Ok(Some(new_gen)) =
+                                    self.admin_cas_fresh(key, g, &rest_val.to_string(), &token)
+                                {
+                                    self.admin_writes.borrow_mut().insert(key.into(), rest_ts);
+                                    let mut state = coord.unwrap_or_default();
+                                    state.record_rest_commit(rest_ts, rest_val, new_gen);
+                                    self.kv_coord_put(key, &state);
+                                    return Ok(true);
                                 }
                             }
                             let now_ms = now();
