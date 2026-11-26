@@ -511,7 +511,7 @@ mod tests {
             timestamp_s: 1_795_724_130,
             timestamp_iso: "2026-11-26T20:15:30Z".into(),
         };
-        assert_eq!(merge_records(&mut summary, &[rec.clone()]), 1);
+        assert_eq!(merge_records(&mut summary, std::slice::from_ref(&rec)), 1);
         assert_eq!(merge_records(&mut summary, &[rec]), 0);
         assert_eq!(summary.buckets.len(), 1);
         assert_eq!(summary.buckets[0].n, 1);

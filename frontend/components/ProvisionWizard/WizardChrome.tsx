@@ -197,9 +197,7 @@ export function WizardFooter({ s }: { s: WizardState }) {
                 setStep(
                   config.capture === "attached" || !config.logging_enabled
                     ? "execute"
-                    : isCloudMode()
-                      ? "fields"
-                      : "ngwaf",
+                    : "ngwaf",
                 )
               }
               disabled={domainStatus === "taken" || domainStatus === "checking"}

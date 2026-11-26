@@ -1583,17 +1583,14 @@ function decodeCached(
       );
     }
     if (rollup && derivedId && source.writeDerivedFile) {
-      const writeDerived = source.writeDerivedFile;
-      const timer = setTimeout(() => {
-        if (callRollupEpoch !== rollupEpoch || signal?.aborted) return;
-        void writeDerived(
+      void source
+        .writeDerivedFile(
           file.key,
           derivedId,
           serializeDecodedRollup(rollup),
           DECODED_ROLLUP_CACHE_VERSION,
-        ).catch(() => {});
-      }, 0);
-      (timer as { unref?: () => void }).unref?.();
+        )
+        .catch(() => {});
     }
     return rollup;
   };

@@ -179,10 +179,10 @@ describe('getStepsForMode', () => {
     expect(ids('provision', { logging_enabled: false })).toEqual(['mode', 'token', 'service', 'features', 'storage', 'execute'])
   })
 
-  it('drops the NGWAF and mode steps in Cloud mode, where the server has no NGWAF or CDN front', () => {
+  it('drops the mode step in Cloud mode while keeping NGWAF when logging is enabled', () => {
     setCloudModeRuntime(true)
     try {
-      expect(ids('provision')).toEqual(['token', 'service', 'features', 'storage', 'fields', 'execute'])
+      expect(ids('provision')).toEqual(['token', 'service', 'features', 'storage', 'ngwaf', 'fields', 'execute'])
       expect(ids('provision', { logging_enabled: false })).toEqual(['token', 'service', 'features', 'storage', 'execute'])
     } finally {
       setCloudModeRuntime(false)
@@ -239,10 +239,10 @@ function makeFooterState(overrides: Partial<WizardState> = {}): WizardState {
   } as WizardState
 }
 
-describe('WizardFooter — Cloud mode skips the NGWAF step', () => {
+describe('WizardFooter — Cloud mode keeps the NGWAF step', () => {
   afterEach(() => setCloudModeRuntime(false))
 
-  it('storage Continue goes straight to log fields in Cloud and to NGWAF when self-hosted', async () => {
+  it('storage Continue goes to NGWAF in both self-hosted and Cloud modes', async () => {
     const selfHosted = vi.fn()
     const { unmount } = render(<WizardFooter s={makeFooterState({ step: 'storage', setStep: selfHosted, config: { logging_enabled: true } as never })} />)
     await userEvent.click(screen.getByRole('button', { name: /^continue$/i }))
@@ -252,15 +252,20 @@ describe('WizardFooter — Cloud mode skips the NGWAF step', () => {
     const cloud = vi.fn()
     render(<WizardFooter s={makeFooterState({ step: 'storage', setStep: cloud, config: { logging_enabled: true } as never })} />)
     await userEvent.click(screen.getByRole('button', { name: /^continue$/i }))
-    expect(cloud).toHaveBeenCalledWith('fields')
+    expect(cloud).toHaveBeenCalledWith('ngwaf')
   })
 
-  it('Back from log fields returns to storage in Cloud', async () => {
+  it('Back from log fields returns to NGWAF and Back from NGWAF returns to storage in Cloud', async () => {
     setCloudModeRuntime(true)
     const setStep = vi.fn()
-    render(<WizardFooter s={makeFooterState({ step: 'fields', setStep, config: { logging_enabled: true } as never })} />)
+    const { unmount } = render(<WizardFooter s={makeFooterState({ step: 'fields', setStep, config: { logging_enabled: true } as never })} />)
     await userEvent.click(screen.getByRole('button', { name: /back/i }))
-    expect(setStep).toHaveBeenCalledWith('storage')
+    expect(setStep).toHaveBeenCalledWith('ngwaf')
+    unmount()
+    const setStep2 = vi.fn()
+    render(<WizardFooter s={makeFooterState({ step: 'ngwaf', setStep: setStep2, config: { logging_enabled: true } as never })} />)
+    await userEvent.click(screen.getByRole('button', { name: /back/i }))
+    expect(setStep2).toHaveBeenCalledWith('storage')
   })
 })
 
@@ -450,7 +455,7 @@ describe('ProvisionWizard — Cloud mode skips the mode step', () => {
     renderWithQuery(<ProvisionWizard open={true} onOpenChange={vi.fn()} />, { queryClient: draftQueryClient })
     expect(screen.getByText(/Enter Fastly API Token/i)).toBeInTheDocument()
     expect(screen.queryByText(/Select your role/i)).not.toBeInTheDocument()
-    expect(screen.getByText((_, el) => el?.textContent === 'Step 1 of 6')).toBeInTheDocument()
+    expect(screen.getByText((_, el) => el?.textContent === 'Step 1 of 7')).toBeInTheDocument()
   })
 
   it('does not show the Back button on the token step in Cloud mode', () => {

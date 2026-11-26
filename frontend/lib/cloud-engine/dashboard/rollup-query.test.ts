@@ -838,9 +838,6 @@ describe("queryRollup", () => {
     });
     expect(first).not.toBeNull();
     expect(fetchFileCalls).toBe(HOURS.length);
-    // Serialization + CacheStorage write is deferred off the query critical path.
-    expect(writeCalls).toBe(0);
-    await new Promise((r) => setTimeout(r, 10));
     expect(writeCalls).toBe(HOURS.length);
 
     // Direct serialize/deserialize round-trip check including NaN for skipped columns
