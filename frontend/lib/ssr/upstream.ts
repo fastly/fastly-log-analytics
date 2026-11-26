@@ -1,7 +1,7 @@
 import { cookies, headers } from 'next/headers'
 import { QueryClient, dehydrate } from '@tanstack/react-query'
 import type { DehydratedState, QueryKey } from '@tanstack/react-query'
-import { historyHoursFromExtents, pickInsightsDefault, quantizeAnchor } from "@/lib/utils";
+import { historyHoursFromExtents, pickInsightsDefault, quantizeAnchor, DEBUG_RESPONSES_COOKIE } from "@/lib/utils";
 import type { Schema } from '@/types/api'
 import type { components } from '@/types/api.generated'
 
@@ -101,7 +101,7 @@ export async function fetchAssetsServerSide(
     path: '/api/assets/aggregates',
     logPrefix: 'ssr/assets',
     now,
-    timeoutMs: 450,
+    timeoutMs: 280,
   })
 }
 
@@ -118,7 +118,7 @@ export async function fetchPerformanceServerSide(
     path: '/api/performance/aggregates',
     logPrefix: 'ssr/performance',
     now,
-    timeoutMs: 450,
+    timeoutMs: 280,
     body: {
       sort_by: PERFORMANCE_SSR_DEFAULTS.sortBy,
       sections: undefined,
@@ -140,7 +140,7 @@ export async function fetchStreamingServerSide(
     path: '/api/cmcd/aggregates',
     logPrefix: 'ssr/streaming',
     now,
-    timeoutMs: 500,
+    timeoutMs: 280,
     body: {
       bucket_seconds: STREAMING_SSR_DEFAULTS.bucketSeconds,
       top_n: STREAMING_SSR_DEFAULTS.topN,
@@ -167,9 +167,9 @@ export const SECURITY_SSR_DEFAULTS = {
   bucketSeconds: 3600,
 } as const
 
-export const SECURITY_SSR_TIMEOUT_MS = 450
-export const INSIGHTS_SSR_TIMEOUT_MS = 450
-export const ORIGIN_SSR_TIMEOUT_MS = 450
+export const SECURITY_SSR_TIMEOUT_MS = 280
+export const INSIGHTS_SSR_TIMEOUT_MS = 280
+export const ORIGIN_SSR_TIMEOUT_MS = 280
 
 export async function fetchSecurityServerSide(
   serviceId: string | undefined,
@@ -342,8 +342,8 @@ export async function fetchBootstrapServerSide(): Promise<BootstrapResponse | nu
     return _fetchBootstrapUpstream(serviceId)
   }
 
-  const requestIdentity = cookieJar.toString() || '__anonymous__'
-  const cacheKey = JSON.stringify([serviceId || null, requestIdentity])
+  const debugResponses = cookieJar.get(DEBUG_RESPONSES_COOKIE)?.value === '1'
+  const cacheKey = JSON.stringify([serviceId || null, debugResponses])
   const now = Date.now()
   const cached = _adminCachedMap.get(cacheKey)
   if (cached && now - cached.at < _ADMIN_SSR_TTL_MS) {
@@ -458,7 +458,7 @@ export async function fetchMetricHistoryBatchServerSide(): Promise<unknown | nul
     await ssrUpstreamGet({
       path: '/api/admin/metric-history/batch?since=1h',
       logPrefix: 'ssr/admin-trends',
-      timeoutMs: 450,
+      timeoutMs: 280,
     }),
     'ssr/admin-trends',
   )
@@ -475,7 +475,7 @@ export async function fetchAlertsServerSide(
     : '/api/alerts/'
 
   return parseSsrJson<AlertListResponse>(
-    await ssrUpstreamGet({ path, logPrefix: 'ssr/alerts' }),
+    await ssrUpstreamGet({ path, logPrefix: 'ssr/alerts', timeoutMs: 300 }),
     'ssr/alerts',
   )
 }
@@ -490,6 +490,7 @@ export async function fetchCronRunsServerSide(
     await ssrUpstreamGet({
       path: '/api/cron-runs?page=1&per_page=500',
       logPrefix: 'ssr/logs',
+      timeoutMs: 300,
       extraHeaders: { 'X-Fastly-Service-Id': serviceId },
     }),
     'ssr/logs',
@@ -506,6 +507,7 @@ export async function fetchCronScheduleServerSide(
     await ssrUpstreamGet({
       path: '/api/cron-schedule',
       logPrefix: 'ssr/logs-schedule',
+      timeoutMs: 300,
       extraHeaders: { 'X-Fastly-Service-Id': serviceId },
     }),
     'ssr/logs-schedule',
@@ -548,6 +550,7 @@ export async function fetchUsageLogServerSide(args: UsageLogSsrArgs): Promise<un
     await ssrUpstreamGet({
       path: `/api/admin/usage-log?${query.toString()}`,
       logPrefix: 'ssr/usage_log',
+      timeoutMs: 300,
     }),
     'ssr/usage_log',
   )

@@ -1,7 +1,9 @@
+import { Suspense } from 'react'
 import { HydrationBoundary } from '@tanstack/react-query'
 
 import { fetchCronRunsServerSide, fetchCronScheduleServerSide } from '@/lib/ssr/upstream'
 import { firstParam, resolvePageServiceId, seedDehydratedState } from '@/lib/ssr/upstream'
+import LogsLoading from './loading'
 import LogsClient from './_sections/LogsClient'
 import { queryKeys } from "@/lib/api"
 
@@ -18,7 +20,19 @@ import { queryKeys } from "@/lib/api"
 
 export const dynamic = 'force-dynamic'
 
-export default async function LogsPage({
+export default function LogsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ service?: string | string[]; tab?: string | string[] }>
+}) {
+  return (
+    <Suspense fallback={<LogsLoading />}>
+      <LogsPageContent searchParams={searchParams} />
+    </Suspense>
+  )
+}
+
+async function LogsPageContent({
   searchParams,
 }: {
   searchParams: Promise<{ service?: string | string[]; tab?: string | string[] }>

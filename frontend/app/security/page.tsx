@@ -1,14 +1,14 @@
+import { Suspense } from 'react'
 import { HydrationBoundary } from '@tanstack/react-query'
 
 import {
   fetchSecurityServerSide,
   SECURITY_SSR_DEFAULTS,
-} from '@/lib/ssr/upstream'
-import {
   resolveReportPageParams,
   seedDehydratedState,
   type ReportSearchParams,
 } from '@/lib/ssr/upstream'
+import SecurityLoading from './loading'
 import SecurityClient from './_sections/SecurityClient'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { analyticsReportQueryKey } from '@/lib/report-query-key'
@@ -50,7 +50,19 @@ import { analyticsReportQueryKey } from '@/lib/report-query-key'
 // fetch unchanged.
 export const dynamic = 'force-dynamic'
 
-export default async function SecurityPage({
+export default function SecurityPage({
+  searchParams,
+}: {
+  searchParams: Promise<ReportSearchParams>
+}) {
+  return (
+    <Suspense fallback={<SecurityLoading />}>
+      <SecurityPageContent searchParams={searchParams} />
+    </Suspense>
+  )
+}
+
+async function SecurityPageContent({
   searchParams,
 }: {
   searchParams: Promise<ReportSearchParams>

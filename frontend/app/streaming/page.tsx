@@ -14,27 +14,24 @@ import { isCloudMode } from '@/lib/cloud-engine/mode'
 
 export const dynamic = 'force-dynamic'
 
-export default async function StreamingPage({
+export default function StreamingPage({
   searchParams,
 }: {
   searchParams: Promise<ReportSearchParams>
 }) {
-  const { serviceId, isDefaultView } = await resolveReportPageParams(searchParams)
-
   return (
     <Suspense fallback={<StreamingLoading />}>
-      <StreamingPageContent serviceId={serviceId} isDefaultView={isDefaultView} />
+      <StreamingPageContent searchParams={searchParams} />
     </Suspense>
   )
 }
 
 async function StreamingPageContent({
-  serviceId,
-  isDefaultView,
+  searchParams,
 }: {
-  serviceId: string | undefined
-  isDefaultView: boolean
+  searchParams: Promise<ReportSearchParams>
 }) {
+  const { serviceId, isDefaultView } = await resolveReportPageParams(searchParams)
   const now = new Date()
   const seed =
     isDefaultView && !isCloudMode()

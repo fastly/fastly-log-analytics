@@ -33,6 +33,7 @@ import {
   scoringAnalyticsCompositeOptions,
   scoringConfigCompositeOptions,
 } from '@/components/SessionScoring/ScoringAdminPanels'
+import { useBootstrapPending } from '@/hooks/useBootstrap'
 import { useServiceStore } from '@/stores/filterStore'
 import Loading from './loading'
 
@@ -146,17 +147,22 @@ function SessionScoringPageContent() {
   const qc = useQueryClient()
 
   const concreteActiveServiceId = activeServiceId && activeServiceId !== 'all' ? activeServiceId : null
+  const bootstrapPending = useBootstrapPending()
+  const bootstrapActiveServiceId = qc.getQueryData<{ active_service_id?: string | null }>(
+    queryKeys.bootstrap(),
+  )?.active_service_id ?? null
 
   // Fallback `/api/services` query when navigating directly to `/admin/session-scoring`
-  // before the global ServiceInitializer has populated `activeServiceId`.
+  // without an in-flight bootstrap populating `activeServiceId`.
   const { data: servicesData, isLoading: servicesLoading } = useQuery({
     queryKey: queryKeys.services(),
     queryFn: async () => unwrapClient(client.GET('/api/services')),
-    enabled: !concreteActiveServiceId,
+    enabled: !concreteActiveServiceId && !bootstrapPending && !bootstrapActiveServiceId,
   })
 
   const effectiveServiceId =
     concreteActiveServiceId ||
+    bootstrapActiveServiceId ||
     servicesData?.services?.[0]?.service_id ||
     ''
 
@@ -245,11 +251,11 @@ function SessionScoringPageContent() {
     }
   }, [configComposite.data, configComposite.dataUpdatedAt, seedConfigSubQueries])
 
-  const statusLoading = !effectiveServiceId ? servicesLoading : configComposite.isLoading
+  const statusLoading = !effectiveServiceId ? (bootstrapPending || servicesLoading) : configComposite.isLoading
   // Overview cards (threshold, exclude-regex, enforce code) read config keys too,
   // so mounting them before the config composite seeds those keys refetches each.
   const overviewLoading = !effectiveServiceId
-    ? servicesLoading
+    ? (bootstrapPending || servicesLoading)
     : configComposite.isLoading || (!attachedFieldsOff && analyticsComposite.isLoading)
   const isStatusRefreshing = configComposite.isFetching && !statusLoading
   const isOverviewRefreshing = analyticsComposite.isFetching && !overviewLoading
@@ -316,11 +322,14 @@ function SessionScoringPageContent() {
             </AlertDescription>
           </Alert>
         ) : (
-          <StatusPanel serviceId={effectiveServiceId} />
+          <StatusPanel
+            serviceId={effectiveServiceId}
+            waitForEvaluation={!attachedFieldsOff && analyticsComposite.isLoading}
+          />
         )}
       </div>
 
-      {effectiveServiceId || servicesLoading ? (
+      {effectiveServiceId || bootstrapPending || servicesLoading ? (
         <Tabs
           value={tab}
           onValueChange={setTab}

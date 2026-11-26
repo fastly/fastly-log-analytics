@@ -680,8 +680,8 @@ describe('fetchBootstrapServerSide & fetchTosServerSide', () => {
     }, 401)
   })
 
-  it('never shares an admin SSR bootstrap cache across request cookie identities', async () => {
-    setCookies('admin_session=first')
+  it('never shares an admin SSR bootstrap cache across analyst_session_id identities while sharing across non-analyst cookies', async () => {
+    setCookies('fla.sidebarCollapsed=1')
     inbound({ host: 'localhost:3001', 'x-service-id': 'svc-cache-identity' })
     await withTestHttpServer(
       (req, res) => {
@@ -691,11 +691,23 @@ describe('fetchBootstrapServerSide & fetchTosServerSide', () => {
       },
       async () => {
         const first = await fetchBootstrapServerSide()
-        expect(first).toMatchObject({ active_service_id: 'admin_session=first' })
+        expect(first).toMatchObject({ active_service_id: 'fla.sidebarCollapsed=1' })
 
-        setCookies('admin_session=second')
-        const second = await fetchBootstrapServerSide()
-        expect(second).toMatchObject({ active_service_id: 'admin_session=second' })
+        setCookies('fla.sidebarCollapsed=0')
+        const shared = await fetchBootstrapServerSide()
+        expect(shared).toMatchObject({ active_service_id: 'fla.sidebarCollapsed=1' })
+
+        setCookies('analyst_session_id=analyst-1', (name) =>
+          name === 'analyst_session_id' ? { value: 'analyst-1' } : undefined,
+        )
+        const analystFirst = await fetchBootstrapServerSide()
+        expect(analystFirst).toMatchObject({ active_service_id: 'analyst_session_id=analyst-1' })
+
+        setCookies('analyst_session_id=analyst-2', (name) =>
+          name === 'analyst_session_id' ? { value: 'analyst-2' } : undefined,
+        )
+        const analystSecond = await fetchBootstrapServerSide()
+        expect(analystSecond).toMatchObject({ active_service_id: 'analyst_session_id=analyst-2' })
       },
     )
   })
@@ -1064,7 +1076,7 @@ describe('certificate gateway SSR trust', () => {
         srv.clearRequests()
         setCookies('')
         expect(await fetchBootstrapServerSide()).toEqual({})
-        expect(srv.lastRequest?.headers).not.toHaveProperty('cookie')
+        expect(srv.lastRequest).toBeUndefined()
 
         inbound({ host: 'admin.example.com', 'x-admin-gateway-token': secret, 'x-service-id': 'analyst-response-cache-test' })
         upstreamBody = { settings: { is_remote_analyst: true } }
@@ -1213,8 +1225,9 @@ describe('Insights page barrel export', () => {
       baselineHours: '24',
     })
     try {
-      const { default: InsightsPage } = await import('@/app/insights/page')
-      await InsightsPage({
+      const { default: InsightsPage, InsightsPageContent } = await import('@/app/insights/page')
+      expect(InsightsPage({ searchParams: Promise.resolve({}) })).toBeTruthy()
+      await InsightsPageContent({
         searchParams: Promise.resolve({
           start_time: '2026-11-25T12:00:00Z',
           end_time: '2026-11-25T13:00:00Z',
@@ -1230,7 +1243,7 @@ describe('Insights page barrel export', () => {
       expect(upstream.ORIGIN_SSR_TIMEOUT_MS).toBeLessThanOrEqual(1000)
 
       insightsSpy.mockClear()
-      await InsightsPage({
+      await InsightsPageContent({
         searchParams: Promise.resolve({
           filters: JSON.stringify({ status: '500' }),
         }),

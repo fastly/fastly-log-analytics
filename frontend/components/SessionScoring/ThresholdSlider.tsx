@@ -335,7 +335,23 @@ export interface ThresholdSliderProps {
 
 export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderProps) {
   const queryClient = useQueryClient()
-  const [thresholdRaw, setThresholdRaw] = React.useState(75)
+  const { data: committed, isPending: committedPending } = useScoringQuery(
+    ['scoring-threshold-committed', serviceId],
+    () =>
+      client.GET('/api/services/{service_id}/scoring/threshold', {
+        params: { path: { service_id: serviceId } },
+      }),
+    { staleTime: 30_000 },
+  )
+
+  const [syncedServiceId, setSyncedServiceId] = React.useState<string | null>(
+    () => (committed?.threshold != null ? serviceId : null),
+  )
+  const [thresholdRaw, setThresholdRaw] = React.useState(() => committed?.threshold ?? 75)
+  if (syncedServiceId !== serviceId && committed?.threshold != null) {
+    setSyncedServiceId(serviceId)
+    setThresholdRaw(committed.threshold)
+  }
   const threshold = useDebounce(thresholdRaw, 150)
   const [pendingAction, setPendingAction] = React.useState<
     | { action: 'commit' | 'enforce' | 'disable'; threshold: number }
@@ -349,24 +365,9 @@ export function ThresholdSlider({ serviceId, sinceHours = 24 }: ThresholdSliderP
       client.GET('/api/services/{service_id}/scoring/threshold-preview', {
         params: { path: { service_id: serviceId }, query: { threshold, since_hours: sinceHours } },
       }),
-    { staleTime: 30_000 },
+    { staleTime: 30_000, enabled: !committedPending && threshold === thresholdRaw },
   )
   const data = rawPreviewData as ThresholdPreviewResponse | undefined
-
-  const { data: committed } = useScoringQuery(
-    ['scoring-threshold-committed', serviceId],
-    () =>
-      client.GET('/api/services/{service_id}/scoring/threshold', {
-        params: { path: { service_id: serviceId } },
-      }),
-    { staleTime: 30_000 },
-  )
-
-  const [syncedServiceId, setSyncedServiceId] = React.useState<string | null>(null)
-  if (syncedServiceId !== serviceId && committed?.threshold != null) {
-    setSyncedServiceId(serviceId)
-    setThresholdRaw(committed.threshold)
-  }
 
   const invalidateThresholdKeys = (firstKey: string) => {
     for (const key of [

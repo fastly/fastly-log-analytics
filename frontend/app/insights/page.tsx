@@ -1,3 +1,4 @@
+import { Suspense } from 'react'
 import { HydrationBoundary } from '@tanstack/react-query'
 
 import { insightsReportQueryKey } from '@/lib/report-query-key'
@@ -9,6 +10,7 @@ import {
   seedDehydratedState,
   type ReportSearchParams,
 } from '@/lib/ssr/upstream'
+import InsightsLoading from './loading'
 import InsightsClient from './_sections/InsightsClient'
 
 export * from './_sections/InsightsClient'
@@ -20,7 +22,19 @@ function firstParam(val: string | string[] | undefined): string | null {
   return val ?? null
 }
 
-export default async function InsightsPage({
+export default function InsightsPage({
+  searchParams,
+}: {
+  searchParams: Promise<ReportSearchParams>
+}) {
+  return (
+    <Suspense fallback={<InsightsLoading />}>
+      <InsightsPageContent searchParams={searchParams} />
+    </Suspense>
+  )
+}
+
+export async function InsightsPageContent({
   searchParams,
 }: {
   searchParams: Promise<ReportSearchParams>

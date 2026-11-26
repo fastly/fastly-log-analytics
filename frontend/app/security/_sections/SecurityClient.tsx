@@ -256,7 +256,7 @@ export default function SecurityClient({ nowServerStr }: { nowServerStr?: string
   return (
     <ReportLayout
       title="Security"
-      description="Monitor TLS health, identify bot fingerprints, and detect request anomalies."
+      description="Monitor TLS cipher and protocol health, verify well-known bot and AI crawler identities, analyze request anomalies, inspect proxy exposure, and track client fingerprint coverage."
       icon={Shield}
     >
       {(props) => (

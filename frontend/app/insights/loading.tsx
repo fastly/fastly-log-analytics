@@ -3,7 +3,7 @@ export default function Loading() {
   return (
     <DashboardSkeleton
       title="Anomaly Detection"
-      description="Automated insights comparing recent traffic to historical baselines."
+      description="Automated anomaly detection comparing recent edge traffic windows against historical baselines across error spikes, latency regressions, cache collapse, bot surges, and origin health."
     />
   )
 }

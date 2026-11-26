@@ -1587,4 +1587,73 @@ describe('admin/session-scoring page', () => {
     renderWithQuery(<SessionScoringPage />)
     await waitFor(() => expect(configHits).toEqual(['svc-fallback']))
   })
+
+  test('issues zero duplicate API calls on initial cold load when committed threshold differs from default and config resolves first', async () => {
+    mockScoringSubcomponents = false
+    const requests: string[] = []
+    const onRequest = ({ request }: { request: Request }) => {
+      requests.push(new URL(request.url).pathname)
+    }
+    server.events.on('request:start', onRequest)
+    let releaseAnalytics!: () => void
+    const analyticsGate = new Promise<void>((resolve) => { releaseAnalytics = resolve })
+
+    server.use(
+      http.get(`${API_BASE}/api/services/:service_id/scoring/config`, () => HttpResponse.json({
+        status: { enabled: true },
+        threshold: { threshold: 70 },
+        exclude_regex: { current: '', is_default: true, default: '', effective: '' },
+        enforce_status_code: { current: 429, effective: 429, is_default: true, default: 429 },
+      })),
+      http.get(`${API_BASE}/api/services/:service_id/scoring/analytics`, async () => {
+        await analyticsGate
+        return HttpResponse.json({
+          ...analyticsStub,
+          latency_timeseries: { rows: [], granularity: 'hour' },
+        })
+      }),
+      http.get(`${API_BASE}/api/services/:service_id/scoring/threshold-preview`, () => HttpResponse.json({
+        threshold: 70,
+        since_hours: 24,
+        total_scored_sessions: 0,
+        flagged: { total: 0, good: 0, bad: 0, unlabeled: 0 },
+        passed: { good: 0, bad: 0, unlabeled: 0 },
+      })),
+      http.get(`${API_BASE}/api/services/:service_id/scoring/enforce-threshold`, () => HttpResponse.json({ threshold: null })),
+      http.get(`${API_BASE}/api/services/:service_id/scoring/l2-enforce`, () => HttpResponse.json({
+        available: true, enabled: false, l2_enabled_at: null, days_since_optin: null,
+        ramp_progress: 0, fully_ramped: false, warmup_days_remaining: null, scoring_enabled_at: null,
+        deployment_age_days: 0, ready: false, ramp_days: 3, readiness_days: 7,
+      })),
+      http.get(`${API_BASE}/api/services/:service_id/scoring/curves`, () => HttpResponse.json({
+        has_min_samples: false, min_per_class: 5, n_good: 0, n_bad: 0, roc: [], pr: [],
+      })),
+      http.get(`${API_BASE}/api/services/:service_id/scoring/labels`, () => HttpResponse.json({
+        labels: [], counts: { good: 0, neutral: 0, bad: 0 },
+      })),
+      http.get(`${API_BASE}/api/services/:service_id/scoring/evaluation`, () => HttpResponse.json({
+        n_good: 0, n_bad: 0, min_per_class: 5, has_min_samples: false,
+      })),
+    )
+
+    try {
+      renderWithQuery(<SessionScoringPage />, { queryOptions: { queries: { gcTime: 5 * 60_000 } } })
+      await waitFor(() => expect(requests).toContain('/api/services/svc-default/scoring/config'))
+      await new Promise((r) => setTimeout(r, 30))
+      releaseAnalytics()
+      await waitFor(() => expect(requests).toContain('/api/services/svc-default/scoring/threshold-preview'))
+      await new Promise((r) => setTimeout(r, 200))
+
+      const counts = new Map<string, number>()
+      for (const pathname of requests) {
+        counts.set(pathname, (counts.get(pathname) ?? 0) + 1)
+      }
+      const duplicates = Array.from(counts.entries()).filter(([, count]) => count > 1)
+      expect(duplicates).toEqual([])
+      expect(counts.get('/api/services/svc-default/scoring/evaluation')).toBeUndefined()
+      expect(counts.get('/api/services/svc-default/scoring/threshold-preview')).toBe(1)
+    } finally {
+      server.events.removeListener('request:start', onRequest)
+    }
+  })
 })

@@ -85,6 +85,7 @@ export {
 
 export interface StatusPanelProps {
   serviceId: string
+  waitForEvaluation?: boolean
 }
 
 type ScoringEvaluation = components['schemas']['ScoringEvaluationResponse']
@@ -340,7 +341,7 @@ function CloudScoringJobButton({
   )
 }
 
-export function StatusPanel({ serviceId }: StatusPanelProps) {
+export function StatusPanel({ serviceId, waitForEvaluation = false }: StatusPanelProps) {
   const queryClient = useQueryClient()
   const { data, isLoading, isFetching, error, refetch } = useScoringQuery(
     ['scoring-status', serviceId],
@@ -368,7 +369,7 @@ export function StatusPanel({ serviceId }: StatusPanelProps) {
       client.GET('/api/services/{service_id}/scoring/evaluation', {
         params: { path: { service_id: serviceId } },
       }),
-    { enabled, staleTime: 30_000 },
+    { enabled: enabled && !waitForEvaluation, staleTime: 30_000 },
   )
 
   const extLinkCls =
