@@ -1721,4 +1721,74 @@ describe("Cloud first-page analytical range loading", () => {
     expect(rangeCalls).toBe(0);
     expect(source.fetchFile).toHaveBeenCalledTimes(1);
   });
+
+  it("greedily packs newest wholeFirst candidates when candidateBytes exceeds byteLimit without wide-projection violation", async () => {
+    Object.assign(wholeReadLimits, DEFAULT_WHOLE_READ_LIMITS);
+    const rgRows = 500;
+    const rowGroups = 6;
+    const totalRows = rgRows * rowGroups;
+    let seed = 53;
+    const randStr = (len: number) => Array.from({ length: len }, () => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return String.fromCharCode(33 + (seed % 90));
+    }).join("");
+    const baseStartMs = Date.parse("2026-11-25T06:00:00Z");
+    const stepMs = 1000;
+    const bytes = parquetWriteBuffer({
+      codec: "UNCOMPRESSED",
+      rowGroupSize: rgRows,
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: totalRows }, (_, i) => new Date(baseStartMs + i * stepMs)) },
+        { name: "status", type: "INT32", data: Array.from({ length: totalRows }, () => 200) },
+        { name: "url", type: "STRING", data: Array.from({ length: totalRows }, () => randStr(400)) },
+        { name: "ua", type: "STRING", data: Array.from({ length: totalRows }, () => randStr(400)) },
+      ],
+    });
+    expect(bytes.byteLength).toBeGreaterThan(2 * 1024 * 1024);
+    expect(bytes.byteLength).toBeLessThanOrEqual(DEFAULT_WHOLE_READ_LIMITS.closedHourUpToBytes);
+
+    const entries: ManifestFile[] = Array.from({ length: 4 }, (_, i) => {
+      const startMs = baseStartMs + i * 3_600_000;
+      return {
+        key: `processed/request/year=2026/month=11/day=25/hour=0${i + 6}/compact=c4-n${i}.parquet`,
+        start: new Date(startMs).toISOString(),
+        end: new Date(startMs + 3_000_000).toISOString(),
+        rows: totalRows,
+        size: bytes.byteLength,
+        etag: `"etag-pack-${i}"`,
+      };
+    });
+    vi.mocked(fetchManifest).mockResolvedValue({ files: entries, complete: true });
+
+    const fetchedWholeKeys: string[] = [];
+    const rangedKeys = new Set<string>();
+    source.fetchFile.mockImplementation(async (key: string) => {
+      fetchedWholeKeys.push(key);
+      return { bytes: bytes.slice(0), cached: false };
+    });
+    source.fetchRange.mockImplementation(async (entry: ManifestFile, start: number, end: number) => {
+      rangedKeys.add(entry.key);
+      return bytes.slice(start, end);
+    });
+
+    // Narrow 2-column projection: candidateBytes (4 * size) > byteLimit (2.5 * size),
+    // but newest file(s) pack greedily into wholeFirst instead of dropping all 4 to range GETs.
+    const byteLimit = Math.floor(bytes.byteLength * 2.5);
+    const read = await ensureCloudRange(
+      new Date(baseStartMs).toISOString(),
+      new Date(baseStartMs + 4 * 3_600_000).toISOString(),
+      signal,
+      ["request"],
+      { projection: { columns: ["timestamp", "status"], maxBytes: byteLimit } },
+    );
+    const [{ n }] = await read.executeSql("SELECT count(*)::INT AS n FROM requests") as [{ n: number }];
+    expect(n).toBe(totalRows * 4);
+    read.release?.();
+
+    expect(fetchedWholeKeys.length).toBeGreaterThan(0);
+    expect(fetchedWholeKeys.length).toBeLessThan(4);
+    // Newest file is packed first and never issues range/footer GETs.
+    expect(fetchedWholeKeys).toContain(entries[3].key);
+    expect(rangedKeys.has(entries[3].key)).toBe(false);
+  });
 });

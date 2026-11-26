@@ -1,7 +1,8 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
 import { parquetWriteBuffer } from "hyparquet-writer";
-import { Aggregator, runDashboard, searchFieldValues } from "./engine";
+import { Aggregator, clearDashboardMemo, runDashboard, searchFieldValues } from "./engine";
+import { loadSummaryFixtures } from "./summary-fixtures";
 import { getDuckDBEngine } from "./duckdb";
 import {
   discoverPresets,
@@ -46,6 +47,29 @@ describe("runDashboard", () => {
       Date.parse("2026-10-29T10:00:00Z"),
       Date.parse("2026-10-29T11:00:00Z"),
     );
+  });
+
+  it("reads only the hour_bundle= when both hour_bundle= and its constituent summary= files are listed", async () => {
+    clearDashboardMemo();
+    const { files, buffers } = loadSummaryFixtures("../dashboard/__fixtures__/summaries");
+    const raw08 = files("raw", (e) => e.key.includes("/hour=08/"));
+    const summaries08 = files("window", (e) => e.key.includes("/hour=08/"));
+    const hour08Bundle = files("hour", (e) => e.sources === 4 && e.key.includes("hour_bundle=08"));
+    expect(summaries08).toHaveLength(4);
+    expect(hour08Bundle).toHaveLength(1);
+
+    const source = fixtureSource(
+      [{ files: raw08, next_cursor: null, complete: true }],
+      buffers,
+      undefined,
+      [{ files: [...summaries08, ...hour08Bundle], next_cursor: null, complete: true }],
+    );
+    const result = await runDashboard(source, {
+      from: "2027-01-15T08:00:00Z",
+      to: "2027-01-15T09:00:00Z",
+    });
+    expect(result.totalRequests).toBe(800);
+    expect(source.log.files).toEqual([hour08Bundle[0].key]);
   });
 
   const rows = [

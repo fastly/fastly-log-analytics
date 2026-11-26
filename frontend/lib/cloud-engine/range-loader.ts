@@ -291,6 +291,25 @@ export async function ensureCloudRange(
           for (const file of candidates) wholeFirst.add(file.scopedKey);
         } else if (candidates.some((file) => prefersWholeForWideProjection(file, projectedColumns.size, rangeWindow))) {
           throw overBudget({ unit: "bytes", needed: candidateBytes, limit: byteLimit });
+        } else {
+          // Greedily pack newest-first whole-file candidates up to a conservative share of byteLimit
+          // while reserving projected headroom for remaining files, avoiding all-or-nothing range fan-out.
+          const wholeCap = Math.floor(byteLimit * 0.65);
+          const reserveOf = (file: typeof unknown[number]) => Math.min(file.size, 512 * 1024);
+          let remainingReserve = unknown.reduce((sum, file) => sum + reserveOf(file), 0);
+          let packedBytes = 0;
+          const sortedCandidates = [...candidates].sort(
+            (a, b) => (Date.parse(b.end) || 0) - (Date.parse(a.end) || 0),
+          );
+          for (const file of sortedCandidates) {
+            const nextPacked = packedBytes + file.size;
+            const nextReserve = remainingReserve - reserveOf(file);
+            if (nextPacked <= wholeCap && nextPacked + nextReserve <= byteLimit) {
+              wholeFirst.add(file.scopedKey);
+              packedBytes = nextPacked;
+              remainingReserve = nextReserve;
+            }
+          }
         }
         await Promise.all(unknown.map(async (file) => {
           generation.assertCurrent();

@@ -63,7 +63,7 @@ export function defineSummarySpec({ groups, columns, only = {}, fields }: {
  * `wholeBelowBytes` are read whole, as are files a projection would fetch
  * more than `wholeAboveShare` of. Mutable for tests.
  */
-export const summaryProjectionLimits = { wholeBelowBytes: 2 * 1024 * 1024, wholeAboveShare: 0.6 };
+export const summaryProjectionLimits = { wholeBelowBytes: 4 * 1024 * 1024, wholeAboveShare: 0.6 };
 
 const SUMMARY_TARGET_RANGES = 4;
 const SUMMARY_SOFT_MERGE_MAX_GAP = 128 * 1024;

@@ -492,4 +492,18 @@ describe("Feature F21 — Network cloud-engine", () => {
       await engine.reset();
     }
   });
+
+  it("unifies networkScanColumns across all /api/network* endpoints on NETWORK_SCAN_COLUMNS plus dynamic filters", () => {
+    const canonical = [...NETWORK_SCAN_COLUMNS].toSorted();
+    expect(networkScanColumns("/api/network-health", { sections: ["summary"] })?.toSorted()).toEqual(canonical);
+    expect(networkScanColumns("/api/network-health", { sections: ["buckets", "cities", "map_buckets"] })?.toSorted()).toEqual(canonical);
+    expect(networkScanColumns("/api/network-quality", { quality_parts: ["throughput"] })?.toSorted()).toEqual(canonical);
+    expect(networkScanColumns("/api/network/pop-health", {})?.toSorted()).toEqual(canonical);
+    expect(networkScanColumns("/api/network/bundle", { sections: ["transport"] })?.toSorted()).toEqual(canonical);
+    expect(networkScanColumns("/api/network/bundle", {
+      sections: ["transport"],
+      filters: { status: { mode: "include", values: ["200"] }, host: { mode: "include", values: ["a.example"] } },
+    })?.toSorted()).toEqual([...NETWORK_SCAN_COLUMNS, "host"].toSorted());
+    expect(networkScanColumns("/api/network/bundle", { filters: "invalid-json" })).toBeNull();
+  });
 });

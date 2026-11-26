@@ -314,10 +314,10 @@ describe("readSummaryProjection", () => {
       .toEqual(want);
   });
 
-  it("reads hour bundles up to 2 MiB whole in one request to avoid 7x HTTP 206 fan-out", async () => {
-    expect(summaryProjectionLimits.wholeBelowBytes).toBe(2 * 1024 * 1024);
+  it("reads hour bundles up to 4 MiB whole in one request to avoid multi-range HTTP 206 fan-out", async () => {
+    expect(summaryProjectionLimits.wholeBelowBytes).toBe(4 * 1024 * 1024);
     const source = fakeSource(layoutBytes);
-    const simulatedHourBundle = { ...manifestFile(layoutBytes), size: 1_500_000 };
+    const simulatedHourBundle = { ...manifestFile(layoutBytes), size: 3_500_000 };
     const read = await readSummaryProjection(source, simulatedHourBundle, FIELDS);
     expect(read.whole).toBe(true);
     expect(source.net.whole).toEqual([KEY]);

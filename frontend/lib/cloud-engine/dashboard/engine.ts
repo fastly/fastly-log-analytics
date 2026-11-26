@@ -34,6 +34,7 @@ import {
   decodeSummary,
   normalizeDashboardValue,
   groupByCovers,
+  planCoarsestFirst,
   planCompactsFromWindows,
   planFilteredSummaries,
   planSummaries,
@@ -1541,7 +1542,7 @@ async function collectAggregator(
       if (sliceable) {
         slicedListing = listing.files;
       } else {
-        const plan = planSummaries(files, listing.files, fromMs, toMs);
+        const plan = planCoarsestFirst(files, listing.files, fromMs, toMs);
         // An open hour's compacts the open bundle cannot prove it holds are answered by the
         // window summaries their names tag, as rollups do (`planRollup`).
         const used = new Set(plan.summaries.map((use) => use.file.key));

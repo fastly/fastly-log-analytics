@@ -389,29 +389,7 @@ export const NETWORK_SCAN_COLUMNS = [
   "retrans", "client_tcpi_delta_retrans", "delivery_rate", "tcpi_delivery_rate",
 ] as const;
 
-const RTT_COLUMNS = ["tcp_rtt", "tcpi_rtt", "client_rtt_us", "client_tcpi_rtt"];
-const BYTES_COLUMNS = ["resp_bytes", "resp_body_size"];
-const COUNTRY_COLUMNS = ["country", "geo_country"];
-const ASN_COLUMNS = ["asn", "client_asn"];
-const POP_COLUMNS = ["pop", "fastly_pop"];
-
-/** The columns each raw /network scan reads, beyond the time and service ones every scan filters on. */
-const SCAN_COLUMNS = {
-  health: [...COUNTRY_COLUMNS, ...ASN_COLUMNS, "as_name", "city", "geo_city", "lat", "lon", "metro", ...RTT_COLUMNS,
-    "ploss", "client_ploss", "status"],
-  // The map alone (`mapOnly`); a chosen map ASN adds the ASN columns (`networkScanColumns`).
-  map: ["city", "geo_city", ...COUNTRY_COLUMNS, "lat", "lon", "metro", ...RTT_COLUMNS, "ploss", "client_ploss", "status"],
-  shielding: ["edge", "rid", "prid", "pop", "ttfb", "ottfb"],
-  quality: [...COUNTRY_COLUMNS, ...ASN_COLUMNS, "as_name", "proto", "protocol", ...POP_COLUMNS, "region", "geo_region",
-    ...RTT_COLUMNS, "client_cwnd", "client_tcpi_rttvar", "ploss", "client_ploss", "rtt_var", "tcpi_rtt_var",
-    "retrans", "client_tcpi_delta_retrans", "elapsed", "time_elapsed_usec", ...BYTES_COLUMNS, "ttfb", "ttfb_ms", "cache", "cache_status"],
-  pop_health: [...POP_COLUMNS, "status", "cache", "cache_status", ...BYTES_COLUMNS, "ttfb", "ttfb_ms", ...RTT_COLUMNS,
-    "client_ploss"],
-  transport: ["proto", "protocol", ...BYTES_COLUMNS, ...RTT_COLUMNS, "ploss", "client_ploss", "delivery_rate",
-    "tcpi_delivery_rate", "retrans", "client_tcpi_delta_retrans"],
-} as const;
-
-export type NetworkScan = keyof typeof SCAN_COLUMNS;
+export type NetworkScan = "health" | "map" | "shielding" | "quality" | "pop_health" | "transport";
 
 /**
  * The /network-quality figures v3 summaries written before the `quality` rows
@@ -420,12 +398,6 @@ export type NetworkScan = keyof typeof SCAN_COLUMNS;
  */
 export const QUALITY_PARTS = ["throughput", "region", "asn_client"] as const;
 export type QualityPart = typeof QUALITY_PARTS[number];
-
-const QUALITY_PART_COLUMNS: Record<QualityPart, readonly string[]> = {
-  throughput: ["elapsed", "time_elapsed_usec", ...BYTES_COLUMNS],
-  region: [...COUNTRY_COLUMNS, "region", "geo_region", ...RTT_COLUMNS],
-  asn_client: [...ASN_COLUMNS, "client_tcpi_rttvar", "ploss", "client_ploss"],
-};
 
 function qualityParts(value: unknown): QualityPart[] | null {
   return Array.isArray(value) && value.length > 0 &&
@@ -465,10 +437,11 @@ export function networkScans(path: string, sections: unknown): NetworkScan[] | n
 }
 
 /**
- * The columns a projected /network load needs: its own scans' columns and the
- * filtered ones. Null when the filters can't name theirs.
+ * The columns a projected /network load needs: the canonical NETWORK_SCAN_COLUMNS
+ * superset plus any dynamic filter columns, so concurrent /network requests share
+ * one `file.scopedKey` and DuckDB registration. Null when the filters can't name theirs.
  */
-export function networkScanColumns(path: string, params: Record<string, unknown>): string[] | null {
+export function networkScanColumns(_path: string, params: Record<string, unknown>): string[] | null {
   let filters: unknown = params.filters;
   if (typeof filters === "string") {
     const trimmed = filters.trim();
@@ -483,17 +456,8 @@ export function networkScanColumns(path: string, params: Record<string, unknown>
     }
   }
   if (filters != null && (typeof filters !== "object" || Array.isArray(filters))) return null;
-  const scans = networkScans(path, params.sections);
-  const present = (value: unknown) => value != null && value !== "";
-  const parts = qualityParts(params.quality_parts);
   return [...new Set([
-    "timestamp", "ts_ms", "service_id",
-    ...(scans ? scans.flatMap((scan) => scan === "quality" && parts
-      ? parts.flatMap((part) => QUALITY_PART_COLUMNS[part]) : SCAN_COLUMNS[scan]) : NETWORK_SCAN_COLUMNS),
-    ...scans?.includes("map") && present(params.map_asn) && params.map_asn !== "all" ? ASN_COLUMNS : [],
-    ...present(params.filter_country) ? COUNTRY_COLUMNS : [],
-    ...present(params.filter_asn) ? ASN_COLUMNS : [],
-    ...present(params.filter_pop) ? POP_COLUMNS : [],
+    ...NETWORK_SCAN_COLUMNS,
     ...filters && typeof filters === "object" ? Object.keys(filters) : [],
   ])];
 }

@@ -418,32 +418,21 @@ describe("Cloud route column projections", () => {
       network("/api/network/bundle", { sections: ["quality", "pop_health", "transport"] }),
       network("/api/network/bundle", {}),
     ]);
-    // The page's transport card reads none of the heavy row-level or geo columns.
-    for (const heavy of ["rid", "prid", "city", "as_name", "lat", "region", "cache", "ttfb"]) {
-      expect(networkScanColumns("/api/network/bundle", transport), heavy).not.toContain(heavy);
-    }
-    // The map alone groups no ASN, metro or name; summaries that lack its rows fall back to just these.
-    const map = networkScanColumns("/api/network-health", { ...page, sections: ["buckets", "cities", "map_buckets"] })!;
-    for (const heavy of ["asn", "client_asn", "as_name", "rid", "region", "proto", "pop"]) expect(map, heavy).not.toContain(heavy);
-    expect(networkScanColumns("/api/network-health", { ...page, sections: ["buckets", "cities", "map_buckets"], map_asn: "600" }))
-      .toEqual(expect.arrayContaining(["asn", "client_asn"]));
-    // A quality read of only the parts summaries lacked loads only those parts' columns.
-    const full = networkScanColumns("/api/network-quality", {})!;
-    const throughput = networkScanColumns("/api/network-quality", { quality_parts: ["throughput"] })!;
-    expect(throughput.toSorted()).toEqual(
-      ["timestamp", "ts_ms", "service_id", "elapsed", "time_elapsed_usec", "resp_bytes", "resp_body_size"].toSorted());
-    const allParts = networkScanColumns("/api/network-quality", { quality_parts: ["throughput", "region", "asn_client"] })!;
-    for (const heavy of ["as_name", "proto", "pop", "cache", "ttfb", "client_cwnd", "rtt_var"]) {
-      expect(full, heavy).toContain(heavy);
-      expect(allParts, heavy).not.toContain(heavy);
-    }
-    expect(networkScanColumns("/api/network-quality", { quality_parts: ["bogus"] })).toEqual(full);
-    expect(networkScanColumns("/api/network/bundle", { sections: ["transport"], filters: { host: ["a.example"] } }))
-      .toContain("host");
+    // All /network endpoints share the canonical NETWORK_SCAN_COLUMNS superset so concurrent
+    // calls coalesce onto a single file.scopedKey and single DuckDB registration.
+    const canonical = [...NETWORK_SCAN_COLUMNS].toSorted();
+    expect(networkScanColumns("/api/network/bundle", transport)?.toSorted()).toEqual(canonical);
+    expect(networkScanColumns("/api/network-health", { ...page, sections: ["buckets", "cities", "map_buckets"] })?.toSorted()).toEqual(canonical);
+    expect(networkScanColumns("/api/network-health", { ...page, sections: ["buckets", "cities", "map_buckets"], map_asn: "600" })?.toSorted()).toEqual(canonical);
+    expect(networkScanColumns("/api/network-quality", {})?.toSorted()).toEqual(canonical);
+    expect(networkScanColumns("/api/network-quality", { quality_parts: ["throughput"] })?.toSorted()).toEqual(canonical);
+    expect(networkScanColumns("/api/network-quality", { quality_parts: ["throughput", "region", "asn_client"] })?.toSorted()).toEqual(canonical);
+    expect(networkScanColumns("/api/network/pop-health", {})?.toSorted()).toEqual(canonical);
+    expect(networkScanColumns("/api/network/bundle", { sections: ["transport"], filters: { host: ["a.example"] } })?.toSorted())
+      .toEqual([...NETWORK_SCAN_COLUMNS, "host"].toSorted());
     expect(networkScanColumns("/api/network/bundle", { filters: "host" })).toBeNull();
-    // An unparsed section list reads every /network column rather than guessing.
-    expect(networkScanColumns("/api/network/bundle", { sections: "transport" })?.toSorted())
-      .toEqual([...NETWORK_SCAN_COLUMNS].toSorted());
+    // An unparsed section list reads the same canonical /network column superset.
+    expect(networkScanColumns("/api/network/bundle", { sections: "transport" })?.toSorted()).toEqual(canonical);
   });
 
   it("loads /api/services/{id}/scoring scans as exact projections", async () => {

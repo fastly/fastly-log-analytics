@@ -1590,8 +1590,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect((await options("/api/network-quality", post({})))?.projection).toEqual(columns("/api/network-quality"));
     const transport = (await options("/api/network/bundle", post({ sections: ["transport"] })))?.projection;
     expect(transport).toEqual(columns("/api/network/bundle", { sections: ["transport"] }));
-    expect(transport?.columns).toEqual(expect.arrayContaining(["tcp_rtt", "delivery_rate", "proto"]));
-    expect(transport?.columns).not.toContain("rid");
+    expect(transport?.columns?.toSorted()).toEqual([...NETWORK_SCAN_COLUMNS].toSorted());
     expect((await options("/api/network/pop-health"))?.projection).toEqual(columns("/api/network/pop-health"));
     expect((await options("/api/network/bundle", post({})))?.projection?.columns?.toSorted())
       .toEqual([...NETWORK_SCAN_COLUMNS].toSorted());
@@ -1904,7 +1903,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     const [from, to, , , options] = vi.mocked(ensureCloudRange).mock.calls[0];
     expect([from, to]).toEqual([residual.start_time, residual.end_time]);
     expect(options?.projection?.columns).toEqual(networkScanColumns("/api/network-quality", residual));
-    expect(options?.projection?.columns).not.toContain("region");
+    expect(options?.projection?.columns?.toSorted()).toEqual([...NETWORK_SCAN_COLUMNS].toSorted());
     // The empty test engine has no rows, so the raw parts come back empty and zero the client-only figures.
     expect(await res!.json()).toEqual({
       ...answer, by_asn: [{ asn: 13335, avg_rttvar_ms: 0, avg_ploss_pct: 0 }],
