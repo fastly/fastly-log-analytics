@@ -1,7 +1,7 @@
 use crate::{
     admin::transport::{
-        FASTLY_API_TIMEOUT, FOS_TIMEOUT, PEER_TIMEOUT, REQUEST_PROBE_TIMEOUT,
-        STATE_CONFIRMATION_TIMEOUT,
+        classify_kv_rest_cas, KvCoordState, KvRestCasOutcome, FASTLY_API_TIMEOUT, FOS_TIMEOUT,
+        PEER_TIMEOUT, REQUEST_PROBE_TIMEOUT, STATE_CAS_TIMEOUT, STATE_CONFIRMATION_TIMEOUT,
     },
     checks::{self, CheckApi, CheckProbe, Environment},
     setup::SetupStores,
@@ -47,18 +47,6 @@ pub struct FastlyRuntime {
     /// Speculative CDN reads sent by [`Runtime::admin_cdn_get_many`] whose answers are not read
     /// yet, by `<service>/<key>`, with their send time and the response limit reserved.
     unread: RefCell<BTreeMap<String, (Instant, fastly::http::request::PendingRequest, usize)>>,
-}
-
-#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
-struct KvCoordState {
-    #[serde(default)]
-    last_write_ms: u64,
-    #[serde(default)]
-    dead_generation: Option<String>,
-    #[serde(default)]
-    dead_since_ms: u64,
-    #[serde(default)]
-    last_written_value: Option<Value>,
 }
 
 impl FastlyRuntime {
@@ -291,6 +279,82 @@ impl FastlyRuntime {
             .flatten()
             .and_then(|record| record.value["last_tick"].as_u64());
         (durable, false)
+    }
+
+    fn admin_cas_fresh(
+        &self,
+        key: &str,
+        generation: u64,
+        body: &str,
+        token: &str,
+    ) -> Result<Option<Option<String>>, String> {
+        let store = self.required("kv_store_id")?;
+        let path = format!(
+            "/resources/stores/kv/{store}/keys/{}",
+            crate::admin::transport::encode(key)
+        );
+        let url = format!("https://api.fastly.com{path}");
+        for rest_attempt in 0..2 {
+            if rest_attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(1_100));
+            }
+            self.budget.charge()?;
+            self.kv_ops.set(self.kv_ops.get().saturating_add(1));
+            let started = Instant::now();
+            let response = bounded_send_with_timeout(
+                Request::put(&url)
+                    .with_header("fastly-key", token)
+                    .with_header("if-generation-match", generation.to_string())
+                    .with_header("content-type", "application/octet-stream")
+                    .with_header("cache-control", "no-cache")
+                    .with_body(body.to_owned()),
+                "api_fastly",
+                STATE_CAS_TIMEOUT,
+            )?;
+            let status = response.get_status().as_u16();
+            let gen_hdr = response.get_header_str("generation").map(str::to_owned);
+            self.admin_event(json!({
+                "event": "admin.state.cas_confirm",
+                "level": if (200..300).contains(&status) || status == 412 || status == 404 {
+                    "info"
+                } else if status == 429 {
+                    "warn"
+                } else {
+                    "error"
+                },
+                "status": status,
+                "attempt": rest_attempt + 1,
+                "duration_ms": started.elapsed().as_millis(),
+                "coordination_key": match key {
+                    crate::ingest::PLAN_KEY
+                    | crate::ingest::WATERMARK_KEY
+                    | crate::ingest::compaction::STATE_KEY => key,
+                    k if k.ends_with(":watermark") || k.ends_with(":plan") => k,
+                    _ => "other",
+                },
+                "if_generation_match": generation.to_string(),
+                "generation": gen_hdr,
+                "api_pop": response.get_header_str("x-served-by"),
+                "runtime_service_id": std::env::var("FASTLY_SERVICE_ID").ok(),
+                "runtime_service_version": std::env::var("FASTLY_SERVICE_VERSION").ok(),
+            }));
+            match classify_kv_rest_cas(status, gen_hdr.as_deref()) {
+                Ok(KvRestCasOutcome::Committed {
+                    generation: new_gen,
+                }) => return Ok(Some(new_gen)),
+                Ok(KvRestCasOutcome::PreconditionFailed) => return Ok(None),
+                Ok(KvRestCasOutcome::RateLimited)
+                    if rest_attempt == 0 && self.budget.remaining() > 0 =>
+                {
+                    continue;
+                }
+                Ok(KvRestCasOutcome::RateLimited) => {
+                    return Err("admin_state_cas_rate_limited".into());
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+        Err("admin_state_cas_confirm_failed".into())
     }
 
     fn raw_admin_api(
@@ -737,25 +801,18 @@ impl Runtime for FastlyRuntime {
         let kv = self.kv.as_ref().ok_or("kv_store_unavailable")?;
         match kv.lookup(key) {
             Ok(mut response) => {
-                let generation = response.current_generation().to_string();
+                let mut generation = response.current_generation().to_string();
                 let mut value = bounded_json_with_limit(response.take_body(), KV_VALUE_MAX_BYTES)?;
                 if Self::is_coordinated_kv_key(key) {
                     if let Some(mut coord) = self.kv_coord_get(key) {
-                        let kv_ts = value["_kv_written_ms"].as_u64().unwrap_or(0);
-                        if let Some(ref cached_val) = coord.last_written_value {
-                            let cached_ts = cached_val["_kv_written_ms"].as_u64().unwrap_or(0);
-                            if cached_ts > kv_ts {
-                                if coord.dead_generation.as_deref() != Some(generation.as_str()) {
-                                    coord.dead_generation = Some(generation.clone());
-                                    coord.dead_since_ms = coord.last_write_ms.max(cached_ts);
-                                    self.kv_coord_put(key, &coord);
-                                }
-                                value = cached_val.clone();
-                            }
+                        let (eff_gen, eff_val, mutated, needs_fresh) =
+                            coord.reconcile_local_lookup(&generation, &value);
+                        if mutated {
+                            self.kv_coord_put(key, &coord);
                         }
-                        if coord.dead_generation.as_deref() == Some(generation.as_str())
-                            && self.budget.remaining() > 4
-                        {
+                        generation = eff_gen;
+                        value = eff_val;
+                        if needs_fresh && self.budget.remaining() > 2 {
                             if let Ok(Some(token)) = self
                                 .secret("fastly_token")
                                 .map(|opt| opt.filter(|t| !t.is_empty()))
@@ -849,15 +906,9 @@ impl Runtime for FastlyRuntime {
                     self.admin_writes.borrow_mut().insert(key.into(), timestamp);
                     self.kv_core_cache_invalidate(key);
                     if coordinated {
-                        self.kv_coord_put(
-                            key,
-                            &KvCoordState {
-                                last_write_ms: timestamp,
-                                dead_generation: None,
-                                dead_since_ms: 0,
-                                last_written_value: Some(value),
-                            },
-                        );
+                        let mut state = coord.unwrap_or_default();
+                        state.record_local_commit(timestamp, value);
+                        self.kv_coord_put(key, &state);
                     }
                     return Ok(true);
                 }
@@ -865,6 +916,37 @@ impl Runtime for FastlyRuntime {
                     self.kv_core_cache_invalidate(key);
                     if coordinated {
                         if let Some(g_str) = generation {
+                            let rest_token = if parsed_gen.is_some() && self.budget.remaining() > 0
+                            {
+                                self.secret("fastly_token")
+                                    .ok()
+                                    .flatten()
+                                    .filter(|t| !t.is_empty())
+                            } else {
+                                None
+                            };
+                            if let (Some(g), Some(token)) = (parsed_gen, rest_token) {
+                                let rest_ts = now();
+                                let mut rest_val = value.clone();
+                                rest_val["_kv_written_ms"] = rest_ts.into();
+                                match self.admin_cas_fresh(key, g, &rest_val.to_string(), &token) {
+                                    Ok(Some(new_gen)) => {
+                                        self.admin_writes.borrow_mut().insert(key.into(), rest_ts);
+                                        let mut state = coord.unwrap_or_default();
+                                        state.record_rest_commit(rest_ts, rest_val, new_gen);
+                                        self.kv_coord_put(key, &state);
+                                        return Ok(true);
+                                    }
+                                    Ok(None) => {
+                                        let mut state = coord.unwrap_or_default();
+                                        if state.record_dead(g_str, now()) {
+                                            self.kv_coord_put(key, &state);
+                                        }
+                                        return Ok(false);
+                                    }
+                                    Err(err) => return Err(err),
+                                }
+                            }
                             let now_ms = now();
                             let dead_since = coord
                                 .as_ref()
@@ -895,15 +977,9 @@ impl Runtime for FastlyRuntime {
                                     .is_ok()
                                 {
                                     self.admin_writes.borrow_mut().insert(key.into(), heal_ts);
-                                    self.kv_coord_put(
-                                        key,
-                                        &KvCoordState {
-                                            last_write_ms: heal_ts,
-                                            dead_generation: None,
-                                            dead_since_ms: 0,
-                                            last_written_value: Some(heal_val),
-                                        },
-                                    );
+                                    let mut state = coord.unwrap_or_default();
+                                    state.record_local_commit(heal_ts, heal_val);
+                                    self.kv_coord_put(key, &state);
                                     self.admin_event(json!({
                                         "event": "admin.state.healed_stale_pop_cache",
                                         "level": "warn",
@@ -917,11 +993,7 @@ impl Runtime for FastlyRuntime {
                                 }
                             }
                             let mut state = coord.unwrap_or_default();
-                            if state.dead_generation.as_deref() != Some(g_str)
-                                || state.dead_since_ms == 0
-                            {
-                                state.dead_generation = Some(g_str.to_owned());
-                                state.dead_since_ms = now_ms;
+                            if state.record_dead(g_str, now_ms) {
                                 self.kv_coord_put(key, &state);
                             }
                         }
@@ -980,7 +1052,6 @@ impl Runtime for FastlyRuntime {
             .into_iter()
             .chain(coord.as_ref().map(|c| c.last_write_ms).filter(|&ts| ts > 0))
             .max();
-        let dead_gen = coord.as_ref().and_then(|c| c.dead_generation.as_deref());
         let read_local_kv = || -> Option<crate::admin::Record> {
             let kv = self.kv.as_ref()?;
             let mut local = kv.lookup(key).ok()?;
@@ -1029,8 +1100,11 @@ impl Runtime for FastlyRuntime {
             // This prevents a stale REST API edge response from pinning `lease_generation` across
             // ticks when Compute's KVStore already has the fresher generation.
             let local_record = read_local_kv();
-            let record =
-                crate::admin::transport::pick_fresher_record(api_record, local_record, dead_gen);
+            let record = crate::admin::transport::pick_fresher_record_for_coord(
+                api_record,
+                local_record,
+                coord.as_ref(),
+            );
             return Ok(Some(record));
         }
         if min_expected_ts.is_some_and(|expected| {
@@ -1691,9 +1765,7 @@ impl Runtime for FastlyRuntime {
                 key,
                 &KvCoordState {
                     last_write_ms: ts,
-                    dead_generation: None,
-                    dead_since_ms: 0,
-                    last_written_value: None,
+                    ..Default::default()
                 },
             );
             self.kv_core_cache_invalidate(key);

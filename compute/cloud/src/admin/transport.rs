@@ -22,6 +22,7 @@ pub const MAX_FOS_RESPONSE_LIMIT: usize =
     24 * 1024 * 1024 + crate::ingest::compaction::checkpoint::MAX_FOOTER_BYTES + 16;
 pub const PEER_TIMEOUT: Duration = Duration::from_secs(60);
 pub const STATE_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(2);
+pub const STATE_CAS_TIMEOUT: Duration = Duration::from_secs(5);
 pub const REQUEST_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_API_ATTEMPTS: u8 = 4;
 const RETRY_AFTER_CAP: Duration = Duration::from_secs(30);
@@ -54,19 +55,152 @@ pub fn kv_write_delay_ms(last: u64, now: u64) -> Result<u64, String> {
     Ok(delay.min(1100))
 }
 
+const KV_DEAD_GENERATION_HISTORY: usize = 4;
+
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+pub struct KvCoordState {
+    #[serde(default)]
+    pub last_write_ms: u64,
+    #[serde(default)]
+    pub dead_generation: Option<String>,
+    #[serde(default)]
+    pub dead_generations: Vec<String>,
+    #[serde(default)]
+    pub dead_since_ms: u64,
+    #[serde(default)]
+    pub last_written_value: Option<Value>,
+    #[serde(default)]
+    pub last_written_generation: Option<String>,
+}
+
+impl KvCoordState {
+    pub fn is_dead(&self, generation: &str) -> bool {
+        self.dead_generation.as_deref() == Some(generation)
+            || self.dead_generations.iter().any(|g| g == generation)
+    }
+
+    pub fn record_dead(&mut self, generation: &str, now_ms: u64) -> bool {
+        let mut changed = false;
+        if self.dead_generation.as_deref() != Some(generation) || self.dead_since_ms == 0 {
+            self.dead_generation = Some(generation.to_owned());
+            self.dead_since_ms = now_ms;
+            changed = true;
+        }
+        if !self.dead_generations.iter().any(|g| g == generation) {
+            while self.dead_generations.len() >= KV_DEAD_GENERATION_HISTORY {
+                self.dead_generations.remove(0);
+            }
+            self.dead_generations.push(generation.to_owned());
+            changed = true;
+        }
+        changed
+    }
+
+    pub fn record_local_commit(&mut self, timestamp: u64, value: Value) {
+        self.last_write_ms = timestamp;
+        self.dead_generation = None;
+        self.dead_generations.clear();
+        self.dead_since_ms = 0;
+        self.last_written_value = Some(value);
+        self.last_written_generation = None;
+    }
+
+    pub fn record_rest_commit(
+        &mut self,
+        timestamp: u64,
+        value: Value,
+        new_generation: Option<String>,
+    ) {
+        self.last_write_ms = timestamp;
+        self.dead_generation = None;
+        self.dead_since_ms = 0;
+        if let Some(ref gen_id) = new_generation {
+            self.dead_generations.retain(|old| old != gen_id);
+        }
+        self.last_written_value = Some(value);
+        self.last_written_generation = new_generation;
+    }
+
+    /// Reconciles a local Compute `KVStore::lookup` against cached POP coordination state.
+    /// Returns `(effective_generation, effective_value, coord_mutated, needs_fresh_lookup)`.
+    pub fn reconcile_local_lookup(
+        &mut self,
+        local_gen: &str,
+        local_value: &Value,
+    ) -> (String, Value, bool, bool) {
+        let kv_ts = local_value["_kv_written_ms"].as_u64().unwrap_or(0);
+        let cached_newer = self
+            .last_written_value
+            .as_ref()
+            .filter(|cached| cached["_kv_written_ms"].as_u64().unwrap_or(0) > kv_ts)
+            .cloned();
+        let (mutated, eff_gen, eff_val) = if let Some(cached_val) = cached_newer {
+            let cached_ts = cached_val["_kv_written_ms"].as_u64().unwrap_or(0);
+            let mutated = self.record_dead(local_gen, self.last_write_ms.max(cached_ts));
+            let eff_gen = self
+                .last_written_generation
+                .clone()
+                .unwrap_or_else(|| local_gen.to_owned());
+            (mutated, eff_gen, cached_val)
+        } else {
+            (false, local_gen.to_owned(), local_value.clone())
+        };
+        let needs_fresh = self.is_dead(local_gen);
+        (eff_gen, eff_val, mutated, needs_fresh)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KvRestCasOutcome {
+    Committed { generation: Option<String> },
+    PreconditionFailed,
+    RateLimited,
+}
+
+pub fn classify_kv_rest_cas(
+    status: u16,
+    generation_header: Option<&str>,
+) -> Result<KvRestCasOutcome, &'static str> {
+    match status {
+        200..=299 => {
+            let generation = generation_header
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|n| n.to_string());
+            Ok(KvRestCasOutcome::Committed { generation })
+        }
+        412 | 404 => Ok(KvRestCasOutcome::PreconditionFailed),
+        429 => Ok(KvRestCasOutcome::RateLimited),
+        _ => Err("admin_state_cas_confirm_failed"),
+    }
+}
+
 /// Picks the fresher of a KV REST API read (`api`) and a local Compute `KVStore::lookup` (`local`).
 /// Prefers `local` when it carries a strictly newer `_kv_written_ms`, or when `api` returned a
 /// known-dead generation and `local` has a different generation at least as new.
 pub fn pick_fresher_record(api: Record, local: Option<Record>, dead_gen: Option<&str>) -> Record {
+    let coord = dead_gen.map(|g| KvCoordState {
+        dead_generation: Some(g.to_owned()),
+        ..Default::default()
+    });
+    pick_fresher_record_for_coord(api, local, coord.as_ref())
+}
+
+pub fn pick_fresher_record_for_coord(
+    api: Record,
+    local: Option<Record>,
+    coord: Option<&KvCoordState>,
+) -> Record {
     let Some(local) = local else {
         return api;
     };
     let api_ts = api.value["_kv_written_ms"].as_u64().unwrap_or(0);
     let local_ts = local.value["_kv_written_ms"].as_u64().unwrap_or(0);
+    let api_dead = coord.is_some_and(|c| c.is_dead(&api.generation));
+    let local_dead = coord.is_some_and(|c| c.is_dead(&local.generation));
     if local_ts > api_ts
-        || (dead_gen == Some(api.generation.as_str())
-            && local.generation != api.generation
-            && local_ts >= api_ts)
+        || (api_dead && !local_dead && local.generation != api.generation && local_ts >= api_ts)
     {
         return local;
     }
@@ -1257,5 +1391,124 @@ mod tests {
             &cached_val,
             &older_api
         ));
+    }
+
+    #[test]
+    fn classify_kv_rest_cas_handles_commit_conflict_rate_limit_and_errors() {
+        assert_eq!(
+            super::classify_kv_rest_cas(200, Some(" 1795647134238999 ")),
+            Ok(super::KvRestCasOutcome::Committed {
+                generation: Some("1795647134238999".into()),
+            })
+        );
+        assert_eq!(
+            super::classify_kv_rest_cas(201, None),
+            Ok(super::KvRestCasOutcome::Committed { generation: None })
+        );
+        assert_eq!(
+            super::classify_kv_rest_cas(204, Some("not-a-number")),
+            Ok(super::KvRestCasOutcome::Committed { generation: None })
+        );
+        assert_eq!(
+            super::classify_kv_rest_cas(412, None),
+            Ok(super::KvRestCasOutcome::PreconditionFailed)
+        );
+        assert_eq!(
+            super::classify_kv_rest_cas(404, None),
+            Ok(super::KvRestCasOutcome::PreconditionFailed)
+        );
+        assert_eq!(
+            super::classify_kv_rest_cas(429, None),
+            Ok(super::KvRestCasOutcome::RateLimited)
+        );
+        for status in [400, 401, 403, 500, 502, 503, 504] {
+            assert_eq!(
+                super::classify_kv_rest_cas(status, None),
+                Err("admin_state_cas_confirm_failed")
+            );
+        }
+    }
+
+    #[test]
+    fn kv_coord_state_heals_wedged_pop_across_rest_commits_and_412_conflicts() {
+        let mut coord = super::KvCoordState::default();
+        let val_1000 = serde_json::json!({"catalog": {"generation": 10}, "_kv_written_ms": 1_000});
+
+        // Tick 1: wedged local KVStore returns "100", REST CAS gets 412 -> marks "100" dead.
+        assert!(coord.record_dead("100", 1_000));
+        let (_, _, mutated, needs_fresh) = coord.reconcile_local_lookup("100", &val_1000);
+        assert!(!mutated);
+        assert!(needs_fresh);
+
+        // Tick 2: fresh REST read returned "150", which loses a race (412) -> marks "150" dead
+        // WITHOUT forgetting wedged local generation "100".
+        assert!(coord.record_dead("150", 2_000));
+        let (_, _, _, needs_fresh_after_second_conflict) =
+            coord.reconcile_local_lookup("100", &val_1000);
+        assert!(needs_fresh_after_second_conflict);
+
+        // Tick 3: REST CAS commits generation "200" at 3_000ms.
+        let val_3000 = serde_json::json!({"catalog": {"generation": 11}, "_kv_written_ms": 3_000});
+        coord.record_rest_commit(3_000, val_3000.clone(), Some("200".into()));
+        assert!(coord.is_dead("100"));
+        assert!(!coord.is_dead("200"));
+
+        // Tick 4: local POP is still wedged on "100" / val_1000; reconcile supplies "200" + val_3000
+        // and still requests fresh lookup, while rejecting stale REST edge HIT (ts=1_500) and
+        // adopting newer REST record ("205", ts=4_000).
+        let (eff_gen, eff_val, _, needs_fresh_after_rest_commit) =
+            coord.reconcile_local_lookup("100", &val_1000);
+        assert!(needs_fresh_after_rest_commit);
+        assert_eq!(eff_gen, "200");
+        assert_eq!(eff_val, val_3000);
+
+        let stale_api_hit = super::Record {
+            generation: "150".into(),
+            value: serde_json::json!({"catalog": {"generation": 10}, "_kv_written_ms": 1_500}),
+        };
+        assert!(!super::should_adopt_fresh_record(
+            &eff_gen,
+            &eff_val,
+            &stale_api_hit
+        ));
+
+        let newer_api = super::Record {
+            generation: "205".into(),
+            value: serde_json::json!({"catalog": {"generation": 12}, "_kv_written_ms": 4_000}),
+        };
+        assert!(super::should_adopt_fresh_record(
+            &eff_gen, &eff_val, &newer_api
+        ));
+
+        // Bounded dead_generations list never grows beyond 4 entries.
+        for g in ["101", "102", "103", "104", "105"] {
+            assert!(coord.record_dead(g, 5_000));
+        }
+        assert!(coord.dead_generations.len() <= 4);
+
+        // Pick fresher record avoids picking a dead local generation when api is newer/equal.
+        let picked = super::pick_fresher_record_for_coord(
+            super::Record {
+                generation: "150".into(),
+                value: serde_json::json!({"_kv_written_ms": 2_000}),
+            },
+            Some(super::Record {
+                generation: "105".into(),
+                value: serde_json::json!({"_kv_written_ms": 2_000}),
+            }),
+            Some(&coord),
+        );
+        assert_eq!(picked.generation, "150");
+    }
+
+    #[test]
+    fn kv_coord_state_deserializes_legacy_records_without_new_fields() {
+        let legacy: super::KvCoordState = serde_json::from_str(
+            r#"{"last_write_ms":1000,"dead_generation":"100","dead_since_ms":1000,"last_written_value":null}"#,
+        )
+        .unwrap();
+        assert!(legacy.is_dead("100"));
+        assert!(legacy.dead_generations.is_empty());
+        assert_eq!(legacy.last_written_generation, None);
     }
 }
