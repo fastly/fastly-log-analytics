@@ -151,7 +151,7 @@ def test_rollup_base_sql_samples_window_and_pushes_sample_to_prewhere() -> None:
 def test_coverage_cache_reuses_when_checksums_match_and_invalidates_on_change() -> None:
     assert "high_scale.insights._INSIGHTS_COVERAGE_CACHE" in CacheRegistry.names()
     assert evaluator._INSIGHTS_COVERAGE_CACHE.maxsize == 128
-    assert evaluator._INSIGHTS_COVERAGE_CACHE.ttl_seconds == 120.0
+    assert evaluator._INSIGHTS_COVERAGE_CACHE.ttl_seconds == 900.0
 
     def _hours(start: datetime, end: datetime) -> list[int]:
         hour = int(start.timestamp()) // 3600 * 3600

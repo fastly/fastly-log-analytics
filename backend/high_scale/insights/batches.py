@@ -145,9 +145,12 @@ def _base_cte(
     return f"/* insight:batch_{name} */ WITH base AS ({raw})", "fact"
 
 
-def _window_from(*, filter_clause: str = "", row_filter: str = "") -> str:
+def _window_from(*, filter_clause: str = "", row_filter: str = "", sample_stride: int = 1) -> str:
     """Window-only FROM/PREWHERE clause so IN-subquery pre-filters prune baseline partitions."""
     fact_scope = " AND ".join(visible_fact_clauses("request"))
+    sample_clause = (
+        f" AND intDiv(toUnixTimestamp(event_timestamp), 300) % {sample_stride} = 0" if sample_stride > 1 else ""
+    )
     extra: list[str] = []
     if filter_clause:
         extra.append(f"({filter_clause})")
@@ -157,7 +160,7 @@ def _window_from(*, filter_clause: str = "", row_filter: str = "") -> str:
     return (
         f"FROM request_facts PREWHERE {fact_scope} "
         "AND event_timestamp >= {window_start:DateTime64(3)} "
-        f"AND event_timestamp < {{window_end:DateTime64(3)}}{where}"
+        f"AND event_timestamp < {{window_end:DateTime64(3)}}{sample_clause}{where}"
     )
 
 
@@ -786,6 +789,10 @@ def _build_latency_dim(
     baseline_hours: float = 0.0,
     window_hours: float = 0.0,
 ) -> tuple[str, QuerySource]:
+    b_stride = _baseline_sample_stride(baseline_hours)
+    b_scale = f" * {b_stride}" if b_stride > 1 else ""
+    w_stride = _window_sample_stride(window_hours)
+    w_scale = f" * {w_stride}" if w_stride > 1 else ""
     proj: list[tuple[str, str]] = [("elapsed", COLUMNS["elapsed"])]
     sets: list[str] = []
     if "pop_latency_regression" in active:
@@ -797,9 +804,12 @@ def _build_latency_dim(
     if "city_latency_regressions" in active:
         city_col = COLUMNS["city"]
         city_win_from = _window_from(
-            filter_clause=filter_clause, row_filter=f"{city_col} != '' AND custom_fields['elapsed'] != ''"
+            filter_clause=filter_clause,
+            row_filter=f"{city_col} != '' AND custom_fields['elapsed'] != ''",
+            sample_stride=w_stride,
         )
-        win_cities = f"SELECT {city_col} {city_win_from} GROUP BY {city_col} HAVING count() >= 10"
+        city_count = f"count(){w_scale}" if w_stride > 1 else "count()"
+        win_cities = f"SELECT {city_col} {city_win_from} GROUP BY {city_col} HAVING {city_count} >= 10"
         proj.extend(
             [
                 ("city", f"if({city_col} != '' AND {city_col} IN ({win_cities}), {city_col}, '')"),
@@ -808,11 +818,6 @@ def _build_latency_dim(
             ]
         )
         sets.append("(city, region, country)")
-
-    b_stride = _baseline_sample_stride(baseline_hours)
-    b_scale = f" * {b_stride}" if b_stride > 1 else ""
-    w_stride = _window_sample_stride(window_hours)
-    w_scale = f" * {w_stride}" if w_stride > 1 else ""
     cte, source = _base_cte(
         "latency_dim",
         proj,
@@ -906,12 +911,33 @@ def _build_url_perf_candidates(
     present: set[str],
     rollup_span: tuple[datetime, datetime] | None,
     filter_clause: str,
+    window_hours: float = 0.0,
 ) -> str:
-    url_win_from = _window_from(filter_clause=filter_clause, row_filter="url != ''")
+    w_stride = _window_sample_stride(window_hours)
+    w_scale = f" * {w_stride}" if w_stride > 1 else ""
+    url_win_from = _window_from(filter_clause=filter_clause, row_filter="url != ''", sample_stride=w_stride)
+    having_parts: list[str] = []
+    if "latency_regression" in active:
+        having_parts.append(
+            f"(countIf(custom_fields['elapsed'] != ''){w_scale} >= 5 "
+            "AND maxIf(toFloat64OrNull(custom_fields['elapsed']), custom_fields['elapsed'] != '') >= 200000)"
+        )
+    if "payload_compression_regression" in active:
+        comp_pred = (
+            f"{COLUMNS['status']} = 200 AND {COLUMNS['resp_bytes']} >= 1024 AND match(url, {{compress_regex:String}})"
+        )
+        uncomp_pred = (
+            f"NOT multiSearchAnyCaseInsensitive({COLUMNS['resp_header_content_encoding']}, "
+            "['gzip', 'br', 'zstd', 'deflate'])"
+        )
+        having_parts.append(
+            f"(countIf({comp_pred}){w_scale} >= 10 AND countIf({comp_pred} AND {uncomp_pred}){w_scale} >= 5)"
+        )
+    if not having_parts:
+        having_parts.append(f"countIf(custom_fields['elapsed'] != ''){w_scale} >= 5")
     return (
         f"/* insight:batch_url_perf_candidates */ SELECT url AS k {url_win_from} "
-        "GROUP BY url HAVING countIf(custom_fields['elapsed'] != '') >= 5 "
-        f"OR countIf({COLUMNS['status']} = 200 AND {COLUMNS['resp_bytes']} >= 1024 AND match(url, {{compress_regex:String}})) >= 10 "
+        f"GROUP BY url HAVING {' OR '.join(having_parts)} "
         f"LIMIT {_URL_PERF_CANDIDATE_LIMIT + 1}"
     )
 
@@ -1430,22 +1456,29 @@ def _build_network_asn_candidates(
     present: set[str],
     rollup_span: tuple[datetime, datetime] | None,
     filter_clause: str,
+    window_hours: float = 0.0,
 ) -> str:
+    w_stride = _window_sample_stride(window_hours)
+    w_count = f"count() * {w_stride}" if w_stride > 1 else "count()"
     has_asn = bool(active & {"network_asn_health", "asn_metro_performance"})
     has_metro = bool(active & {"asn_metro_performance", "metro_delivery_degradation"})
     branches: list[str] = []
     if has_asn:
-        asn_win_from = _window_from(filter_clause=filter_clause, row_filter="custom_fields['asn'] != ''")
+        asn_win_from = _window_from(
+            filter_clause=filter_clause, row_filter="custom_fields['asn'] != ''", sample_stride=w_stride
+        )
         branches.append(
             f"SELECT 'asn' AS kind, custom_fields['asn'] AS k {asn_win_from} "
-            f"GROUP BY custom_fields['asn'] HAVING count() >= 20 LIMIT {_CANDIDATE_LIMIT + 1}"
+            f"GROUP BY custom_fields['asn'] HAVING {w_count} >= 20 LIMIT {_CANDIDATE_LIMIT + 1}"
         )
     if has_metro:
         metro_col = COLUMNS["metro"]
-        metro_win_from = _window_from(filter_clause=filter_clause, row_filter=f"{metro_col} != ''")
+        metro_win_from = _window_from(
+            filter_clause=filter_clause, row_filter=f"{metro_col} != ''", sample_stride=w_stride
+        )
         branches.append(
             f"SELECT 'metro' AS kind, {metro_col} AS k {metro_win_from} "
-            f"GROUP BY {metro_col} HAVING count() >= 20 LIMIT {_CANDIDATE_LIMIT + 1}"
+            f"GROUP BY {metro_col} HAVING {w_count} >= 20 LIMIT {_CANDIDATE_LIMIT + 1}"
         )
     if len(branches) == 1:
         return f"/* insight:batch_network_asn_candidates */ {branches[0]}"
@@ -1500,6 +1533,12 @@ def _build_network_asn(
         effective_active.discard("asn_metro_performance")
         effective_active.discard("metro_delivery_degradation")
 
+    b_stride = _baseline_sample_stride(baseline_hours)
+    b_scale = f" * {b_stride}" if b_stride > 1 else ""
+    w_stride = _window_sample_stride(window_hours)
+    w_scale = f" * {w_stride}" if w_stride > 1 else ""
+    win_count = f"count() * {w_stride}" if w_stride > 1 else "count()"
+
     prewhere_preds: list[str] = []
     asn_metro_filters: list[str] = []
     if has_asn:
@@ -1509,8 +1548,12 @@ def _build_network_asn(
             prewhere_preds.append(f"({asn_in})")
             proj.append(("asn_str", f"if(custom_fields['asn'] != '' AND {asn_in}, custom_fields['asn'], '')"))
         else:
-            asn_win_from = _window_from(filter_clause=filter_clause, row_filter="custom_fields['asn'] != ''")
-            win_asns = f"SELECT custom_fields['asn'] {asn_win_from} GROUP BY custom_fields['asn'] HAVING count() >= 20"
+            asn_win_from = _window_from(
+                filter_clause=filter_clause, row_filter="custom_fields['asn'] != ''", sample_stride=w_stride
+            )
+            win_asns = (
+                f"SELECT custom_fields['asn'] {asn_win_from} GROUP BY custom_fields['asn'] HAVING {win_count} >= 20"
+            )
             proj.append(
                 (
                     "asn_str",
@@ -1526,8 +1569,10 @@ def _build_network_asn(
             prewhere_preds.append(f"({metro_in})")
             proj.append(("metro", f"if({metro_col} != '' AND {metro_in}, {metro_col}, '')"))
         else:
-            metro_win_from = _window_from(filter_clause=filter_clause, row_filter=f"{metro_col} != ''")
-            win_metros = f"SELECT {metro_col} {metro_win_from} GROUP BY {metro_col} HAVING count() >= 20"
+            metro_win_from = _window_from(
+                filter_clause=filter_clause, row_filter=f"{metro_col} != ''", sample_stride=w_stride
+            )
+            win_metros = f"SELECT {metro_col} {metro_win_from} GROUP BY {metro_col} HAVING {win_count} >= 20"
             proj.append(
                 (
                     "metro",
@@ -1545,16 +1590,8 @@ def _build_network_asn(
         proj.append(("delivery_rate", COLUMNS["delivery_rate"]))
         sets.append("(metro)")
 
-    if prewhere_preds and not asn_metro_filters:
-        prewhere_clause = " OR ".join(prewhere_preds)
-        row_filter = ""
-    else:
-        prewhere_clause = ""
-        row_filter = " OR ".join([*prewhere_preds, *asn_metro_filters])
-    b_stride = _baseline_sample_stride(baseline_hours)
-    b_scale = f" * {b_stride}" if b_stride > 1 else ""
-    w_stride = _window_sample_stride(window_hours)
-    w_scale = f" * {w_stride}" if w_stride > 1 else ""
+    prewhere_clause = " OR ".join([*prewhere_preds, *asn_metro_filters])
+    row_filter = ""
     cte, source = _base_cte(
         "network_asn",
         proj,

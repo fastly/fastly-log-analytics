@@ -326,8 +326,8 @@ def test_rum_analytics_applies_prewhere_and_fuses_slowest_queries(monkeypatch: p
     slowest_sql = next(s for s in client.calls if "/* rum_analytics_slowest */" in s)
     assert slowest_sql.count("FROM request_facts PREWHERE ") == 1
     assert "ttlb_joined AS (" in slowest_sql
-    assert "UNION ALL" in slowest_sql
-    assert "'url' AS kind" in slowest_sql and "'asn' AS kind" in slowest_sql
+    assert "UNION ALL" not in slowest_sql
+    assert "ARRAY JOIN [('url'," in slowest_sql and "LIMIT 20 BY kind" in slowest_sql
 
     # Every rum_vitals_facts and rum_error_facts scan uses PREWHERE for visibility + time window.
     for sql in client.calls:

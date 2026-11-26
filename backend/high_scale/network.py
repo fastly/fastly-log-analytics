@@ -8,7 +8,7 @@ import os
 import sys
 from collections import defaultdict
 from collections.abc import Callable, Mapping
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from dataclasses import field as _dc_field
 from datetime import UTC, datetime, timedelta
@@ -61,14 +61,17 @@ _network_model_cache: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds
 CacheRegistry.register("high_scale.network.models", _network_model_cache)
 _network_json_cache: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=60.0)
 CacheRegistry.register("high_scale.network.json", _network_json_cache)
+_pop_rollup_cache: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=60.0)
+CacheRegistry.register("high_scale.network.pop_rollup", _pop_rollup_cache)
 _SHIELD_ACTIVE_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=600)
 CacheRegistry.register("high_scale.network._SHIELD_ACTIVE_CACHE", _SHIELD_ACTIVE_CACHE)
 
 
 def _invalidate_network_caches(_service_id: str) -> int:
-    n = len(_network_model_cache) + len(_network_json_cache)
+    n = len(_network_model_cache) + len(_network_json_cache) + len(_pop_rollup_cache)
     _network_model_cache.clear()
     _network_json_cache.clear()
+    _pop_rollup_cache.clear()
     return n
 
 
@@ -177,6 +180,8 @@ def _fmt_ts(ts: int) -> str:
 
 
 def _network_sample_stride(span_s: float) -> int:
+    if span_s >= 1209600:
+        return 250
     if span_s >= 604800:
         return 100
     if span_s >= 172800:
@@ -361,14 +366,29 @@ def _shielding_analysis(service: HighScaleService, start: datetime, end: datetim
     if is_real_ch:
         shield_cache_key = (service.service_id, client_cache_token(service.client))
         use_shield_cache = not os.getenv("PYTEST_CURRENT_TEST")
-        shield_active = bool(_SHIELD_ACTIVE_CACHE.get(shield_cache_key)) if use_shield_cache else False
-        if not shield_active:
-            shield_prewhere = f"{_BASE_WHERE} AND custom_fields['edge'] IN ('false', '0', 'False', 'FALSE') AND custom_fields['prid'] != ''"
+        cached_shield = _SHIELD_ACTIVE_CACHE.get(shield_cache_key) if use_shield_cache else None
+        if cached_shield is False:
+            return ShieldingAnalysis(
+                **cache_result({}, state="bypass", prewarmer=False), has_data=False, edge_only=True, rows=[]
+            )
+        if cached_shield is not True:
+            probe_stride = (
+                _network_sample_stride(sh_span_s)
+                if (sh_span_s >= 21600 and not os.getenv("PYTEST_CURRENT_TEST"))
+                else 1
+            )
+            probe_clause = _network_time_sample_clause(probe_stride, start=start, end=end)
+            shield_prewhere = (
+                f"{_BASE_WHERE}{probe_clause} AND custom_fields['edge'] IN ('false', '0', 'False', 'FALSE') "
+                "AND custom_fields['prid'] != ''"
+            )
             shield_rows = service.client.execute(
                 f"SELECT count() AS n FROM (SELECT 1 FROM request_facts PREWHERE {shield_prewhere} LIMIT 1)",
                 {"service_id": service.service_id, "start": start, "end": end},
             )
             if not shield_rows or int(shield_rows[0]["n"]) == 0:
+                if use_shield_cache:
+                    _SHIELD_ACTIVE_CACHE[shield_cache_key] = False
                 return ShieldingAnalysis(
                     **cache_result({}, state="bypass", prewarmer=False), has_data=False, edge_only=True, rows=[]
                 )
@@ -1205,227 +1225,312 @@ def network_health(
     return _compute_health()
 
 
+def _unpack_sum_map(val: Any) -> list[tuple[Any, Any]]:
+    if isinstance(val, Mapping):
+        return list(val.items())
+    if isinstance(val, (list, tuple)) and len(val) == 2 and isinstance(val[0], (list, tuple)):
+        return list(zip(val[0], val[1], strict=False))
+    return []
+
+
 def network_quality(
-    service: HighScaleService, req: Any, start_time: str | None, end_time: str | None
+    service: HighScaleService,
+    req: Any,
+    start_time: str | None,
+    end_time: str | None,
+    *,
+    pop_rollup_sink: Future[dict[str, tuple[int, int, Any, Any]] | None] | None = None,
 ) -> NetworkQualityResponse:
     start, end = parse_time_window(start_time, end_time)
     region_country = getattr(req, "region_country", "US") or "US"
     is_real_ch = (
         hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
     )
-    memo_key: str | None = None
-    if is_real_ch and start_time is not None and end_time is not None:
-        memo_key = digest_cache_key(
-            {
-                "ep": "hs_network_quality",
-                "cid": client_cache_token(service.client),
-                "s": _cache_minute_bound(start_time),
-                "e": _cache_minute_bound(end_time),
-                "f": serialize_filters_for_key(getattr(req, "filters", None) or {}),
-                "rc": str(region_country),
-            },
-            {"name": service.service_id, "service_id": service.service_id},
+    pop_rollup_cache_key: tuple[Any, ...] | None = (
+        (
+            service.service_id,
+            client_cache_token(service.client),
+            _cache_minute_bound(start_time),
+            _cache_minute_bound(end_time),
         )
-        if (cached := _network_memo.get_with_telemetry(memo_key)) is not None:
-            return NetworkQualityResponse.with_telemetry(**cached)
-
-    def _compute_quality() -> dict[str, Any]:
-        if memo_key is not None and (cached_inner := _network_memo.get_with_telemetry(memo_key)) is not None:
-            return cached_inner
-        filter_sql, filter_params = _filter_clause(getattr(req, "filters", None))
-        params = {
-            "service_id": service.service_id,
-            "start": start,
-            "end": end,
-            "region_country": region_country,
-            **filter_params,
-        }
-        rtt_where = f"{_RTT_FILTER}{filter_sql}"
-
-        def _bar(group_expr: str, extra_where: str = "") -> list[dict]:
-            q_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
-            scale_factor = _network_sample_stride(q_span_s) if is_real_ch else 1
-            hash_clause = _network_time_sample_clause(scale_factor, start=start, end=end)
-            if is_real_ch and group_expr != _ASN:
-                sql = (
-                    f"SELECT {group_expr} AS label, avg({_RTT} / 1000.0) AS rtt_ms, count() AS reqs "
-                    f"FROM request_facts PREWHERE {_BASE_WHERE}{filter_sql}{extra_where}{hash_clause} "
-                    f"AND {group_expr} != '' AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0' "
-                    f"WHERE {_RTT} > 0 GROUP BY label ORDER BY reqs DESC LIMIT 25"
-                )
-            elif is_real_ch:
-                sql = (
-                    f"SELECT {group_expr} AS label, avg({_RTT} / 1000.0) AS rtt_ms, count() AS reqs "
-                    f"FROM request_facts PREWHERE {_BASE_WHERE}{filter_sql}{extra_where}{hash_clause} "
-                    f"AND custom_fields['asn'] != '' AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0' "
-                    f"WHERE {group_expr} IS NOT NULL AND {_RTT} > 0 GROUP BY label ORDER BY reqs DESC LIMIT 25"
-                )
-            else:
-                sql = _ch_fact_query(
-                    f"{group_expr} AS label, avg({_RTT} / 1000.0) AS rtt_ms, count() AS reqs",
-                    f"{rtt_where}{extra_where}",
-                    group_by="label",
-                    order_by="reqs DESC",
-                    limit=25,
-                )
-            rows = service.client.execute(sql, params)
-            if scale_factor > 1 and not rows:
-                scale_factor = 1
-                rows = service.client.execute(sql.replace(hash_clause, ""), params)
-            return [
-                {
-                    "value": str(r["label"]),
-                    "label": str(r["label"]),
-                    "rtt_ms": _flt(r["rtt_ms"], 2) or 0.0,
-                    "reqs": int(r["reqs"]) * scale_factor,
-                }
-                for r in rows
-                if r["label"] is not None and r["label"] != ""
-            ]
-
-        def _bars_from_rollup_and_region() -> dict[str, list[dict]]:
-            fence = visible_publication_fence_sql(
-                "network_dimensions", client=service.client, service_id=service.service_id
-            )
-            q_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
-            region_scale = _network_sample_stride(q_span_s)
-            region_hash = _network_time_sample_clause(region_scale, start=start, end=end)
-            sql = (
-                "SELECT dimension, label, rtt_ms, reqs FROM ("
-                "SELECT dimension, value AS label, "
-                "coalesce(sum(tcp_rtt_sum), sum(tcp_rtt_p50_us * tcp_rtt_count)) / nullIf(sum(tcp_rtt_count), 0) / 1000.0 AS rtt_ms, "
-                "toUInt64(sum(tcp_rtt_count)) AS reqs "
-                "FROM network_minute_dimensions "
-                "PREWHERE service_id={service_id:String} "
-                "AND bucket_start >= {start:DateTime64(3)} AND bucket_start < {end:DateTime64(3)} "
-                "AND dimension IN ('country', 'asn', 'pop') AND value != '' "
-                f"WHERE tcp_rtt_count > 0 AND {fence} "
-                "GROUP BY dimension, label HAVING reqs > 0 "
-                "ORDER BY dimension ASC, reqs DESC LIMIT 25 BY dimension) "
-                "UNION ALL "
-                "SELECT dimension, label, rtt_ms, reqs FROM ("
-                f"SELECT 'region' AS dimension, custom_fields['region'] AS label, avg({_RTT} / 1000.0) AS rtt_ms, "
-                f"toUInt64(count() * {region_scale}) AS reqs "
-                f"FROM request_facts PREWHERE {_BASE_WHERE}{region_hash} AND country = {{region_country:String}} "
-                "AND custom_fields['region'] != '' AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0' "
-                f"WHERE {_RTT} > 0 GROUP BY label ORDER BY reqs DESC LIMIT 25)"
-            )
-            out: dict[str, list[dict]] = {"country": [], "asn": [], "pop": [], "region": []}
-            for r in service.client.execute(sql, params):
-                dim = str(r.get("dimension") or "")
-                lbl = str(r.get("label") or "")
-                if dim in out and lbl:
-                    out[dim].append(
-                        {
-                            "value": lbl,
-                            "label": lbl,
-                            "rtt_ms": _flt(r["rtt_ms"], 2) or 0.0,
-                            "reqs": int(r["reqs"]),
-                        }
-                    )
-            for dim_rows in out.values():
-                dim_rows.sort(key=lambda row: row["reqs"], reverse=True)
-            return out
-
-        scatter_sql = _ch_fact_query(
-            f"{_RTT} / 1000.0 AS rtt_ms, {_TTFB} * 1000.0 AS ttfb_ms, "
-            "if(custom_fields['cache'] = '', 'UNKNOWN', custom_fields['cache']) AS cache_state",
-            f"{rtt_where} AND {_TTFB} > 0",
-            order_by="cityHash64(event_id)",
-            limit=_SCATTER_SAMPLE,
-        )
-
-        def _run_scatter() -> list[dict[str, Any]]:
-            if is_real_ch:
-
-                def _scatter_query(sample_clause: str) -> str:
-                    return (
-                        f"SELECT {_RTT} / 1000.0 AS rtt_ms, {_TTFB} * 1000.0 AS ttfb_ms, "
-                        "if(custom_fields['cache'] = '', 'UNKNOWN', custom_fields['cache']) AS cache_state "
-                        f"FROM request_facts PREWHERE {_BASE_WHERE}{filter_sql} "
-                        f"AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0' "
-                        f"AND custom_fields['ttfb'] != '' AND custom_fields['ttfb'] != '0'{sample_clause} "
-                        f"WHERE {_RTT} > 0 AND {_TTFB} > 0 LIMIT {_SCATTER_SAMPLE}"
-                    )
-
-                q_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
-                ord_stride = 16 if q_span_s <= 86400 else 64
-                fast_rows = service.client.execute(_scatter_query(f" AND line_ordinal % {ord_stride} = 0"), params)
-                if len(fast_rows) >= 50:
-                    return fast_rows
-                return service.client.execute(_scatter_query(""), params)
-            return service.client.execute(scatter_sql, params)
-
-        trace = HighScaleSections(service.service_id, "network.quality")
-        if is_real_ch and not filter_sql:
-            q_res_mixed: dict[str, Any] = trace.run_parallel(
-                [
-                    ("rollup_bars", _bars_from_rollup_and_region),
-                    ("scatter", _run_scatter),
-                ],
-                source="projection",
-                max_workers=2,
-                thread_name_prefix="hs-net-quality",
-            )
-            rollup_bars = q_res_mixed["rollup_bars"]
-            by_country = rollup_bars.get("country", [])
-            by_asn = rollup_bars.get("asn") or _bar(_ASN, "")
-            by_pop = rollup_bars.get("pop", [])
-            by_region = rollup_bars.get("region", [])
-            scatter_rows = q_res_mixed["scatter"]
-        else:
-            q_tasks: list[tuple[str, Callable[[], list[dict[str, Any]]]]] = [
-                *((name, partial(_bar, expr, extra)) for name, expr, extra in _QUALITY_BAR_SPECS),
-                ("scatter", _run_scatter),
-            ]
-            q_res: dict[str, list[dict[str, Any]]] = trace.run_parallel(
-                q_tasks,
-                source="fact",
-                max_workers=2,
-                thread_name_prefix="hs-net-quality",
-            )
-            by_country, by_asn, by_region, by_pop, scatter_rows = (
-                q_res[k] for k in ("country", "asn", "region", "pop", "scatter")
-            )
-        for row in by_country:
-            row["label"] = COUNTRY_MAP.get(row["value"], row["label"])
-        if by_asn:
-            labels = resolve_asn_display_labels(
-                service.service_id, [int(r["value"]) for r in by_asn if r["value"].isdigit()]
-            )
-            for row in by_asn:
-                if row["value"].isdigit():
-                    row["label"] = labels[int(row["value"])]
-        payload = {
-            "available": True,
-            "section_timings": trace.timings(),
-            "by_country": by_country,
-            "by_asn": by_asn,
-            "by_region": by_region,
-            "region_country": region_country,
-            "by_pop": by_pop,
-            "scatter": [
-                {
-                    "rtt_ms": round(float(r["rtt_ms"]), 2),
-                    "ttfb_ms": round(float(r["ttfb_ms"]), 2),
-                    "cache": str(r["cache_state"]),
-                }
-                for r in scatter_rows
-            ],
-            "countries": sorted({row["value"] for row in by_country}),
-        }
-        if memo_key is not None:
-            _network_memo.put(memo_key, dict(payload))
-        return payload
-
-    if memo_key is not None:
-        return NetworkQualityResponse.with_telemetry(
-            **_network_memo.coalesce(f"hs_net_quality:{memo_key}", _compute_quality)
-        )
-    return NetworkQualityResponse.with_telemetry(
-        **cache_result({}, state="bypass", prewarmer=False),
-        **_compute_quality(),
+        if is_real_ch and start_time is not None and end_time is not None and not getattr(req, "filters", None)
+        else None
     )
+
+    def _finish_pop_rollup(val: dict[str, tuple[int, int, Any, Any]] | None) -> None:
+        if pop_rollup_sink is not None and not pop_rollup_sink.done():
+            pop_rollup_sink.set_result(val)
+
+    try:
+        memo_key: str | None = None
+        if is_real_ch and start_time is not None and end_time is not None:
+            memo_key = digest_cache_key(
+                {
+                    "ep": "hs_network_quality",
+                    "cid": client_cache_token(service.client),
+                    "s": _cache_minute_bound(start_time),
+                    "e": _cache_minute_bound(end_time),
+                    "f": serialize_filters_for_key(getattr(req, "filters", None) or {}),
+                    "rc": str(region_country),
+                },
+                {"name": service.service_id, "service_id": service.service_id},
+            )
+            if (cached := _network_memo.get_with_telemetry(memo_key)) is not None:
+                _finish_pop_rollup(
+                    _pop_rollup_cache.get(pop_rollup_cache_key) if pop_rollup_cache_key is not None else None
+                )
+                return NetworkQualityResponse.with_telemetry(**cached)
+
+        def _compute_quality() -> dict[str, Any]:
+            if memo_key is not None and (cached_inner := _network_memo.get_with_telemetry(memo_key)) is not None:
+                _finish_pop_rollup(
+                    _pop_rollup_cache.get(pop_rollup_cache_key) if pop_rollup_cache_key is not None else None
+                )
+                return cached_inner
+            filter_sql, filter_params = _filter_clause(getattr(req, "filters", None))
+            params = {
+                "service_id": service.service_id,
+                "start": start,
+                "end": end,
+                "region_country": region_country,
+                **filter_params,
+            }
+            rtt_where = f"{_RTT_FILTER}{filter_sql}"
+
+            def _bar(group_expr: str, extra_where: str = "") -> list[dict]:
+                q_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
+                scale_factor = _network_sample_stride(q_span_s) if is_real_ch else 1
+                hash_clause = _network_time_sample_clause(scale_factor, start=start, end=end)
+                if is_real_ch and group_expr != _ASN:
+                    sql = (
+                        f"SELECT {group_expr} AS label, avg({_RTT} / 1000.0) AS rtt_ms, count() AS reqs "
+                        f"FROM request_facts PREWHERE {_BASE_WHERE}{filter_sql}{extra_where}{hash_clause} "
+                        f"AND {group_expr} != '' AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0' "
+                        f"WHERE {_RTT} > 0 GROUP BY label ORDER BY reqs DESC LIMIT 25"
+                    )
+                elif is_real_ch:
+                    sql = (
+                        f"SELECT {group_expr} AS label, avg({_RTT} / 1000.0) AS rtt_ms, count() AS reqs "
+                        f"FROM request_facts PREWHERE {_BASE_WHERE}{filter_sql}{extra_where}{hash_clause} "
+                        f"AND custom_fields['asn'] != '' AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0' "
+                        f"WHERE {group_expr} IS NOT NULL AND {_RTT} > 0 GROUP BY label ORDER BY reqs DESC LIMIT 25"
+                    )
+                else:
+                    sql = _ch_fact_query(
+                        f"{group_expr} AS label, avg({_RTT} / 1000.0) AS rtt_ms, count() AS reqs",
+                        f"{rtt_where}{extra_where}",
+                        group_by="label",
+                        order_by="reqs DESC",
+                        limit=25,
+                    )
+                rows = service.client.execute(sql, params)
+                if scale_factor > 1 and not rows:
+                    scale_factor = 1
+                    rows = service.client.execute(sql.replace(hash_clause, ""), params)
+                return [
+                    {
+                        "value": str(r["label"]),
+                        "label": str(r["label"]),
+                        "rtt_ms": _flt(r["rtt_ms"], 2) or 0.0,
+                        "reqs": int(r["reqs"]) * scale_factor,
+                    }
+                    for r in rows
+                    if r["label"] is not None and r["label"] != ""
+                ]
+
+            def _bars_from_rollup_and_region() -> dict[str, list[dict]]:
+                fence = visible_publication_fence_sql(
+                    "network_dimensions", client=service.client, service_id=service.service_id
+                )
+                q_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
+                region_scale = _network_sample_stride(q_span_s)
+                region_hash = _network_time_sample_clause(region_scale, start=start, end=end)
+                want_pop_rollup = pop_rollup_sink is not None
+                pop_cols = (
+                    ", toUInt64(sum(requests)) AS pop_reqs, "
+                    "toUInt64(sum(errors)) AS pop_errors, "
+                    "sum(tcp_rtt_p50_us * tcp_rtt_count) / nullIf(sum(tcp_rtt_count), 0) AS p50_rtt_us, "
+                    "sum(ttfb_p95_us * requests) / nullIf(sumIf(requests, ttfb_p95_us IS NOT NULL), 0) * 1000.0 AS p95_ttfb_ms"
+                    if want_pop_rollup
+                    else ""
+                )
+                pop_zero = (
+                    ", toUInt64(0) AS pop_reqs, toUInt64(0) AS pop_errors, "
+                    "CAST(NULL, 'Nullable(Float64)') AS p50_rtt_us, "
+                    "CAST(NULL, 'Nullable(Float64)') AS p95_ttfb_ms"
+                    if want_pop_rollup
+                    else ""
+                )
+                outer_cols = (
+                    "dimension, label, rtt_ms, reqs, pop_reqs, pop_errors, p50_rtt_us, p95_ttfb_ms"
+                    if want_pop_rollup
+                    else "dimension, label, rtt_ms, reqs"
+                )
+                dim_where = (
+                    f"(dimension = 'pop' OR tcp_rtt_count > 0) AND {fence}"
+                    if want_pop_rollup
+                    else f"tcp_rtt_count > 0 AND {fence}"
+                )
+                dim_having = "(reqs > 0 OR dimension = 'pop')" if want_pop_rollup else "reqs > 0"
+                dim_limit = 200 if want_pop_rollup else 25
+                sql = (
+                    f"SELECT {outer_cols} FROM ("
+                    "SELECT dimension, value AS label, "
+                    "coalesce(sum(tcp_rtt_sum), sum(tcp_rtt_p50_us * tcp_rtt_count)) / nullIf(sum(tcp_rtt_count), 0) / 1000.0 AS rtt_ms, "
+                    f"toUInt64(sum(tcp_rtt_count)) AS reqs{pop_cols} "
+                    "FROM network_minute_dimensions "
+                    "PREWHERE service_id={service_id:String} "
+                    "AND bucket_start >= {start:DateTime64(3)} AND bucket_start < {end:DateTime64(3)} "
+                    "AND dimension IN ('country', 'asn', 'pop') AND value != '' "
+                    f"WHERE {dim_where} "
+                    f"GROUP BY dimension, label HAVING {dim_having} "
+                    f"ORDER BY dimension ASC, reqs DESC LIMIT {dim_limit} BY dimension) "
+                    "UNION ALL "
+                    f"SELECT {outer_cols} FROM ("
+                    f"SELECT 'region' AS dimension, custom_fields['region'] AS label, avg({_RTT} / 1000.0) AS rtt_ms, "
+                    f"toUInt64(count() * {region_scale}) AS reqs{pop_zero} "
+                    f"FROM request_facts PREWHERE {_BASE_WHERE}{region_hash} AND country = {{region_country:String}} "
+                    "AND custom_fields['region'] != '' AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0' "
+                    f"WHERE {_RTT} > 0 GROUP BY label ORDER BY reqs DESC LIMIT 25)"
+                )
+                out: dict[str, list[dict]] = {"country": [], "asn": [], "pop": [], "region": []}
+                pop_rollup: dict[str, tuple[int, int, Any, Any]] = {}
+                for r in service.client.execute(sql, params):
+                    dim = str(r.get("dimension") or "")
+                    lbl = str(r.get("label") or "")
+                    if not lbl:
+                        continue
+                    reqs_val = int(r.get("reqs") or 0)
+                    if dim == "pop" and want_pop_rollup:
+                        pop_reqs = int(r.get("pop_reqs") or reqs_val)
+                        pop_rollup[lbl] = (
+                            pop_reqs,
+                            int(r.get("pop_errors") or 0),
+                            r.get("p50_rtt_us"),
+                            r.get("p95_ttfb_ms"),
+                        )
+                    if dim in out and reqs_val > 0:
+                        out[dim].append(
+                            {
+                                "value": lbl,
+                                "label": lbl,
+                                "rtt_ms": _flt(r["rtt_ms"], 2) or 0.0,
+                                "reqs": reqs_val,
+                            }
+                        )
+                for dim, dim_rows in out.items():
+                    dim_rows.sort(key=lambda row: row["reqs"], reverse=True)
+                    if len(dim_rows) > 25:
+                        out[dim] = dim_rows[:25]
+                if want_pop_rollup:
+                    if pop_rollup_cache_key is not None and pop_rollup:
+                        _pop_rollup_cache[pop_rollup_cache_key] = pop_rollup
+                    _finish_pop_rollup(pop_rollup)
+                return out
+
+            scatter_sql = _ch_fact_query(
+                f"{_RTT} / 1000.0 AS rtt_ms, {_TTFB} * 1000.0 AS ttfb_ms, "
+                "if(custom_fields['cache'] = '', 'UNKNOWN', custom_fields['cache']) AS cache_state",
+                f"{rtt_where} AND {_TTFB} > 0",
+                order_by="cityHash64(event_id)",
+                limit=_SCATTER_SAMPLE,
+            )
+
+            def _run_scatter() -> list[dict[str, Any]]:
+                if is_real_ch:
+
+                    def _scatter_query(sample_clause: str) -> str:
+                        return (
+                            f"SELECT {_RTT} / 1000.0 AS rtt_ms, {_TTFB} * 1000.0 AS ttfb_ms, "
+                            "if(custom_fields['cache'] = '', 'UNKNOWN', custom_fields['cache']) AS cache_state "
+                            f"FROM request_facts PREWHERE {_BASE_WHERE}{filter_sql} "
+                            f"AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0' "
+                            f"AND custom_fields['ttfb'] != '' AND custom_fields['ttfb'] != '0'{sample_clause} "
+                            f"WHERE {_RTT} > 0 AND {_TTFB} > 0 LIMIT {_SCATTER_SAMPLE}"
+                        )
+
+                    q_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
+                    ord_stride = 16 if q_span_s <= 86400 else 64
+                    fast_rows = service.client.execute(_scatter_query(f" AND line_ordinal % {ord_stride} = 0"), params)
+                    if len(fast_rows) >= 50:
+                        return fast_rows
+                    return service.client.execute(_scatter_query(""), params)
+                return service.client.execute(scatter_sql, params)
+
+            trace = HighScaleSections(service.service_id, "network.quality")
+            if is_real_ch and not filter_sql:
+                q_res_mixed: dict[str, Any] = trace.run_parallel(
+                    [
+                        ("rollup_bars", _bars_from_rollup_and_region),
+                        ("scatter", _run_scatter),
+                    ],
+                    source="projection",
+                    max_workers=2,
+                    thread_name_prefix="hs-net-quality",
+                )
+                rollup_bars = q_res_mixed["rollup_bars"]
+                by_country = rollup_bars.get("country", [])
+                by_asn = rollup_bars.get("asn") or _bar(_ASN, "")
+                by_pop = rollup_bars.get("pop", [])
+                by_region = rollup_bars.get("region", [])
+                scatter_rows = q_res_mixed["scatter"]
+            else:
+                q_tasks: list[tuple[str, Callable[[], list[dict[str, Any]]]]] = [
+                    *((name, partial(_bar, expr, extra)) for name, expr, extra in _QUALITY_BAR_SPECS),
+                    ("scatter", _run_scatter),
+                ]
+                q_res: dict[str, list[dict[str, Any]]] = trace.run_parallel(
+                    q_tasks,
+                    source="fact",
+                    max_workers=2,
+                    thread_name_prefix="hs-net-quality",
+                )
+                by_country, by_asn, by_region, by_pop, scatter_rows = (
+                    q_res[k] for k in ("country", "asn", "region", "pop", "scatter")
+                )
+            for row in by_country:
+                row["label"] = COUNTRY_MAP.get(row["value"], row["label"])
+            if by_asn:
+                labels = resolve_asn_display_labels(
+                    service.service_id, [int(r["value"]) for r in by_asn if r["value"].isdigit()]
+                )
+                for row in by_asn:
+                    if row["value"].isdigit():
+                        row["label"] = labels[int(row["value"])]
+            payload = {
+                "available": True,
+                "section_timings": trace.timings(),
+                "by_country": by_country,
+                "by_asn": by_asn,
+                "by_region": by_region,
+                "region_country": region_country,
+                "by_pop": by_pop,
+                "scatter": [
+                    {
+                        "rtt_ms": round(float(r["rtt_ms"]), 2),
+                        "ttfb_ms": round(float(r["ttfb_ms"]), 2),
+                        "cache": str(r["cache_state"]),
+                    }
+                    for r in scatter_rows
+                ],
+                "countries": sorted({row["value"] for row in by_country}),
+            }
+            if memo_key is not None:
+                _network_memo.put(memo_key, dict(payload))
+            return payload
+
+        if memo_key is not None:
+            result = _network_memo.coalesce(f"hs_net_quality:{memo_key}", _compute_quality)
+            _finish_pop_rollup(
+                _pop_rollup_cache.get(pop_rollup_cache_key) if pop_rollup_cache_key is not None else None
+            )
+            return NetworkQualityResponse.with_telemetry(**result)
+        return NetworkQualityResponse.with_telemetry(
+            **cache_result({}, state="bypass", prewarmer=False),
+            **_compute_quality(),
+        )
+    finally:
+        _finish_pop_rollup(None)
 
 
 def get_pop_health(
@@ -1434,6 +1539,8 @@ def get_pop_health(
     end_time: datetime | None,
     *,
     filters: Any = None,
+    pop_rollup_fut: Future[dict[str, tuple[int, int, Any, Any]] | None] | None = None,
+    pop_fact_fut: Future[tuple[list[dict[str, Any]], int] | None] | None = None,
 ) -> PopHealthListResponse:
     end = end_time or datetime.now(UTC)
     start = start_time or (end - timedelta(hours=24))
@@ -1478,58 +1585,75 @@ def get_pop_health(
             )
             rollup_by_pop: dict[str, tuple[int, int, Any, Any]] = {}
             if not filter_sql:
-                fence = visible_publication_fence_sql(
-                    "network_dimensions", client=service.client, service_id=service.service_id
-                )
-                combined_sql = (
-                    "SELECT 'rollup' AS kind, value AS pop, toUInt64(sum(requests)) AS req_count, "
-                    "CAST(toUInt64(sum(errors)), 'Nullable(UInt64)') AS errors, "
-                    "sum(tcp_rtt_p50_us * tcp_rtt_count) / nullIf(sum(tcp_rtt_count), 0) AS p50_rtt_us, "
-                    "sum(ttfb_p95_us * requests) / nullIf(sumIf(requests, ttfb_p95_us IS NOT NULL), 0) * 1000.0 AS p95_ttfb_ms, "
-                    "toUInt64(0) AS cache_hits, toInt64(0) AS bandwidth_bytes "
-                    "FROM network_minute_dimensions "
-                    "PREWHERE service_id={service_id:String} "
-                    "AND bucket_start >= {start:DateTime64(3)} AND bucket_start < {end:DateTime64(3)} "
-                    "AND dimension='pop' AND value != '' "
-                    f"WHERE {fence} "
-                    "GROUP BY pop "
-                    "UNION ALL "
-                    "SELECT 'fact' AS kind, custom_fields['pop'] AS pop, toUInt64(count()) AS req_count, "
-                    "CAST(NULL, 'Nullable(UInt64)') AS errors, "
-                    "CAST(NULL, 'Nullable(Float64)') AS p50_rtt_us, "
-                    "CAST(NULL, 'Nullable(Float64)') AS p95_ttfb_ms, "
-                    f"toUInt64(countIf({cache_hit_pred})) AS cache_hits, "
-                    "toInt64(sum(toInt64OrZero(custom_fields['resp_bytes']))) AS bandwidth_bytes "
+                shared_rollup = pop_rollup_fut.result() if pop_rollup_fut is not None else None
+                shared_fact = pop_fact_fut.result() if pop_fact_fut is not None else None
+                light_sql = (
+                    "SELECT custom_fields['pop'] AS pop, count() AS requests, "
+                    f"countIf({cache_hit_pred}) AS cache_hits, "
+                    "sum(toInt64OrZero(custom_fields['resp_bytes'])) AS bandwidth_bytes "
                     f"FROM request_facts PREWHERE {base_where}{hash_clause} AND custom_fields['pop'] != '' "
-                    "GROUP BY pop"
+                    "GROUP BY pop ORDER BY requests DESC"
                 )
-                combined_rows = trace.run(
-                    "pop_health",
-                    lambda: service.client.execute(combined_sql, params),
-                    source="fact",
-                )
-                fact_rows = []
-                for cr in combined_rows:
-                    if cr.get("kind") == "rollup":
-                        if cr.get("pop"):
-                            rollup_by_pop[str(cr["pop"])] = (
-                                int(cr.get("req_count") or 0),
-                                int(cr.get("errors") or 0),
-                                cr.get("p50_rtt_us"),
-                                cr.get("p95_ttfb_ms"),
-                            )
-                    else:
-                        fact_rows.append({**cr, "requests": cr.get("req_count", cr.get("requests"))})
-                if not fact_rows or (not rollup_by_pop and pop_stride == 1):
+                if shared_rollup is not None and shared_fact is not None:
+                    rollup_by_pop = shared_rollup
+                    fact_rows, pop_stride = shared_fact
+                    trace.run("pop_health", lambda: None, source="projection" if rollup_by_pop else "fact")
+                elif shared_rollup is not None:
+                    rollup_by_pop = shared_rollup
+                    fact_rows = trace.run(
+                        "pop_health",
+                        lambda: service.client.execute(light_sql, params),
+                        source="fact",
+                    )
+                else:
+                    fence = visible_publication_fence_sql(
+                        "network_dimensions", client=service.client, service_id=service.service_id
+                    )
+                    combined_sql = (
+                        "SELECT 'rollup' AS kind, value AS pop, toUInt64(sum(requests)) AS req_count, "
+                        "CAST(toUInt64(sum(errors)), 'Nullable(UInt64)') AS errors, "
+                        "sum(tcp_rtt_p50_us * tcp_rtt_count) / nullIf(sum(tcp_rtt_count), 0) AS p50_rtt_us, "
+                        "sum(ttfb_p95_us * requests) / nullIf(sumIf(requests, ttfb_p95_us IS NOT NULL), 0) * 1000.0 AS p95_ttfb_ms, "
+                        "toUInt64(0) AS cache_hits, toInt64(0) AS bandwidth_bytes "
+                        "FROM network_minute_dimensions "
+                        "PREWHERE service_id={service_id:String} "
+                        "AND bucket_start >= {start:DateTime64(3)} AND bucket_start < {end:DateTime64(3)} "
+                        "AND dimension='pop' AND value != '' "
+                        f"WHERE {fence} "
+                        "GROUP BY pop "
+                        "UNION ALL "
+                        "SELECT 'fact' AS kind, custom_fields['pop'] AS pop, toUInt64(count()) AS req_count, "
+                        "CAST(NULL, 'Nullable(UInt64)') AS errors, "
+                        "CAST(NULL, 'Nullable(Float64)') AS p50_rtt_us, "
+                        "CAST(NULL, 'Nullable(Float64)') AS p95_ttfb_ms, "
+                        f"toUInt64(countIf({cache_hit_pred})) AS cache_hits, "
+                        "toInt64(sum(toInt64OrZero(custom_fields['resp_bytes']))) AS bandwidth_bytes "
+                        f"FROM request_facts PREWHERE {base_where}{hash_clause} AND custom_fields['pop'] != '' "
+                        "GROUP BY pop"
+                    )
+                    combined_rows = trace.run(
+                        "pop_health",
+                        lambda: service.client.execute(combined_sql, params),
+                        source="fact",
+                    )
+                    fact_rows = []
+                    for cr in combined_rows:
+                        if cr.get("kind") == "rollup":
+                            if cr.get("pop"):
+                                rollup_by_pop[str(cr["pop"])] = (
+                                    int(cr.get("req_count") or 0),
+                                    int(cr.get("errors") or 0),
+                                    cr.get("p50_rtt_us"),
+                                    cr.get("p95_ttfb_ms"),
+                                )
+                        else:
+                            fact_rows.append({**cr, "requests": cr.get("req_count", cr.get("requests"))})
+                if (not fact_rows and (shared_fact is None or pop_stride > 1)) or (
+                    not rollup_by_pop and pop_stride == 1 and shared_fact is None
+                ):
                     pop_stride = 1
                     if rollup_by_pop:
-                        light_fb_sql = (
-                            "SELECT custom_fields['pop'] AS pop, count() AS requests, "
-                            f"countIf({cache_hit_pred}) AS cache_hits, "
-                            "sum(toInt64OrZero(custom_fields['resp_bytes'])) AS bandwidth_bytes "
-                            f"FROM request_facts PREWHERE {base_where} AND custom_fields['pop'] != '' "
-                            "GROUP BY pop ORDER BY requests DESC"
-                        )
+                        light_fb_sql = light_sql.replace(hash_clause, "")
                         fact_rows = trace.run(
                             "pop_health_fallback",
                             lambda: service.client.execute(light_fb_sql, params),
@@ -1658,141 +1782,178 @@ def _with_transport_settings(service_id: str, payload: Mapping[str, Any]) -> dic
 
 
 def get_transport_metrics(
-    service: HighScaleService, start_time: str | None, end_time: str | None, filters: Any = None
+    service: HighScaleService,
+    start_time: str | None,
+    end_time: str | None,
+    filters: Any = None,
+    *,
+    pop_fact_sink: Future[tuple[list[dict[str, Any]], int] | None] | None = None,
 ) -> TransportMetrics:
     start, end = parse_time_window(start_time, end_time)
     is_real_ch = (
         hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
     )
-    memo_key: str | None = None
-    if is_real_ch and start_time is not None and end_time is not None:
-        memo_key = digest_cache_key(
-            {
-                "ep": "hs_transport_metrics",
-                "cid": client_cache_token(service.client),
-                "s": _cache_minute_bound(start_time),
-                "e": _cache_minute_bound(end_time),
-                "f": serialize_filters_for_key(filters or {}),
-            },
-            {"name": service.service_id, "service_id": service.service_id},
-        )
-        if (cached := _network_memo.get_with_telemetry(memo_key)) is not None:
-            return TransportMetrics(**_with_transport_settings(service.service_id, cached))
 
-    def _compute_transport() -> dict[str, Any]:
-        if memo_key is not None and (cached_inner := _network_memo.get_with_telemetry(memo_key)) is not None:
-            return cached_inner
-        filter_sql, filter_params = _filter_clause(filters)
-        params = {"service_id": service.service_id, "start": start, "end": end, **filter_params}
-        base_where = f"{_BASE_WHERE}{filter_sql}"
-        proto_clean_expr = (
-            "caseWithExpression(custom_fields['proto'], '3.0', 'HTTP/3', '3', 'HTTP/3', '2.0', 'HTTP/2', '2', 'HTTP/2', "
-            "'1.1', 'HTTP/1.1', '1.0', 'HTTP/1.0', if(empty(custom_fields['proto']), 'Other', custom_fields['proto']))"
-        )
-        trace = HighScaleSections(service.service_id, "network.transport")
-        retrans_expr = (
-            "if(countIf(custom_fields['retrans'] != '') > 0, "
-            "countIf(toFloat64OrNull(custom_fields['retrans']) > 0) * 100.0 / nullIf(count(), 0), NULL)"
-        )
-        if is_real_ch:
-            tr_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
-            scale_factor = _network_sample_stride(tr_span_s)
-            hash_clause = _network_time_sample_clause(scale_factor, start=start, end=end)
-            combined_sql = (
-                f"SELECT count() AS total_reqs, sum(toInt64OrZero(custom_fields['resp_bytes'])) AS total_bytes, "
-                f"quantilesTDigest(0.50, 0.90, 0.95, 0.99)({_RTT}) AS rtt_quants, "
-                f"{retrans_expr} AS avg_retrans, avg({_PLOSS}) * 100.0 AS avg_ploss_pct, "
-                f"avg(toFloat64OrNull(custom_fields['delivery_rate'])) * 8.0 / 1e6 AS avg_del_rate_mbps, "
-                f"sumMap([{proto_clean_expr}], [toUInt64(1)]) AS proto_map "
-                f"FROM request_facts PREWHERE {base_where}{hash_clause}"
+    def _finish_pop_fact(val: tuple[list[dict[str, Any]], int] | None) -> None:
+        if pop_fact_sink is not None and not pop_fact_sink.done():
+            pop_fact_sink.set_result(val)
+
+    try:
+        memo_key: str | None = None
+        if is_real_ch and start_time is not None and end_time is not None:
+            memo_key = digest_cache_key(
+                {
+                    "ep": "hs_transport_metrics",
+                    "cid": client_cache_token(service.client),
+                    "s": _cache_minute_bound(start_time),
+                    "e": _cache_minute_bound(end_time),
+                    "f": serialize_filters_for_key(filters or {}),
+                },
+                {"name": service.service_id, "service_id": service.service_id},
             )
-            rows = trace.run("summary", lambda: service.client.execute(combined_sql, params), source="fact")
-            if scale_factor > 1 and (not rows or int(rows[0].get("total_reqs") or 0) == 0):
-                scale_factor = 1
-                rows = trace.run(
-                    "summary_fallback",
-                    lambda: service.client.execute(combined_sql.replace(hash_clause, ""), params),
-                    source="fact",
+            if (cached := _network_memo.get_with_telemetry(memo_key)) is not None:
+                _finish_pop_fact(None)
+                return TransportMetrics(**_with_transport_settings(service.service_id, cached))
+
+        def _compute_transport() -> dict[str, Any]:
+            if memo_key is not None and (cached_inner := _network_memo.get_with_telemetry(memo_key)) is not None:
+                _finish_pop_fact(None)
+                return cached_inner
+            filter_sql, filter_params = _filter_clause(filters)
+            params = {"service_id": service.service_id, "start": start, "end": end, **filter_params}
+            base_where = f"{_BASE_WHERE}{filter_sql}"
+            proto_clean_expr = (
+                "caseWithExpression(custom_fields['proto'], '3.0', 'HTTP/3', '3', 'HTTP/3', '2.0', 'HTTP/2', '2', 'HTTP/2', "
+                "'1.1', 'HTTP/1.1', '1.0', 'HTTP/1.0', if(empty(custom_fields['proto']), 'Other', custom_fields['proto']))"
+            )
+            trace = HighScaleSections(service.service_id, "network.transport")
+            retrans_expr = (
+                "if(countIf(custom_fields['retrans'] != '') > 0, "
+                "countIf(toFloat64OrNull(custom_fields['retrans']) > 0) * 100.0 / nullIf(count(), 0), NULL)"
+            )
+            if is_real_ch:
+                tr_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
+                scale_factor = _network_sample_stride(tr_span_s)
+                hash_clause = _network_time_sample_clause(scale_factor, start=start, end=end)
+                want_pop_fact = pop_fact_sink is not None and not filter_sql
+                cache_hit_pred = (
+                    "(startsWith(custom_fields['cache'], 'HIT') OR startsWith(custom_fields['cache'], 'hit'))"
                 )
-            r_raw: Mapping[str, Any] = rows[0] if rows else {}
-            quants = r_raw.get("rtt_quants")
-            q_vals = (
-                [float(x) / 1000.0 if x is not None else None for x in quants]
-                if isinstance(quants, (list, tuple)) and len(quants) == 4
-                else [None, None, None, None]
-            )
-            r = {
-                **r_raw,
-                "total_reqs": int(r_raw.get("total_reqs") or 0) * scale_factor,
-                "total_bytes": int(r_raw.get("total_bytes") or 0) * scale_factor,
-                "rtt_p50": q_vals[0],
-                "rtt_p90": q_vals[1],
-                "rtt_p95": q_vals[2],
-                "rtt_p99": q_vals[3],
-            }
-            pm = r_raw.get("proto_map")
-            if isinstance(pm, Mapping):
-                p_pairs = list(pm.items())
-            elif isinstance(pm, (list, tuple)) and len(pm) == 2 and isinstance(pm[0], (list, tuple)):
-                p_pairs = list(zip(pm[0], pm[1], strict=False))
+                pop_select = (
+                    ", sumMap(if(custom_fields['pop'] != '', [custom_fields['pop']], []), "
+                    "if(custom_fields['pop'] != '', [toUInt64(1)], [])) AS pop_reqs_map, "
+                    f"sumMap(if(custom_fields['pop'] != '' AND {cache_hit_pred}, [custom_fields['pop']], []), "
+                    f"if(custom_fields['pop'] != '' AND {cache_hit_pred}, [toUInt64(1)], [])) AS pop_hits_map, "
+                    "sumMap(if(custom_fields['pop'] != '', [custom_fields['pop']], []), "
+                    "if(custom_fields['pop'] != '', [toInt64OrZero(custom_fields['resp_bytes'])], [])) AS pop_bytes_map"
+                    if want_pop_fact
+                    else ""
+                )
+                combined_sql = (
+                    f"SELECT count() AS total_reqs, sum(toInt64OrZero(custom_fields['resp_bytes'])) AS total_bytes, "
+                    f"quantilesTDigest(0.50, 0.90, 0.95, 0.99)({_RTT}) AS rtt_quants, "
+                    f"{retrans_expr} AS avg_retrans, avg({_PLOSS}) * 100.0 AS avg_ploss_pct, "
+                    f"avg(toFloat64OrNull(custom_fields['delivery_rate'])) * 8.0 / 1e6 AS avg_del_rate_mbps, "
+                    f"sumMap([{proto_clean_expr}], [toUInt64(1)]) AS proto_map{pop_select} "
+                    f"FROM request_facts PREWHERE {base_where}{hash_clause}"
+                )
+                rows = trace.run("summary", lambda: service.client.execute(combined_sql, params), source="fact")
+                if scale_factor > 1 and (not rows or int(rows[0].get("total_reqs") or 0) == 0):
+                    scale_factor = 1
+                    rows = trace.run(
+                        "summary_fallback",
+                        lambda: service.client.execute(combined_sql.replace(hash_clause, ""), params),
+                        source="fact",
+                    )
+                r_raw: Mapping[str, Any] = rows[0] if rows else {}
+                if want_pop_fact:
+                    reqs_d = {str(k): int(v) for k, v in _unpack_sum_map(r_raw.get("pop_reqs_map")) if k}
+                    hits_d = {str(k): int(v) for k, v in _unpack_sum_map(r_raw.get("pop_hits_map")) if k}
+                    bytes_d = {str(k): int(v) for k, v in _unpack_sum_map(r_raw.get("pop_bytes_map")) if k}
+                    pop_fact_rows: list[dict[str, Any]] = [
+                        {
+                            "pop": pop_code,
+                            "requests": req_cnt,
+                            "cache_hits": hits_d.get(pop_code, 0),
+                            "bandwidth_bytes": bytes_d.get(pop_code, 0),
+                        }
+                        for pop_code, req_cnt in sorted(reqs_d.items(), key=lambda kv: kv[1], reverse=True)
+                    ]
+                    _finish_pop_fact((pop_fact_rows, scale_factor))
+                quants = r_raw.get("rtt_quants")
+                q_vals = (
+                    [float(x) / 1000.0 if x is not None else None for x in quants]
+                    if isinstance(quants, (list, tuple)) and len(quants) == 4
+                    else [None, None, None, None]
+                )
+                r = {
+                    **r_raw,
+                    "total_reqs": int(r_raw.get("total_reqs") or 0) * scale_factor,
+                    "total_bytes": int(r_raw.get("total_bytes") or 0) * scale_factor,
+                    "rtt_p50": q_vals[0],
+                    "rtt_p90": q_vals[1],
+                    "rtt_p95": q_vals[2],
+                    "rtt_p99": q_vals[3],
+                }
+                p_pairs = _unpack_sum_map(r_raw.get("proto_map"))
+                p_rows = [
+                    {"proto_clean": str(k), "reqs": int(v) * scale_factor}
+                    for k, v in sorted(p_pairs, key=lambda kv: int(kv[1]), reverse=True)
+                ]
             else:
-                p_pairs = []
-            p_rows = [
-                {"proto_clean": str(k), "reqs": int(v) * scale_factor}
-                for k, v in sorted(p_pairs, key=lambda kv: int(kv[1]), reverse=True)
-            ]
-        else:
-            sql = _ch_fact_query(
-                f"count() AS total_reqs, sum(toInt64OrZero(custom_fields['resp_bytes'])) AS total_bytes, "
-                f"quantile(0.50)({_RTT}) / 1000.0 AS rtt_p50, quantile(0.90)({_RTT}) / 1000.0 AS rtt_p90, "
-                f"quantile(0.95)({_RTT}) / 1000.0 AS rtt_p95, quantile(0.99)({_RTT}) / 1000.0 AS rtt_p99, "
-                f"{retrans_expr} AS avg_retrans, avg({_PLOSS}) * 100.0 AS avg_ploss_pct, "
-                f"avg(toFloat64OrNull(custom_fields['delivery_rate'])) * 8.0 / 1e6 AS avg_del_rate_mbps",
-                base_where,
-            )
-            proto_sql = _ch_fact_query(
-                f"{proto_clean_expr} AS proto_clean, count() AS reqs",
-                base_where,
-                group_by="proto_clean",
-                order_by="reqs DESC",
-            )
-            q_res = trace.run_parallel(
-                [
-                    ("summary", lambda: service.client.execute(sql, params)),
-                    ("protocols", lambda: service.client.execute(proto_sql, params)),
-                ],
-                source="fact",
-                max_workers=2,
-                thread_name_prefix="hs-net-transport",
-            )
-            rows, p_rows = q_res["summary"], q_res["protocols"]
-            r = rows[0] if rows else {}
-        total_requests = int(r.get("total_reqs") or 0)
-        _transport_vals: dict[str, Any] = {attr: _flt(r.get(col), nd) for attr, col, nd in _TRANSPORT_ROUND_SPECS}
-        payload = {
-            "section_timings": [SectionTimingEntry.model_validate(t) for t in trace.timings()],
-            **_transport_vals,
-            "bandwidth_bytes": int(r.get("total_bytes") or 0),
-            "total_requests": total_requests,
-            "protocol_distribution": [
-                TransportProtocolShare(**item)
-                for item in shape_protocol_distribution(
-                    ((pr.get("proto_clean", "Other"), pr.get("reqs", 0)) for pr in p_rows),
-                    total_requests=total_requests,
+                sql = _ch_fact_query(
+                    f"count() AS total_reqs, sum(toInt64OrZero(custom_fields['resp_bytes'])) AS total_bytes, "
+                    f"quantile(0.50)({_RTT}) / 1000.0 AS rtt_p50, quantile(0.90)({_RTT}) / 1000.0 AS rtt_p90, "
+                    f"quantile(0.95)({_RTT}) / 1000.0 AS rtt_p95, quantile(0.99)({_RTT}) / 1000.0 AS rtt_p99, "
+                    f"{retrans_expr} AS avg_retrans, avg({_PLOSS}) * 100.0 AS avg_ploss_pct, "
+                    f"avg(toFloat64OrNull(custom_fields['delivery_rate'])) * 8.0 / 1e6 AS avg_del_rate_mbps",
+                    base_where,
                 )
-            ],
-        }
-        if memo_key is not None:
-            _network_memo.put(memo_key, dict(payload))
-        return payload
+                proto_sql = _ch_fact_query(
+                    f"{proto_clean_expr} AS proto_clean, count() AS reqs",
+                    base_where,
+                    group_by="proto_clean",
+                    order_by="reqs DESC",
+                )
+                q_res = trace.run_parallel(
+                    [
+                        ("summary", lambda: service.client.execute(sql, params)),
+                        ("protocols", lambda: service.client.execute(proto_sql, params)),
+                    ],
+                    source="fact",
+                    max_workers=2,
+                    thread_name_prefix="hs-net-transport",
+                )
+                rows, p_rows = q_res["summary"], q_res["protocols"]
+                r = rows[0] if rows else {}
+            total_requests = int(r.get("total_reqs") or 0)
+            _transport_vals: dict[str, Any] = {attr: _flt(r.get(col), nd) for attr, col, nd in _TRANSPORT_ROUND_SPECS}
+            payload = {
+                "section_timings": [SectionTimingEntry.model_validate(t) for t in trace.timings()],
+                **_transport_vals,
+                "bandwidth_bytes": int(r.get("total_bytes") or 0),
+                "total_requests": total_requests,
+                "protocol_distribution": [
+                    TransportProtocolShare(**item)
+                    for item in shape_protocol_distribution(
+                        ((pr.get("proto_clean", "Other"), pr.get("reqs", 0)) for pr in p_rows),
+                        total_requests=total_requests,
+                    )
+                ],
+            }
+            if memo_key is not None:
+                _network_memo.put(memo_key, dict(payload))
+            return payload
 
-    if memo_key is not None:
-        computed = _network_memo.coalesce(f"hs_transport_metrics:{memo_key}", _compute_transport)
-        return TransportMetrics(**_with_transport_settings(service.service_id, computed))
-    return TransportMetrics(
-        **cache_result({}, state="bypass", prewarmer=False),
-        **_with_transport_settings(service.service_id, _compute_transport()),
-    )
+        if memo_key is not None:
+            computed = _network_memo.coalesce(f"hs_transport_metrics:{memo_key}", _compute_transport)
+            return TransportMetrics(**_with_transport_settings(service.service_id, computed))
+        return TransportMetrics(
+            **cache_result({}, state="bypass", prewarmer=False),
+            **_with_transport_settings(service.service_id, _compute_transport()),
+        )
+    finally:
+        _finish_pop_fact(None)
 
 
 def network_bundle(
@@ -1836,26 +1997,45 @@ def network_bundle(
         q_req = NetworkQualityRequest(
             region_country=req.region_country, filters=req.filters, start_time=start_time, end_time=end_time
         )
+        want_health = (
+            sections is None or "health" in sections or bool(sections & (_CORE_SECTIONS | {"shielding_analysis"}))
+        )
+        want_quality = sections is None or "quality" in sections
+        want_pop = sections is None or "pop_health" in sections
+        want_transport = sections is None or "transport" in sections
+        share_pop_rollup = is_real_ch and want_quality and want_pop and not getattr(req, "filters", None)
+        pop_rollup_fut: Future[dict[str, tuple[int, int, Any, Any]] | None] | None = (
+            Future() if share_pop_rollup else None
+        )
+        pop_fact_fut: Future[tuple[list[dict[str, Any]], int] | None] | None = (
+            Future() if (share_pop_rollup and want_transport) else None
+        )
         bundle_specs: tuple[tuple[str, bool, Callable[[], Any]], ...] = (
             (
                 "health",
-                sections is None or "health" in sections or bool(sections & (_CORE_SECTIONS | {"shielding_analysis"})),
+                want_health,
                 lambda: network_health(service, req, start_time, end_time),
             ),
             (
                 "quality",
-                sections is None or "quality" in sections,
-                lambda: network_quality(service, q_req, start_time, end_time),
+                want_quality,
+                lambda: network_quality(service, q_req, start_time, end_time, pop_rollup_sink=pop_rollup_fut),
             ),
             (
                 "pop",
-                sections is None or "pop_health" in sections,
-                lambda: get_pop_health(service, _range_value(start_time), _range_value(end_time)),
+                want_pop,
+                lambda: get_pop_health(
+                    service,
+                    _range_value(start_time),
+                    _range_value(end_time),
+                    pop_rollup_fut=pop_rollup_fut,
+                    pop_fact_fut=pop_fact_fut,
+                ),
             ),
             (
                 "transport",
-                sections is None or "transport" in sections,
-                lambda: get_transport_metrics(service, start_time, end_time, req.filters),
+                want_transport,
+                lambda: get_transport_metrics(service, start_time, end_time, req.filters, pop_fact_sink=pop_fact_fut),
             ),
         )
         with ThreadPoolExecutor(max_workers=4, thread_name_prefix="hs-net-bundle") as pool:

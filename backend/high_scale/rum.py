@@ -396,15 +396,14 @@ def _rum_analytics_compute(
         f"replaceRegexpOne(coalesce(nullIf(v.asn, ''), r.req_asn), '^AS', '') AS asn_key, "
         f"v.metric_value AS metric_value, v.w AS w, r.edge_ms AS edge_ms "
         f"FROM ttlb_rows AS v LEFT JOIN req_edge AS r ON v.req_id != '' AND r.rid = v.req_id) "
-        f"SELECT * FROM ("
-        f"SELECT 'url' AS kind, resource_url AS k, {slowest_agg_select} "
-        f"FROM ttlb_joined WHERE resource_url != '' "
-        f"GROUP BY resource_url ORDER BY p99_ms DESC, p95_ms DESC, requests DESC LIMIT 20) "
-        f"UNION ALL "
-        f"SELECT * FROM ("
-        f"SELECT 'asn' AS kind, asn_key AS k, {slowest_agg_select} "
-        f"FROM ttlb_joined WHERE asn_key != '' AND asn_key != '0' "
-        f"GROUP BY asn_key ORDER BY p99_ms DESC, p95_ms DESC, requests DESC LIMIT 20)"
+        f"SELECT kind_k.1 AS kind, kind_k.2 AS k, {slowest_agg_select} "
+        f"FROM ttlb_joined "
+        f"ARRAY JOIN [('url', if(resource_url != '', resource_url, '')), "
+        f"('asn', if(asn_key != '' AND asn_key != '0', asn_key, ''))] AS kind_k "
+        f"WHERE kind_k.2 != '' "
+        f"GROUP BY kind_k.1, kind_k.2 "
+        f"ORDER BY kind ASC, p99_ms DESC, p95_ms DESC, requests DESC "
+        f"LIMIT 20 BY kind"
     )
 
     queries = (

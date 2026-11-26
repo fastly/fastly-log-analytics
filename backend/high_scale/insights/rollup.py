@@ -241,7 +241,7 @@ def coverage_sql() -> str:
     return (
         "/* insight:rollup_coverage */ SELECT shape, toUInt32(toUnixTimestamp(bucket_start)) AS hour, "
         "sum(request_count) AS row_count, sum(cityHash64(batch_id) * request_count) AS batch_checksum "
-        f"FROM {ROLLUP_TABLE} WHERE {scope} "
+        f"FROM {ROLLUP_TABLE} PREWHERE {scope} "
         "AND bucket_start >= {coverage_start:DateTime64(3)} AND bucket_start < {coverage_end:DateTime64(3)} "
         "GROUP BY shape, hour"
     )

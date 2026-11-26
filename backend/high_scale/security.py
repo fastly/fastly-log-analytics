@@ -598,35 +598,61 @@ def _sec_combined_ngwaf(
     return bundle
 
 
-def _sec_combined_overview(service: HighScaleService, scope: _Scope, sec_base_key: str | None) -> dict[str, Any]:
+def _sec_combined_overview(
+    service: HighScaleService,
+    scope: _Scope,
+    sec_base_key: str | None,
+    *,
+    bucket_seconds: int = 3600,
+    include_verified_bots: bool = False,
+) -> dict[str, Any]:
     h_case = _bucket_case("h", _REQ_HEADER_BUCKETS, _REQ_HEADER_LAST)
     c_case = _bucket_case("c", _CONN_REUSE_BUCKETS, _CONN_REUSE_LAST)
+    bucket_expr = (
+        f"intDiv(toUnixTimestamp(event_timestamp), {bucket_seconds}) * {bucket_seconds}"
+        if include_verified_bots
+        else "toUnixTimestamp(toStartOfHour(event_timestamp))"
+    )
+    vb_select = ", sumMap(vb_tags, arrayMap(_ -> toUInt64(1), vb_tags)) AS vb_map" if include_verified_bots else ""
+    vb_inner = (
+        ", if(positionCaseInsensitive(custom_fields['waf_sig'], 'VERIFIED-BOT.') > 0, "
+        "arrayMap(t -> replaceOne(t, 'VERIFIED-BOT.', ''), "
+        "arrayFilter(t -> startsWith(t, 'VERIFIED-BOT.'), splitByChar(',', custom_fields['waf_sig']))), "
+        "CAST([], 'Array(String)')) AS vb_tags"
+        if include_verified_bots
+        else ""
+    )
     overview_sql = (
-        "SELECT toUnixTimestamp(toStartOfHour(event_timestamp)) AS bucket_ts, "
+        f"SELECT {bucket_expr} AS bucket_ts, "
         "count() AS total_rows, "
         "countIf(custom_fields['tls_ciphers_sha'] != '') AS tls_populated, "
         f"countIf({_IS_IPV6}) AS ipv6_rows, "
         "sumMap(if(h IS NOT NULL, [h_b], []), if(h IS NOT NULL, [toUInt64(1)], [])) AS h_map, "
         "sumMap(if(c IS NOT NULL AND c > 0, [c_b], []), if(c IS NOT NULL AND c > 0, [toUInt64(1)], [])) AS c_map, "
-        "sumMap(if(p_t != '', [p_t], []), if(p_t != '', [toUInt64(1)], [])) AS p_map "
+        f"sumMap(if(p_t != '', [p_t], []), if(p_t != '', [toUInt64(1)], [])) AS p_map{vb_select} "
         "FROM (SELECT event_timestamp, custom_fields['tls_ciphers_sha'], custom_fields['is_ipv6'], "
         "custom_fields['p_type'] AS p_t, toUInt64OrNull(custom_fields['req_header_bytes']) AS h, "
-        f"{h_case} AS h_b, toUInt64OrNull(custom_fields['conn_requests']) AS c, {c_case} AS c_b "
+        f"{h_case} AS h_b, toUInt64OrNull(custom_fields['conn_requests']) AS c, {c_case} AS c_b{vb_inner} "
         "FROM request_facts PREWHERE __WHERE__) GROUP BY bucket_ts ORDER BY bucket_ts"
     )
     rows = _run(service, scope, "overview_5in1", overview_sql)
     total_rows = 0
     tls_pop = 0
-    ipv6_list: list[dict[str, Any]] = []
+    ipv6_by_hour: dict[int, list[int]] = {}
     h_counts: dict[str, int] = defaultdict(int)
     c_counts: dict[str, int] = defaultdict(int)
     p_counts: dict[str, int] = defaultdict(int)
+    vb_entries: list[tuple[int, str, int]] = []
     for r in rows:
         tr = int(r.get("total_rows") or 0)
         total_rows += tr
         tls_pop += int(r.get("tls_populated") or 0)
+        b_ts = int(r["bucket_ts"])
         if tr > 0:
-            ipv6_list.append({"time": _sec_iso(r["bucket_ts"]), "pct": float(r.get("ipv6_rows") or 0) * 100.0 / tr})
+            hr_ts = (b_ts // 3600) * 3600
+            acc = ipv6_by_hour.setdefault(hr_ts, [0, 0])
+            acc[0] += int(r.get("ipv6_rows") or 0)
+            acc[1] += tr
         for k, v in _unpack_summap(r.get("h_map")):
             if k:
                 h_counts[str(k)] += v
@@ -636,9 +662,18 @@ def _sec_combined_overview(service: HighScaleService, scope: _Scope, sec_base_ke
         for k, v in _unpack_summap(r.get("p_map")):
             if k:
                 p_counts[_normalize_proxy_type(k)] += v
+        if include_verified_bots:
+            for k, v in _unpack_summap(r.get("vb_map")):
+                if k and v > 0:
+                    vb_entries.append((b_ts, str(k), v))
+    ipv6_list = [
+        {"time": _sec_iso(hr_ts), "pct": ipv6_cnt * 100.0 / tot_cnt}
+        for hr_ts, (ipv6_cnt, tot_cnt) in sorted(ipv6_by_hour.items())
+        if tot_cnt > 0
+    ]
     h_order = [*(lbl for _, lbl in _REQ_HEADER_BUCKETS), _REQ_HEADER_LAST]
     c_order = [*(lbl for _, lbl in _CONN_REUSE_BUCKETS), _CONN_REUSE_LAST]
-    bundle = {
+    bundle: dict[str, Any] = {
         "fingerprint_coverage": {"tls_ciphers_sha": (tls_pop / total_rows) if total_rows > 0 else 0.0},
         "req_size_dist": [{"bucket": b, "count": h_counts[b]} for b in h_order if h_counts.get(b, 0) > 0],
         "conn_reuse_dist": [{"bucket": b, "count": c_counts[b]} for b in c_order if c_counts.get(b, 0) > 0],
@@ -647,6 +682,11 @@ def _sec_combined_overview(service: HighScaleService, scope: _Scope, sec_base_ke
             {"type": k, "count": v} for k, v in sorted(p_counts.items(), key=lambda kv: kv[1], reverse=True) if v > 0
         ],
     }
+    if include_verified_bots:
+        bundle["verified_bots_ts"] = [
+            {"time": _sec_iso(ts), "bot_type": bt, "count": cnt}
+            for ts, bt, cnt in sorted(vb_entries, key=lambda item: (item[0], item[1]))
+        ]
     _populate_sec_memo_bundle(sec_base_key, bundle)
     return bundle
 
@@ -743,12 +783,15 @@ def security_aggregates(
         def want(name: str) -> bool:
             return sections is None or name in sections
 
+        can_fold_vb = is_real_ch and bucket_seconds <= 3600 and 3600 % bucket_seconds == 0
+        overview_keys = (*_COMBINED_OVERVIEW_KEYS, "verified_bots_ts") if can_fold_vb else _COMBINED_OVERVIEW_KEYS
         wanted_overview = [
             k
-            for k in _COMBINED_OVERVIEW_KEYS
+            for k in overview_keys
             if want(k) and (sec_base_key is None or f"{sec_base_key}:{k}" not in _security_memo.cache)
         ]
         use_combined_overview = is_real_ch and len(wanted_overview) >= 2
+        fold_vb_in_overview = use_combined_overview and can_fold_vb and ("verified_bots_ts" in wanted_overview)
         want_any_ngwaf = want("ngwaf_verified_bots") or want("ngwaf_verified_bots_ts")
         use_combined_ngwaf = (
             is_real_ch
@@ -766,7 +809,13 @@ def security_aggregates(
             (
                 "_combined_overview",
                 use_combined_overview,
-                lambda: _sec_combined_overview(service, scope, sec_base_key),
+                lambda: _sec_combined_overview(
+                    service,
+                    scope,
+                    sec_base_key,
+                    bucket_seconds=bucket_seconds,
+                    include_verified_bots=fold_vb_in_overview,
+                ),
             ),
             (
                 "fingerprint_coverage",
@@ -798,7 +847,11 @@ def security_aggregates(
                 want("conn_reuse_dist") and not use_combined_overview,
                 lambda: _conn_reuse_dist(service, scope),
             ),
-            ("verified_bots_ts", want("verified_bots_ts"), lambda: _verified_bots_ts(service, scope, bucket_seconds)),
+            (
+                "verified_bots_ts",
+                want("verified_bots_ts") and not fold_vb_in_overview,
+                lambda: _verified_bots_ts(service, scope, bucket_seconds),
+            ),
             (
                 "ngwaf_configured",
                 want_any_ngwaf,
@@ -856,8 +909,8 @@ def security_aggregates(
             elif k == "_proxies":
                 res.update(val)
             elif k == "_combined_overview":
-                for ok in _COMBINED_OVERVIEW_KEYS:
-                    if want(ok):
+                for ok in overview_keys:
+                    if ok in val and want(ok):
                         res[ok] = val[ok]
             elif k == "_combined_ngwaf":
                 res.update(val)

@@ -96,7 +96,7 @@ _INSIGHTS_TELEMETRY_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=200, ttl_se
 # Results with error cards are kept briefly so retries and prewarms reuse the cards that did succeed.
 _INSIGHTS_PARTIAL_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=200, ttl_seconds=60)
 _INSIGHTS_HISTORY_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=60)
-_INSIGHTS_COVERAGE_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=120)
+_INSIGHTS_COVERAGE_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=900)
 _CacheRegistry.register("high_scale.insights._INSIGHTS_CACHE", _INSIGHTS_CACHE)
 _CacheRegistry.register("high_scale.insights._INSIGHTS_TELEMETRY_CACHE", _INSIGHTS_TELEMETRY_CACHE)
 _CacheRegistry.register("high_scale.insights._INSIGHTS_PARTIAL_CACHE", _INSIGHTS_PARTIAL_CACHE)
@@ -292,12 +292,25 @@ def _evaluate(
         window_total = int(history[0].get("window_total") or 0) if history else 0
         history_hours = compute_available_history_hours(now, earliest)
         if use_rollup and coverage_start < coverage_end and history_hours >= baseline_hours and history[0].get("hours"):
+            cov_start_ts = int(coverage_start.timestamp())
+            cov_end_ts = int(coverage_end.timestamp())
+            cov_pairs = tuple(
+                sorted(
+                    (int(h), str(cs))
+                    for h, cs in zip(
+                        history[0].get("hours") or [],
+                        history[0].get("hour_checksums") or [],
+                        strict=False,
+                    )
+                    if cov_start_ts <= int(h) < cov_end_ts
+                )
+            )
             coverage_cache_key = (
                 service.service_id,
                 client_cache_token(service.client),
-                int(coverage_start.timestamp()),
-                int(coverage_end.timestamp()),
-                tuple(zip(history[0].get("hours") or [], history[0].get("hour_checksums") or [])),
+                cov_start_ts,
+                cov_end_ts,
+                cov_pairs,
             )
             cached_coverage = None if bypass_history_cache else _INSIGHTS_COVERAGE_CACHE.get(coverage_cache_key)
             if cached_coverage is None:
@@ -418,10 +431,15 @@ def _evaluate(
             return out
 
         if batch.build_candidates_sql is not None:
+            cand_kwargs: dict[str, Any] = {
+                "present": enabled_set,
+                "rollup_span": span,
+                "filter_clause": filter_clause,
+            }
+            if "window_hours" in inspect.signature(batch.build_candidates_sql).parameters:
+                cand_kwargs["window_hours"] = window_hours
             cand_sql = rewrite_materialized_cf(
-                batch.build_candidates_sql(
-                    active_ids, present=enabled_set, rollup_span=span, filter_clause=filter_clause
-                ),
+                batch.build_candidates_sql(active_ids, **cand_kwargs),
                 params,
                 use_cf=use_cf,
             )

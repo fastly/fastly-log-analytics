@@ -398,13 +398,13 @@ def test_shield_active_cache_and_network_quality_scatter_stride(monkeypatch: pyt
     assert sum(1 for sql, _, _ in sh_client.calls if "SELECT count() AS n" in sql) == 1
     assert len(sh_client.calls) == 3
 
-    # Edge-only (n=0) does NOT cache True, so subsequent calls still probe.
+    # Edge-only (n=0) caches False, so subsequent calls bypass CH with 0 probes.
     edge_only_client = _FakeRealClickHouseClient(lambda sql, _p: [{"n": 0}] if "SELECT count() AS n" in sql else [])
     edge_svc = _service(edge_only_client, "svc-opt23-edge")
     res_edge = hs_network._shielding_analysis(edge_svc, start_24h, end, None)
     assert res_edge.edge_only is True
     hs_network._shielding_analysis(edge_svc, start_24h, end, None)
-    assert sum(1 for sql, _, _ in edge_only_client.calls if "SELECT count() AS n" in sql) == 2
+    assert sum(1 for sql, _, _ in edge_only_client.calls if "SELECT count() AS n" in sql) == 1
 
     # Scatter uses stride 16 on <= 24h and accepts >= 50 rows without fallback.
     rollup_rows = [
