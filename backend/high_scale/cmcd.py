@@ -93,6 +93,36 @@ _BITRATE_LADDER_TIERS = {
     5: "10+ Mbps (4K)",
 }
 _FILTER_COLUMNS = {"country": "country", "asn": "asn"}
+_EVENT_COL_EXPRS: dict[str, str] = {
+    "ts": "event_timestamp AS ts",
+    "sid": "cmcd['sid'] AS sid",
+    "sid_h": "cityHash64(cmcd['sid']) AS sid_h",
+    "cid": "cmcd['cid'] AS cid",
+    "ot": "cmcd['ot'] AS ot",
+    "sf": "cmcd['sf'] AS sf",
+    "st": "cmcd['st'] AS st",
+    "country": "country",
+    "bl": "toFloat64OrNull(cmcd['bl']) AS bl",
+    "br": "toFloat64OrNull(cmcd['br']) AS br",
+    "mtp": "toFloat64OrNull(cmcd['mtp']) AS mtp",
+    "tb": "toFloat64OrNull(cmcd['tb']) AS tb",
+    "bs": "if(cmcd['bs'] = '', NULL, lower(cmcd['bs']) IN ('true', '1')) AS bs",
+    "su": "if(cmcd['su'] = '', NULL, lower(cmcd['su']) IN ('true', '1')) AS su",
+}
+
+
+def _events_sql(
+    cols: Iterable[str],
+    *,
+    from_table: str,
+    asn_expr: str,
+    prewhere_clause: str,
+    where: str,
+) -> str:
+    proj = ",\n           ".join(asn_expr if col == "asn" else _EVENT_COL_EXPRS[col] for col in cols)
+    return f"\n    SELECT {proj}\n    FROM {from_table}{prewhere_clause}\n    WHERE {where}\n"
+
+
 _EVENTS_BASE = """
     SELECT event_timestamp AS ts,
            cmcd['sid'] AS sid,
@@ -392,6 +422,9 @@ def _cmcd_aggregates_compute(
         )
     ]
 
+    def _ev(*cols: str) -> str:
+        return _events_sql(cols, from_table=from_table, asn_expr=asn_expr, prewhere_clause=prewhere_clause, where=where)
+
     req_ts = {
         "sessions_ts": wanted("sessions_ts"),
         "buffer_health_ts": wanted("buffer_health_ts"),
@@ -403,13 +436,14 @@ def _cmcd_aggregates_compute(
     need_peak_query = want_overview and not req_ts["sessions_ts"]
     need_duration_query = want_overview and not want_duration_dist
     if need_peak_query or need_duration_query:
+        overview_events = _ev("ts", "sid")
 
         def _run_overview_extras() -> dict[str, Any]:
             out: dict[str, Any] = {}
             if need_peak_query:
                 peak = execute(
                     "/* cmcd:overview_peak */ SELECT max(viewers) AS peak_viewers FROM ("
-                    "SELECT uniqExact(sid) AS viewers FROM (" + events + ") "
+                    "SELECT uniqExact(cityHash64(sid)) AS viewers FROM (" + overview_events + ") "
                     f"GROUP BY {_BUCKET.format(column='ts')})",
                     params,
                 )
@@ -418,7 +452,7 @@ def _cmcd_aggregates_compute(
                 duration = execute(
                     "/* cmcd:overview_duration */ SELECT avg(duration) AS avg_duration FROM ("
                     "SELECT (toUnixTimestamp64Milli(max(ts)) - toUnixTimestamp64Milli(min(ts))) / 1000.0 AS duration "
-                    "FROM (" + events + ") GROUP BY sid HAVING duration > 0)",
+                    "FROM (" + overview_events + ") GROUP BY sid HAVING duration > 0)",
                     params,
                 )
                 out["_avg_duration"] = duration[0].get("avg_duration") if duration else None
@@ -427,20 +461,38 @@ def _cmcd_aggregates_compute(
         tasks.append(("overview", _run_overview_extras))
 
     if any(req_ts.values()):
+        ts_cols: list[str] = ["ts"]
+        if req_ts["sessions_ts"]:
+            ts_cols.extend(["sid", "bs"])
+        if req_ts["buffer_health_ts"] or req_ts["bitrate_ts"] or req_ts["throughput_ts"]:
+            ts_cols.append("ot")
+        if req_ts["buffer_health_ts"]:
+            ts_cols.append("bl")
+            if "bs" not in ts_cols:
+                ts_cols.append("bs")
+        if req_ts["bitrate_ts"]:
+            ts_cols.extend(["br", "tb"])
+        if req_ts["throughput_ts"]:
+            ts_cols.append("mtp")
+        if req_ts["startup_ts"]:
+            ts_cols.append("su")
+        ts_events = _ev(*ts_cols)
 
         def _run_timeseries() -> dict[str, Any]:
             select = [f"{_BUCKET.format(column='ts')} AS bucket"]
             if req_ts["sessions_ts"]:
                 select += [
-                    "uniqExact(sid) AS concurrent_sessions",
-                    "uniqExactIf(sid, bs = 1) * 100.0 / nullIf(uniqExact(sid), 0) AS rebuffer_session_pct",
+                    "uniqExact(cityHash64(sid)) AS concurrent_sessions",
+                    "uniqExactIf(cityHash64(sid), bs = 1) * 100.0 / nullIf(uniqExact(cityHash64(sid)), 0) AS rebuffer_session_pct",
                 ]
             if req_ts["buffer_health_ts"]:
                 select += [
-                    f"quantileTDigestIf(0.5)(bl, {_VIDEO}) AS p50_buffer",
-                    "quantileTDigest(0.5)(bl) AS p50_buffer_all",
-                    f"quantileTDigestIf(0.95)(bl, {_VIDEO}) AS p95_buffer",
-                    "quantileTDigest(0.95)(bl) AS p95_buffer_all",
+                    f"quantilesTDigestIf(0.5, 0.95)(bl, {_VIDEO}) AS _bl_q",
+                    "_bl_q[1] AS p50_buffer",
+                    "_bl_q[2] AS p95_buffer",
+                    "quantilesTDigest(0.5, 0.95)(bl) AS _bl_q_all",
+                    "_bl_q_all[1] AS p50_buffer_all",
+                    "_bl_q_all[2] AS p95_buffer_all",
                     "countIf(bs = 1) * 100.0 / nullIf(count(), 0) AS starvation_rate",
                 ]
             if req_ts["bitrate_ts"]:
@@ -452,17 +504,19 @@ def _cmcd_aggregates_compute(
                 ]
             if req_ts["throughput_ts"]:
                 select += [
-                    f"quantileTDigestIf(0.5)(mtp, {_VIDEO}) AS p50_throughput",
-                    "quantileTDigest(0.5)(mtp) AS p50_throughput_all",
-                    f"quantileTDigestIf(0.95)(mtp, {_VIDEO}) AS p95_throughput",
-                    "quantileTDigest(0.95)(mtp) AS p95_throughput_all",
-                    f"quantileTDigestIf(0.99)(mtp, {_VIDEO}) AS p99_throughput",
-                    "quantileTDigest(0.99)(mtp) AS p99_throughput_all",
+                    f"quantilesTDigestIf(0.5, 0.95, 0.99)(mtp, {_VIDEO}) AS _mtp_q",
+                    "_mtp_q[1] AS p50_throughput",
+                    "_mtp_q[2] AS p95_throughput",
+                    "_mtp_q[3] AS p99_throughput",
+                    "quantilesTDigest(0.5, 0.95, 0.99)(mtp) AS _mtp_q_all",
+                    "_mtp_q_all[1] AS p50_throughput_all",
+                    "_mtp_q_all[2] AS p95_throughput_all",
+                    "_mtp_q_all[3] AS p99_throughput_all",
                 ]
             if req_ts["startup_ts"]:
                 select.append("countIf(su = 1) * 100.0 / nullIf(count(), 0) AS startup_ratio")
             rows = execute(
-                f"/* cmcd:timeseries */ SELECT {', '.join(select)} FROM ({events}) GROUP BY bucket ORDER BY bucket",
+                f"/* cmcd:timeseries */ SELECT {', '.join(select)} FROM ({ts_events}) GROUP BY bucket ORDER BY bucket",
                 params,
             )
             return {"_ts_rows": rows}
@@ -471,13 +525,14 @@ def _cmcd_aggregates_compute(
 
     # Consolidate per-session aggregations (new_sessions + session_duration_dist) into one scan.
     if req_ts["sessions_ts"] and want_duration_dist:
+        sess_events = _ev("ts", "sid")
 
         def _run_sessions() -> dict[str, Any]:
             rows = execute(
                 "/* cmcd:sessions */ WITH sess AS ("
                 "SELECT sid, min(ts) AS first_ts, "
                 "(toUnixTimestamp64Milli(max(ts)) - toUnixTimestamp64Milli(min(ts))) / 1000.0 AS duration "
-                f"FROM ({events}) GROUP BY sid) "
+                f"FROM ({sess_events}) GROUP BY sid) "
                 f"SELECT 'new_sessions' AS kind, {_BUCKET.format(column='first_ts')} AS k, "
                 "toUInt64(count()) AS session_count, toFloat64(0) AS positive_duration_sum, "
                 "toUInt64(0) AS positive_duration_count FROM sess GROUP BY k "
@@ -517,18 +572,20 @@ def _cmcd_aggregates_compute(
 
         tasks.append(("sessions", _run_sessions))
     elif req_ts["sessions_ts"]:
+        sess_events = _ev("ts", "sid")
 
         def _run_new_sessions() -> dict[str, Any]:
             first_seen = execute(
                 "/* cmcd:new_sessions */ SELECT "
                 f"{_BUCKET.format(column='first_ts')} AS bucket, count() AS new_sessions FROM ("
-                f"SELECT sid, min(ts) AS first_ts FROM ({events}) GROUP BY sid) GROUP BY bucket",
+                f"SELECT sid, min(ts) AS first_ts FROM ({sess_events}) GROUP BY sid) GROUP BY bucket",
                 params,
             )
             return {"_new_sessions": {str(row["bucket"]): int(row["new_sessions"] or 0) for row in first_seen}}
 
         tasks.append(("new_sessions", _run_new_sessions))
     elif want_duration_dist:
+        sess_events = _ev("ts", "sid")
 
         def _run_session_duration() -> dict[str, Any]:
             rows = execute(
@@ -538,7 +595,7 @@ def _cmcd_aggregates_compute(
                 "SELECT duration, multiIf(duration < 30, 1, duration < 120, 2, duration < 300, 3, duration < 600, 4, "
                 "duration < 1800, 5, duration < 3600, 6, 7) AS sort_order FROM ("
                 "SELECT (toUnixTimestamp64Milli(max(ts)) - toUnixTimestamp64Milli(min(ts))) / 1000.0 AS duration "
-                f"FROM ({events}) GROUP BY sid)) GROUP BY sort_order ORDER BY sort_order",
+                f"FROM ({sess_events}) GROUP BY sid)) GROUP BY sort_order ORDER BY sort_order",
                 params,
             )
             out: dict[str, Any] = {
@@ -582,6 +639,22 @@ def _cmcd_aggregates_compute(
     if req_asn:
         sess_dims.append("asn")
 
+    if sess_dims:
+        need_br_bl = req_content or req_asn
+        need_mtp = req_country
+        sess_bd_cols: list[str] = ["sid_h", "ot", "bs"]
+        if req_content:
+            sess_bd_cols.append("cid")
+        if req_country:
+            sess_bd_cols.append("country")
+        if req_asn:
+            sess_bd_cols.append("asn")
+        if need_br_bl:
+            sess_bd_cols.extend(["br", "bl"])
+        if need_mtp:
+            sess_bd_cols.append("mtp")
+        sess_bd_events = _ev(*sess_bd_cols)
+
     if len(sess_dims) >= 2:
         g_cid = "grouping(cid)" if req_content else "toUInt8(1)"
         g_country = "grouping(country)" if req_country else "toUInt8(1)"
@@ -594,27 +667,25 @@ def _cmcd_aggregates_compute(
         k_cases: list[str] = []
         if req_content:
             dim_cols.append("cid")
-            gsets.append("(cid, sid)")
+            gsets.append("(cid, sid_h)")
             where_parts.append("cid != ''")
             having_parts.append("(g_cid = 0 AND cid != '')")
             kind_cases.append("g_cid = 0, 'content'")
             k_cases.append("g_cid = 0, cid")
         if req_country:
             dim_cols.append("country")
-            gsets.append("(country, sid)")
+            gsets.append("(country, sid_h)")
             where_parts.append("country != ''")
             having_parts.append("(g_country = 0 AND country != '')")
             kind_cases.append("g_country = 0, 'country'")
             k_cases.append("g_country = 0, country")
         if req_asn:
             dim_cols.append("asn")
-            gsets.append("(asn, sid)")
+            gsets.append("(asn, sid_h)")
             where_parts.append("asn IS NOT NULL")
             having_parts.append("(g_asn = 0 AND asn IS NOT NULL)")
             kind_cases.append("g_asn = 0, 'asn'")
             k_cases.append("g_asn = 0, toString(asn)")
-        need_br_bl = req_content or req_asn
-        need_mtp = req_country
         inner_aggs = ["max(if(bs = 1, 1, 0)) AS had_rebuffer"]
         tagged_cols = [
             f"multiIf({', '.join(kind_cases)}, '') AS kind",
@@ -675,10 +746,10 @@ def _cmcd_aggregates_compute(
                 "CAST(NULL, 'Nullable(Float64)') AS median_mtp, CAST(NULL, 'Nullable(Float64)') AS median_mtp_all"
             )
         session_breakdown_sql = (
-            f"/* cmcd:session_breakdowns */ WITH events AS ({events}), "
+            f"/* cmcd:session_breakdowns */ WITH events AS ({sess_bd_events}), "
             "sess_agg AS ("
             f"SELECT {g_cid} AS g_cid, {g_country} AS g_country, {g_asn} AS g_asn, "
-            f"{', '.join(dim_cols)}, sid, {', '.join(inner_aggs)} "
+            f"{', '.join(dim_cols)}, sid_h, {', '.join(inner_aggs)} "
             f"FROM events WHERE {' OR '.join(where_parts)} "
             f"GROUP BY GROUPING SETS ({', '.join(gsets)}) "
             f"HAVING {' OR '.join(having_parts)}) "
@@ -708,12 +779,12 @@ def _cmcd_aggregates_compute(
                 "toNullable(sumIf(avg_bl * bl_reqs, avg_bl IS NOT NULL) / nullIf(sumIf(bl_reqs, avg_bl IS NOT NULL), 0)) AS avg_bl, "
                 "toNullable(sumIf(avg_bl_all * bl_reqs_all, avg_bl_all IS NOT NULL) / nullIf(sumIf(bl_reqs_all, avg_bl_all IS NOT NULL), 0)) AS avg_bl_all, "
                 "CAST(NULL, 'Nullable(Float64)') AS median_mtp, CAST(NULL, 'Nullable(Float64)') AS median_mtp_all FROM ("
-                "SELECT cid, sid, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
+                "SELECT cid, sid_h, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
                 f"avgIf(br, {_VIDEO}) AS avg_br, countIf({_VIDEO} AND br IS NOT NULL) AS br_reqs, "
                 "avg(br) AS avg_br_all, countIf(br IS NOT NULL) AS br_reqs_all, "
                 f"avgIf(bl, {_VIDEO}) AS avg_bl, countIf({_VIDEO} AND bl IS NOT NULL) AS bl_reqs, "
                 "avg(bl) AS avg_bl_all, countIf(bl IS NOT NULL) AS bl_reqs_all "
-                "FROM events WHERE cid != '' GROUP BY cid, sid) "
+                "FROM events WHERE cid != '' GROUP BY cid, sid_h) "
                 "GROUP BY cid ORDER BY session_count DESC, k LIMIT {top_n:UInt32})"
             )
         elif req_country:
@@ -725,10 +796,10 @@ def _cmcd_aggregates_compute(
                 "CAST(NULL, 'Nullable(Float64)') AS avg_bl, CAST(NULL, 'Nullable(Float64)') AS avg_bl_all, "
                 "toNullable(sumIf(median_mtp * mtp_reqs, median_mtp IS NOT NULL) / nullIf(sumIf(mtp_reqs, median_mtp IS NOT NULL), 0)) AS median_mtp, "
                 "toNullable(sumIf(median_mtp_all * mtp_reqs_all, median_mtp_all IS NOT NULL) / nullIf(sumIf(mtp_reqs_all, median_mtp_all IS NOT NULL), 0)) AS median_mtp_all FROM ("
-                "SELECT country, sid, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
+                "SELECT country, sid_h, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
                 f"quantileTDigestIf(0.5)(mtp, {_VIDEO}) AS median_mtp, countIf({_VIDEO} AND mtp IS NOT NULL) AS mtp_reqs, "
                 "quantileTDigest(0.5)(mtp) AS median_mtp_all, countIf(mtp IS NOT NULL) AS mtp_reqs_all "
-                "FROM events WHERE country != '' GROUP BY country, sid) "
+                "FROM events WHERE country != '' GROUP BY country, sid_h) "
                 "GROUP BY country ORDER BY session_count DESC, k LIMIT {top_n:UInt32})"
             )
         else:
@@ -741,17 +812,17 @@ def _cmcd_aggregates_compute(
                 "toNullable(sumIf(avg_bl * bl_reqs, avg_bl IS NOT NULL) / nullIf(sumIf(bl_reqs, avg_bl IS NOT NULL), 0)) AS avg_bl, "
                 "toNullable(sumIf(avg_bl_all * bl_reqs_all, avg_bl_all IS NOT NULL) / nullIf(sumIf(bl_reqs_all, avg_bl_all IS NOT NULL), 0)) AS avg_bl_all, "
                 "CAST(NULL, 'Nullable(Float64)') AS median_mtp, CAST(NULL, 'Nullable(Float64)') AS median_mtp_all FROM ("
-                "SELECT asn, sid, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
+                "SELECT asn, sid_h, max(if(bs = 1, 1, 0)) AS had_rebuffer, "
                 f"avgIf(br, {_VIDEO}) AS avg_br, countIf({_VIDEO} AND br IS NOT NULL) AS br_reqs, "
                 "avg(br) AS avg_br_all, countIf(br IS NOT NULL) AS br_reqs_all, "
                 f"avgIf(bl, {_VIDEO}) AS avg_bl, countIf({_VIDEO} AND bl IS NOT NULL) AS bl_reqs, "
                 "avg(bl) AS avg_bl_all, countIf(bl IS NOT NULL) AS bl_reqs_all "
-                "FROM events WHERE asn IS NOT NULL GROUP BY asn, sid) "
+                "FROM events WHERE asn IS NOT NULL GROUP BY asn, sid_h) "
                 "GROUP BY asn ORDER BY session_count DESC, k LIMIT {top_n:UInt32})"
             )
 
         def _run_session_breakdowns() -> dict[str, Any]:
-            sql = f"/* cmcd:session_breakdowns */ WITH events AS ({events}) {single_sess_branch}"
+            sql = f"/* cmcd:session_breakdowns */ WITH events AS ({sess_bd_events}) {single_sess_branch}"
             return {"_session_breakdown_rows": execute(sql, params)}
 
         tasks.append(("session_breakdowns", _run_session_breakdowns))
@@ -765,6 +836,17 @@ def _cmcd_aggregates_compute(
         flat_dims.append(("ladder", "ladder_k"))
     if req_st:
         flat_dims.append(("st", "st"))
+    flat_event_cols: list[str] = []
+    if req_sf or req_ladder or req_st:
+        flat_event_cols.append("sid")
+    if req_ot or req_ladder:
+        flat_event_cols.append("ot")
+    if req_sf:
+        flat_event_cols.append("sf")
+    if req_st:
+        flat_event_cols.append("st")
+    if req_ladder:
+        flat_event_cols.extend(["br", "bs"])
     flat_sql: str | None = None
     if len(flat_dims) >= 2:
         flat_gsets = ", ".join(f"({col})" for _, col in flat_dims)
@@ -795,6 +877,7 @@ def _cmcd_aggregates_compute(
             if req_ladder
             else ""
         )
+        flat_from = f"(SELECT {', '.join(flat_event_cols)}{ladder_col} FROM events)" if req_ladder else "events"
         flat_sql = (
             f"SELECT multiIf({flat_kind_cases}, '') AS kind, multiIf({flat_k_cases}, '') AS k, "
             f"multiIf({', '.join(sess_cases)}, toUInt64(0)) AS session_count, "
@@ -802,7 +885,7 @@ def _cmcd_aggregates_compute(
             "CAST(NULL, 'Nullable(Float64)') AS avg_br_all, "
             "CAST(NULL, 'Nullable(Float64)') AS avg_bl, CAST(NULL, 'Nullable(Float64)') AS avg_bl_all, "
             "CAST(NULL, 'Nullable(Float64)') AS median_mtp, CAST(NULL, 'Nullable(Float64)') AS median_mtp_all "
-            f"FROM (SELECT sid, ot, sf, st, br, bs{ladder_col} FROM events) "
+            f"FROM {flat_from} "
             f"GROUP BY GROUPING SETS ({flat_gsets}) HAVING k != ''"
         )
     else:
@@ -841,9 +924,10 @@ def _cmcd_aggregates_compute(
                 f"{null_extras} FROM events WHERE st != '' GROUP BY st"
             )
     if flat_sql is not None:
+        flat_events = _ev(*flat_event_cols)
 
         def _run_breakdowns() -> dict[str, Any]:
-            sql = f"/* cmcd:breakdowns */ WITH events AS ({events}) {flat_sql}"
+            sql = f"/* cmcd:breakdowns */ WITH events AS ({flat_events}) {flat_sql}"
             return {"_breakdown_rows": execute(sql, params)}
 
         tasks.append(("breakdowns", _run_breakdowns))

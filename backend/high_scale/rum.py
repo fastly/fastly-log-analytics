@@ -262,18 +262,19 @@ def _rum_analytics_compute(
 ) -> dict[str, Any]:
     params = {"service_id": service.service_id, "start": start, "end": end, **filter_params}
 
-    def scope(domain: str) -> str:
+    def prewhere_scope(domain: str) -> str:
         return " AND ".join(
             [
                 *visible_fact_clauses(domain),
                 "event_timestamp >= {start:DateTime64(3, 'UTC')}",
                 "event_timestamp < {end:DateTime64(3, 'UTC')}",
-                *filter_clauses,
             ]
         )
 
-    where_vitals, where_errors = f"{scope('rum_vitals')} AND {_PAGE_VITALS}", scope("rum_errors")
-    where_ttlb = f"{scope('rum_vitals')} AND metric_name = 'ttlb'"
+    filter_sql = " AND ".join(filter_clauses)
+    vitals_where = f"{_PAGE_VITALS} AND {filter_sql}" if filter_sql else _PAGE_VITALS
+    errors_where = f" WHERE {filter_sql}" if filter_sql else ""
+    ttlb_where = f"metric_name = 'ttlb' AND {filter_sql}" if filter_sql else "metric_name = 'ttlb'"
     req_edge_scope = " AND ".join(visible_fact_clauses("request"))
     req_edge_cte = (
         f"req_edge AS (SELECT _cf_rid AS rid, any(toFloat64OrNull(nullIf(_cf_elapsed, ''))) / 1000.0 AS edge_ms, "
@@ -281,29 +282,31 @@ def _rum_analytics_compute(
         "AND event_timestamp >= ({start:DateTime64(3, 'UTC')} - INTERVAL 10 MINUTE) "
         "AND event_timestamp < ({end:DateTime64(3, 'UTC')} + INTERVAL 10 MINUTE) "
         "AND _cf_rid != '' "
-        f"AND _cf_rid IN (SELECT req_id FROM rum_vitals_facts WHERE {where_ttlb} AND req_id != '') "
+        f"AND _cf_rid IN (SELECT req_id FROM rum_vitals_facts PREWHERE {prewhere_scope('rum_vitals')} "
+        f"WHERE {ttlb_where} AND req_id != '') "
         "GROUP BY _cf_rid)"
     )
-    ttlb_agg_select = (
-        "toUInt64(round(sum(v.w))) AS requests, "
-        "avg(v.metric_value) AS avg_ms, "
-        "quantileExactInclusive(0.5)(v.metric_value) AS p50_ms, "
-        "quantileExactInclusive(0.95)(v.metric_value) AS p95_ms, "
-        "quantileExactInclusive(0.99)(v.metric_value) AS p99_ms, "
-        "toUInt64(round(sumIf(v.w, r.edge_ms IS NOT NULL))) AS matched_requests, "
-        "avgOrNullIf(r.edge_ms, r.edge_ms IS NOT NULL) AS edge_avg_ms, "
-        "quantileExactInclusiveOrNullIf(0.5)(r.edge_ms, r.edge_ms IS NOT NULL) AS edge_p50_ms, "
-        "quantileExactInclusiveOrNullIf(0.95)(r.edge_ms, r.edge_ms IS NOT NULL) AS edge_p95_ms, "
-        "quantileExactInclusiveOrNullIf(0.99)(r.edge_ms, r.edge_ms IS NOT NULL) AS edge_p99_ms"
+    slowest_agg_select = (
+        "toUInt64(round(sum(w))) AS requests, "
+        "avg(metric_value) AS avg_ms, "
+        "quantileExactInclusive(0.5)(metric_value) AS p50_ms, "
+        "quantileExactInclusive(0.95)(metric_value) AS p95_ms, "
+        "quantileExactInclusive(0.99)(metric_value) AS p99_ms, "
+        "toUInt64(round(sumIf(w, edge_ms IS NOT NULL))) AS matched_requests, "
+        "avgOrNullIf(edge_ms, edge_ms IS NOT NULL) AS edge_avg_ms, "
+        "quantileExactInclusiveOrNullIf(0.5)(edge_ms, edge_ms IS NOT NULL) AS edge_p50_ms, "
+        "quantileExactInclusiveOrNullIf(0.95)(edge_ms, edge_ms IS NOT NULL) AS edge_p95_ms, "
+        "quantileExactInclusiveOrNullIf(0.99)(edge_ms, edge_ms IS NOT NULL) AS edge_p99_ms"
     )
     identity = _BEACON_IDENTITY
     events = (
         f"WITH events AS ("
         f"SELECT event_timestamp, {identity} AS beacon_id, 'vitals' AS src, metric_name, metric_value, pathname, "
-        f"{_ROW_WEIGHT} AS w FROM rum_vitals_facts WHERE {where_vitals} UNION ALL "
+        f"{_ROW_WEIGHT} AS w FROM rum_vitals_facts PREWHERE {prewhere_scope('rum_vitals')} WHERE {vitals_where} "
+        f"UNION ALL "
         f"SELECT event_timestamp, {identity} AS beacon_id, 'errors' AS src, '' AS metric_name, "
         f"CAST(NULL AS Nullable(Float64)) AS metric_value, pathname, {_ROW_WEIGHT} AS w "
-        f"FROM rum_error_facts WHERE {where_errors}) "
+        f"FROM rum_error_facts PREWHERE {prewhere_scope('rum_errors')}{errors_where}) "
     )
     pageview = "src = 'vitals' AND metric_name NOT LIKE 'event_%'"
     interaction = "src = 'vitals' AND metric_name LIKE 'event_%'"
@@ -347,15 +350,15 @@ def _rum_analytics_compute(
         f"sumIf({_ROW_WEIGHT}, {vitals_good}) as good, "
         f"sumIf({_ROW_WEIGHT}, {vitals_ni}) as ni, "
         f"sumIf({_ROW_WEIGHT}, {vitals_poor}) as poor "
-        f"FROM rum_vitals_facts WHERE {where_vitals} GROUP BY metric_name"
+        f"FROM rum_vitals_facts PREWHERE {prewhere_scope('rum_vitals')} WHERE {vitals_where} GROUP BY metric_name"
     )
     environments_sql = (
         f"/* rum_analytics_environments */ SELECT if(browser = '', 'Unknown', browser) AS env_browser, "
         f"if(os = '', 'Unknown', os) AS env_os, if(device = '', 'Unknown', device) AS env_device, "
         f"{_weighted_beacons(identity=identity, weight=_ROW_WEIGHT)} AS beacons, "
         f"grouping(browser) AS g_browser, grouping(os) AS g_os, "
-        f"grouping(device) AS g_device FROM rum_vitals_facts WHERE {where_vitals} "
-        f"GROUP BY GROUPING SETS ((browser), (os), (device))"
+        f"grouping(device) AS g_device FROM rum_vitals_facts PREWHERE {prewhere_scope('rum_vitals')} "
+        f"WHERE {vitals_where} GROUP BY GROUPING SETS ((browser), (os), (device))"
     )
     trends_sql = (
         events + f"/* rum_analytics_trends */ SELECT {bucket_sql} AS bucket, "
@@ -379,25 +382,29 @@ def _rum_analytics_compute(
     exceptions_sql = (
         f"/* rum_analytics_exceptions */ SELECT error_message, error_file, error_line, error_col, "
         f"toUInt64(round(sum({_ROW_WEIGHT}))) AS count "
-        f"FROM rum_error_facts WHERE {where_errors} GROUP BY error_message, error_file, error_line, error_col "
+        f"FROM rum_error_facts PREWHERE {prewhere_scope('rum_errors')}{errors_where} "
+        f"GROUP BY error_message, error_file, error_line, error_col "
         f"ORDER BY count DESC, error_message, error_file, error_line, error_col LIMIT 3"
     )
-    slowest_urls_sql = (
-        f"/* rum_analytics_slowest_urls */ WITH ttlb_rows AS ("
-        f"SELECT req_id, resource_url, metric_value, {_ROW_WEIGHT} AS w "
-        f"FROM rum_vitals_facts WHERE {where_ttlb} AND resource_url != ''), {req_edge_cte} "
-        f"SELECT v.resource_url AS url, {ttlb_agg_select} "
-        f"FROM ttlb_rows AS v LEFT JOIN req_edge AS r ON v.req_id != '' AND r.rid = v.req_id "
-        f"GROUP BY v.resource_url ORDER BY p99_ms DESC, p95_ms DESC, requests DESC LIMIT 20"
-    )
-    slowest_networks_sql = (
-        f"/* rum_analytics_slowest_networks */ WITH ttlb_rows AS ("
-        f"SELECT req_id, asn, metric_value, {_ROW_WEIGHT} AS w "
-        f"FROM rum_vitals_facts WHERE {where_ttlb}), {req_edge_cte} "
-        f"SELECT replaceRegexpOne(coalesce(nullIf(v.asn, ''), r.req_asn), '^AS', '') AS asn_key, {ttlb_agg_select} "
-        f"FROM ttlb_rows AS v LEFT JOIN req_edge AS r ON v.req_id != '' AND r.rid = v.req_id "
-        f"WHERE asn_key != '' AND asn_key != '0' "
-        f"GROUP BY asn_key ORDER BY p99_ms DESC, p95_ms DESC, requests DESC LIMIT 20"
+    slowest_sql = (
+        f"/* rum_analytics_slowest */ WITH ttlb_rows AS ("
+        f"SELECT req_id, resource_url, asn, metric_value, {_ROW_WEIGHT} AS w "
+        f"FROM rum_vitals_facts PREWHERE {prewhere_scope('rum_vitals')} WHERE {ttlb_where}), "
+        f"{req_edge_cte}, "
+        f"ttlb_joined AS ("
+        f"SELECT v.resource_url AS resource_url, "
+        f"replaceRegexpOne(coalesce(nullIf(v.asn, ''), r.req_asn), '^AS', '') AS asn_key, "
+        f"v.metric_value AS metric_value, v.w AS w, r.edge_ms AS edge_ms "
+        f"FROM ttlb_rows AS v LEFT JOIN req_edge AS r ON v.req_id != '' AND r.rid = v.req_id) "
+        f"SELECT * FROM ("
+        f"SELECT 'url' AS kind, resource_url AS k, {slowest_agg_select} "
+        f"FROM ttlb_joined WHERE resource_url != '' "
+        f"GROUP BY resource_url ORDER BY p99_ms DESC, p95_ms DESC, requests DESC LIMIT 20) "
+        f"UNION ALL "
+        f"SELECT * FROM ("
+        f"SELECT 'asn' AS kind, asn_key AS k, {slowest_agg_select} "
+        f"FROM ttlb_joined WHERE asn_key != '' AND asn_key != '0' "
+        f"GROUP BY asn_key ORDER BY p99_ms DESC, p95_ms DESC, requests DESC LIMIT 20)"
     )
 
     queries = (
@@ -407,14 +414,11 @@ def _rum_analytics_compute(
         trends_sql,
         pages_sql,
         exceptions_sql,
-        slowest_urls_sql,
-        slowest_networks_sql,
+        slowest_sql,
     )
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    with ThreadPoolExecutor(max_workers=7) as pool:
         futs = [pool.submit(contextvars.copy_context().run, service.client.execute, q, params) for q in queries]
-        count_rows, rows, environment_rows, trend_rows, page_rows, error_rows, slowest_url_rows, slowest_net_rows = (
-            f.result() for f in futs
-        )
+        count_rows, rows, environment_rows, trend_rows, page_rows, error_rows, slowest_rows = (f.result() for f in futs)
     counts = count_rows[0]
     no_data = False
     if not counts["beacons"]:
@@ -422,8 +426,8 @@ def _rum_analytics_compute(
         any_errors = " AND ".join(visible_fact_clauses("rum_errors"))
         any_data = service.client.execute(
             f"/* rum_analytics_any_data */ SELECT count() AS has_data FROM ("
-            f"(SELECT event_id FROM rum_vitals_facts WHERE {any_vitals} LIMIT 1) UNION ALL "
-            f"(SELECT event_id FROM rum_error_facts WHERE {any_errors} LIMIT 1))",
+            f"(SELECT event_id FROM rum_vitals_facts PREWHERE {any_vitals} LIMIT 1) UNION ALL "
+            f"(SELECT event_id FROM rum_error_facts PREWHERE {any_errors} LIMIT 1))",
             {"service_id": service.service_id},
         )
         no_data = not any_data[0]["has_data"]
@@ -516,9 +520,9 @@ def _rum_analytics_compute(
         for row in page_rows
     ]
     slowest_urls = [
-        {"url": _decode_pct(row["url"]), **_shape_rum_resource_latency_fields(row)}
-        for row in slowest_url_rows
-        if row.get("url")
+        {"url": _decode_pct(row["k"]), **_shape_rum_resource_latency_fields(row)}
+        for row in slowest_rows
+        if row.get("kind") == "url" and row.get("k")
     ]
     from backend.repositories.utils.response_shaping.asn import (
         format_asn_display_label,
@@ -526,14 +530,15 @@ def _rum_analytics_compute(
         resolve_asn_names_map,
     )
 
-    raw_asns = [row.get("asn_key") for row in slowest_net_rows if row.get("asn_key")]
+    slowest_net_rows = [row for row in slowest_rows if row.get("kind") == "asn"]
+    raw_asns = [row.get("k") for row in slowest_net_rows if row.get("k")]
     try:
         asn_names = resolve_asn_names_map(service.service_id, raw_asns) if raw_asns else {}
     except Exception:
         asn_names = {}
     slowest_networks = []
     for row in slowest_net_rows:
-        raw_key = str(row.get("asn_key") or "").strip()
+        raw_key = str(row.get("k") or "").strip()
         if not raw_key:
             continue
         asn_int = parse_asn_int(raw_key)

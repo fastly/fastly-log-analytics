@@ -44,6 +44,7 @@ def _parse_int(value: Any) -> int | None:
 
 
 _CANDIDATE_LIMIT = 500
+_URL_PERF_CANDIDATE_LIMIT = 2000
 _baseline_sample_stride = baseline_sample_stride
 
 
@@ -891,18 +892,20 @@ def _build_url_perf_candidates(
         f"/* insight:batch_url_perf_candidates */ SELECT url AS k {url_win_from} "
         "GROUP BY url HAVING countIf(custom_fields['elapsed'] != '') >= 5 "
         f"OR countIf({COLUMNS['status']} = 200 AND {COLUMNS['resp_bytes']} >= 1024 AND match(url, {{compress_regex:String}})) >= 10 "
-        f"LIMIT {_CANDIDATE_LIMIT + 1}"
+        f"LIMIT {_URL_PERF_CANDIDATE_LIMIT + 1}"
     )
 
 
 def _parse_single_key_candidates(
     key_name: str,
     rows: list[dict[str, Any]],
+    *,
+    limit: int = _CANDIDATE_LIMIT,
 ) -> dict[str, list[str] | None] | None:
     keys = [str(r["k"]) for r in rows if r.get("k")]
     if not keys:
         return None
-    if len(keys) > _CANDIDATE_LIMIT:
+    if len(keys) > limit:
         return {key_name: None}
     return {key_name: keys}
 
@@ -940,16 +943,7 @@ def _build_url_perf(
         filter_clause=filter_clause,
         baseline_sample_stride=b_stride,
     )
-    if prewhere_clause:
-        base_filter = ""
-    else:
-        url_win_from = _window_from(filter_clause=filter_clause, row_filter="url != ''")
-        win_urls = (
-            f"SELECT url {url_win_from} "
-            "GROUP BY url HAVING countIf(custom_fields['elapsed'] != '') >= 5 "
-            f"OR countIf({COLUMNS['status']} = 200 AND {COLUMNS['resp_bytes']} >= 1024 AND match(url, {{compress_regex:String}})) >= 10"
-        )
-        base_filter = f"WHERE url != '' AND url IN ({win_urls}) "
+    base_filter = "" if prewhere_clause else "WHERE url != '' "
     sql = (
         f"{cte} SELECT url, "
         f"{_P95}(elapsed, is_w AND elapsed IS NOT NULL) / 1000.0 AS l_w_p95, "
@@ -1999,7 +1993,9 @@ DETECTION_BATCHES: tuple[DetectionBatch, ...] = (
         build_sql=_build_url_perf,
         extract_rows=_extract_url_perf,
         build_candidates_sql=_build_url_perf_candidates,
-        parse_candidates=lambda _active, rows: _parse_single_key_candidates("url", rows),
+        parse_candidates=lambda _active, rows: _parse_single_key_candidates(
+            "url", rows, limit=_URL_PERF_CANDIDATE_LIMIT
+        ),
     ),
     DetectionBatch(
         name="ip_outlier",

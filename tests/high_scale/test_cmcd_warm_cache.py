@@ -276,7 +276,7 @@ def test_cmcd_breakdowns_consolidate_flat_dimensions_with_grouping_sets_and_no_s
 
     cmcd_aggregates(svc, req, "2026-09-14T10:00:00Z", "2026-09-14T10:20:00Z", ALL_SECTIONS, False)
     sess_breakdown_sql = next(sql for sql, _ in client.calls if "/* cmcd:session_breakdowns */" in sql)
-    assert "GROUP BY GROUPING SETS ((cid, sid), (country, sid), (asn, sid))" in sess_breakdown_sql
+    assert "GROUP BY GROUPING SETS ((cid, sid_h), (country, sid_h), (asn, sid_h))" in sess_breakdown_sql
     assert "WITH events AS (" in sess_breakdown_sql
     assert sess_breakdown_sql.count("FROM cmcd_projection_facts") == 1
     breakdown_sql = next(sql for sql, _ in client.calls if "/* cmcd:breakdowns */" in sql)

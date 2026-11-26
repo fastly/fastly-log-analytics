@@ -246,14 +246,14 @@ def test_page_level_queries_exclude_resource_timings_and_avg_load_is_real_page_l
     rum_beacons_by_date(service_for(client), *window)
     rum_live_events(service_for(client), *window, 10)
     vitals_queries = [sql for sql, _ in client.calls if "FROM rum_vitals_facts" in sql]
-    assert len(vitals_queries) == 9
+    assert len(vitals_queries) == 8
     page_queries = [sql for sql in vitals_queries if "metric_name != 'ttlb'" in sql]
     resource_queries = [
-        sql for sql in vitals_queries if "rum_analytics_slowest_" in sql and "metric_name = 'ttlb'" in sql
+        sql for sql in vitals_queries if "rum_analytics_slowest" in sql and "metric_name = 'ttlb'" in sql
     ]
     live_queries = [sql for sql in vitals_queries if "rum_live_events" in sql]
     assert len(page_queries) == 6
-    assert len(resource_queries) == 2
+    assert len(resource_queries) == 1
     assert len(live_queries) == 1
     assert "metric_name != 'ttlb'" not in live_queries[0]
 
@@ -270,11 +270,12 @@ def test_slowest_urls_and_networks_weight_sample_rate_and_join_edge_latency() ->
             if "rum_analytics_counts" in sql:
                 self.calls.append((sql, params or {}))
                 return [{"beacons": 10, "pageviews": 10, "interactions": 0, "errors": 0, "sampled": 1}]
-            if "rum_analytics_slowest_urls" in sql:
+            if "rum_analytics_slowest" in sql:
                 self.calls.append((sql, params or {}))
                 return [
                     {
-                        "url": "/api/slow",
+                        "kind": "url",
+                        "k": "/api/slow",
                         "requests": 20,
                         "avg_ms": 810.0,
                         "p50_ms": 750.0,
@@ -285,13 +286,10 @@ def test_slowest_urls_and_networks_weight_sample_rate_and_join_edge_latency() ->
                         "edge_p50_ms": 380.0,
                         "edge_p95_ms": 700.0,
                         "edge_p99_ms": 950.0,
-                    }
-                ]
-            if "rum_analytics_slowest_networks" in sql:
-                self.calls.append((sql, params or {}))
-                return [
+                    },
                     {
-                        "asn_key": "15169",
+                        "kind": "asn",
+                        "k": "15169",
                         "requests": 20,
                         "avg_ms": 810.0,
                         "p50_ms": 750.0,
@@ -302,7 +300,7 @@ def test_slowest_urls_and_networks_weight_sample_rate_and_join_edge_latency() ->
                         "edge_p50_ms": 380.0,
                         "edge_p95_ms": 700.0,
                         "edge_p99_ms": 950.0,
-                    }
+                    },
                 ]
             return super().execute(sql, params)
 

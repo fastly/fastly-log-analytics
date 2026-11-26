@@ -198,20 +198,21 @@ def test_candidate_precheck_skips_empty_pushes_prewhere_and_falls_back_above_500
     assert "IN (SELECT custom_fields" not in fp_sql
     assert "t13_fp_1" in fp_params.values()
 
-    # 3. > 500 candidates -> falls back to existing subquery
+    # 3. > 2000 candidates for url_perf -> falls back to direct WHERE url != '' scan without redundant subquery
     class _ManyCandClient(_BatchFakeClient):
         def execute(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
             marker = re.search(r"/\* insight:(\w+) \*/", sql)
             name = marker.group(1) if marker else ""
             if name == "batch_url_perf_candidates":
                 self.calls.append((sql, params or {}))
-                return [{"k": f"/u/{i}"} for i in range(501)]
+                return [{"k": f"/u/{i}"} for i in range(2001)]
             return super().execute(sql, params)
 
     many_client = _ManyCandClient(with_rollup=True)
     _run(many_client)
     many_sql, _ = many_client.queries()["batch_url_perf"]
-    assert "IN (SELECT url FROM" in many_sql
+    assert "WHERE url != '' " in many_sql
+    assert "IN (SELECT url FROM" not in many_sql
 
 
 def test_batched_rollup_queries_use_rollup_table_and_preserve_visibility_fence() -> None:

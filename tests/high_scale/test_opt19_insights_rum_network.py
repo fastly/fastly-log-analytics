@@ -240,10 +240,9 @@ def test_rum_analytics_constrains_req_edge_with_rum_vitals_prewhere() -> None:
     client = _RumClient()
     svc = HighScaleService("svc-rum-opt19", client, b"secret", None)
     hs_rum.rum_analytics(svc, "2026-11-25T00:00:00Z", "2026-11-26T00:00:00Z")
-    for marker in ("rum_analytics_slowest_urls", "rum_analytics_slowest_networks"):
-        sql = next(s for s in client.calls if marker in s)
-        assert "FROM request_facts PREWHERE " in sql
-        assert "_cf_rid IN (SELECT req_id FROM rum_vitals_facts WHERE " in sql
+    sql = next(s for s in client.calls if "rum_analytics_slowest" in s)
+    assert "FROM request_facts PREWHERE " in sql
+    assert "_cf_rid IN (SELECT req_id FROM rum_vitals_facts PREWHERE " in sql
 
 
 def test_network_prewhere_filtered_pop_sampling_and_bundle_concurrency(monkeypatch: pytest.MonkeyPatch) -> None:

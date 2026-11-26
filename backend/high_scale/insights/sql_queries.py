@@ -814,21 +814,21 @@ DETECTIONS: dict[str, Detection] = {
     ),
     "crawler_disparity": Detection(
         ("ua", "referer", "ip", "resp_bytes"),
-        f""" , tagged AS (SELECT ua, ip, resp_bytes, is_w, is_b,
-            if(multiSearchAnyCaseInsensitive(ua, {_CRAWLER_UA_NEEDLES}),
-                extract(lower(ua), {_CRAWLER_TOKEN}), '') AS raw_tok,
-            if(multiSearchAnyCaseInsensitive(ua, {_CRAWLER_UA_NEEDLES}),
-                extract(lower(ua), 'https?://(?:www\\.)?([^/.:;\\s)]+)'), '') AS ua_dom,
-            if(ip != ''
-               AND ((referer != '' AND referer != '-') OR positionCaseInsensitive(ua, '-user') > 0 OR positionCaseInsensitive(ua, '-externalfetcher') > 0)
-               AND NOT multiSearchAnyCaseInsensitive(ua, {_CRAWLER_UA_NEEDLES}),
-               ifNull(nullIf(if(positionCaseInsensitive(ua, '-user') > 0 OR positionCaseInsensitive(ua, '-externalfetcher') > 0,
-                   lower(extract(ua, '(?i)([a-z0-9]+)-(?:user|externalfetcher)')), ''), ''),
-                   lower(extract(referer, '(?i)https?://(?:www\\.)?([^/.:;\\s]+)'))),
-               '') AS ref_stem
+        f""" , pre AS (SELECT ua, referer, ip, resp_bytes, is_w, is_b,
+            multiSearchAnyCaseInsensitive(ua, {_CRAWLER_UA_NEEDLES}) AS is_bot_ua,
+            (positionCaseInsensitive(ua, '-user') > 0 OR positionCaseInsensitive(ua, '-externalfetcher') > 0) AS is_ref_ua
         FROM base),
-    classified AS (SELECT ip, resp_bytes, is_w, is_b, raw_tok, ua_dom, ref_stem,
-            if(raw_tok != '', {_BOT_STEM}, '') AS bot_stem
+    tagged AS (SELECT ip, referer, resp_bytes, is_w, is_b, is_bot_ua,
+            if(is_bot_ua, extract(lower(ua), {_CRAWLER_TOKEN}), '') AS raw_tok,
+            if(is_bot_ua, extract(lower(ua), 'https?://(?:www\\.)?([^/.:;\\s)]+)'), '') AS ua_dom,
+            if(NOT is_bot_ua AND ip != '' AND is_ref_ua,
+                lower(extract(ua, '(?i)([a-z0-9]+)-(?:user|externalfetcher)')), '') AS ua_ref_tok
+        FROM pre),
+    classified AS (SELECT ip, resp_bytes, is_w, is_b, raw_tok, ua_dom,
+            if(is_bot_ua AND raw_tok != '', {_BOT_STEM}, '') AS bot_stem,
+            if(ua_ref_tok != '', ua_ref_tok,
+                if(NOT is_bot_ua AND ip != '' AND referer != '' AND referer != '-',
+                    lower(extract(referer, '(?i)https?://(?:www\\.)?([^/.:;\\s]+)')), '')) AS ref_stem
         FROM tagged),
     gs AS (SELECT grouping(bot_stem) AS g_bot, grouping(ref_stem) AS g_ref,
             bot_stem, ref_stem, is_w, is_b,
@@ -862,7 +862,12 @@ DETECTIONS: dict[str, Detection] = {
     FROM combined c
     WHERE c.w_crawls >= 50 AND (c.w_referrals = 0 OR c.w_crawls * 1.0 / greatest(c.w_referrals, 1) >= 100.0 OR c.w_bytes * 1.0 / greatest(c.w_referrals, 1) >= 1048576.0)
     ORDER BY crawls_per_referral DESC, c.w_bytes DESC LIMIT 10 """,
-        row_filter=f"ua != '' AND {_CRAWLER_IN_WINDOW}",
+        row_filter=(
+            f"ua != '' AND {_CRAWLER_IN_WINDOW} "
+            "AND (event_timestamp >= {window_start:DateTime64(3)} OR (referer != '' AND referer != '-') "
+            f"OR multiSearchAnyCaseInsensitive(ua, {_CRAWLER_UA_NEEDLES}) "
+            "OR positionCaseInsensitive(ua, '-user') > 0 OR positionCaseInsensitive(ua, '-externalfetcher') > 0)"
+        ),
         baseline_sampled=True,
     ),
 }

@@ -430,7 +430,7 @@ def test_cmcd_splits_session_breakdowns_and_flat_breakdowns_in_parallel() -> Non
     sess_sql = next(s for s, _, _ in client.calls if "/* cmcd:session_breakdowns */" in s)
     flat_sql = next(s for s, _, _ in client.calls if "/* cmcd:breakdowns */" in s)
     assert sess_sql.count("FROM cmcd_projection_facts") == 1
-    assert "GROUP BY GROUPING SETS ((cid, sid), (country, sid), (asn, sid))" in sess_sql
+    assert "GROUP BY GROUPING SETS ((cid, sid_h), (country, sid_h), (asn, sid_h))" in sess_sql
     assert "row_number() OVER (PARTITION BY kind ORDER BY session_count DESC, k ASC)" in sess_sql
     assert "WHERE rn <= {top_n:UInt32}" in sess_sql
     assert flat_sql.count("FROM cmcd_projection_facts") == 1
@@ -516,6 +516,6 @@ def test_cmcd_single_session_or_partial_session_breakdowns() -> None:
         svc, req, "2026-11-25T10:00:00Z", "2026-11-25T11:00:00Z", {"top_content", "rebuffer_by_country"}, False
     )  # type: ignore[arg-type]
     two_sql = next(s for s, _, _ in client.calls if "cmcd:session_breakdowns" in s)
-    assert "GROUP BY GROUPING SETS ((cid, sid), (country, sid))" in two_sql
-    assert "(asn, sid)" not in two_sql
+    assert "GROUP BY GROUPING SETS ((cid, sid_h), (country, sid_h))" in two_sql
+    assert "(asn, sid_h)" not in two_sql
     assert "asn IS NOT NULL" not in two_sql
