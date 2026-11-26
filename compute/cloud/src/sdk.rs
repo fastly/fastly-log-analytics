@@ -35,6 +35,7 @@ pub struct FastlyRuntime {
     bundle_from_edge: std::cell::Cell<bool>,
     bundle_map: RefCell<BTreeMap<String, String>>,
     kv_cache: RefCell<BTreeMap<String, Option<crate::admin::Record>>>,
+    kv_coord_mem: RefCell<BTreeMap<String, KvCoordState>>,
     admin_writes: RefCell<BTreeMap<String, u64>>,
     usage: crate::telemetry::usage::UsageAgg,
     api_log: crate::telemetry::api::ApiLog,
@@ -80,6 +81,7 @@ impl FastlyRuntime {
             bundle_from_edge: Default::default(),
             bundle_map: RefCell::new(BTreeMap::new()),
             kv_cache: RefCell::new(BTreeMap::new()),
+            kv_coord_mem: RefCell::new(BTreeMap::new()),
             admin_writes: RefCell::new(BTreeMap::new()),
             usage: Default::default(),
             api_log: Default::default(),
@@ -169,9 +171,13 @@ impl FastlyRuntime {
     }
 
     fn kv_coord_get(&self, key: &str) -> Option<KvCoordState> {
-        if !Self::is_coordinated_kv_key(key)
-            || self.cache_ops.get() + 8 >= crate::shell::CACHE_OP_BUDGET
-        {
+        if !Self::is_coordinated_kv_key(key) {
+            return None;
+        }
+        if let Some(cached) = self.kv_coord_mem.borrow().get(key).cloned() {
+            return Some(cached);
+        }
+        if self.cache_ops.get() + 8 >= crate::shell::CACHE_OP_BUDGET {
             return None;
         }
         let cache_key = Self::kv_coord_cache_key(key);
@@ -181,13 +187,21 @@ impl FastlyRuntime {
         if meta != b"coord" {
             return None;
         }
-        serde_json::from_slice(&body).ok()
+        let state: KvCoordState = serde_json::from_slice(&body).ok()?;
+        self.kv_coord_mem
+            .borrow_mut()
+            .insert(key.to_owned(), state.clone());
+        Some(state)
     }
 
     fn kv_coord_put(&self, key: &str, state: &KvCoordState) {
-        if !Self::is_coordinated_kv_key(key)
-            || self.cache_ops.get() + 8 >= crate::shell::CACHE_OP_BUDGET
-        {
+        if !Self::is_coordinated_kv_key(key) {
+            return;
+        }
+        self.kv_coord_mem
+            .borrow_mut()
+            .insert(key.to_owned(), state.clone());
+        if self.cache_ops.get() + 8 >= crate::shell::CACHE_OP_BUDGET {
             return;
         }
         let Ok(body) = serde_json::to_vec(state) else {
@@ -200,6 +214,20 @@ impl FastlyRuntime {
             std::time::Duration::from_secs(300),
             &|_| (body.clone(), b"coord".to_vec()),
         );
+    }
+
+    fn kv_rest_token(&self) -> Option<String> {
+        if let Ok(Some(token)) = self
+            .secret("fastly_token")
+            .map(|opt| opt.filter(|t| !t.is_empty()))
+        {
+            return Some(token);
+        }
+        self.bundle_map
+            .borrow()
+            .iter()
+            .find(|(k, v)| k.starts_with("fastly_token.") && !v.is_empty())
+            .map(|(_, v)| v.clone())
     }
 
     fn kv_core_cache_key(key: &str) -> String {
@@ -291,7 +319,7 @@ impl FastlyRuntime {
         let store = self.required("kv_store_id")?;
         let path = format!(
             "/resources/stores/kv/{store}/keys/{}",
-            crate::admin::transport::encode(key)
+            crate::admin::transport::encode_kv_key(key)
         );
         let url = format!("https://api.fastly.com{path}");
         for rest_attempt in 0..2 {
@@ -306,8 +334,9 @@ impl FastlyRuntime {
                     .with_header("fastly-key", token)
                     .with_header("if-generation-match", generation.to_string())
                     .with_header("content-type", "application/octet-stream")
+                    .with_header("content-length", body.len().to_string())
                     .with_header("cache-control", "no-cache")
-                    .with_body(body.to_owned()),
+                    .with_body(body.as_bytes().to_vec()),
                 "api_fastly",
                 STATE_CAS_TIMEOUT,
             )?;
@@ -315,7 +344,7 @@ impl FastlyRuntime {
             let gen_hdr = response.get_header_str("generation").map(str::to_owned);
             self.admin_event(json!({
                 "event": "admin.state.cas_confirm",
-                "level": if (200..300).contains(&status) || status == 412 || status == 404 {
+                "level": if (200..300).contains(&status) || status == 412 {
                     "info"
                 } else if status == 429 {
                     "warn"
@@ -351,7 +380,7 @@ impl FastlyRuntime {
                 Ok(KvRestCasOutcome::RateLimited) => {
                     return Err("admin_state_cas_rate_limited".into());
                 }
-                Err(err) => return Err(err.into()),
+                Err(err) => return Err(format!("{err}_{status}")),
             }
         }
         Err("admin_state_cas_confirm_failed".into())
@@ -812,16 +841,16 @@ impl Runtime for FastlyRuntime {
                         }
                         generation = eff_gen;
                         value = eff_val;
+                        let cur_is_dead = coord.is_dead(&generation);
                         if needs_fresh && self.budget.remaining() > 2 {
-                            if let Ok(Some(token)) = self
-                                .secret("fastly_token")
-                                .map(|opt| opt.filter(|t| !t.is_empty()))
-                            {
+                            if let Some(token) = self.kv_rest_token() {
                                 if let Ok(Some(fresh)) = self.admin_get_fresh(key, &token) {
                                     if crate::admin::transport::should_adopt_fresh_record(
                                         &generation,
+                                        cur_is_dead,
                                         &value,
                                         &fresh,
+                                        Some(&coord),
                                     ) {
                                         return Ok(Some(fresh));
                                     }
@@ -918,10 +947,7 @@ impl Runtime for FastlyRuntime {
                         if let Some(g_str) = generation {
                             let rest_token = if parsed_gen.is_some() && self.budget.remaining() > 0
                             {
-                                self.secret("fastly_token")
-                                    .ok()
-                                    .flatten()
-                                    .filter(|t| !t.is_empty())
+                                self.kv_rest_token()
                             } else {
                                 None
                             };
@@ -1012,7 +1038,7 @@ impl Runtime for FastlyRuntime {
         let store = self.required("kv_store_id")?;
         let path = format!(
             "/resources/stores/kv/{store}/keys/{}",
-            crate::admin::transport::encode(key)
+            crate::admin::transport::encode_kv_key(key)
         );
         let started = Instant::now();
         let mut response = bounded_send_with_timeout(

@@ -170,8 +170,9 @@ pub fn classify_kv_rest_cas(
                 .map(|n| n.to_string());
             Ok(KvRestCasOutcome::Committed { generation })
         }
-        412 | 404 => Ok(KvRestCasOutcome::PreconditionFailed),
+        412 => Ok(KvRestCasOutcome::PreconditionFailed),
         429 => Ok(KvRestCasOutcome::RateLimited),
+        404 => Err("admin_state_cas_not_found"),
         _ => Err("admin_state_cas_confirm_failed"),
     }
 }
@@ -199,7 +200,10 @@ pub fn pick_fresher_record_for_coord(
     let local_ts = local.value["_kv_written_ms"].as_u64().unwrap_or(0);
     let api_dead = coord.is_some_and(|c| c.is_dead(&api.generation));
     let local_dead = coord.is_some_and(|c| c.is_dead(&local.generation));
-    if local_ts > api_ts
+    if local_dead && !api_dead {
+        return api;
+    }
+    if (!local_dead && local_ts > api_ts)
         || (api_dead && !local_dead && local.generation != api.generation && local_ts >= api_ts)
     {
         return local;
@@ -209,10 +213,21 @@ pub fn pick_fresher_record_for_coord(
 
 /// Whether `admin_get`'s `admin_get_fresh` fallback should replace the local KV record (whose
 /// body may already have been refreshed from Core Cache `last_written_value` while keeping the
-/// stale local `generation`). Accepting `fresh_ts == cur_ts` when `fresh.generation` differs lets
-/// `admin_get` adopt the real post-write generation instead of discarding it and returning the
-/// dead generation.
-pub fn should_adopt_fresh_record(cur_generation: &str, cur_value: &Value, fresh: &Record) -> bool {
+/// stale local `generation`). Always escapes a known-dead `cur_generation` for a live fresh
+/// generation, regardless of `_kv_written_ms` clock skew.
+pub fn should_adopt_fresh_record(
+    cur_generation: &str,
+    cur_is_dead: bool,
+    cur_value: &Value,
+    fresh: &Record,
+    coord: Option<&KvCoordState>,
+) -> bool {
+    if coord.is_some_and(|c| c.is_dead(&fresh.generation)) {
+        return false;
+    }
+    if cur_is_dead && fresh.generation != cur_generation {
+        return true;
+    }
     let cur_ts = cur_value["_kv_written_ms"].as_u64().unwrap_or(0);
     let fresh_ts = fresh.value["_kv_written_ms"].as_u64().unwrap_or(0);
     fresh_ts > cur_ts
@@ -1101,9 +1116,14 @@ const URI_UNRESERVED: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHA
     .remove(b'.')
     .remove(b'_')
     .remove(b'~');
+const KV_KEY_URI_SET: &percent_encoding::AsciiSet = &URI_UNRESERVED.remove(b':');
 
 pub fn encode(value: &str) -> String {
     percent_encoding::utf8_percent_encode(value, URI_UNRESERVED).to_string()
+}
+
+pub fn encode_kv_key(value: &str) -> String {
+    percent_encoding::utf8_percent_encode(value, KV_KEY_URI_SET).to_string()
 }
 pub fn list(value: &Value) -> Result<&Vec<Value>, Error> {
     value
@@ -1405,23 +1425,98 @@ mod tests {
         };
         // Core Cache already substituted `cached_val` into `value`, so `fresh_ts == cur_ts`,
         // but `fresh.generation` ("200") escapes the dead local generation ("100").
-        assert!(super::should_adopt_fresh_record("100", &cached_val, &fresh));
+        assert!(super::should_adopt_fresh_record(
+            "100",
+            false,
+            &cached_val,
+            &fresh,
+            None
+        ));
         // Same generation and same timestamp needs no replacement.
         assert!(!super::should_adopt_fresh_record(
             "200",
+            false,
             &cached_val,
-            &fresh
+            &fresh,
+            None,
         ));
-        // Older API response must never replace a newer cached value.
+        // Older API response must never replace a newer cached value when current generation is live.
         let older_api = super::Record {
             generation: "150".into(),
             value: serde_json::json!({"catalog": {"generation": 41}, "_kv_written_ms": 1_000}),
         };
         assert!(!super::should_adopt_fresh_record(
             "100",
+            false,
             &cached_val,
-            &older_api
+            &older_api,
+            None,
         ));
+    }
+
+    #[test]
+    fn dead_local_generation_never_beats_live_api_record_even_under_clock_skew() {
+        let mut coord = super::KvCoordState::default();
+        assert!(coord.record_dead("100", 1_000));
+        let skewed_local_val =
+            serde_json::json!({"catalog": {"generation": 41}, "_kv_written_ms": 2_050});
+        let local_record = super::Record {
+            generation: "100".into(),
+            value: skewed_local_val.clone(),
+        };
+        let api_record = super::Record {
+            generation: "150".into(),
+            value: serde_json::json!({"catalog": {"generation": 42}, "_kv_written_ms": 2_000}),
+        };
+
+        let picked = super::pick_fresher_record_for_coord(
+            api_record.clone(),
+            Some(local_record),
+            Some(&coord),
+        );
+        assert_eq!(picked.generation, "150");
+
+        // When current local generation is known dead, always adopt live fresh record even if
+        // `fresh_ts < cur_ts` due to clock skew or prior overwrite.
+        assert!(super::should_adopt_fresh_record(
+            "100",
+            true,
+            &skewed_local_val,
+            &api_record,
+            Some(&coord),
+        ));
+
+        // When current generation is live ("200"), stale API record must not replace newer local cache.
+        let val_3000 = serde_json::json!({"catalog": {"generation": 43}, "_kv_written_ms": 3_000});
+        let stale_api_1500 = super::Record {
+            generation: "140".into(),
+            value: serde_json::json!({"catalog": {"generation": 40}, "_kv_written_ms": 1_500}),
+        };
+        assert!(!super::should_adopt_fresh_record(
+            "200",
+            false,
+            &val_3000,
+            &stale_api_1500,
+            Some(&coord),
+        ));
+
+        // Never adopt a generation already known dead in coord.
+        assert!(!super::should_adopt_fresh_record(
+            "150",
+            false,
+            &api_record.value,
+            &super::Record {
+                generation: "100".into(),
+                value: val_3000,
+            },
+            Some(&coord),
+        ));
+    }
+
+    #[test]
+    fn encode_kv_key_preserves_colons_while_escaping_slashes_and_spaces() {
+        assert_eq!(super::encode_kv_key("ingest:watermark"), "ingest:watermark");
+        assert_eq!(super::encode_kv_key("a/b c%d:e"), "a%2Fb%20c%25d:e");
     }
 
     #[test]
@@ -1446,7 +1541,7 @@ mod tests {
         );
         assert_eq!(
             super::classify_kv_rest_cas(404, None),
-            Ok(super::KvRestCasOutcome::PreconditionFailed)
+            Err("admin_state_cas_not_found")
         );
         assert_eq!(
             super::classify_kv_rest_cas(429, None),
@@ -1499,8 +1594,10 @@ mod tests {
         };
         assert!(!super::should_adopt_fresh_record(
             &eff_gen,
+            false,
             &eff_val,
-            &stale_api_hit
+            &stale_api_hit,
+            Some(&coord),
         ));
 
         let newer_api = super::Record {
@@ -1508,7 +1605,11 @@ mod tests {
             value: serde_json::json!({"catalog": {"generation": 12}, "_kv_written_ms": 4_000}),
         };
         assert!(super::should_adopt_fresh_record(
-            &eff_gen, &eff_val, &newer_api
+            &eff_gen,
+            false,
+            &eff_val,
+            &newer_api,
+            Some(&coord),
         ));
 
         // Bounded dead_generations list never grows beyond 4 entries.
