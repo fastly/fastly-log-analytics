@@ -2483,14 +2483,17 @@ mod summary_bundles {
     #[test]
     fn summary_bundle_work_left_brings_the_next_maintenance_tick_forward() {
         use fastly_log_analytics::admin::schedule;
-        let fake = Fake::new(BASE + 3 * HOUR);
+        let now = BASE + 6 * HOUR;
+        let fake = Fake::new(now);
         tick_runtime(&fake);
-        watermark(&fake, BASE + 3 * HOUR);
-        // More windows than one execution folds.
-        seed_hour(&fake, BASE, 40);
+        watermark(&fake, now);
+        // More closed hours and windows than one stage execution (inline + chained workers) folds.
+        for h in 0..4 {
+            seed_hour(&fake, BASE + h * HOUR, 40);
+        }
         fake.kv.borrow_mut().insert(
             "retention:last_sweep".into(),
-            (1, json!({"at": BASE + 3 * HOUR, "complete": true})),
+            (1, json!({"at": now, "complete": true})),
         );
         for _ in 0..16 {
             fake.now.set(fake.now.get() + 120);
@@ -2501,6 +2504,14 @@ mod summary_bundles {
                 .iter()
                 .any(|reply| reply["ran"] == "summary_bundle")
             {
+                let bundle_run = rows(&fake, LogKind::CronRuns)
+                    .into_iter()
+                    .rev()
+                    .find(|row| row["cron_kind"] == "summary_bundle")
+                    .expect("summary_bundle cron_runs row");
+                let details: Value =
+                    serde_json::from_str(bundle_run["details_json"].as_str().unwrap()).unwrap();
+                assert_eq!(details["passes"], 7, "{bundle_run}");
                 let maint = fake.kv.borrow()["cron:state"].1["jobs"]["maint"].clone();
                 assert_eq!(maint["more_pending"], true, "{maint}");
                 assert_eq!(

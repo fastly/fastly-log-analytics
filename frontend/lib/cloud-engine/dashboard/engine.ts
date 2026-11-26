@@ -776,16 +776,22 @@ export class Aggregator {
   }
 
   boundRankings(): void {
-    const bytesPerField = Math.floor((32 * 1024 * 1024) / this.fields.length);
+    const entriesPerField = Math.min(
+      4096,
+      Math.floor(150_000 / Math.max(1, this.fields.length)),
+    );
+    const bytesPerField = Math.floor(
+      (32 * 1024 * 1024) / Math.max(1, this.fields.length),
+    );
     for (const [field, counts] of this.counts) {
       let bytes = 0;
       for (const value of counts.keys()) {
         bytes += 48 + (typeof value === "string" ? value.length * 2 : 8);
       }
-      if (counts.size <= 4096 && bytes <= bytesPerField) continue;
+      if (counts.size <= entriesPerField && bytes <= bytesPerField) continue;
       const kept = new Map<Scalar, number>();
       bytes = 0;
-      for (const { value, count } of topEntries(counts, 4096)) {
+      for (const { value, count } of topEntries(counts, entriesPerField)) {
         const size = 48 + (typeof value === "string" ? value.length * 2 : 8);
         if (bytes + size > bytesPerField) continue;
         kept.set(value, count);
@@ -1793,6 +1799,9 @@ async function collectAggregator(
 
       files = files.filter((file) => remainingRaw.has(file.key));
       listed = files.length + summaryUses.length + resolvedSummaries;
+      if (!next && topK !== null && searchQuery === undefined && resolvedSummaries > 0) {
+        aggregator.boundRankings();
+      }
     }
   }
   type GroupRead = {
@@ -2539,6 +2548,9 @@ async function collectAggregator(
             },
           );
           assertActive();
+        }
+        if (!next && topK !== null && searchQuery === undefined) {
+          aggregator.boundRankings();
         }
         let aggregateEntries = aggregator.buckets.size;
         let aggregateBytes = aggregator.buckets.size * 96;

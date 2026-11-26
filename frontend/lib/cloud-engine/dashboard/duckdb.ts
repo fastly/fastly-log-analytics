@@ -1037,7 +1037,14 @@ export class DuckDBAnalyticalEngine extends ParquetBindingStore {
     ].join(" AND ");
 
     await this.runRead(context, signal, (backend) => this.queryRelation(
-      backend, "requests", where, hasBytes, customTypes, aggregator, options,
+      backend,
+      "requests",
+      where,
+      hasBytes,
+      customTypes,
+      aggregator,
+      options,
+      options.topK != null && !aggregator.isPristine() && !options.fieldSearch,
     ));
   }
 

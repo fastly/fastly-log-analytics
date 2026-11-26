@@ -26,6 +26,7 @@ import {
   searchFieldSummaries,
   searchFieldValues,
   type DashboardResult,
+  type FileSource,
 } from "./engine";
 import type { DashboardFilter } from "./filters";
 import { fnv1a32 } from "../parquet-key";
@@ -1654,6 +1655,100 @@ describe("projected dashboard summaries", () => {
       expect(report.cachedBytes).toBe(0);
       expect(report.downloadedBytes).toBeGreaterThan(0);
     }
+  });
+
+  it("bounds filtered summary counts before the selective budget check on openParquet", async () => {
+    const from = "2027-01-15T08:00:00Z";
+    const to = "2027-01-15T10:00:00Z";
+    const stringFields = [
+      "ip", "host", "url", "ua", "referer", "digest", "city", "region", "country",
+      "pop", "backend", "server_region", "tls", "waf_resp", "p_type", "p_desc",
+      "ja3", "ja4", "tls_ciphers_sha", "io_input_format", "io_output_format",
+      "method", "cache", "proto", "transport", "c_speed",
+    ];
+    const templateRow = {
+      bundle: "slice_fields",
+      bucket: null,
+      field: "url",
+      value: "/seeded",
+      count: BigInt(1),
+      requests: null,
+      status_4xx: null,
+      status_5xx: null,
+      hits: null,
+      cache_total: null,
+      resp_bytes_sum: null,
+      truncated: false,
+      pivot: "status",
+      pivot_value: "200",
+      ip_sketch: null,
+    };
+    const crowdedBytes = await Promise.all(
+      pick("hour", (e) => !e.early).map((file, fileIdx) =>
+        editSummaryRows(BUFFERS[file.key], (existing) => {
+          const sample = existing.find((r) => r.bundle === "slice_fields") ?? templateRow;
+          const extra: Record<string, unknown>[] = [];
+          // 26 CARD_FIELDS * 4,100 unique values * 2 bundles = >213k entries before bounding.
+          for (const field of stringFields) {
+            for (let i = 0; i < 4100; i++) {
+              extra.push({
+                ...sample,
+                bundle: "slice_fields",
+                pivot: "status",
+                pivot_value: "200",
+                field,
+                value: `${field}-${fileIdx}-${i}`,
+                count: BigInt(1),
+              });
+            }
+          }
+          return [...existing, ...extra];
+        }),
+      ),
+    );
+    const hours = pick("hour", (e) => !e.early).map((file, i) => ({
+      ...file,
+      size: crowdedBytes[i].byteLength,
+    }));
+    const rawTailKey = "processed/request/year=2027/month=01/day=15/hour=09/window=1800007080-1800007200-tail-n1.parquet";
+    const rawTailBytes = await parquetFixture([
+      {
+        timestamp: (HOUR_09 + 3500) * 1000,
+        status: 404,
+        cache: "MISS",
+        resp_bytes: 10,
+        host: "tail.example",
+      },
+    ]);
+    const rawTail: ManifestFile = {
+      key: rawTailKey,
+      start: iso(HOUR_09 + 3480),
+      end: iso(HOUR_09 + 3600),
+      size: rawTailBytes.byteLength,
+      rows: 1,
+    };
+    const buffers = {
+      ...BUFFERS,
+      [hours[0].key]: crowdedBytes[0],
+      [hours[1].key]: crowdedBytes[1],
+      [rawTailKey]: rawTailBytes,
+    };
+    const baseSource = fixtureSource([page([...RAW, rawTail])], buffers, { json: [], files: [] }, [page(hours)]);
+    const source: FileSource = {
+      ...baseSource,
+      openParquet: async (file) => ({
+        kind: "buffer",
+        bytes: buffers[file.key],
+        cached: false,
+      }),
+    };
+    const result = await runDashboard(source, {
+      from,
+      to,
+      filters: [{ mode: "include", field: "status", value: "200" }],
+    });
+    expect(result.totalRequests).toBeGreaterThan(0);
+    expect(result.cards.url.top.length).toBeGreaterThan(0);
   });
 
   it("covers open-hour compacts via open_bundle + window summaries even when an in-progress tail RAW_WINDOW crosses toMs", () => {

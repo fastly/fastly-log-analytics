@@ -2317,4 +2317,20 @@ describe("query beacon", () => {
       }),
     ).resolves.toBeTruthy();
   });
+
+  it("scales boundRankings per-field entry cap when custom fields push field count high", () => {
+    const fields = Array.from({ length: 50 }, (_, i) => `f_${i}`);
+    const agg = new Aggregator("2026-10-29T10:00:00Z", "2026-10-29T11:00:00Z", fields);
+    for (const field of fields) {
+      const counts = agg.counts.get(field)!;
+      for (let i = 0; i < 4200; i++) counts.set(`v${i}`, 1);
+    }
+    agg.boundRankings();
+    let totalEntries = 0;
+    for (const counts of agg.counts.values()) {
+      expect(counts.size).toBeLessThanOrEqual(3000);
+      totalEntries += counts.size;
+    }
+    expect(totalEntries).toBeLessThanOrEqual(150_000);
+  });
 });
