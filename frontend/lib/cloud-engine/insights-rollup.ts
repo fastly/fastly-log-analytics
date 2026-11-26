@@ -10,6 +10,7 @@ import {
   emptyAgg,
   mergeTimeIntervals,
   planBundleCoverage,
+  prefetchSummaryRollups,
   queryRollup,
   rollupGroup,
   type PrefetchedRollupManifest,
@@ -569,6 +570,14 @@ export async function insightsFromRollup(
 
     const rawByKey = new Map<string, ManifestFile>();
     if (uncoveredGroups.length) {
+      if (wCoverage.bundles.length || bCoverage.bundles.length) {
+        prefetchSummaryRollups(
+          source,
+          [...wCoverage.bundles, ...bCoverage.bundles],
+          spec ?? undefined,
+          signal,
+        );
+      }
       const fetchRawInterval = async (startMs: number, endMs: number): Promise<ManifestFile[] | null> => {
         try {
           const raw = await fetchManifest(

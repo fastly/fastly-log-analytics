@@ -2157,6 +2157,75 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect(res?.status).toBe(200);
   });
 
+  it("prewarms the rollup worker before awaiting /api/log-extents and skips /api/log-extents when both bounds are provided", async () => {
+    resetCloudMetadataCache();
+    const dashboardClient = await import("./dashboard/client");
+    const prewarmSpy = vi.spyOn(dashboardClient as { prewarmRollupWorker: () => void }, "prewarmRollupWorker");
+    let releaseExtents!: (res: Response) => void;
+    const extentsGate = new Promise<Response>((resolve) => {
+      releaseExtents = resolve;
+    });
+    const origFetch = globalThis.fetch;
+    let extentsCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes("/api/log-extents")) {
+        extentsCalls += 1;
+        return extentsGate;
+      }
+      return origFetch(input, init);
+    }));
+    vi.mocked(cloudActiveLogFieldIds).mockClear().mockResolvedValue(new Set(["status", "url"]));
+    const fakeRollup = {
+      insights: [],
+      window_start: "2026-11-05T00:00:00.000Z",
+      window_end: "2026-11-06T00:00:00.000Z",
+      baseline_start: "2026-10-29T00:00:00.000Z",
+      baseline_end: "2026-11-05T00:00:00.000Z",
+      computed_at: "2026-11-06T00:00:00.000Z",
+      window_hours: 24,
+      baseline_hours: 168,
+      window_total_requests: 0,
+      rollup: { data_from: "2026-10-29T00:00:00.000Z", data_through: "2026-11-06T00:00:00.000Z", approximate: [], lower_bound: [] },
+      deferred_detectors: [],
+      unsupported_detectors: [],
+      unavailable_detectors: [],
+    } as never;
+    vi.mocked(insightsFromRollup).mockClear().mockResolvedValueOnce(fakeRollup).mockResolvedValueOnce(fakeRollup);
+
+    const pending = handleCloudAnalyticalRequest(new Request("http://localhost/api/insights", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-service-id": "svc-warm" },
+      body: JSON.stringify({ window_size_hrs: 24, baseline_hours: 168, filters: {} }),
+    }));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(prewarmSpy).toHaveBeenCalledTimes(1);
+    expect(extentsCalls).toBe(1);
+
+    releaseExtents(Response.json({
+      earliest_log_at: "2026-10-20T00:00:00Z",
+      latest_log_at: "2026-11-06T00:00:00Z",
+    }));
+    expect((await pending)?.status).toBe(200);
+
+    // When both end and earliest_log_at are supplied, /api/log-extents is not fetched at all.
+    resetCloudMetadataCache();
+    extentsCalls = 0;
+    const boundedRes = await handleCloudAnalyticalRequest(new Request("http://localhost/api/insights", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-service-id": "svc-warm" },
+      body: JSON.stringify({
+        window_size_hrs: 24,
+        baseline_hours: 168,
+        filters: {},
+        end_time: "2026-11-06T00:00:00Z",
+        earliest_log_at: "2026-10-20T00:00:00Z",
+      }),
+    }));
+    expect(boundedRes?.status).toBe(200);
+    expect(extentsCalls).toBe(0);
+    prewarmSpy.mockRestore();
+  });
+
   it("reads only the Insights window raw when summaries answer its unfiltered baseline", async () => {
     const hour = 3_600_000;
     const end = Date.parse("2026-11-06T00:00:00Z");

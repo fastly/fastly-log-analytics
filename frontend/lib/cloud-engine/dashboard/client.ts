@@ -376,6 +376,10 @@ class DashboardWorkerClient extends BaseWorkerRpcClient<
     worker.postMessage({ id, type: "prewarm" } satisfies WorkerRequest);
   }
 
+  prewarmWorker(): void {
+    this.getWorker(this.handleMessage);
+  }
+
   catalogChanged(
     event?: CatalogCommitEvent,
     serviceId?: string | null,
@@ -447,6 +451,11 @@ export function answerRollupInWorker(
 
 export function prewarmDashboardEngine(): void {
   getClient().prewarm();
+}
+
+/** Spawns the dashboard worker module early for rollup reads without initializing DuckDB-WASM. */
+export function prewarmRollupWorker(): void {
+  getClient().prewarmWorker();
 }
 
 export type { CatalogCommitEvent };

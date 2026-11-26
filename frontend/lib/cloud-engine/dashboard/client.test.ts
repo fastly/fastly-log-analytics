@@ -73,6 +73,24 @@ describe("answerRollupInWorker", () => {
       event,
     });
   });
+
+  it("prewarmRollupWorker spawns the worker without prewarming DuckDB and reuses it for answerRollupInWorker", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+    const mod = await import("./client");
+    const prewarmRollupWorker = (mod as { prewarmRollupWorker?: () => void }).prewarmRollupWorker;
+    expect(typeof prewarmRollupWorker).toBe("function");
+    prewarmRollupWorker!();
+    expect(FakeWorker.created).toHaveLength(1);
+    const [worker] = FakeWorker.created;
+    expect(worker.postMessage).not.toHaveBeenCalled();
+
+    const pending = mod.answerRollupInWorker("/api/insights/rollup", {}, "svc-1");
+    expect(FakeWorker.created).toHaveLength(1);
+    const [message] = worker.postMessage.mock.calls[0] as [{ id: number; type: string }];
+    expect(message.type).toBe("rollup");
+    worker.onmessage!({ data: { id: message.id, type: "rollupResult", result: { ok: true } } });
+    await expect(pending).resolves.toEqual({ ok: true });
+  });
 });
 
 describe("persistent storage", () => {

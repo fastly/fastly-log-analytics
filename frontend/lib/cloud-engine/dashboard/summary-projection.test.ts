@@ -364,6 +364,34 @@ describe("readSummaryProjection", () => {
     expect(peak).toBeLessThanOrEqual(16);
     expect(peak).toBeGreaterThan(1);
   });
+
+  it("checks hasFile and derived caches concurrently before starting footer range reads", async () => {
+    anySize();
+    const base = fakeSource(layoutBytes);
+    let releaseHasFile!: (value: boolean) => void;
+    let derivedReadsWhileHasFilePending = 0;
+    let hasFileSettled = false;
+    const concurrentSource: typeof base = {
+      ...base,
+      hasFile: () =>
+        new Promise<boolean>((resolve) => {
+          releaseHasFile = (value) => {
+            hasFileSettled = true;
+            resolve(value);
+          };
+        }),
+      readDerivedFile: async (key: string, identity: string) => {
+        if (!hasFileSettled) derivedReadsWhileHasFilePending += 1;
+        return base.readDerivedFile(key, identity);
+      },
+    };
+    const pending = readSummaryProjection(concurrentSource, manifestFile(layoutBytes), HEAD);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(derivedReadsWhileHasFilePending).toBeGreaterThanOrEqual(1);
+    releaseHasFile(false);
+    const read = await pending;
+    expect(read.whole).toBe(false);
+  });
 });
 
 describe("summaryLayout", () => {

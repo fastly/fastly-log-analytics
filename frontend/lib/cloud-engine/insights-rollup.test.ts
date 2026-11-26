@@ -1359,4 +1359,57 @@ describe("insightsFromRollup summary-first multi-day manifest handling", () => {
       expect(["country", "p_type", "method", "referer", "ua", "asn", "cache", "transport", "ip"]).toContain(key);
     }
   });
+
+  it("prefetches covered summary bundles concurrently while uncovered raw /api/files listings are in flight", async () => {
+    const END = Date.UTC(2025, 0, 9, 3, 0, 0);
+    const { src } = makeMultiDayServer({
+      endMs: END,
+      missingLastHourBundle: true,
+      rawTruncatedOverMs: 2 * HOUR,
+    });
+    let releaseRawListing!: () => void;
+    const rawListingGate = new Promise<void>((resolve) => {
+      releaseRawListing = resolve;
+    });
+    let summaryFetchesBeforeRawResolved = 0;
+    let rawListingResolved = false;
+    const baseFetchJson = src.fetchJson.bind(src);
+    const baseFetchFile = src.fetchFile.bind(src);
+    const trackedSrc = {
+      ...src,
+      async fetchJson(url: string) {
+        const params = new URL(url, "http://x").searchParams;
+        if (params.get("view") !== "summary") {
+          await rawListingGate;
+          rawListingResolved = true;
+        }
+        return baseFetchJson(url);
+      },
+      async fetchFile(key: string) {
+        if (!rawListingResolved && key.includes("/summary_bundle/")) {
+          summaryFetchesBeforeRawResolved += 1;
+        }
+        return baseFetchFile(key);
+      },
+    };
+
+    const pending = insightsFromRollup(
+      withSettings({
+        ...body,
+        clamp_end: new Date(END).toISOString(),
+        window_size_hrs: 24,
+        baseline_hours: 168,
+        earliest_log_at: new Date(END - 14 * DAY).toISOString(),
+      }),
+      [],
+      trackedSrc,
+      signal,
+    );
+
+    await vi.waitFor(() => expect(summaryFetchesBeforeRawResolved).toBeGreaterThan(0));
+    releaseRawListing();
+    const result = await pending;
+    expect(result).not.toBeNull();
+    expect(result!.window_total_requests).toBeGreaterThan(0);
+  });
 });

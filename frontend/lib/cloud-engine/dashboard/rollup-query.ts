@@ -1515,10 +1515,10 @@ function decodeCached(
   source: RollupSource,
   file: ManifestFile,
   spec: SummarySpec | undefined,
-  signal: AbortSignal,
+  signal: AbortSignal | undefined,
   callRollupEpoch: number,
 ): Promise<Rollup | null> {
-  signal.throwIfAborted();
+  signal?.throwIfAborted();
   if (callRollupEpoch !== rollupEpoch) {
     return Promise.reject(
       new DOMException("The operation was aborted.", "AbortError"),
@@ -1540,13 +1540,13 @@ function decodeCached(
   const load = async (): Promise<Rollup | null> => {
     if (derivedId && source.readDerivedFile) {
       const stored = await source.readDerivedFile(file.key, derivedId).catch(() => null);
-      signal.throwIfAborted();
+      signal?.throwIfAborted();
       if (callRollupEpoch !== rollupEpoch) {
         throw new DOMException("The operation was aborted.", "AbortError");
       }
       if (stored && stored.meta === DECODED_ROLLUP_CACHE_VERSION) {
         const rawBytes = await stored.bytes().catch(() => null);
-        signal.throwIfAborted();
+        signal?.throwIfAborted();
         if (callRollupEpoch !== rollupEpoch) {
           throw new DOMException("The operation was aborted.", "AbortError");
         }
@@ -1559,7 +1559,7 @@ function decodeCached(
     let rollup: Rollup | null;
     if (spec) {
       const { parts } = await readSummaryProjection(source, file, spec, signal);
-      signal.throwIfAborted();
+      signal?.throwIfAborted();
       if (callRollupEpoch !== rollupEpoch) {
         throw new DOMException("The operation was aborted.", "AbortError");
       }
@@ -1570,27 +1570,30 @@ function decodeCached(
         () => source.fetchFile(file.key, signal, { priority: "high" }),
         signal,
       );
-      signal.throwIfAborted();
+      signal?.throwIfAborted();
       if (callRollupEpoch !== rollupEpoch) {
         throw new DOMException("The operation was aborted.", "AbortError");
       }
       rollup = await decodeRollup(bytes, step);
     }
-    if (callRollupEpoch !== rollupEpoch || signal.aborted) {
+    if (callRollupEpoch !== rollupEpoch || signal?.aborted) {
       throw (
-        signal.reason ??
+        signal?.reason ??
         new DOMException("The operation was aborted.", "AbortError")
       );
     }
     if (rollup && derivedId && source.writeDerivedFile) {
-      void source
-        .writeDerivedFile(
+      const writeDerived = source.writeDerivedFile;
+      const timer = setTimeout(() => {
+        if (callRollupEpoch !== rollupEpoch || signal?.aborted) return;
+        void writeDerived(
           file.key,
           derivedId,
           serializeDecodedRollup(rollup),
           DECODED_ROLLUP_CACHE_VERSION,
-        )
-        .catch(() => {});
+        ).catch(() => {});
+      }, 0);
+      (timer as { unref?: () => void }).unref?.();
     }
     return rollup;
   };
@@ -1599,13 +1602,33 @@ function decodeCached(
     if (decoded.get(key) === pending) decoded.delete(key);
     throw err;
   });
-  if (callRollupEpoch === rollupEpoch && !signal.aborted) {
+  if (callRollupEpoch === rollupEpoch && !signal?.aborted) {
     decoded.set(key, pending);
     while (decoded.size > DECODED_LIMIT) {
       decoded.delete(decoded.keys().next().value!);
     }
   }
   return pending;
+}
+
+/**
+ * Starts `decodeCached` for each summary file in the background so downloads
+ * and Parquet decodes overlap with concurrent raw gap listings.
+ */
+export function prefetchSummaryRollups(
+  source: RollupSource,
+  files: readonly ManifestFile[],
+  spec?: SummarySpec,
+  signal?: AbortSignal,
+): void {
+  if (!files.length || signal?.aborted) return;
+  const callRollupEpoch = rollupEpoch;
+  const seen = new Set<string>();
+  for (const file of files) {
+    if (seen.has(file.key)) continue;
+    seen.add(file.key);
+    decodeCached(source, file, spec, signal, callRollupEpoch).catch(() => {});
+  }
 }
 
 /**

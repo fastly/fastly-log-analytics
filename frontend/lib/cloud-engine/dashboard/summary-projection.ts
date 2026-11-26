@@ -217,13 +217,16 @@ export async function readSummaryProjection(
     return whole();
   }
   assertProjectionActive();
-  const hasWhole = await source.hasFile?.(file.key);
-  assertProjectionActive();
-  if (hasWhole) return whole();
   const identity = fileIdentity(source, file);
   const partsId = partsIdentity(source, file, spec);
-  const stored = await readDerivedFile(file.key, partsId);
+  const footerId = JSON.stringify([...identity, "summary-footer"]);
+  const [hasWhole, stored, cachedFooter] = await Promise.all([
+    source.hasFile ? source.hasFile(file.key) : Promise.resolve(false),
+    readDerivedFile(file.key, partsId),
+    readDerivedFile(file.key, footerId),
+  ]);
   assertProjectionActive();
+  if (hasWhole) return whole();
   if (stored) {
     const rawStored = await stored.bytes();
     assertProjectionActive();
@@ -237,9 +240,6 @@ export async function readSummaryProjection(
     downloadedBytes += bytes.byteLength;
     return bytes;
   });
-  const footerId = JSON.stringify([...identity, "summary-footer"]);
-  const cachedFooter = await readDerivedFile(file.key, footerId);
-  assertProjectionActive();
   const tailStart = cachedFooter ? Number(cachedFooter.meta) : NaN;
   const tail = cachedFooter && Number.isSafeInteger(tailStart) && tailStart >= 0
     ? { start: tailStart, bytes: await cachedFooter.bytes() } : null;

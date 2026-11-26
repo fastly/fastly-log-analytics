@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   answerRollupInWorker,
+  prewarmRollupWorker,
   runInWorker,
   searchFieldSummariesInWorker,
   searchFieldValuesInWorker,
@@ -929,6 +930,7 @@ async function cloudNetworkRollup(
   const params = await readRequestParams(request) as NetworkQueryParams & Record<string, unknown>;
   assertAdapterEpoch(request, entryMetaEpoch);
   if (!networkRollupEligible(path, params)) return null;
+  prewarmRollupWorker();
   let end = String(params.end_time ?? params.end ?? "");
   if (!end) {
     const response = await withLoading("range", () => fetchCloudMetadata("/api/log-extents", request.signal));
@@ -1092,6 +1094,7 @@ async function cloudSectionRollup(
   const body = request.method === "POST" ? params : {};
   if (route.label === "/security") params.mask_ips = securityMaskIps(request, url, body);
   if (!route.eligible(path, params)) return null;
+  prewarmRollupWorker();
   let end = String(params.end_time ?? params.end ?? "");
   if (!end) {
     const response = await withLoading("range", () => fetchCloudMetadata("/api/log-extents", request.signal));
@@ -1250,30 +1253,37 @@ async function cloudInsightsRollup(
   const filters = filtersPayloadToPredicates(body.filters as Parameters<typeof filtersPayloadToPredicates>[0], undefined);
   if (filters.length) return null;
   let end = String(body.end_time ?? body.end ?? body.clamp_end ?? "");
-  let earliestLogAt: string | null = null;
+  let earliestLogAt: string | null =
+    typeof body.earliest_log_at === "string" && body.earliest_log_at
+      ? body.earliest_log_at
+      : null;
+  const hasEarliestBound = Object.hasOwn(body, "earliest_log_at");
   const rawServiceId = body.service_id ?? request.headers.get("x-service-id");
   const serviceId = rawServiceId ? decodeUriStrict(String(rawServiceId)) : undefined;
+  prewarmRollupWorker();
   const activeFieldsPromise = cloudActiveLogFieldIds(serviceId, request.signal);
   activeFieldsPromise.catch(() => {});
-  const extentsRes = await withLoading("range", () =>
-    fetchCloudMetadata("/api/log-extents", request.signal),
-  ).catch((error: unknown) => {
-    if (request.signal.aborted || entryMetaEpoch !== currentStoreMetaEpoch() || isAdapterAbortError(error)) {
-      throw error;
-    }
-    return null;
-  });
-  assertAdapterEpoch(request, entryMetaEpoch);
-  if (extentsRes?.ok) {
-    const extents = (await extentsRes.json().catch(() => null)) as {
-      earliest_log_at?: string | null;
-      latest_log_at?: string | null;
-    } | null;
+  if (!end || !hasEarliestBound) {
+    const extentsRes = await withLoading("range", () =>
+      fetchCloudMetadata("/api/log-extents", request.signal),
+    ).catch((error: unknown) => {
+      if (request.signal.aborted || entryMetaEpoch !== currentStoreMetaEpoch() || isAdapterAbortError(error)) {
+        throw error;
+      }
+      return null;
+    });
     assertAdapterEpoch(request, entryMetaEpoch);
-    earliestLogAt = extents?.earliest_log_at ?? null;
-    if (!end) end = extents?.latest_log_at ?? new Date().toISOString();
-  } else if (!end) {
-    return null;
+    if (extentsRes?.ok) {
+      const extents = (await extentsRes.json().catch(() => null)) as {
+        earliest_log_at?: string | null;
+        latest_log_at?: string | null;
+      } | null;
+      assertAdapterEpoch(request, entryMetaEpoch);
+      if (!hasEarliestBound) earliestLogAt = extents?.earliest_log_at ?? null;
+      if (!end) end = extents?.latest_log_at ?? new Date().toISOString();
+    } else if (!end) {
+      return null;
+    }
   }
   const headerRole = request.headers.get("x-session-role");
   const maskIps = Boolean(body.mask_ips) || request.headers.get("x-mask-ips") === "1" ||
