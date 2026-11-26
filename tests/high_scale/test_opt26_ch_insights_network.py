@@ -229,7 +229,7 @@ def test_network_sample_stride_14d_is_500_and_standalone_quality_shares_pop_roll
 ) -> None:
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     assert hs_network._network_sample_stride(1209600) == 500
-    assert hs_network._network_sample_stride(2592000) == 500
+    assert hs_network._network_sample_stride(2592000) == 1000
 
     end = datetime(2026, 11, 26, 12, 0, tzinfo=UTC)
     start_30d = end - timedelta(days=30)

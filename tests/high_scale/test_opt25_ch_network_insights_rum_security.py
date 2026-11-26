@@ -101,7 +101,7 @@ def test_network_sample_stride_14d_tier() -> None:
     assert hs_network._network_sample_stride(604800) == 100
     assert hs_network._network_sample_stride(1209599) == 100
     assert hs_network._network_sample_stride(1209600) == 500
-    assert hs_network._network_sample_stride(2592000) == 500
+    assert hs_network._network_sample_stride(2592000) == 1000
 
 
 def test_shield_active_cache_caches_false_without_probe_sampling_and_scopes_short_windows(
@@ -379,7 +379,7 @@ def test_network_bundle_shares_rollup_and_fact_and_stays_under_8_queries(monkeyp
     assert sjc.cache_hit_rate == 60.0
     assert sjc.bandwidth_bytes == 480000
     assert resp.quality is not None and resp.quality.by_pop[0].value == "SJC"
-    assert resp.transport is not None and resp.transport.total_requests == 5000
+    assert resp.transport is not None and resp.transport.total_requests == 10000
 
     # When sections=["quality", "pop_health"] (without transport), pop_health skips network_minute_dimensions.
     hs_network._network_memo.cache.clear()

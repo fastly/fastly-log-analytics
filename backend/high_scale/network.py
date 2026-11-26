@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextvars
-import math
 import os
 import sys
 from collections import defaultdict
@@ -205,6 +204,8 @@ def _fmt_ts(ts: int) -> str:
 
 
 def _network_sample_stride(span_s: float) -> int:
+    if span_s >= 1_728_000:
+        return 1000
     if span_s >= 1209600:
         return 500
     if span_s >= 604800:
@@ -270,11 +271,12 @@ def _network_time_sample_clause(
         first_b = (start_ts // bucket_seconds) * bucket_seconds
         last_b = ((end_ts - 1) // bucket_seconds) * bucket_seconds
         n_buckets = ((last_b - first_b) // bucket_seconds) + 1
-        step_buckets = 1 if n_buckets <= 720 else math.ceil(n_buckets / 360)
+        if n_buckets > 24:
+            return f" AND line_ordinal % {stride} = 0"
         windows: list[tuple[int, int]] = []
-        for idx in range(0, n_buckets, step_buckets):
+        for idx in range(n_buckets):
             b_lo = max(start_ts, first_b + idx * bucket_seconds)
-            b_hi = min(end_ts, first_b + (idx + step_buckets) * bucket_seconds)
+            b_hi = min(end_ts, first_b + (idx + 1) * bucket_seconds)
             b_dur = b_hi - b_lo
             if b_dur < stride:
                 continue
@@ -285,7 +287,7 @@ def _network_time_sample_clause(
         return _pk_range_or_clause(windows) if windows else ""
 
     target_sampled_s = max(1, span_s // stride)
-    n_windows = min(24, max(1, target_sampled_s // 60)) if target_sampled_s >= 60 else 1
+    n_windows = min(16, max(1, target_sampled_s // 120)) if target_sampled_s >= 120 else 1
     win_s = max(1, target_sampled_s // n_windows)
     step_s = span_s // n_windows
     windows = []

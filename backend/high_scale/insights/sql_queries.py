@@ -124,7 +124,7 @@ def _pk_range_windows(start_ts: int, end_ts: int, stride: int) -> list[tuple[int
     if span_s <= stride:
         return [(start_ts, min(end_ts, start_ts + 1))]
     target_sampled_s = max(1, span_s // stride)
-    n_windows = min(168, max(1, span_s // 3600), target_sampled_s)
+    n_windows = min(16, max(1, span_s // 14400), max(1, target_sampled_s // 120)) if target_sampled_s >= 120 else 1
     step_s = span_s // n_windows
     win_s = max(1, target_sampled_s // n_windows)
     windows: list[tuple[int, int]] = []
