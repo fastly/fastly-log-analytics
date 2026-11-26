@@ -1,29 +1,46 @@
 'use client'
 
 import React from 'react'
-import { BarChart3, Clock, Film, Gauge, Globe, Play, UserPlus, Users, Wifi } from 'lucide-react'
-import { PlotlyChart } from '@/components/PlotlyChart'
+import dynamic from 'next/dynamic'
+import { BarChart3, Gauge, Play, UserPlus, Users, Wifi } from 'lucide-react'
 import { AnalyticsCard, TimeSeriesChart, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { DataTable } from '@/components/DataTable'
+import { Skeleton } from '@/components/ui/skeleton'
 import type { components, PlotlyTrace } from '@/types/api'
 import {
   BITRATE_LADDER_COLUMNS,
   BITRATE_LAYOUT,
   BUFFER_LAYOUT,
-  CONTENT_COLUMNS,
-  DURATION_DIST_LAYOUT,
-  EMPTY_PLOT_LAYOUT,
-  EMPTY_ROWS,
-  REBUFFER_ASN_COLUMNS,
-  REBUFFER_COUNTRY_COLUMNS,
   SESSIONS_LAYOUT,
   SESSION_STARTS_LAYOUT,
   STARTUP_LAYOUT,
-  STREAMING_FORMAT_COLUMNS,
   STREAMING_INFO,
   STREAM_TYPE_COLUMNS,
   THROUGHPUT_LAYOUT,
 } from './StreamingConstants'
+
+const StreamingSecondaryCharts = dynamic(
+  () => import('./StreamingSecondaryCharts').then((m) => m.StreamingSecondaryCharts),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="space-y-6 mb-6" aria-busy="true">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <Skeleton className="h-[320px] w-full rounded-xl" />
+          <Skeleton className="h-[320px] w-full rounded-xl" />
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <Skeleton className="h-[280px] w-full rounded-xl" />
+          <Skeleton className="h-[280px] w-full rounded-xl" />
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <Skeleton className="h-[280px] w-full rounded-xl" />
+          <Skeleton className="h-[280px] w-full rounded-xl" />
+        </div>
+      </div>
+    ),
+  },
+)
 
 type CmcdAggregatesResponse = components['schemas']['CmcdAggregatesResponse']
 type CmcdBitrateLadderRow = NonNullable<CmcdAggregatesResponse['bitrate_ladder']>[number]
@@ -162,79 +179,13 @@ export function StreamingChartsGrid({
         </AnalyticsCard>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-        <AnalyticsCard
-          title="Top Content"
-          icon={<Film className="h-4 w-4" />}
-          {...queryStatus}
-          isEmpty={!data?.top_content?.length}
-          helpTitle={STREAMING_INFO.top_content.title}
-          helpContent={STREAMING_INFO.top_content.body}
-        >
-          <DataTable columns={CONTENT_COLUMNS} data={data?.top_content ?? EMPTY_ROWS} />
-        </AnalyticsCard>
-
-        <AnalyticsCard
-          title="Session Duration"
-          icon={<Clock className="h-4 w-4" />}
-          {...queryStatus}
-          isEmpty={!data?.session_duration_dist?.length}
-          className="h-[320px]"
-          contentClassName="p-2"
-          helpTitle={STREAMING_INFO.session_duration.title}
-          helpContent={STREAMING_INFO.session_duration.body}
-        >
-          <PlotlyChart data={durationDistData} layout={DURATION_DIST_LAYOUT} height="100%" />
-        </AnalyticsCard>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-        <AnalyticsCard
-          title="Object Type Distribution"
-          icon={<BarChart3 className="h-4 w-4" />}
-          {...queryStatus}
-          isEmpty={!data?.object_type_dist?.length}
-          className="h-[280px]"
-          contentClassName="p-2"
-          helpTitle={STREAMING_INFO.object_type_dist.title}
-          helpContent={STREAMING_INFO.object_type_dist.body}
-        >
-          <PlotlyChart data={objectTypeData} layout={EMPTY_PLOT_LAYOUT} height="100%" />
-        </AnalyticsCard>
-
-        <AnalyticsCard
-          title="Streaming Formats"
-          icon={<Play className="h-4 w-4" />}
-          {...queryStatus}
-          isEmpty={!streamingFormatRows.length}
-        >
-          <DataTable columns={STREAMING_FORMAT_COLUMNS} data={streamingFormatRows} />
-        </AnalyticsCard>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-        <AnalyticsCard
-          title="Rebuffer Rate by Country"
-          icon={<Globe className="h-4 w-4" />}
-          {...queryStatus}
-          isEmpty={!data?.rebuffer_by_country?.length}
-          helpTitle={STREAMING_INFO.rebuffer_by_country.title}
-          helpContent={STREAMING_INFO.rebuffer_by_country.body}
-        >
-          <DataTable columns={REBUFFER_COUNTRY_COLUMNS} data={data?.rebuffer_by_country ?? EMPTY_ROWS} />
-        </AnalyticsCard>
-
-        <AnalyticsCard
-          title="Rebuffer Rate by ASN"
-          icon={<Wifi className="h-4 w-4" />}
-          {...queryStatus}
-          isEmpty={!data?.rebuffer_by_asn?.length}
-          helpTitle={STREAMING_INFO.rebuffer_by_asn.title}
-          helpContent={STREAMING_INFO.rebuffer_by_asn.body}
-        >
-          <DataTable columns={REBUFFER_ASN_COLUMNS} data={data?.rebuffer_by_asn ?? EMPTY_ROWS} />
-        </AnalyticsCard>
-      </div>
+      <StreamingSecondaryCharts
+        data={data}
+        queryStatus={queryStatus}
+        durationDistData={durationDistData}
+        objectTypeData={objectTypeData}
+        streamingFormatRows={streamingFormatRows}
+      />
 
       <div ref={extendedSectionRef} className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <AnalyticsCard

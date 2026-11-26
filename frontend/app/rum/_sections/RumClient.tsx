@@ -1,12 +1,14 @@
 'use client'
 
 import React, { useState, useEffect, useMemo } from 'react'
+import dynamic from 'next/dynamic'
 import { useQuery } from '@tanstack/react-query'
 import { BookOpen, Radio } from 'lucide-react'
 import { CardErrorState } from '@/components/AnalyticsCard'
 import { DashboardSkeleton, ReportLayout } from '@/components/ReportLayout'
 import { RawWindowNote, readRawWindow } from '@/components/network/rollupLabels'
 import { Button } from '@/components/ui/button'
+import { Skeleton } from '@/components/ui/skeleton'
 import { useIsAnalyst, useMounted } from '@/hooks/useBootstrap'
 import { useRumStatus } from '@/hooks/useDashboardCards'
 import { useAnalyticsReportQuery, useReportRangeAnchor } from '@/hooks/useReportPageState'
@@ -17,15 +19,25 @@ import type { FiltersPayload } from '@/types/api'
 import {
   RumEmptyWindowCard,
   RumFaroVersionCard,
-  RumInstallationDialog,
   RumNoDataBanner,
   RumStatusPanel,
   type RumAnalytics,
+} from './RumStatusSection'
+import { RumVitalsTopSection } from './RumVitalsSection'
+import type { RumLiveEvent } from './RumTablesSection'
+
+export {
+  RumFaroVersionCard,
+  RumStatusPanel,
+  RumNoDataBanner,
+  RumEmptyWindowCard,
+  RumInstallationDialog,
   type RumFaroVersionCardProps,
   type RumVersionsResponse,
   type RumWire,
+  type RumAnalytics,
 } from './RumStatusSection'
-import {
+export {
   buildEnvPieData,
   DONUT_CHART_LAYOUT,
   getThresholdColors,
@@ -36,7 +48,7 @@ import {
   type CwvColors,
   type RumCwvDistribution,
 } from './RumVitalsSection'
-import {
+export {
   envName,
   RumClientResourceTablesSection,
   RumLiveActivitySection,
@@ -50,37 +62,61 @@ import {
   type RumWorstPage,
 } from './RumTablesSection'
 
-export {
-  RumFaroVersionCard,
-  RumStatusPanel,
-  RumNoDataBanner,
-  RumEmptyWindowCard,
-  RumInstallationDialog,
-  RumVitalsTopSection,
-  RumEnvironmentAndBeaconsSection,
-  RumClientResourceTablesSection,
-  RumWorstPagesAndErrorsSection,
-  RumLiveActivitySection,
-  WORST_PAGE_COLUMNS,
-  envName,
-  getThresholdColors,
-  buildEnvPieData,
-  TREND_CHART_LAYOUT,
-  STACKED_BAR_LAYOUT,
-  DONUT_CHART_LAYOUT,
-  type RumFaroVersionCardProps,
-  type RumVersionsResponse,
-  type RumWire,
-  type RumAnalytics,
-  type RumCwvDistribution,
-  type CwvColors,
-  type RumWorstPage,
-  type RumSlowestUrlItem,
-  type RumSlowestNetworkItem,
-  type RumJsError,
-  type RumRawLog,
-  type RumLiveEvent,
-}
+const LazyRumInstallationDialog = dynamic(
+  () => import('./RumStatusSection').then((m) => m.RumInstallationDialog),
+  { ssr: false },
+)
+
+const LazyRumWorstPagesAndErrorsSection = dynamic(
+  () => import('./RumTablesSection').then((m) => m.RumWorstPagesAndErrorsSection),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6" aria-busy="true">
+        <Skeleton className="h-[320px] w-full rounded-xl" />
+        <Skeleton className="h-[320px] w-full rounded-xl" />
+      </div>
+    ),
+  },
+)
+
+const LazyRumClientResourceTablesSection = dynamic(
+  () => import('./RumTablesSection').then((m) => m.RumClientResourceTablesSection),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6" aria-busy="true">
+        <Skeleton className="h-[320px] w-full rounded-xl" />
+        <Skeleton className="h-[320px] w-full rounded-xl" />
+      </div>
+    ),
+  },
+)
+
+const LazyRumEnvironmentAndBeaconsSection = dynamic(
+  () => import('./RumVitalsSection').then((m) => m.RumEnvironmentAndBeaconsSection),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="space-y-6" aria-busy="true">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <Skeleton className="h-[300px] w-full rounded-xl" />
+          <Skeleton className="h-[300px] w-full rounded-xl" />
+          <Skeleton className="h-[300px] w-full rounded-xl" />
+        </div>
+        <Skeleton className="h-[310px] w-full rounded-xl" />
+      </div>
+    ),
+  },
+)
+
+const LazyRumLiveActivitySection = dynamic(
+  () => import('./RumTablesSection').then((m) => m.RumLiveActivitySection),
+  {
+    ssr: false,
+    loading: () => <Skeleton className="h-[360px] w-full rounded-xl" aria-busy="true" />,
+  },
+)
 
 // Columns the RUM analytics API accepts (backend/high_scale/rum.py _FILTER_COLUMNS). The shared
 // FilterBar carries request-log fields such as status across pages; both backends answer 400 for
@@ -203,17 +239,17 @@ export function RumClient({
         timezone={timezone}
       />
 
-      <RumWorstPagesAndErrorsSection
+      <LazyRumWorstPagesAndErrorsSection
         worstPages={analytics.worst_pages}
         errors={analytics.errors}
       />
 
-      <RumClientResourceTablesSection
+      <LazyRumClientResourceTablesSection
         slowestUrls={analytics.slowest_urls ?? []}
         slowestNetworks={analytics.slowest_networks ?? []}
       />
 
-      <RumEnvironmentAndBeaconsSection
+      <LazyRumEnvironmentAndBeaconsSection
         analytics={analytics}
         startTime={startTime}
         endTime={endTime}
@@ -224,7 +260,7 @@ export function RumClient({
         title="Live activity unavailable"
         message="Could not load RUM live events for this time window."
         onRetry={() => void refetchLiveEvents()}
-      /> : <RumLiveActivitySection
+      /> : <LazyRumLiveActivitySection
         liveEvents={liveEvents}
         isLiveEventsLoading={isLiveEventsLoading}
         timezone={timezone}
@@ -284,8 +320,8 @@ export function RumPageClient({ initialServiceId }: RumPageClientProps) {
         )}
       </ReportLayout>
 
-      {!isAnalyst && (
-        <RumInstallationDialog open={showInstructions} onOpenChange={setShowInstructions} />
+      {!isAnalyst && showInstructions && (
+        <LazyRumInstallationDialog open={showInstructions} onOpenChange={setShowInstructions} />
       )}
     </>
   )

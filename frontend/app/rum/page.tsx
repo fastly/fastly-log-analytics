@@ -1,5 +1,9 @@
+import { Suspense } from 'react'
+
+import RumLoading from './loading'
+import RumPageClient from './_sections/RumClient'
+
 export {
-  default,
   RumPageClient,
   RumClient,
   RumStatusPanel,
@@ -31,3 +35,11 @@ export {
   type RumRawLog,
   type RumLiveEvent,
 } from './_sections/RumClient'
+
+export default function RumPage() {
+  return (
+    <Suspense fallback={<RumLoading />}>
+      <RumPageClient />
+    </Suspense>
+  )
+}
