@@ -1,6 +1,7 @@
 'use client'
 
 import React from 'react'
+import dynamic from 'next/dynamic'
 import { RefreshCw } from 'lucide-react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { client, unwrapClient, queryKeys } from '@/lib/api'
@@ -14,10 +15,23 @@ import {
   type LedgerStatusFilter,
   InProcessSchedulesSection,
 } from './QueueOverviewPanels'
-import { IngestLedgerSection } from './QueueLedgerInspector'
+
+const IngestLedgerSection = dynamic(
+  () => import('./QueueLedgerInspector').then((m) => m.IngestLedgerSection),
+  {
+    ssr: false,
+    loading: () => (
+      <div
+        data-testid="admin-queue-ledger-reservation"
+        className="min-h-[240px] min-w-0 overflow-hidden [contain-intrinsic-size:auto_240px] [content-visibility:visible]"
+      >
+        <Skeleton className="h-[320px] w-full rounded-lg" />
+      </div>
+    ),
+  },
+)
 
 export * from './QueueOverviewPanels'
-export * from './QueueLedgerInspector'
 
 const CELERY_STATUS_CHANNELS: AdminEventChannel[] = ['celery-status']
 

@@ -7,7 +7,7 @@ import { client, unwrapClient, queryKeys } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { BackToAdminLink } from '@/components/ReportLayout'
-import { Sparkline } from '@/app/dashboard/_sections/DashboardClient'
+import { Sparkline } from '@/components/Sparkline'
 import { Button } from '@/components/ui/button'
 import { PageHeader } from '@/components/ui/confirm-dialog'
 
