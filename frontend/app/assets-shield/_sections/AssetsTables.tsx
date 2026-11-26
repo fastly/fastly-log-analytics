@@ -22,6 +22,7 @@ export type LowTtlRow = components['schemas']['LowTtlAssetRow']
 export interface AssetsTableProps<T> {
   rows: T[]
   isLoading: boolean
+  isDeferred?: boolean
   /** Dashboard deep link up to and including `filter_url=`; the asset URL is appended encoded. */
   urlHrefPrefix: string
 }
@@ -52,7 +53,15 @@ export function LoadingBlock({ message }: { message: string }) {
   )
 }
 
-export function LargeUncompressedTable({ rows, isLoading, urlHrefPrefix }: AssetsTableProps<LargeUncompressedRow>) {
+function DeferredBlock({ message }: { message: string }) {
+  return (
+    <div className="py-8 text-center text-muted-foreground text-xs">
+      <span>{message}</span>
+    </div>
+  )
+}
+
+export function LargeUncompressedTable({ rows, isLoading, isDeferred = false, urlHrefPrefix }: AssetsTableProps<LargeUncompressedRow>) {
   const columns = React.useMemo<ColumnDef<LargeUncompressedRow>[]>(
     () => [
       {
@@ -98,6 +107,7 @@ export function LargeUncompressedTable({ rows, isLoading, urlHrefPrefix }: Asset
   )
 
   if (isLoading) return <LoadingBlock message="Scanning uncompressed static assets..." />
+  if (isDeferred && rows.length === 0) return <DeferredBlock message="Scroll to scan uncompressed static assets." />
   return (
     <DataTableReadonly
       columns={columns}
@@ -110,7 +120,7 @@ export function LargeUncompressedTable({ rows, isLoading, urlHrefPrefix }: Asset
   )
 }
 
-export function LowTtlTable({ rows, isLoading, urlHrefPrefix }: AssetsTableProps<LowTtlRow>) {
+export function LowTtlTable({ rows, isLoading, isDeferred = false, urlHrefPrefix }: AssetsTableProps<LowTtlRow>) {
   const columns = React.useMemo<ColumnDef<LowTtlRow>[]>(
     () => [
       {
@@ -156,6 +166,7 @@ export function LowTtlTable({ rows, isLoading, urlHrefPrefix }: AssetsTableProps
   )
 
   if (isLoading) return <LoadingBlock message="Detecting low cache-TTL hotspots..." />
+  if (isDeferred && rows.length === 0) return <DeferredBlock message="Scroll to detect low cache-TTL hotspots." />
   return (
     <DataTableReadonly
       columns={columns}
@@ -172,12 +183,14 @@ export function AssetsHotspotsSection({
   largeUncompressed,
   lowTtl,
   isLoading,
+  isDeferred = false,
   urlFilterHrefPrefix,
   onSelectHelp,
 }: {
   largeUncompressed: LargeUncompressedRow[]
   lowTtl: LowTtlRow[]
   isLoading: boolean
+  isDeferred?: boolean
   urlFilterHrefPrefix: string
   onSelectHelp: (help: AssetHelpContent) => void
 }) {
@@ -207,7 +220,7 @@ export function AssetsHotspotsSection({
         <p className="text-xs text-muted-foreground mb-4">
           Compressible assets served without compression (br or gzip), consuming excessive origin & CDN bandwidth.
         </p>
-        <LargeUncompressedTable rows={largeUncompressed} isLoading={isLoading} urlHrefPrefix={urlFilterHrefPrefix} />
+        <LargeUncompressedTable rows={largeUncompressed} isLoading={isLoading} isDeferred={isDeferred} urlHrefPrefix={urlFilterHrefPrefix} />
       </div>
 
       {/* Low Cache-TTL table */}
@@ -234,7 +247,7 @@ export function AssetsHotspotsSection({
         <p className="text-xs text-muted-foreground mb-4">
           Static resources receiving repeated Cache MISSes, potentially due to low/zero TTL configurations.
         </p>
-        <LowTtlTable rows={lowTtl} isLoading={isLoading} urlHrefPrefix={urlFilterHrefPrefix} />
+        <LowTtlTable rows={lowTtl} isLoading={isLoading} isDeferred={isDeferred} urlHrefPrefix={urlFilterHrefPrefix} />
       </div>
     </div>
   )

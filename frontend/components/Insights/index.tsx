@@ -128,13 +128,13 @@ function InsightsBody({
   // started only once the first response is in and pinned to its window.
   const deferredIds = readDeferredDetectors(data)
   const followUp = useQuery({
-    queryKey: ['insights', activeServiceId, windowHours, baselineHours, 'deferred', data?.window_end, deferredIds],
+    queryKey: ['insights', activeServiceId, windowHours, baselineHours, 'deferred', data?.window_end, deferredIds, hasActiveFilters ? filterPayload : undefined],
     queryFn: async ({ signal }) => {
       const body: components['schemas']['InsightsRequest'] & { detectors: string[] } = {
         window_size_hrs: parseFloat(windowHours),
         baseline_hours: parseFloat(baselineHours),
         end_time: data?.window_end,
-        filters: {},
+        filters: filterPayload ?? {},
         force_refresh: false,
         detectors: deferredIds,
       }

@@ -24,15 +24,17 @@ import { useShallow } from 'zustand/react/shallow'
 import { cn, TRENDS, buildTrafficData, TIME_HOVER_LAYOUT, makeTimeXAxis, type BuildTrafficDataParams } from '@/lib/utils'
 import { useLocalStorageString } from '@/hooks/useSSE'
 import {
-  Sparkline, CardGrid, GeoMap, DashboardHeader,
-  type SparklineProps, type DashboardCatalog, type DashboardAggregates,
+  CardGrid, GeoMap, DashboardHeader,
+  type DashboardCatalog, type DashboardAggregates,
   type CardGridProps, type GeoMapProps, type DashboardHeaderProps,
 } from './DashboardWidgets'
 
+export { Sparkline, type SparklineProps } from '@/components/Sparkline'
+
 export {
   CARD_CATEGORIES, CATEGORIZED_CARD_IDS, CUSTOM_TINT, type CardCategory, type CardTint,
-  Sparkline, CardGrid, GeoMap, DashboardHeader,
-  type SparklineProps, type DashboardCatalog, type DashboardAggregates,
+  CardGrid, GeoMap, DashboardHeader,
+  type DashboardCatalog, type DashboardAggregates,
   type CardGridProps, type GeoMapProps, type DashboardHeaderProps,
 }
 

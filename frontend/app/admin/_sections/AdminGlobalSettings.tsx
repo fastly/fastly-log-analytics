@@ -1,5 +1,6 @@
 'use client'
 import React, { useMemo, useState } from 'react'
+import dynamic from 'next/dynamic'
 import { Controller, useForm, useWatch } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -15,8 +16,12 @@ import { buildServiceHref, cn, panelDialogContent, panelDialogFooter, panelDialo
 import { useBootstrap, useMounted } from '@/hooks/useBootstrap'
 import { useServiceStore } from '@/stores/filterStore'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
-import { BotSourcesPanel } from '@/app/control-room/_sections/BotSourcesAndJobsPanels'
 import { Badge } from '@/components/ui/badge'
+
+const BotSourcesPanel = dynamic(
+  () => import('@/app/control-room/_sections/BotSourcesAndJobsPanels').then((m) => m.BotSourcesPanel),
+  { ssr: false },
+)
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'

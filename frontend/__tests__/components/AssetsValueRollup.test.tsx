@@ -11,7 +11,7 @@ import { createTestQueryClient } from '@/__tests__/helpers/page-smoke'
 import { setCloudModeRuntime } from '@/lib/cloud-engine/mode'
 import AssetsClient from '@/app/assets-shield/_sections/AssetsClient'
 import FastlyValueClient from '@/app/fastly-value/_sections/FastlyValueClient'
-import { useServiceStore, useTimezoneStore } from '@/stores/filterStore'
+import { useFilterStore, useServiceStore, useTimezoneStore } from '@/stores/filterStore'
 
 const layout = vi.hoisted(() => ({
   filterPayload: {} as Record<string, unknown>,
@@ -115,13 +115,81 @@ describe('AssetsClient on Cloud', () => {
 
     expect(await screen.findByText('4,321 reqs')).toBeInTheDocument()
     expect(sections).toEqual([['summary']])
-    expect(screen.getByText('Scanning uncompressed static assets...')).toBeInTheDocument()
+    expect(screen.getByText('Scroll to scan uncompressed static assets.')).toBeInTheDocument()
+    expect(screen.getByText('Scroll to detect low cache-TTL hotspots.')).toBeInTheDocument()
+    expect(screen.queryByText('Scanning uncompressed static assets...')).not.toBeInTheDocument()
     expect(screen.queryByText('No uncompressed static assets detected! Nice work.')).not.toBeInTheDocument()
+    expect(screen.queryByText('No cache miss hot spots detected.')).not.toBeInTheDocument()
+    expect(screen.getByTestId('assets-uncompressed-card').querySelector('.animate-spin')).toBeNull()
+    expect(screen.getByTestId('assets-low-ttl-card').querySelector('.animate-spin')).toBeNull()
     act(() => observer.fire(true))
     await waitFor(() => expect(sections).toEqual([['summary'], ['large_uncompressed_assets', 'low_ttl_assets']]))
+    expect(screen.getByText('Scanning uncompressed static assets...')).toBeInTheDocument()
     expect(container.querySelector('.opacity-60')).toBeNull()
     answerTables({ large_uncompressed_assets: [], low_ttl_assets: [] })
     expect(await screen.findByText('No uncompressed static assets detected! Nice work.')).toBeInTheDocument()
+  })
+
+  it('loads raw URL hotspots eagerly without waiting for intersection when the window is <= 1h', async () => {
+    setCloudModeRuntime(true)
+    layout.startTime = '2027-01-15T09:00:00Z'
+    layout.endTime = '2027-01-15T10:00:00Z'
+    stubIntersectionObserver()
+    const sections = recordPosts('/api/assets/aggregates', (asked) =>
+      asked?.includes('summary')
+        ? { ...assetsSummary, rollup: meta }
+        : { large_uncompressed_assets: [], low_ttl_assets: [] },
+    )
+    renderBootstrapped(<AssetsClient />, { withNuqs: true })
+
+    expect(await screen.findByText('4,321 reqs')).toBeInTheDocument()
+    await waitFor(() => expect(sections).toEqual([['summary'], ['large_uncompressed_assets', 'low_ttl_assets']]))
+    expect(screen.queryByText('Scroll to scan uncompressed static assets.')).not.toBeInTheDocument()
+    expect(await screen.findByText('No uncompressed static assets detected! Nice work.')).toBeInTheDocument()
+  })
+
+  it('loads raw URL hotspots eagerly for relativeRange 1h and defers with a non-spinning prompt for 24h', async () => {
+    setCloudModeRuntime(true)
+    const prevRelativeRange = useFilterStore.getState().relativeRange
+    layout.startTime = null
+    layout.endTime = null
+    try {
+      useFilterStore.setState({ relativeRange: '1h' })
+      stubIntersectionObserver()
+      const eagerSections = recordPosts('/api/assets/aggregates', (asked) =>
+        asked?.includes('summary')
+          ? { ...assetsSummary, rollup: meta }
+          : { large_uncompressed_assets: [], low_ttl_assets: [] },
+      )
+      const { unmount } = renderBootstrapped(<AssetsClient />, { withNuqs: true })
+
+      expect(await screen.findByText('4,321 reqs')).toBeInTheDocument()
+      await waitFor(() => expect(eagerSections).toEqual([['summary'], ['large_uncompressed_assets', 'low_ttl_assets']]))
+      expect(screen.queryByText('Scroll to scan uncompressed static assets.')).not.toBeInTheDocument()
+      unmount()
+
+      useFilterStore.setState({ relativeRange: '24h' })
+      const observer = stubIntersectionObserver()
+      const deferredSections = recordPosts('/api/assets/aggregates', (asked) =>
+        asked?.includes('summary')
+          ? { ...assetsSummary, rollup: meta }
+          : { large_uncompressed_assets: [], low_ttl_assets: [] },
+      )
+      renderBootstrapped(<AssetsClient />, { withNuqs: true })
+
+      expect(await screen.findByText('4,321 reqs')).toBeInTheDocument()
+      expect(deferredSections).toEqual([['summary']])
+      expect(screen.getByText('Scroll to scan uncompressed static assets.')).toBeInTheDocument()
+      expect(screen.getByText('Scroll to detect low cache-TTL hotspots.')).toBeInTheDocument()
+      expect(screen.getByTestId('assets-uncompressed-card').querySelector('.animate-spin')).toBeNull()
+      expect(screen.getByTestId('assets-low-ttl-card').querySelector('.animate-spin')).toBeNull()
+
+      act(() => observer.fire(true))
+      await waitFor(() => expect(deferredSections).toEqual([['summary'], ['large_uncompressed_assets', 'low_ttl_assets']]))
+      expect(await screen.findByText('No uncompressed static assets detected! Nice work.')).toBeInTheDocument()
+    } finally {
+      useFilterStore.setState({ relativeRange: prevRelativeRange })
+    }
   })
 
   it('observes hotspots against the nearest overflow-auto scroll container with 0px rootMargin', async () => {

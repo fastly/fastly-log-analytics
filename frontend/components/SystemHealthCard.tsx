@@ -4,7 +4,7 @@ import * as React from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { Badge } from '@/components/ui/badge'
-import { Sparkline } from '@/app/dashboard/_sections/DashboardClient'
+import { Sparkline } from '@/components/Sparkline'
 import { ELAPSED_AGE_COMPACT, formatCount, formatElapsed } from "@/lib/utils"
 import { useMounted } from '@/hooks/useBootstrap'
 import { client, unwrapClient, queryKeys } from "@/lib/api";

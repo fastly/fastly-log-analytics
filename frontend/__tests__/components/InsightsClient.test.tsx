@@ -16,15 +16,22 @@ vi.mock('@/hooks/useBootstrap', async (importOriginal) => ({
   useEffectiveServiceId: () => 'svc-1',
 }))
 
+const layout = vi.hoisted(() => ({
+  filterPayload: undefined as Record<string, unknown> | undefined,
+}))
+
 vi.mock('@/components/ReportLayout', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/components/ReportLayout')>()
-  const ReportLayout = (props: { children: (ctx: { activeServiceId: string }) => React.ReactNode }) => (
-    <div>{props.children({ activeServiceId: 'svc-1' })}</div>
+  const ReportLayout = (props: { children: (ctx: { activeServiceId: string; filterPayload?: Record<string, unknown> }) => React.ReactNode }) => (
+    <div>{props.children({ activeServiceId: 'svc-1', filterPayload: layout.filterPayload })}</div>
   )
   return { ...actual, default: ReportLayout, ReportLayout }
 })
 
-afterEach(cleanup)
+afterEach(() => {
+  layout.filterPayload = undefined
+  cleanup()
+})
 
 describe('InsightsClient first load', () => {
   it('scans once with the history-adapted defaults instead of first scanning the static 24h/7d pair', async () => {
@@ -268,7 +275,7 @@ describe('InsightsClient deferred baseline follow-up', () => {
     rollup: { data_from: new Date(Date.now() - 48 * 3600_000).toISOString(), data_through: windowEnd, approximate: [], lower_bound: [] },
     insights: [card('fast', 'warning', 'Spike'), card('slow', 'info', 'Computing baseline…', true)],
   })
-  type Body = { detectors?: string[]; end_time?: string; baseline_hours: number; window_size_hrs: number }
+  type Body = { detectors?: string[]; end_time?: string; baseline_hours: number; window_size_hrs: number; filters?: Record<string, unknown> }
 
   function serveFollowUp(followUp: () => Promise<Response>) {
     const followUps: Array<{ body: Body; prefetch: string | null }> = []
@@ -342,6 +349,20 @@ describe('InsightsClient deferred baseline follow-up', () => {
     expect(grid).not.toHaveTextContent('Computing baseline…')
     expect(grid).not.toHaveTextContent('Not evaluated')
     expect(screen.queryByText(/Error loading insights/)).toBeNull()
+  })
+
+  it('forwards active filters in the deferred baseline follow-up POST /api/insights body', async () => {
+    const activeFilters = { country: { mode: 'include', values: ['US'] } }
+    layout.filterPayload = activeFilters
+    const followUps = serveFollowUp(async () =>
+      HttpResponse.json(envelope({ window_end: windowEnd, insights: [card('slow', 'critical', 'Slow spike')] })),
+    )
+    useServiceStore.setState({ activeServiceId: 'svc-1' })
+    renderWithQuery(<InsightsClient />, { withNuqs: true })
+
+    await waitFor(() => expect(followUps).toHaveLength(1))
+    expect(followUps[0].body.filters).toEqual(activeFilters)
+    expect(followUps[0].body).toMatchObject({ detectors: ['slow'], end_time: windowEnd, filters: activeFilters })
   })
 })
 

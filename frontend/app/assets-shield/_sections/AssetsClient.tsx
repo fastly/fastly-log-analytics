@@ -109,16 +109,22 @@ export function AssetsReportContent({
     queryFn: ({ rangeBody, signal }) => postAssets(ASSETS_ROLLUP_SECTIONS, rangeBody, signal),
   })
 
-  // The URL tables always read raw rows, so in Cloud they wait until summaries paint and their panel enters the viewport.
+  // The URL tables always read raw rows; on <=1h Cloud windows load them eagerly after summaries,
+  // and on longer Cloud windows wait until summaries paint and their panel enters the viewport.
+  const spanHours = startTime && endTime
+    ? (Date.parse(endTime) - Date.parse(startTime)) / 3_600_000
+    : (relativeRange === '15m' || relativeRange === '1h' ? 1 : 24)
+  const deferHotspots = rollupFirst && !(spanHours > 0 && spanHours <= 1.05)
   const hotspotsRef = React.useRef<HTMLDivElement>(null)
-  const hotspotsNear = useInViewOnce(hotspotsRef, { rootMargin: '0px', enabled: !rollupFirst || rollupQuery.isSuccess })
+  const hotspotsNear = useInViewOnce(hotspotsRef, { rootMargin: '0px', enabled: deferHotspots && rollupQuery.isSuccess })
+  const hotspotsEnabled = !rollupFirst || (rollupQuery.isSuccess && (!deferHotspots || hotspotsNear))
   const bundle = useAnalyticsReportQuery<AssetsAggregates | undefined>({
     namespace: ['assets', 'aggregates'],
     serviceId: activeServiceId,
     filterPayload,
     range,
     keyParts: rollupFirst ? [ASSETS_RAW_SECTIONS] : [],
-    queryOptions: { enabled: !rollupFirst || (rollupQuery.isSuccess && hotspotsNear) },
+    queryOptions: { enabled: hotspotsEnabled },
     queryFn: ({ rangeBody, signal }) => postAssets(rollupFirst ? ASSETS_RAW_SECTIONS : undefined, rangeBody, signal),
   })
 
@@ -198,7 +204,8 @@ export function AssetsReportContent({
         <AssetsHotspotsSection
           largeUncompressed={largeUncompressed}
           lowTtl={lowTtl}
-          isLoading={!bundle.data}
+          isLoading={hotspotsEnabled ? !bundle.data : false}
+          isDeferred={!hotspotsEnabled && !bundle.data}
           urlFilterHrefPrefix={urlFilterHrefPrefix}
           onSelectHelp={setActiveHelp}
         />
