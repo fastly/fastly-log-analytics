@@ -955,9 +955,8 @@ impl Runtime for FastlyRuntime {
                                 .unwrap_or(0);
                             if crate::admin::transport::allow_stale_pop_overwrite(
                                 key,
-                                coord
-                                    .as_ref()
-                                    .is_some_and(|c| c.last_written_value.is_some()),
+                                coord.as_ref().and_then(|c| c.last_written_value.as_ref()),
+                                &value,
                                 coord.as_ref().and_then(|c| c.dead_generation.as_deref()),
                                 dead_since,
                                 g_str,

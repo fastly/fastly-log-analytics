@@ -223,28 +223,39 @@ pub fn should_adopt_fresh_record(cur_generation: &str, cur_value: &Value, fresh:
 /// Whether `admin_cas` may heal a stuck local POP KV cache via `InsertMode::Overwrite` after
 /// `ItemPreconditionFailed`.
 ///
-/// Watermark keys (`ingest:watermark`, `ingest:rum:watermark`, etc.) hold the committed catalog
-/// head pointer and have concurrent writers across POPs (ingest, compaction, summary_bundle,
-/// retention). A blind `Overwrite` from a stale read rolls back the catalog head and permanently
-/// orphans committed Parquet files whose raw logs have already been deleted, so watermark keys
-/// must never use `InsertMode::Overwrite`. Other coordinated keys may only heal when this POP's
-/// Core Cache actually recorded a prior write (`has_local_write`), so an unverified conflict
-/// against another POP's commit never clobbers it.
+/// Only allowed when this POP's Core Cache actually recorded a prior write (`last_written`), so
+/// `admin_get` already served `last_written` as the caller's base and an unverified conflict
+/// against another POP's commit never clobbers it. For `ingest:watermark`, additionally requires
+/// `catalog.generation` to strictly advance past `last_written` so a stale read can never roll
+/// back the catalog head and orphan committed Parquet files.
 pub fn allow_stale_pop_overwrite(
     key: &str,
-    has_local_write: bool,
+    last_written: Option<&Value>,
+    new_value: &Value,
     dead_generation: Option<&str>,
     dead_since_ms: u64,
     tried_gen: &str,
     now_ms: u64,
 ) -> bool {
-    if key == crate::ingest::WATERMARK_KEY || key.ends_with(":watermark") {
+    let Some(last) = last_written else {
+        return false;
+    };
+    if dead_generation != Some(tried_gen)
+        || dead_since_ms == 0
+        || now_ms.saturating_sub(dead_since_ms) < 2_000
+    {
         return false;
     }
-    has_local_write
-        && dead_generation == Some(tried_gen)
-        && dead_since_ms > 0
-        && now_ms.saturating_sub(dead_since_ms) >= 2_000
+    if key == crate::ingest::WATERMARK_KEY {
+        let prev_gen = last["catalog"]["generation"].as_u64();
+        let next_gen = new_value["catalog"]["generation"].as_u64();
+        return matches!((prev_gen, next_gen), (Some(prev), Some(next)) if next > prev);
+    }
+    if key.ends_with(":watermark") {
+        return last["run_id"].as_str().is_some()
+            && new_value["run_id"].as_str() != last["run_id"].as_str();
+    }
+    true
 }
 impl Default for BackendBudget {
     fn default() -> Self {
@@ -1318,36 +1329,55 @@ mod tests {
 
     #[test]
     fn allow_stale_pop_overwrite_blocks_watermarks_and_unverified_cross_pop_conflicts() {
-        // Never allow blind Overwrite on request or RUM watermark keys.
+        let prev_wm = serde_json::json!({"catalog": {"generation": 10}, "_kv_written_ms": 1_000});
+        let next_wm = serde_json::json!({"catalog": {"generation": 11}, "_kv_written_ms": 5_000});
+        let stale_wm = serde_json::json!({"catalog": {"generation": 10}, "_kv_written_ms": 5_000});
+        let state_val = serde_json::json!({"lease_until": 0, "_kv_written_ms": 1_000});
+
+        // Cross-POP writer with no local write in coord cache is always blocked.
         assert!(!super::allow_stale_pop_overwrite(
             crate::ingest::WATERMARK_KEY,
-            true,
+            None,
+            &next_wm,
             Some("100"),
             1_000,
             "100",
             5_000,
         ));
+        // Watermark rollback / same catalog generation is blocked even with a local write.
         assert!(!super::allow_stale_pop_overwrite(
-            "ingest:rum:watermark",
-            true,
+            crate::ingest::WATERMARK_KEY,
+            Some(&prev_wm),
+            &stale_wm,
             Some("100"),
             1_000,
             "100",
             5_000,
         ));
-        // Never allow Overwrite on other keys without a local POP write in coord cache.
+        // Watermark strictly advancing from this POP's own last written head heals after >=2s.
+        assert!(super::allow_stale_pop_overwrite(
+            crate::ingest::WATERMARK_KEY,
+            Some(&prev_wm),
+            &next_wm,
+            Some("100"),
+            1_000,
+            "100",
+            5_000,
+        ));
+        // Non-watermark coordinated keys require local write + >=2s dead gen.
         assert!(!super::allow_stale_pop_overwrite(
             crate::ingest::compaction::STATE_KEY,
-            false,
+            None,
+            &state_val,
             Some("100"),
             1_000,
             "100",
             5_000,
         ));
-        // Allow Overwrite on non-watermark coordinated keys when local write + >=2s dead gen.
         assert!(super::allow_stale_pop_overwrite(
             crate::ingest::compaction::STATE_KEY,
-            true,
+            Some(&state_val),
+            &state_val,
             Some("100"),
             1_000,
             "100",
@@ -1356,7 +1386,8 @@ mod tests {
         // Too soon (< 2s) still waits.
         assert!(!super::allow_stale_pop_overwrite(
             crate::ingest::compaction::STATE_KEY,
-            true,
+            Some(&state_val),
+            &state_val,
             Some("100"),
             1_000,
             "100",
