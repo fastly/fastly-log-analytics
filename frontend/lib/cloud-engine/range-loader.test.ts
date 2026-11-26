@@ -1917,4 +1917,216 @@ describe("Cloud first-page analytical range loading", () => {
     expect(await readB.executeSql("SELECT count(*)::INT AS n FROM requests")).toEqual([{ n: 1600 }]);
     readB.release?.();
   });
+
+  it("throws CloudBudgetError on a warm 24h wide-projection scan when a resident >6 MiB compact puts total bytes over budget, while narrowing to resident hours hits zero fetches", async () => {
+    Object.assign(wholeReadLimits, DEFAULT_WHOLE_READ_LIMITS);
+    const makeCompact = (seedStart: number, rgRows: number, rowGroups: number, startMs: number, stepMs: number, strLen: number) => {
+      let seed = seedStart;
+      const randStr = (len: number) => Array.from({ length: len }, () => {
+        seed = (seed * 1103515245 + 12345) % 2147483648;
+        return String.fromCharCode(33 + (seed % 90));
+      }).join("");
+      const totalRows = rgRows * rowGroups;
+      return parquetWriteBuffer({
+        codec: "UNCOMPRESSED",
+        rowGroupSize: rgRows,
+        columnData: [
+          { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: totalRows }, (_, i) => new Date(startMs + i * stepMs)) },
+          { name: "status", type: "INT32", data: Array.from({ length: totalRows }, () => 200) },
+          { name: "url", type: "STRING", data: Array.from({ length: totalRows }, () => randStr(strLen)) },
+          { name: "ua", type: "STRING", data: Array.from({ length: totalRows }, () => randStr(strLen)) },
+        ],
+      });
+    };
+
+    const dayStartMs = Date.parse("2026-11-25T00:00:00Z");
+    const dayEndMs = dayStartMs + 24 * 3_600_000;
+    const recentStartMs = dayEndMs - 3_600_000;
+    const bigBytes = makeCompact(71, 1000, 5, recentStartMs, 500, 680);
+    expect(bigBytes.byteLength).toBeGreaterThan(6 * 1024 * 1024);
+    const smallBytes = makeCompact(83, 500, 6, dayStartMs, 1000, 400);
+    expect(smallBytes.byteLength).toBeGreaterThan(2 * 1024 * 1024);
+    expect(smallBytes.byteLength).toBeLessThanOrEqual(DEFAULT_WHOLE_READ_LIMITS.closedHourUpToBytes);
+
+    const bigEntry: ManifestFile = {
+      key: "processed/request/year=2026/month=11/day=25/hour=23/compact=c4-big.parquet",
+      start: new Date(recentStartMs).toISOString(),
+      end: new Date(recentStartMs + 5000 * 500).toISOString(),
+      rows: 5000,
+      size: bigBytes.byteLength,
+      etag: "\"etag-wide-resident-big\"",
+    };
+    const olderEntries: ManifestFile[] = Array.from({ length: 3 }, (_, i) => {
+      const startMs = dayStartMs + i * 3_600_000;
+      return {
+        key: `processed/request/year=2026/month=11/day=25/hour=0${i + 1}/compact=c4-old-${i}.parquet`,
+        start: new Date(startMs).toISOString(),
+        end: new Date(startMs + 3_000 * 1000).toISOString(),
+        rows: 3000,
+        size: smallBytes.byteLength,
+        etag: `"etag-wide-old-${i}"`,
+      };
+    });
+
+    const bytesByKey = new Map<string, ArrayBuffer>([
+      [bigEntry.key, bigBytes],
+      ...olderEntries.map((entry) => [entry.key, smallBytes] as const),
+    ]);
+    source.fetchFile.mockImplementation(async (key: string) => ({
+      bytes: bytesByKey.get(key)!.slice(0),
+      cached: false,
+    }));
+    source.fetchRange.mockImplementation(async (entry: ManifestFile, start: number, end: number) =>
+      bytesByKey.get(entry.key)!.slice(start, end),
+    );
+
+    const wideColumns = [
+      "timestamp", "status", "cache", "resp_bytes", "edge", "url",
+      "ua", "referer", "ip", "host", "country", "asn",
+      "pop", "method", "proto", "tls",
+    ];
+    const recentFrom = new Date(recentStartMs - 60_000).toISOString();
+    const recentTo = new Date(dayEndMs).toISOString();
+
+    // 1. Warm the newest hour so the >6 MiB compact is resident in DuckDB.
+    vi.mocked(fetchManifest).mockResolvedValueOnce({ files: [bigEntry], complete: true });
+    const byteLimit = bigBytes.byteLength + smallBytes.byteLength;
+    const warmRead = await ensureCloudRange(recentFrom, recentTo, signal, ["request"], {
+      projection: { columns: wideColumns, maxBytes: byteLimit },
+    });
+    expect(await warmRead.executeSql("SELECT count(*)::INT AS n FROM requests")).toEqual([{ n: 5000 }]);
+    warmRead.release?.();
+
+    source.fetchFile.mockClear();
+    source.fetchRange.mockClear();
+
+    // 2. Expanding to the full 24h exceeds byteLimit and fails fast with CloudBudgetError (no range fallback).
+    vi.mocked(fetchManifest).mockResolvedValueOnce({ files: [...olderEntries, bigEntry], complete: true });
+    await expect(ensureCloudRange(
+      new Date(dayStartMs).toISOString(),
+      recentTo,
+      signal,
+      ["request"],
+      { projection: { columns: wideColumns, maxBytes: byteLimit } },
+    )).rejects.toBeInstanceOf(CloudBudgetError);
+    expect(source.fetchFile).not.toHaveBeenCalled();
+    expect(source.fetchRange).not.toHaveBeenCalled();
+
+    // 3. Narrowing back to the resident hours succeeds with 0 new fetchFile or fetchRange calls.
+    vi.mocked(fetchManifest).mockResolvedValueOnce({ files: [bigEntry], complete: true });
+    const narrowRead = await ensureCloudRange(recentFrom, recentTo, signal, ["request"], {
+      projection: { columns: wideColumns, maxBytes: byteLimit },
+    });
+    expect(await narrowRead.executeSql("SELECT count(*)::INT AS n FROM requests")).toEqual([{ n: 5000 }]);
+    narrowRead.release?.();
+    expect(source.fetchFile).not.toHaveBeenCalled();
+    expect(source.fetchRange).not.toHaveBeenCalled();
+  });
+
+  it("bounds wholeFirst greedy packing against byteLimit minus residentPriorBytes", async () => {
+    Object.assign(wholeReadLimits, DEFAULT_WHOLE_READ_LIMITS);
+    const makeCompact = (seedStart: number, startMs: number, urlLen: number, uaLen: number) => {
+      let seed = seedStart;
+      const randStr = (len: number) => Array.from({ length: len }, () => {
+        seed = (seed * 1103515245 + 12345) % 2147483648;
+        return String.fromCharCode(33 + (seed % 90));
+      }).join("");
+      const rgRows = 500;
+      const totalRows = rgRows * 6;
+      return parquetWriteBuffer({
+        codec: "UNCOMPRESSED",
+        rowGroupSize: rgRows,
+        columnData: [
+          { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: totalRows }, (_, i) => new Date(startMs + i * 1000)) },
+          { name: "url", type: "STRING", data: Array.from({ length: totalRows }, () => randStr(urlLen)) },
+          { name: "ua", type: "STRING", data: Array.from({ length: totalRows }, () => randStr(uaLen)) },
+        ],
+      });
+    };
+
+    const baseStartMs = Date.parse("2026-11-25T02:00:00Z");
+    const residentBytes = makeCompact(91, baseStartMs + 2 * 3_600_000, 750, 20);
+    const unknownBytes = makeCompact(97, baseStartMs, 10, 780);
+    expect(residentBytes.byteLength).toBeGreaterThan(2 * 1024 * 1024);
+    expect(unknownBytes.byteLength).toBeGreaterThan(2 * 1024 * 1024);
+    expect(unknownBytes.byteLength).toBeLessThanOrEqual(DEFAULT_WHOLE_READ_LIMITS.closedHourUpToBytes);
+
+    const residentEntry: ManifestFile = {
+      key: "processed/request/year=2026/month=11/day=25/hour=04/compact=c4-res.parquet",
+      start: new Date(baseStartMs + 2 * 3_600_000).toISOString(),
+      end: new Date(baseStartMs + 2 * 3_600_000 + 3_000_000).toISOString(),
+      rows: 3000,
+      size: residentBytes.byteLength,
+      etag: "\"etag-greedy-res\"",
+    };
+    const unknownEntries: ManifestFile[] = [0, 1].map((i) => ({
+      key: `processed/request/year=2026/month=11/day=25/hour=0${i + 2}/compact=c4-unk-${i}.parquet`,
+      start: new Date(baseStartMs + i * 3_600_000).toISOString(),
+      end: new Date(baseStartMs + i * 3_600_000 + 3_000_000).toISOString(),
+      rows: 3000,
+      size: unknownBytes.byteLength,
+      etag: `"etag-greedy-unk-${i}"`,
+    }));
+
+    const bytesByKey = new Map<string, ArrayBuffer>([
+      [residentEntry.key, residentBytes],
+      ...unknownEntries.map((entry) => [entry.key, unknownBytes] as const),
+    ]);
+    const fetchedWholeKeys: string[] = [];
+    const rangedKeys = new Set<string>();
+    source.fetchFile.mockImplementation(async (key: string) => {
+      fetchedWholeKeys.push(key);
+      return { bytes: bytesByKey.get(key)!.slice(0), cached: false };
+    });
+    source.fetchRange.mockImplementation(async (entry: ManifestFile, start: number, end: number) => {
+      rangedKeys.add(entry.key);
+      return bytesByKey.get(entry.key)!.slice(start, end);
+    });
+
+    // Warm residentEntry with ["timestamp", "url"], leaving ~2.2 MiB resident in DuckDB.
+    vi.mocked(fetchManifest).mockResolvedValueOnce({ files: [residentEntry], complete: true });
+    const warmRead = await ensureCloudRange(
+      residentEntry.start,
+      residentEntry.end,
+      signal,
+      ["request"],
+      { projection: { columns: ["timestamp", "url"] } },
+    );
+    warmRead.release?.();
+
+    const engine = getDuckDBEngine();
+    const resKey = JSON.stringify([
+      "fixture-session", "", "request", residentEntry.key, residentEntry.etag, residentEntry.size, "",
+      "projection", "timestamp", "url",
+    ]);
+    const residentPriorBytes = engine.getFileMeta(resKey)!.byteLength;
+    expect(residentPriorBytes).toBeGreaterThan(2 * 1024 * 1024);
+
+    fetchedWholeKeys.length = 0;
+    rangedKeys.clear();
+
+    // byteLimit accommodates residentPriorBytes + 1.5 * unknownBytes (so candidateBytes = 2 * unknownBytes
+    // fits byteLimit on its own, yet residentPriorBytes leaves room to pack only the newest unknown whole).
+    const byteLimit = residentPriorBytes + Math.floor(unknownBytes.byteLength * 1.5);
+    expect(unknownBytes.byteLength * 2).toBeLessThanOrEqual(byteLimit);
+    vi.mocked(fetchManifest).mockResolvedValueOnce({
+      files: [...unknownEntries, residentEntry],
+      complete: true,
+    });
+    const read = await ensureCloudRange(
+      new Date(baseStartMs).toISOString(),
+      new Date(baseStartMs + 3 * 3_600_000).toISOString(),
+      signal,
+      ["request"],
+      { projection: { columns: ["timestamp", "url"], maxBytes: byteLimit } },
+    );
+    const [{ n }] = await read.executeSql("SELECT count(*)::INT AS n FROM requests") as [{ n: number }];
+    expect(n).toBe(9000);
+    read.release?.();
+
+    expect(fetchedWholeKeys).toEqual([unknownEntries[1].key]);
+    expect(rangedKeys.has(unknownEntries[0].key)).toBe(true);
+    expect(rangedKeys.has(unknownEntries[1].key)).toBe(false);
+    expect(rangedKeys.has(residentEntry.key)).toBe(false);
+  });
 });

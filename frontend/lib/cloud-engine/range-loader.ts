@@ -421,19 +421,27 @@ export async function ensureCloudRange(
         loading.update({ stage: "files" });
         const unknown = files.filter((file) => !engine.getFileMeta(file.scopedKey));
         if (unknown.some((file) => !(file.size > 0))) throw new Error("Cloud file listing has no file size to project");
+        const residentPriorBytes = files.reduce(
+          (sum, file) => sum + (engine.getFileMeta(file.scopedKey)?.byteLength ?? 0),
+          0,
+        );
         const now = Date.now();
         // When `requireAnyColumns` is set, read the footer first so files lacking all required
         // columns are skipped without downloading them whole.
         const candidates = requiredAnyColumns ? [] : unknown.filter((file) => shouldReadWholeFirst(file, now));
+        const hasWideProjectionFile =
+          !requiredAnyColumns &&
+          files.some((file) => prefersWholeForWideProjection(file, projectedColumns.size, rangeWindow));
         const candidateBytes = candidates.reduce((total, file) => total + file.size, 0);
-        if (candidateBytes <= byteLimit) {
+        if (residentPriorBytes + candidateBytes <= byteLimit) {
           for (const file of candidates) wholeFirst.add(file.scopedKey);
-        } else if (candidates.some((file) => prefersWholeForWideProjection(file, projectedColumns.size, rangeWindow))) {
-          throw overBudget({ unit: "bytes", needed: candidateBytes, limit: byteLimit });
+        } else if (hasWideProjectionFile) {
+          throw overBudget({ unit: "bytes", needed: residentPriorBytes + candidateBytes, limit: byteLimit });
         } else {
-          // Greedily pack newest-first whole-file candidates up to a conservative share of byteLimit
+          // Greedily pack newest-first whole-file candidates up to a conservative share of availableBudget
           // while reserving projected headroom for remaining files, avoiding all-or-nothing range fan-out.
-          const wholeCap = Math.floor(byteLimit * 0.85);
+          const availableBudget = Math.max(0, byteLimit - residentPriorBytes);
+          const wholeCap = Math.floor(availableBudget * 0.85);
           const reserveOf = (file: typeof unknown[number]) => Math.min(Math.ceil(file.size * 0.25), 256 * 1024);
           let remainingReserve = unknown.reduce((sum, file) => sum + reserveOf(file), 0);
           let packedBytes = 0;
@@ -443,7 +451,7 @@ export async function ensureCloudRange(
           for (const file of sortedCandidates) {
             const nextPacked = packedBytes + file.size;
             const nextReserve = remainingReserve - reserveOf(file);
-            if (nextPacked <= wholeCap && nextPacked + nextReserve <= byteLimit) {
+            if (nextPacked <= wholeCap && nextPacked + nextReserve <= availableBudget) {
               wholeFirst.add(file.scopedKey);
               packedBytes = nextPacked;
               remainingReserve = nextReserve;

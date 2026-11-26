@@ -3,6 +3,7 @@ import { renderHook, waitFor } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleCloudAnalyticalRequest, resetCloudMetadataCache } from "./adapter";
+import { fetchCloudMetadata } from "./metadata-cache";
 import { useBootstrap } from "@/hooks/useBootstrap";
 import { queryKeys } from "@/lib/api";
 import { setCloudModeRuntime } from "./mode";
@@ -200,6 +201,35 @@ describe("Cloud scan metadata", () => {
     const counts = calls(fetcher).reduce<Record<string, number>>((acc, path) => ({ ...acc, [path]: (acc[path] ?? 0) + 1 }), {});
     expect(counts["/api/services"]).toBe(1);
     expect(counts["/api/log-extents"]).toBe(1);
+  });
+
+  it("shares an anonymous metadata entry when promoted to a user identity, while isolating distinct or downgraded identities", async () => {
+    const fetcher = metadataFetcher();
+    vi.stubGlobal("fetch", fetcher);
+
+    // 1. null -> "u1:admin" shares 1 underlying fetch and promotes the entry's identity.
+    updateDashboardCacheIdentity(null);
+    const anonRes = await fetchCloudMetadata("/api/services", new AbortController().signal);
+    expect(anonRes.ok).toBe(true);
+    updateDashboardCacheIdentity("u1:admin");
+    const promotedRes = await fetchCloudMetadata("/api/services", new AbortController().signal);
+    expect(promotedRes.ok).toBe(true);
+    expect(calls(fetcher).filter((path) => path === "/api/services")).toHaveLength(1);
+
+    // 2. "u1:admin" -> "u2:viewer" must issue a separate fetch.
+    updateDashboardCacheIdentity("u2:viewer");
+    const viewerRes = await fetchCloudMetadata("/api/services", new AbortController().signal);
+    expect(viewerRes.ok).toBe(true);
+    expect(calls(fetcher).filter((path) => path === "/api/services")).toHaveLength(2);
+
+    // 3. "u1:admin" -> null must also issue a separate fetch.
+    updateDashboardCacheIdentity("u1:admin");
+    const adminExtents = await fetchCloudMetadata("/api/log-extents", new AbortController().signal);
+    expect(adminExtents.ok).toBe(true);
+    updateDashboardCacheIdentity(null);
+    const anonExtents = await fetchCloudMetadata("/api/log-extents", new AbortController().signal);
+    expect(anonExtents.ok).toBe(true);
+    expect(calls(fetcher).filter((path) => path === "/api/log-extents")).toHaveLength(2);
   });
 });
 

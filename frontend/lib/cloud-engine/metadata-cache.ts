@@ -66,14 +66,20 @@ export async function fetchCloudMetadata(path: string, signal: AbortSignal): Pro
   // Another tab signing in as someone else changes the shared identity; never hand them this one's answer.
   const identity = dashboardCacheIdentity();
   let entry = metadataCache.get(path);
+  const identityMatches =
+    entry !== undefined &&
+    (entry.identity === identity || (entry.identity === null && identity !== null));
   if (
     entry &&
     entry.epoch === callCacheEpoch &&
     !entry.controller.signal.aborted &&
-    entry.identity === identity &&
+    identityMatches &&
     now - entry.usedAt <= METADATA_TTL_MS &&
     now - entry.at < METADATA_MAX_AGE_MS
   ) {
+    if (entry.identity === null && identity !== null) {
+      entry.identity = identity;
+    }
     entry.usedAt = now;
   } else {
     const controller = new AbortController();
