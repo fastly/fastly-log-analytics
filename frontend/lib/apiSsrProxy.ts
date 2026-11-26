@@ -56,12 +56,34 @@ function sanitizeForwardedFor(raw: string | null): string | null {
   return kept.length > 0 ? kept.join(", ") : null;
 }
 
+let _ssrHttpAgent: import("node:http").Agent | undefined;
+let _ssrHttpsAgent: import("node:https").Agent | undefined;
+
+function getSsrTransport(protocol: string): {
+  request: typeof import("node:http").request;
+  agent: import("node:http").Agent;
+} {
+  if (protocol === "https:") {
+    const mod = process.getBuiltinModule("node:https") as typeof import("node:https") | undefined;
+    if (!mod?.request || !mod?.Agent) throw new Error("Node HTTPS module unavailable in browser runtime");
+    if (!_ssrHttpsAgent) {
+      _ssrHttpsAgent = new mod.Agent({ keepAlive: true, maxSockets: 32, keepAliveMsecs: 30_000 });
+    }
+    return {
+      request: mod.request as unknown as typeof import("node:http").request,
+      agent: _ssrHttpsAgent,
+    };
+  }
+  const mod = process.getBuiltinModule("node:http") as typeof import("node:http") | undefined;
+  if (!mod?.request || !mod?.Agent) throw new Error("Node HTTP module unavailable in browser runtime");
+  if (!_ssrHttpAgent) {
+    _ssrHttpAgent = new mod.Agent({ keepAlive: true, maxSockets: 32, keepAliveMsecs: 30_000 });
+  }
+  return { request: mod.request, agent: _ssrHttpAgent };
+}
+
 function getNodeRequestFn(protocol: string) {
-  const mod = process.getBuiltinModule(protocol === "https:" ? "node:https" : "node:http") as
-    | typeof import("node:http")
-    | undefined;
-  if (!mod?.request) throw new Error("Node HTTP module unavailable in browser runtime");
-  return mod.request;
+  return getSsrTransport(protocol).request;
 }
 
 function apiProxyTarget(): string {
@@ -512,7 +534,6 @@ export async function ssrUpstreamGet({
       upstreamHeaders["Content-Type"] = "application/json";
       upstreamHeaders["Content-Length"] = String(Buffer.byteLength(serialisedBody));
     }
-    upstreamHeaders["Connection"] = "close";
     try {
       return await rawRequest(`${base}${path}`, upstreamHeaders, timeoutMs, method, serialisedBody);
     } catch (firstErr) {
@@ -537,8 +558,8 @@ function rawRequest(
 ): Promise<SSRUpstreamResponse> {
   return new Promise((resolve, reject) => {
     const url = new URL(urlStr);
-    const lib = getNodeRequestFn(url.protocol);
-    const req = lib(
+    const { request, agent } = getSsrTransport(url.protocol);
+    const req = request(
       {
         hostname: url.hostname,
         port: url.port || (url.protocol === "https:" ? 443 : 80),
@@ -546,7 +567,7 @@ function rawRequest(
         method,
         headers: reqHeaders,
         timeout: timeoutMs,
-        agent: false,
+        agent,
       },
       (res) => {
         const chunks: Buffer[] = [];

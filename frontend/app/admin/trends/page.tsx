@@ -1,14 +1,16 @@
+import { Suspense } from 'react'
 import { HydrationBoundary } from '@tanstack/react-query'
 
-import { fetchMetricHistoryBatchServerSide } from '@/lib/ssr/upstream'
-import { seedDehydratedState } from '@/lib/ssr/upstream'
+import { fetchMetricHistoryBatchServerSide, seedDehydratedState } from '@/lib/ssr/upstream'
+import AdminTrendsLoading from './loading'
 import { AdminTrendsClient } from '../_sections/OperationsOverview'
-import { queryKeys } from "@/lib/api"
+import { queryKeys } from '@/lib/api'
 
-// Per-request RSC shell for /admin/trends. Pre-fetches the default 1-hour
-// metric-history batch server-side and dehydrates it into a HydrationBoundary
-// so the 7 sparkline cards render from cache on first paint instead of paying
-// the client round-trip + skeleton flash on cold load.
+// Per-request RSC shell for /admin/trends. Streams the static AdminTrendsLoading
+// shell immediately via <Suspense> while pre-fetching the default 1-hour
+// metric-history batch server-side inside AdminTrendsPageContent and dehydrating
+// it into a HydrationBoundary so the sparkline cards hydrate from cache instead
+// of paying an extra client round-trip once the stream completes.
 //
 // The seed is consumed 100% of the time: AdminTrendsClient's window selector
 // is useState('1h') with no searchParams, so its cold queryKey is always
@@ -22,7 +24,15 @@ import { queryKeys } from "@/lib/api"
 // and AdminTrendsClient's useQuery picks up unchanged.
 export const dynamic = 'force-dynamic'
 
-export default async function AdminTrendsPage() {
+export default function AdminTrendsPage() {
+  return (
+    <Suspense fallback={<AdminTrendsLoading />}>
+      <AdminTrendsPageContent />
+    </Suspense>
+  )
+}
+
+async function AdminTrendsPageContent() {
   const batch = await fetchMetricHistoryBatchServerSide()
 
   // Must match AdminTrendsClient's useQuery key for the cold '1h' window.

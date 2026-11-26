@@ -1178,7 +1178,7 @@ describe('ssrUpstreamGet — debug-responses cookie propagation & ECONNRESET ret
     })
   })
 
-  it('disables keep-alive socket reuse (connection: close) and retries once on ECONNRESET', async () => {
+  it('uses keep-alive socket reuse (connection: keep-alive) and retries once on ECONNRESET', async () => {
     let attempts = 0
     let secondConnHeader: string | string[] | undefined
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
@@ -1198,7 +1198,7 @@ describe('ssrUpstreamGet — debug-responses cookie propagation & ECONNRESET ret
         expect(out?.statusCode).toBe(200)
         expect(out?.body).toBe('{"recovered":true}')
         expect(attempts).toBe(2)
-        expect(secondConnHeader).toBe('close')
+        expect(secondConnHeader).toBe('keep-alive')
         expect(warnSpy).not.toHaveBeenCalled()
       },
     )

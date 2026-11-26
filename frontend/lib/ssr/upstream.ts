@@ -321,15 +321,41 @@ export async function fetchInsightsServerSide(
 
 type BootstrapResponse = components['schemas']['BootstrapResponse']
 
-const _ADMIN_SSR_TTL_MS = 10000
+const _ADMIN_SSR_TTL_MS = 10_000
+const _ADMIN_SSR_STALE_TTL_MS = 60_000
 const _adminInflightMap = new Map<string, Promise<BootstrapResponse | null>>()
 const _adminCachedMap = new Map<string, { at: number; value: BootstrapResponse | null }>()
 
 function _fetchBootstrapUpstream(serviceId?: string | null): Promise<BootstrapResponse | null> {
   const path = serviceId ? `/api/bootstrap?service_id=${encodeURIComponent(serviceId)}` : '/api/bootstrap'
-  return ssrUpstreamGet({ path, logPrefix: 'ssr/bootstrap', timeoutMs: 450 }).then((resp) =>
+  return ssrUpstreamGet({ path, logPrefix: 'ssr/bootstrap', timeoutMs: 280 }).then((resp) =>
     parseSsrJson<BootstrapResponse>(resp, 'ssr/bootstrap'),
   )
+}
+
+function _refreshAdminBootstrap(
+  cacheKey: string,
+  serviceId: string | null,
+  preserveNonNullOnFailure = false,
+): Promise<BootstrapResponse | null> {
+  const existing = _adminInflightMap.get(cacheKey)
+  if (existing) return existing
+
+  const promise = (async () => {
+    try {
+      const value = await _fetchBootstrapUpstream(serviceId)
+      if (!value?.settings?.is_remote_analyst) {
+        if (value !== null || !preserveNonNullOnFailure || _adminCachedMap.get(cacheKey)?.value == null) {
+          _adminCachedMap.set(cacheKey, { at: Date.now(), value })
+        }
+      }
+      return value
+    } finally {
+      _adminInflightMap.delete(cacheKey)
+    }
+  })()
+  _adminInflightMap.set(cacheKey, promise)
+  return promise
 }
 
 export async function fetchBootstrapServerSide(): Promise<BootstrapResponse | null> {
@@ -344,27 +370,19 @@ export async function fetchBootstrapServerSide(): Promise<BootstrapResponse | nu
 
   const debugResponses = cookieJar.get(DEBUG_RESPONSES_COOKIE)?.value === '1'
   const cacheKey = JSON.stringify([serviceId || null, debugResponses])
-  const now = Date.now()
   const cached = _adminCachedMap.get(cacheKey)
-  if (cached && now - cached.at < _ADMIN_SSR_TTL_MS) {
-    return cached.value
-  }
-  const inflight = _adminInflightMap.get(cacheKey)
-  if (inflight) return inflight
-
-  const promise = (async () => {
-    try {
-      const value = await _fetchBootstrapUpstream(serviceId)
-      if (!value?.settings?.is_remote_analyst) {
-        _adminCachedMap.set(cacheKey, { at: Date.now(), value })
-      }
-      return value
-    } finally {
-      _adminInflightMap.delete(cacheKey)
+  if (cached) {
+    const age = Date.now() - cached.at
+    if (age < _ADMIN_SSR_TTL_MS) {
+      return cached.value
     }
-  })()
-  _adminInflightMap.set(cacheKey, promise)
-  return promise
+    if (age < _ADMIN_SSR_STALE_TTL_MS) {
+      void _refreshAdminBootstrap(cacheKey, serviceId, true).catch(() => {})
+      return cached.value
+    }
+  }
+
+  return _refreshAdminBootstrap(cacheKey, serviceId)
 }
 
 // ── Seed Helpers ──────────────────────────────────────────────────────────────

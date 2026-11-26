@@ -313,4 +313,53 @@ describe('SEC-02 apiSsrProxy trust-boundary header sanitization', () => {
       await server.close()
     }
   })
+
+  it('ssrUpstreamGet reuses keep-alive connections across requests and retries once on ECONNRESET', async () => {
+    const http = await import('node:http')
+    let connectionCount = 0
+    let requestCount = 0
+    const seenConnectionHeaders: Array<string | undefined> = []
+
+    const server = http.createServer((req, res) => {
+      requestCount += 1
+      seenConnectionHeaders.push(req.headers.connection)
+      if (requestCount === 3) {
+        req.socket.destroy()
+        return
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ req: requestCount }))
+    })
+    server.on('connection', () => {
+      connectionCount += 1
+    })
+
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const port = (server.address() as { port: number }).port
+    process.env.API_PROXY_URL = `http://127.0.0.1:${port}`
+
+    registerSsrHeaders({
+      cookies: () => ({ toString: () => '', get: () => undefined }),
+      headers: () => new Headers({ host: 'localhost:3000' }),
+    })
+
+    try {
+      const r1 = await ssrUpstreamGet({ path: '/api/bootstrap', logPrefix: 'ka-1' })
+      const r2 = await ssrUpstreamGet({ path: '/api/bootstrap', logPrefix: 'ka-2' })
+      expect(r1?.statusCode).toBe(200)
+      expect(r2?.statusCode).toBe(200)
+      expect(seenConnectionHeaders).toEqual(['keep-alive', 'keep-alive'])
+      expect(connectionCount).toBe(1)
+
+      // Request #3 destroys the socket mid-flight (ECONNRESET); retry opens a new socket and succeeds on #4.
+      const r3 = await ssrUpstreamGet({ path: '/api/bootstrap', logPrefix: 'ka-retry' })
+      expect(r3?.statusCode).toBe(200)
+      expect(JSON.parse(r3!.body)).toEqual({ req: 4 })
+      expect(requestCount).toBe(4)
+      expect(connectionCount).toBe(2)
+    } finally {
+      server.closeAllConnections?.()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
 })

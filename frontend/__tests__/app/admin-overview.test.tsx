@@ -205,6 +205,7 @@ import { ClickHouseAdminClient, ClickHouseStatusNotice } from '@/app/admin/click
 import { OperationsOverview, AdminTrendsClient, ServicesTable } from '@/app/admin/_sections/OperationsOverview'
 import { QuarantineSection } from '@/app/control-room/_sections/ControlRoomClient'
 import TrendsLoading from '@/app/admin/trends/loading'
+import AdminTrendsPage from '@/app/admin/trends/page'
 import { getApiBase, queryKeys } from '@/lib/api'
 import { server } from '@/__tests__/helpers/msw/handlers'
 import { InvitationsPanel } from '@/components/share-dashboard/InvitationsPanel'
@@ -435,6 +436,17 @@ describe('/admin/trends Page & Client', () => {
     const callsBeforeRefresh = clientGetSpy.mock.calls.length
     fireEvent.click(screen.getByTestId('admin-trends-refresh-btn'))
     await waitFor(() => expect(clientGetSpy.mock.calls.length).toBeGreaterThan(callsBeforeRefresh))
+  })
+
+  it('streams AdminTrendsPage synchronously behind a Suspense boundary with TrendsLoading fallback', () => {
+    const element = AdminTrendsPage() as React.ReactElement<{ fallback: React.ReactElement; children: React.ReactElement }>
+    expect(element).not.toBeInstanceOf(Promise)
+    expect(element.type).toBe(React.Suspense)
+    expect(element.props.fallback.type).toBe(TrendsLoading)
+
+    const { unmount } = render(element.props.fallback)
+    expect(screen.getByTestId('admin-trends-loading')).toBeInTheDocument()
+    unmount()
   })
 })
 

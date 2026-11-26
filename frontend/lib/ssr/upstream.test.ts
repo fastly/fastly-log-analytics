@@ -106,7 +106,7 @@ describe('R18-FE-01: SSR upstream timeout budgets and bootstrap admin TTL', () =
     vi.mocked(headers).mockResolvedValueOnce(new Headers({ 'x-service-id': 'svc-timeout-check' }))
     await fetchBootstrapServerSide()
     expect(mockSsrUpstreamGet).toHaveBeenLastCalledWith(
-      expect.objectContaining({ path: '/api/bootstrap?service_id=svc-timeout-check', timeoutMs: 450 }),
+      expect.objectContaining({ path: '/api/bootstrap?service_id=svc-timeout-check', timeoutMs: 280 }),
     )
   })
 
@@ -172,6 +172,73 @@ describe('R18-FE-01: SSR upstream timeout budgets and bootstrap admin TTL', () =
       vi.advanceTimersByTime(5500)
       await fetchBootstrapServerSide()
       expect(mockSsrUpstreamGet).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+      vi.mocked(headers).mockImplementation(async () => new Headers())
+    }
+  })
+
+  it('serves stale cache immediately between 10s and 60s with deduped background SWR refresh, and blocks past 60s', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-11-26T01:00:00Z'))
+    try {
+      vi.mocked(headers).mockImplementation(
+        async () => new Headers({ host: 'localhost:3001', 'x-service-id': 'svc-admin-swr-test' }),
+      )
+
+      mockSsrUpstreamGet.mockResolvedValueOnce({
+        statusCode: 200,
+        body: JSON.stringify({ active_service_id: 'svc-v1' }),
+      })
+      expect(await fetchBootstrapServerSide()).toEqual({ active_service_id: 'svc-v1' })
+      expect(mockSsrUpstreamGet).toHaveBeenCalledTimes(1)
+
+      // Within 10s: fresh cache hit, no upstream call.
+      vi.advanceTimersByTime(5_000)
+      expect(await fetchBootstrapServerSide()).toEqual({ active_service_id: 'svc-v1' })
+      expect(mockSsrUpstreamGet).toHaveBeenCalledTimes(1)
+
+      // Between 10s and 60s: returns stale v1 immediately while background refresh is in flight.
+      let resolveRefresh!: (resp: { statusCode: number; body: string }) => void
+      mockSsrUpstreamGet.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveRefresh = resolve
+          }),
+      )
+      vi.advanceTimersByTime(10_000) // t = 15s
+      expect(await fetchBootstrapServerSide()).toEqual({ active_service_id: 'svc-v1' })
+      await Promise.resolve()
+      expect(mockSsrUpstreamGet).toHaveBeenCalledTimes(2)
+
+      // Concurrent/subsequent stale call while refresh is inflight still returns v1 and dedupes via _adminInflightMap.
+      expect(await fetchBootstrapServerSide()).toEqual({ active_service_id: 'svc-v1' })
+      expect(mockSsrUpstreamGet).toHaveBeenCalledTimes(2)
+
+      // Finish background refresh -> cache updates to v2.
+      resolveRefresh({ statusCode: 200, body: JSON.stringify({ active_service_id: 'svc-v2' }) })
+      await Promise.resolve()
+      await Promise.resolve()
+
+      expect(await fetchBootstrapServerSide()).toEqual({ active_service_id: 'svc-v2' })
+      expect(mockSsrUpstreamGet).toHaveBeenCalledTimes(2)
+
+      // Failed background refresh (null) preserves existing non-null cached value.
+      vi.advanceTimersByTime(15_000) // t = 30s (15s since v2 cached)
+      mockSsrUpstreamGet.mockResolvedValueOnce(null)
+      expect(await fetchBootstrapServerSide()).toEqual({ active_service_id: 'svc-v2' })
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(mockSsrUpstreamGet).toHaveBeenCalledTimes(3)
+
+      // Past 60s stale TTL: synchronous fetch blocks until upstream resolves.
+      vi.advanceTimersByTime(50_000) // t = 80s (65s since v2 cached)
+      mockSsrUpstreamGet.mockResolvedValueOnce({
+        statusCode: 200,
+        body: JSON.stringify({ active_service_id: 'svc-v3' }),
+      })
+      expect(await fetchBootstrapServerSide()).toEqual({ active_service_id: 'svc-v3' })
+      expect(mockSsrUpstreamGet).toHaveBeenCalledTimes(4)
     } finally {
       vi.useRealTimers()
       vi.mocked(headers).mockImplementation(async () => new Headers())
