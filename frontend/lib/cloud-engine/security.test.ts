@@ -463,14 +463,14 @@ describe("security cloud-engine module (F20)", () => {
     expect(shaped).not.toHaveProperty("total_requests_count");
 
     expect(shaped.active_clients.map((c) => [c.ip, c.asn_name])).toEqual([
-      ["198.51.100.42", "AS13335 (Cloudflare, Inc.)"],
+      ["198.51.100.42", "Cloudflare, Inc. (13335)"],
       ["198.51.100.43", "Unknown ISP"],
     ]);
     for (const client of shaped.active_clients) {
       expect(client).not.toHaveProperty("isp");
       expect(client).not.toHaveProperty("asn");
     }
-    expect(shaped.suspicious_isps).toEqual([{ asn: 13335, isp: "AS13335 (Cloudflare, Inc.)", count: 1 }]);
+    expect(shaped.suspicious_isps).toEqual([{ asn: 13335, isp: "Cloudflare, Inc. (13335)", count: 1 }]);
   });
 
   it("formats fastly-acl CSV (ip,comment) and plain exports and masks IPs when requested", () => {

@@ -50,6 +50,7 @@ const ID_AFTER: &[&str] = &[
     "config",
     "views",
     "labels",
+    "workspaces",
 ];
 
 /// Literal path segments of our own routes and of the Fastly API calls we make. Anything else
@@ -184,6 +185,12 @@ const KNOWN_SEGMENTS: &[&str] = &[
     "compute",
     "config_store",
     "kv_store",
+    "security",
+    "ngwaf-bots",
+    "ngwaf",
+    "workspaces",
+    "requests",
+    "self",
 ];
 
 /// Drops the query and replaces identifiers with `:id` and unrecognized segments with

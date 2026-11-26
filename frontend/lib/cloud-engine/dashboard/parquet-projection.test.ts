@@ -1132,4 +1132,70 @@ describe("query schemas from footers", () => {
       wholeReadLimits.closedHourUpToBytes = prevClosedLimit;
     }
   });
+
+  it("avoids 10-15 range HTTP 206 fragmentation on >8 MiB multi-row-group compact= files", async () => {
+    const mediumLargeFile = 10 * 1024 * 1024;
+    expect(shouldFallbackToWhole(
+      { ranges: Array.from({ length: 14 }, (_, i) => ({ start: i * 100, end: i * 100 + 50 })) },
+      mediumLargeFile,
+      Math.ceil(mediumLargeFile * 0.40),
+    )).toBe(true);
+
+    // 14 row groups in a >8 MiB compact= file with ~45% needed columns and >256 KiB gaps:
+    // previously 14 < WHOLE_FALLBACK_HIGH_FANOUT_MIN (16) and size > 8 MiB left 14 HTTP 206s;
+    // now shouldFallbackToWhole triggers a single shared fetchFile download.
+    const rgRows = 650;
+    const rowGroups = 14;
+    const totalRows = rgRows * rowGroups;
+    const startMs = Date.parse("2026-11-26T04:00:00Z");
+    const bytes = parquetWriteBuffer({
+      codec: "UNCOMPRESSED",
+      rowGroupSize: rgRows,
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: totalRows }, (_, i) => new Date(startMs + i * 1000)) },
+        { name: "status", type: "INT32", data: Array.from({ length: totalRows }, (_, i) => (i % 10 === 0 ? 503 : 200)) },
+        { name: "host", type: "STRING", data: Array.from({ length: totalRows }, () => noise(440)) },
+        { name: "cache", type: "STRING", data: Array.from({ length: totalRows }, () => "HIT") },
+        { name: "ua", type: "STRING", data: Array.from({ length: totalRows }, () => noise(240)) },
+        { name: "url", type: "STRING", data: Array.from({ length: totalRows }, () => noise(240)) },
+      ],
+    });
+    expect(bytes.byteLength).toBeGreaterThan(8 * 1024 * 1024);
+    expect(bytes.byteLength).toBeLessThan(16 * 1024 * 1024);
+
+    const footer = await readParquetFooter(bytes.byteLength, ranged(bytes).fetchRange);
+    const plan = planParquetProjection(footer, new Set(["timestamp", "status", "host", "cache"]));
+    const plannedBytes = plan.ranges.reduce((sum, r) => sum + (r.end - r.start), 0);
+    expect(plan.ranges.length).toBe(14);
+    expect(shouldFallbackToWhole(plan, bytes.byteLength, plannedBytes)).toBe(true);
+
+    const entry = {
+      key: "processed/request/year=2026/month=11/day=26/hour=04/compact=1795665600-1795669200-c14-n9100-abc.parquet",
+      start: new Date(startMs).toISOString(),
+      end: new Date(Date.now() + 60_000).toISOString(),
+      size: bytes.byteLength,
+      rows: totalRows,
+      etag: "\"etag-14range\"",
+    };
+    let dataRangeCalls = 0;
+    let fileCalls = 0;
+    const source = {
+      cacheScope: "fixture-session:svc-14range",
+      fetchRange: async (_file: unknown, start: number, end: number) => {
+        if (end < bytes.byteLength) dataRangeCalls++;
+        return bytes.slice(start, end);
+      },
+      fetchFile: async () => {
+        fileCalls++;
+        return { bytes: bytes.slice(0), cached: false };
+      },
+    };
+    const read = projectedReader(source, ["timestamp", "status", "host", "cache"]);
+    const projected = await (await read(entry)).read();
+    expect(fileCalls).toBe(1);
+    expect(dataRangeCalls).toBe(0);
+    expect(await query({ "c.parquet": projected.bytes },
+      "SELECT count(*)::INT AS n, count(*) FILTER (WHERE status = 503)::INT AS errors FROM 'c.parquet'"))
+      .toEqual([{ n: totalRows, errors: totalRows / 10 }]);
+  });
 });
