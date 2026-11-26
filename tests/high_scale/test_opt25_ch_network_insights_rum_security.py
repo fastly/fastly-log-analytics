@@ -18,7 +18,9 @@ from backend.high_scale import security as hs_security
 from backend.high_scale.ingest_controller import HighScaleService
 from backend.high_scale.insights import evaluator
 from backend.high_scale.insights.batches import (
+    _base_cte,
     _build_latency_dim,
+    _build_misc,
     _build_network_asn,
     _build_network_asn_candidates,
     _build_url_perf_candidates,
@@ -81,6 +83,7 @@ def _stub_and_clear_caches(monkeypatch: pytest.MonkeyPatch) -> None:
     hs_network._network_model_cache.clear()
     hs_network._network_json_cache.clear()
     hs_network._pop_rollup_cache.clear()
+    hs_network._pop_fact_cache.clear()
     hs_network._SHIELD_ACTIVE_CACHE.clear()
     evaluator._INSIGHTS_CACHE.clear()
     evaluator._INSIGHTS_TELEMETRY_CACHE.clear()
@@ -101,35 +104,170 @@ def test_network_sample_stride_14d_tier() -> None:
     assert hs_network._network_sample_stride(2592000) == 500
 
 
-def test_shield_active_cache_caches_false_and_samples_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_shield_active_cache_caches_false_without_probe_sampling_and_scopes_short_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    end = datetime(2026, 11, 26, 0, 0, tzinfo=UTC)
+    start_30d = end - timedelta(days=30)
+    start_1h = end - timedelta(hours=1)
+
+    # Short window (< 24h) with n=0 caches False only under window-scoped key, NOT service-wide.
+    short_client = _FakeRealCHClient(lambda sql, _p: [{"n": 0}] if "SELECT count() AS n" in sql else [])
+    short_svc = _service(short_client, "svc-opt25-short")
+    res_1h_1 = hs_network._shielding_analysis(short_svc, start_1h, end, None)
+    assert res_1h_1.has_data is False
+    assert res_1h_1.edge_only is True
+    assert len(short_client.calls) == 1
+    probe_sql = short_client.calls[0][0]
+    assert "SELECT count() AS n" in probe_sql
+    assert "LIMIT 1" in probe_sql
+    assert "event_timestamp >= toDateTime(" not in probe_sql
+
+    # Repeat same 1h window hits window-scoped cache (0 extra CH calls).
+    res_1h_2 = hs_network._shielding_analysis(short_svc, start_1h, end, None)
+    assert res_1h_2.edge_only is True
+    assert len(short_client.calls) == 1
+
+    # Different/longer window (30d) still probes because short window did not poison service-wide key.
+    res_30d = hs_network._shielding_analysis(short_svc, start_30d, end, None)
+    assert res_30d.edge_only is True
+    assert len(short_client.calls) == 2
+
+    # 30d window (>= 86400s) with n=0 caches False under service-wide key.
+    res_30d_2 = hs_network._shielding_analysis(short_svc, start_30d, end, None)
+    assert res_30d_2.edge_only is True
+    assert len(short_client.calls) == 2
+
+    # origin_shielding_analysis also bypasses CH when service-wide _SHIELD_ACTIVE_CACHE is False.
+    origin_res = hs_network.origin_shielding_analysis(
+        short_svc, OriginShieldingAnalysisRequest(), start_30d.isoformat(), end.isoformat()
+    )
+    assert origin_res.edge_only is True
+    assert origin_res.has_data is False
+    assert len(short_client.calls) == 2
+
+    # _invalidate_network_caches clears _SHIELD_ACTIVE_CACHE so the next call re-probes.
+    hs_network._invalidate_network_caches(short_svc.service_id)
+    assert len(hs_network._SHIELD_ACTIVE_CACHE) == 0
+    hs_network._shielding_analysis(short_svc, start_30d, end, None)
+    assert len(short_client.calls) == 3
+
+
+def test_standalone_network_quality_and_transport_share_pop_caches_with_pop_health(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.models.analytics import NetworkQualityRequest
+
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     end = datetime(2026, 11, 26, 0, 0, tzinfo=UTC)
     start_30d = end - timedelta(days=30)
 
-    edge_client = _FakeRealCHClient(lambda sql, _p: [{"n": 0}] if "SELECT count() AS n" in sql else [])
-    edge_svc = _service(edge_client, "svc-opt25-edge")
+    def _handler(sql: str, _p: dict[str, Any]) -> list[dict[str, Any]]:
+        if "FROM network_minute_dimensions" in sql and "UNION ALL" in sql:
+            return [
+                {
+                    "dimension": "country",
+                    "label": "US",
+                    "rtt_ms": 20.0,
+                    "reqs": 500,
+                    "pop_reqs": 0,
+                    "pop_errors": 0,
+                    "p50_rtt_us": None,
+                    "p95_ttfb_ms": None,
+                },
+                {
+                    "dimension": "asn",
+                    "label": "13335",
+                    "rtt_ms": 20.0,
+                    "reqs": 500,
+                    "pop_reqs": 0,
+                    "pop_errors": 0,
+                    "p50_rtt_us": None,
+                    "p95_ttfb_ms": None,
+                },
+                {
+                    "dimension": "pop",
+                    "label": "SJC",
+                    "rtt_ms": 15.0,
+                    "reqs": 1000,
+                    "pop_reqs": 1200,
+                    "pop_errors": 12,
+                    "p50_rtt_us": 15000.0,
+                    "p95_ttfb_ms": 42.0,
+                },
+            ]
+        if "FROM network_minute_dimensions" in sql:
+            return [
+                {
+                    "pop": "SJC",
+                    "req_count": 1200,
+                    "errors": 12,
+                    "p50_rtt_us": 15000.0,
+                    "p95_ttfb_ms": 42.0,
+                }
+            ]
+        if "AS cache_state" in sql:
+            return [{"rtt_ms": 20.0, "ttfb_ms": 40.0, "cache_state": "HIT"}] * 60
+        if "AS proto_map" in sql:
+            return [
+                {
+                    "total_reqs": 10,
+                    "total_bytes": 5000,
+                    "rtt_quants": [10000.0, 20000.0, 30000.0, 40000.0],
+                    "avg_retrans": 0.1,
+                    "avg_ploss_pct": 0.05,
+                    "avg_del_rate_mbps": 12.5,
+                    "proto_map": {"HTTP/2": 10},
+                    "pop_reqs_map": {"SJC": 10},
+                    "pop_hits_map": {"SJC": 6},
+                    "pop_bytes_map": {"SJC": 4000},
+                }
+            ]
+        return []
 
-    res1 = hs_network._shielding_analysis(edge_svc, start_30d, end, None)
-    assert res1.has_data is False
-    assert res1.edge_only is True
-    assert len(edge_client.calls) == 1
-    probe_sql = edge_client.calls[0][0]
-    assert "SELECT count() AS n" in probe_sql
-    assert "event_timestamp >= toDateTime(" in probe_sql
+    client = _FakeRealCHClient(_handler)
+    svc = _service(client, "svc-opt25-standalone-share")
+    assert hs_network._pop_fact_cache.ttl_seconds == 60.0
+    assert hs_network._pop_fact_cache.maxsize == 128
 
-    # Second call within TTL hits _SHIELD_ACTIVE_CACHE == False with 0 ClickHouse queries.
-    res2 = hs_network._shielding_analysis(edge_svc, start_30d, end, None)
-    assert res2.has_data is False
-    assert res2.edge_only is True
-    assert len(edge_client.calls) == 1
+    # 1. Standalone network_quality populates _pop_rollup_cache even with pop_rollup_sink=None.
+    with patch("backend.core.fos_client.get_asn_names", return_value={13335: "Cloudflare"}):
+        hs_network.network_quality(svc, NetworkQualityRequest(), start_30d.isoformat(), end.isoformat())
+    assert len(hs_network._pop_rollup_cache) == 1
 
-    # origin_shielding_analysis also bypasses CH when _SHIELD_ACTIVE_CACHE is False.
-    origin_res = hs_network.origin_shielding_analysis(
-        edge_svc, OriginShieldingAnalysisRequest(), start_30d.isoformat(), end.isoformat()
-    )
-    assert origin_res.edge_only is True
-    assert origin_res.has_data is False
-    assert len(edge_client.calls) == 1
+    # 2. Standalone get_transport_metrics populates _pop_fact_cache.
+    hs_network.get_transport_metrics(svc, start_30d.isoformat(), end.isoformat(), {})
+    assert len(hs_network._pop_fact_cache) == 1
+
+    # 3. Subsequent standalone get_pop_health hits BOTH caches with 0 ClickHouse queries!
+    calls_before = len(client.calls)
+    pop_res = hs_network.get_pop_health(svc, start_30d, end)
+    assert len(client.calls) == calls_before
+    assert len(pop_res.data) == 1
+    assert pop_res.data[0].pop == "SJC"
+    assert pop_res.data[0].requests == 1200
+    assert pop_res.data[0].errors == 12
+    assert pop_res.data[0].cache_hit_rate == 60.0
+    assert pop_res.data[0].bandwidth_bytes == 480000
+
+    # 4. _invalidate_network_caches clears _pop_fact_cache too.
+    hs_network._invalidate_network_caches(svc.service_id)
+    assert len(hs_network._pop_fact_cache) == 0
+    assert len(hs_network._pop_rollup_cache) == 0
+
+    # 5. Standalone transport then pop-health (with cold rollup cache) only queries network_minute_dimensions, not request_facts.
+    hs_network._network_memo.cache.clear()
+    client2 = _FakeRealCHClient(_handler)
+    svc2 = _service(client2, "svc-opt25-fact-only")
+    hs_network.get_transport_metrics(svc2, start_30d.isoformat(), end.isoformat(), {})
+    calls_after_tr = len(client2.calls)
+    pop_res2 = hs_network.get_pop_health(svc2, start_30d, end)
+    new_sqls = [sql for sql, _, _ in client2.calls[calls_after_tr:]]
+    assert len(new_sqls) == 1
+    assert "FROM network_minute_dimensions" in new_sqls[0]
+    assert "request_facts" not in new_sqls[0]
+    assert pop_res2.data[0].requests == 1200
 
 
 def test_network_bundle_shares_rollup_and_fact_and_stays_under_8_queries(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -383,7 +521,7 @@ def test_insights_batches_window_sampling_and_candidate_prewhere_optimizations()
     assert "custom_fields['metro'] IN (" in pre_part or "custom_fields['asn'] != ''" in pre_part
     assert "HAVING count() * 4 >= 20" in nasn_partial_cands
 
-    # Evaluator passes window_hours to candidate builders.
+    # Evaluator passes window_start/window_end so candidate & batch queries use monotonic PK range sampling.
     def _eval_handler(q: str, _params: dict[str, Any]) -> list[dict[str, Any]]:
         if "/* insight:history */" in q:
             return [{"earliest": datetime.now(UTC) - timedelta(days=10), "window_total": 1000, "hours": []}]
@@ -400,7 +538,77 @@ def test_insights_batches_window_sampling_and_candidate_prewhere_optimizations()
         force_refresh=True,
     )
     url_cand_call = next(q for q, _, _ in eval_client.calls if "/* insight:batch_url_perf_candidates */" in q)
-    assert "intDiv(toUnixTimestamp(event_timestamp), 300) % 4 = 0" in url_cand_call
+    assert "event_timestamp >= toDateTime(" in url_cand_call
+    assert "intDiv(toUnixTimestamp(event_timestamp), 300) %" not in url_cand_call
+
+    # End-to-end 24h/168h evaluation: every batch and standalone sql_queries query uses monotonic toDateTime(..., 'UTC') slices.
+    all_batch_and_standalone = [
+        q
+        for q, _, _ in eval_client.calls
+        if (
+            "/* insight:batch_" in q
+            or "/* insight:crawler_disparity */" in q
+            or "/* insight:stale_browser_version */" in q
+            or "/* insight:shield_path_degradation */" in q
+        )
+    ]
+    assert all_batch_and_standalone
+    for q in all_batch_and_standalone:
+        assert "intDiv(toUnixTimestamp(event_timestamp), 300) %" not in q, q[:120]
+    sampled_markers = (
+        "/* insight:batch_misc */",
+        "/* insight:batch_url_cache */",
+        "/* insight:batch_latency_dim */",
+        "/* insight:batch_url_perf_candidates */",
+        "/* insight:batch_network_asn_candidates */",
+        "/* insight:crawler_disparity */",
+    )
+    for marker in sampled_markers:
+        matched = [q for q in eval_client.calls if marker in q[0]]
+        assert matched, f"Missing {marker}"
+        assert "toDateTime(" in matched[0][0] and "'UTC')" in matched[0][0], marker
+
+    # Direct _base_cte (fact & mixed) and _window_from emit monotonic PK ranges when timestamps are supplied.
+    w_end = datetime(2026, 11, 26, 12, 30, tzinfo=UTC)
+    w_start = w_end - timedelta(hours=24)
+    b_start = w_start - timedelta(hours=144)
+    r_span = (datetime(2026, 11, 20, 13, 0, tzinfo=UTC), datetime(2026, 11, 25, 12, 0, tzinfo=UTC))
+
+    mixed_sql, mixed_src = _build_misc(
+        {"cache_hit_cliff", "method_drift"},
+        present=present,
+        rollup_span=r_span,
+        filter_clause="",
+        baseline_hours=168.0,
+        baseline_start=b_start,
+        window_start=w_start,
+        window_end=w_end,
+    )
+    assert mixed_src == "mixed"
+    mixed_raw, mixed_rollup = mixed_sql.split("UNION ALL", 1)
+    assert "intDiv(toUnixTimestamp(event_timestamp), 300) %" not in mixed_raw
+    assert "event_timestamp >= toDateTime(" in mixed_raw
+    assert "toUInt64(8)" in mixed_raw
+    assert "request_count AS n" in mixed_rollup
+
+    fact_cte, fact_src = _base_cte(
+        "test_pk",
+        [("url", "url")],
+        weighted=True,
+        baseline_sample_stride=8,
+        window_sample_stride=4,
+        baseline_start=b_start,
+        window_start=w_start,
+        window_end=w_end,
+    )
+    assert fact_src == "fact"
+    assert "intDiv(toUnixTimestamp(event_timestamp), 300) %" not in fact_cte
+    assert "event_timestamp >= toDateTime(" in fact_cte
+    assert "if(event_timestamp < {window_start:DateTime64(3)}, toUInt64(8), toUInt64(4)) AS n" in fact_cte
+
+    win_pk = _window_from(row_filter="url != ''", sample_stride=4, window_start=w_start, window_end=w_end)
+    assert "intDiv(toUnixTimestamp(event_timestamp), 300) %" not in win_pk
+    assert "event_timestamp >= toDateTime(" in win_pk
 
 
 def test_rum_slowest_sql_uses_array_join_without_union_all(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -551,3 +759,86 @@ def test_security_folds_verified_bots_ts_into_overview_5in1_and_reduces_queries(
             sections={"ipv6_adoption", "proxy_dist", "verified_bots_ts"},
         )
         assert any("/* hs_security:verified_bots_ts */" in sql for sql, _, _ in client.calls)
+
+
+def test_security_bundle_folds_tls_fingerprints_and_top_ips_header_to_at_most_7_queries() -> None:
+    t0 = 1_790_002_800
+
+    def _handler(sql: str, _params: dict[str, Any]) -> list[dict[str, Any]]:
+        if "/* hs_security:tls_and_ips */" in sql:
+            return [
+                {"kind": "fp", "k": "sha-1", "v1": 4, "v2": 100},
+                {"kind": "ip", "k": "203.0.113.5", "v1": 8192, "v2": 0},
+            ]
+        if "/* hs_security:overview_5in1 */" in sql:
+            return [
+                {
+                    "bucket_ts": t0,
+                    "total_rows": 100,
+                    "tls_populated": 80,
+                    "ipv6_rows": 20,
+                    "h_map": {"0-256B": 100},
+                    "c_map": {"1 (New)": 100},
+                    "p_map": {},
+                    "vb_map": {},
+                }
+            ]
+        return []
+
+    client = _FakeRealCHClient(_handler)
+    req = SimpleNamespace(filters={}, bucket_seconds=300)
+    end = datetime.now(UTC)
+    start = end - timedelta(hours=24)
+    bundle_sections = {
+        "ngwaf_verified_bots",
+        "ngwaf_verified_bots_ts",
+        "wellknown_bots",
+        "bot_efficiency",
+        "tls_fingerprints",
+        "fingerprint_coverage",
+        "req_size_dist",
+        "top_ips_header",
+        "ipv6_adoption",
+        "proxy_dist",
+        "conn_reuse_dist",
+        "proxies",
+    }
+
+    with (
+        patch("backend.config.get_ngwaf_workspace_id", return_value="ws-opt25-tls"),
+        patch("backend.utils.bot_sources.build_well_known_bots_matcher", return_value=lambda _ua: False),
+        patch("backend.core.fos_client.get_asn_names", return_value={}),
+        patch("backend.high_scale.aggregate_query.can_use_hourly_rollup", return_value=None),
+    ):
+        res = hs_security.security_aggregates(
+            _service(client, "svc-opt25-sec-bundle"),
+            req,
+            start.isoformat(),
+            end.isoformat(),
+            sections=bundle_sections,
+            mask_ips=True,
+        )
+
+    assert len(client.calls) <= 7, (
+        f"Expected <= 7 queries for security_bundle, got {len(client.calls)}: {[s[:60] for s, _, _ in client.calls]}"
+    )
+    assert any("/* hs_security:tls_and_ips */" in sql for sql, _, _ in client.calls)
+    assert not any("/* hs_security:tls_fingerprints */" in sql for sql, _, _ in client.calls)
+    assert not any("/* hs_security:top_ips_header */" in sql for sql, _, _ in client.calls)
+    dumped = res.model_dump()
+    assert dumped["tls_fingerprints"] == [{"fingerprint": "sha-1", "ip_count": 4, "request_count": 100}]
+    assert dumped["top_ips_header"] == [{"ip": "203.0.113.xxx", "max_header": 8192}]
+
+    # Follow-up request for tls_fingerprints alone hits per-section memo with 0 new queries.
+    calls_before = len(client.calls)
+    with patch("backend.config.get_ngwaf_workspace_id", return_value="ws-opt25-tls"):
+        res_single = hs_security.security_aggregates(
+            _service(client, "svc-opt25-sec-bundle"),
+            req,
+            start.isoformat(),
+            end.isoformat(),
+            sections={"tls_fingerprints"},
+            mask_ips=True,
+        )
+    assert len(client.calls) == calls_before
+    assert [r.model_dump() for r in res_single.tls_fingerprints] == dumped["tls_fingerprints"]

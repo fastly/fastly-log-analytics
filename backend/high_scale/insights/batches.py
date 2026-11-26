@@ -17,7 +17,15 @@ from typing import Any, Literal
 from backend.high_scale._common import visible_fact_clauses
 
 from .rollup import ROLLUP_TABLE, _to_rollup
-from .sql_queries import _CACHEABLE, _HIT, _P95, COLUMNS, baseline_sample_stride, window_sample_stride
+from .sql_queries import (
+    _CACHEABLE,
+    _HIT,
+    _P95,
+    COLUMNS,
+    baseline_sample_stride,
+    build_pk_time_sample_clause,
+    window_sample_stride,
+)
 
 QuerySource = Literal["fact", "mixed"]
 
@@ -79,6 +87,9 @@ def _base_cte(
     weighted: bool = False,
     baseline_sample_stride: int = 1,
     window_sample_stride: int = 1,
+    baseline_start: datetime | None = None,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
 ) -> tuple[str, QuerySource]:
     """Build the ``/* insight:batch_<name> */ WITH base AS (...)`` prefix."""
     fact_scope = " AND ".join(visible_fact_clauses("request"))
@@ -93,27 +104,29 @@ def _base_cte(
     raw_proj = ", ".join(f"{expr} AS {alias}" for alias, expr in projections)
     b_sample = baseline_sample_stride if not window_only else 1
     w_sample = window_sample_stride
+    use_mixed_rollup = bool(rollup_shape and rollup_span and not filter_clause and not window_only)
+    baseline_sample = build_pk_time_sample_clause(
+        b_stride=b_sample,
+        w_stride=w_sample,
+        window_only=window_only,
+        baseline_start=baseline_start,
+        window_start=window_start,
+        window_end=window_end,
+        rollup_span=rollup_span if use_mixed_rollup else None,
+    )
     if w_sample > 1 and b_sample > 1:
-        baseline_sample = (
-            f" AND ((event_timestamp >= {{window_start:DateTime64(3)}} AND intDiv(toUnixTimestamp(event_timestamp), 300) % {w_sample} = 0)"
-            f" OR (event_timestamp < {{window_start:DateTime64(3)}} AND intDiv(toUnixTimestamp(event_timestamp), 300) % {b_sample} = 0))"
-        )
         raw_weight = (
             f"if(event_timestamp < {{window_start:DateTime64(3)}}, toUInt64({b_sample}), toUInt64({w_sample})) AS n"
         )
     elif w_sample > 1 and window_only:
-        baseline_sample = f" AND intDiv(toUnixTimestamp(event_timestamp), 300) % {w_sample} = 0"
         raw_weight = f"toUInt64({w_sample}) AS n"
     elif w_sample > 1:
-        baseline_sample = f" AND (event_timestamp < {{window_start:DateTime64(3)}} OR intDiv(toUnixTimestamp(event_timestamp), 300) % {w_sample} = 0)"
         raw_weight = f"if(event_timestamp >= {{window_start:DateTime64(3)}}, toUInt64({w_sample}), toUInt64(1)) AS n"
     elif b_sample > 1:
-        baseline_sample = f" AND (event_timestamp >= {{window_start:DateTime64(3)}} OR intDiv(toUnixTimestamp(event_timestamp), 300) % {b_sample} = 0)"
         raw_weight = f"if(event_timestamp < {{window_start:DateTime64(3)}}, toUInt64({b_sample}), toUInt64(1)) AS n"
     else:
-        baseline_sample = ""
         raw_weight = "toUInt64(1) AS n"
-    if rollup_shape and rollup_span and not filter_clause and not window_only:
+    if use_mixed_rollup:
         rollup_proj = ", ".join(f"{_to_rollup(expr)} AS {alias}" for alias, expr in projections)
         raw = (
             f"SELECT {raw_proj}, "
@@ -145,11 +158,21 @@ def _base_cte(
     return f"/* insight:batch_{name} */ WITH base AS ({raw})", "fact"
 
 
-def _window_from(*, filter_clause: str = "", row_filter: str = "", sample_stride: int = 1) -> str:
+def _window_from(
+    *,
+    filter_clause: str = "",
+    row_filter: str = "",
+    sample_stride: int = 1,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
+) -> str:
     """Window-only FROM/PREWHERE clause so IN-subquery pre-filters prune baseline partitions."""
     fact_scope = " AND ".join(visible_fact_clauses("request"))
-    sample_clause = (
-        f" AND intDiv(toUnixTimestamp(event_timestamp), 300) % {sample_stride} = 0" if sample_stride > 1 else ""
+    sample_clause = build_pk_time_sample_clause(
+        w_stride=sample_stride,
+        window_only=True,
+        window_start=window_start,
+        window_end=window_end,
     )
     extra: list[str] = []
     if filter_clause:
@@ -204,6 +227,9 @@ def _build_misc(
     rollup_span: tuple[datetime, datetime] | None,
     filter_clause: str,
     baseline_hours: float = 0.0,
+    baseline_start: datetime | None = None,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
 ) -> tuple[str, QuerySource]:
     proj: list[tuple[str, str]] = []
     if "cache_hit_cliff" in active:
@@ -229,6 +255,9 @@ def _build_misc(
         filter_clause=filter_clause,
         weighted=True,
         baseline_sample_stride=b_stride,
+        baseline_start=baseline_start,
+        window_start=window_start,
+        window_end=window_end,
     )
     sets: list[str] = []
     if "cache_hit_cliff" in active or "http3_fallback" in active:
@@ -592,6 +621,9 @@ def _build_url_cache(
     filter_clause: str,
     baseline_hours: float = 0.0,
     window_hours: float = 0.0,
+    baseline_start: datetime | None = None,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
 ) -> tuple[str, QuerySource]:
     b_stride = _baseline_sample_stride(baseline_hours)
     w_stride = _window_sample_stride(window_hours)
@@ -604,6 +636,9 @@ def _build_url_cache(
         weighted=True,
         baseline_sample_stride=b_stride,
         window_sample_stride=w_stride,
+        baseline_start=baseline_start,
+        window_start=window_start,
+        window_end=window_end,
     )
     sql = (
         f"{cte} SELECT url, "
@@ -791,6 +826,9 @@ def _build_latency_dim(
     filter_clause: str,
     baseline_hours: float = 0.0,
     window_hours: float = 0.0,
+    baseline_start: datetime | None = None,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
 ) -> tuple[str, QuerySource]:
     b_stride = _baseline_sample_stride(baseline_hours)
     b_scale = f" * {b_stride}" if b_stride > 1 else ""
@@ -810,6 +848,8 @@ def _build_latency_dim(
             filter_clause=filter_clause,
             row_filter=f"{city_col} != '' AND custom_fields['elapsed'] != ''",
             sample_stride=w_stride,
+            window_start=window_start,
+            window_end=window_end,
         )
         city_count = f"count(){w_scale}" if w_stride > 1 else "count()"
         win_cities = f"SELECT {city_col} {city_win_from} GROUP BY {city_col} HAVING {city_count} >= 10"
@@ -829,6 +869,9 @@ def _build_latency_dim(
         filter_clause=filter_clause,
         baseline_sample_stride=b_stride,
         window_sample_stride=w_stride,
+        baseline_start=baseline_start,
+        window_start=window_start,
+        window_end=window_end,
     )
     g_pop = "grouping(pop)" if "pop_latency_regression" in active else "toUInt8(1)"
     g_reg = "grouping(server_region)" if "region_latency" in active else "toUInt8(1)"
@@ -915,10 +958,18 @@ def _build_url_perf_candidates(
     rollup_span: tuple[datetime, datetime] | None,
     filter_clause: str,
     window_hours: float = 0.0,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
 ) -> str:
     w_stride = _window_sample_stride(window_hours)
     w_scale = f" * {w_stride}" if w_stride > 1 else ""
-    url_win_from = _window_from(filter_clause=filter_clause, row_filter="url != ''", sample_stride=w_stride)
+    url_win_from = _window_from(
+        filter_clause=filter_clause,
+        row_filter="url != ''",
+        sample_stride=w_stride,
+        window_start=window_start,
+        window_end=window_end,
+    )
     having_parts: list[str] = []
     if "latency_regression" in active:
         having_parts.append(
@@ -969,6 +1020,9 @@ def _build_url_perf(
     window_hours: float = 0.0,
     candidates: dict[str, list[str] | None] | None = None,
     candidate_params: dict[str, Any] | None = None,
+    baseline_start: datetime | None = None,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
 ) -> tuple[str, QuerySource]:
     proj = [
         ("url", COLUMNS["url"]),
@@ -995,6 +1049,9 @@ def _build_url_perf(
         filter_clause=filter_clause,
         baseline_sample_stride=b_stride,
         window_sample_stride=w_stride,
+        baseline_start=baseline_start,
+        window_start=window_start,
+        window_end=window_end,
     )
     base_filter = "" if prewhere_clause else "WHERE url != '' "
     sql = (
@@ -1077,6 +1134,9 @@ def _build_ip_outlier(
     window_hours: float = 0.0,
     candidates: dict[str, list[str] | None] | None = None,
     candidate_params: dict[str, Any] | None = None,
+    baseline_start: datetime | None = None,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
 ) -> tuple[str, QuerySource]:
     proj = [
         ("ip", COLUMNS["ip"]),
@@ -1121,6 +1181,9 @@ def _build_ip_outlier(
         filter_clause=filter_clause,
         baseline_sample_stride=b_stride,
         window_sample_stride=w_stride,
+        baseline_start=baseline_start,
+        window_start=window_start,
+        window_end=window_end,
     )
     sql = (
         f"{cte} SELECT ip, "
@@ -1208,6 +1271,9 @@ def _build_ip_abuse(
     baseline_hours: float = 0.0,
     candidates: dict[str, list[str] | None] | None = None,
     candidate_params: dict[str, Any] | None = None,
+    baseline_start: datetime | None = None,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
 ) -> tuple[str, QuerySource]:
     proj: list[tuple[str, str]] = [("ip", COLUMNS["ip"])]
     if active & {"content_discovery", "credential_enumeration", "orphaned_deep_crawl"}:
@@ -1287,6 +1353,9 @@ def _build_ip_abuse(
         prewhere_clause=prewhere_clause,
         filter_clause=filter_clause,
         baseline_sample_stride=b_stride,
+        baseline_start=baseline_start,
+        window_start=window_start,
+        window_end=window_end,
     )
     sql = f"{cte} SELECT {', '.join(sel)} FROM base GROUP BY ip HAVING {' OR '.join(having)}"
     return sql, source
@@ -1382,6 +1451,9 @@ def _build_origin_perf(
     window_hours: float = 0.0,
     candidates: dict[str, list[str] | None] | None = None,
     candidate_params: dict[str, Any] | None = None,
+    baseline_start: datetime | None = None,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
 ) -> tuple[str, QuerySource]:
     proj = [
         ("ottfb", COLUMNS["ottfb"]),
@@ -1400,6 +1472,9 @@ def _build_origin_perf(
         filter_clause=filter_clause,
         baseline_sample_stride=b_stride,
         window_sample_stride=w_stride,
+        baseline_start=baseline_start,
+        window_start=window_start,
+        window_end=window_end,
     )
     read_ms = "greatest(ottfb / 1000.0 - oconnect_ms, 0)"
     has_conn = "oconnect_ms IS NOT NULL"
@@ -1460,6 +1535,8 @@ def _build_network_asn_candidates(
     rollup_span: tuple[datetime, datetime] | None,
     filter_clause: str,
     window_hours: float = 0.0,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
 ) -> str:
     w_stride = _window_sample_stride(window_hours)
     w_count = f"count() * {w_stride}" if w_stride > 1 else "count()"
@@ -1468,7 +1545,11 @@ def _build_network_asn_candidates(
     branches: list[str] = []
     if has_asn:
         asn_win_from = _window_from(
-            filter_clause=filter_clause, row_filter="custom_fields['asn'] != ''", sample_stride=w_stride
+            filter_clause=filter_clause,
+            row_filter="custom_fields['asn'] != ''",
+            sample_stride=w_stride,
+            window_start=window_start,
+            window_end=window_end,
         )
         branches.append(
             f"SELECT 'asn' AS kind, custom_fields['asn'] AS k {asn_win_from} "
@@ -1477,7 +1558,11 @@ def _build_network_asn_candidates(
     if has_metro:
         metro_col = COLUMNS["metro"]
         metro_win_from = _window_from(
-            filter_clause=filter_clause, row_filter=f"{metro_col} != ''", sample_stride=w_stride
+            filter_clause=filter_clause,
+            row_filter=f"{metro_col} != ''",
+            sample_stride=w_stride,
+            window_start=window_start,
+            window_end=window_end,
         )
         branches.append(
             f"SELECT 'metro' AS kind, {metro_col} AS k {metro_win_from} "
@@ -1518,6 +1603,9 @@ def _build_network_asn(
     window_hours: float = 0.0,
     candidates: dict[str, list[str] | None] | None = None,
     candidate_params: dict[str, Any] | None = None,
+    baseline_start: datetime | None = None,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
 ) -> tuple[str, QuerySource]:
     proj: list[tuple[str, str]] = []
     sets: list[str] = []
@@ -1552,7 +1640,11 @@ def _build_network_asn(
             proj.append(("asn_str", f"if(custom_fields['asn'] != '' AND {asn_in}, custom_fields['asn'], '')"))
         else:
             asn_win_from = _window_from(
-                filter_clause=filter_clause, row_filter="custom_fields['asn'] != ''", sample_stride=w_stride
+                filter_clause=filter_clause,
+                row_filter="custom_fields['asn'] != ''",
+                sample_stride=w_stride,
+                window_start=window_start,
+                window_end=window_end,
             )
             win_asns = (
                 f"SELECT custom_fields['asn'] {asn_win_from} GROUP BY custom_fields['asn'] HAVING {win_count} >= 20"
@@ -1573,7 +1665,11 @@ def _build_network_asn(
             proj.append(("metro", f"if({metro_col} != '' AND {metro_in}, {metro_col}, '')"))
         else:
             metro_win_from = _window_from(
-                filter_clause=filter_clause, row_filter=f"{metro_col} != ''", sample_stride=w_stride
+                filter_clause=filter_clause,
+                row_filter=f"{metro_col} != ''",
+                sample_stride=w_stride,
+                window_start=window_start,
+                window_end=window_end,
             )
             win_metros = f"SELECT {metro_col} {metro_win_from} GROUP BY {metro_col} HAVING {win_count} >= 20"
             proj.append(
@@ -1603,6 +1699,9 @@ def _build_network_asn(
         filter_clause=filter_clause,
         baseline_sample_stride=b_stride,
         window_sample_stride=w_stride,
+        baseline_start=baseline_start,
+        window_start=window_start,
+        window_end=window_end,
     )
     g_asn = "grouping(asn_str)" if has_asn else "toUInt8(1)"
     g_metro = "grouping(metro)" if has_metro else "toUInt8(1)"

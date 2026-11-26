@@ -558,7 +558,7 @@ def test_network_quality_avoids_star_subquery_and_scatter_full_sort(monkeypatch:
     ((bars_sql, _),) = client.matching("FROM network_minute_dimensions")
     # Explicit column projection avoids has_star_subquery disabling _cf_* rewrite
     assert "SELECT * FROM (" not in bars_sql
-    assert "SELECT dimension, label, rtt_ms, reqs" in bars_sql
+    assert "SELECT dimension, label, rtt_ms, reqs, pop_reqs, pop_errors, p50_rtt_us, p95_ttfb_ms FROM (" in bars_sql
 
     scatter_calls = [sql for sql, _ in client.matching("cache_state")]
     assert len(scatter_calls) == 2

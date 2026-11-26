@@ -383,7 +383,15 @@ def _evaluate(
             query_params = {**params, "rollup_start": span[0], "rollup_end": span[1]}
             source = "mixed"
         else:
-            sql = _base_sql(detection, definition.id, baseline_hours=baseline_hours, window_hours=window_hours)
+            sql = _base_sql(
+                detection,
+                definition.id,
+                baseline_hours=baseline_hours,
+                window_hours=window_hours,
+                baseline_start=baseline_start,
+                window_start=window_start,
+                window_end=now,
+            )
         if filter_clause:
             sql = sql.replace(
                 "AND event_timestamp < {window_end:DateTime64(3)}",
@@ -411,10 +419,15 @@ def _evaluate(
         span = rollup_spans.get(batch.rollup_shape) if batch.rollup_shape else None
         build_kwargs: dict[str, Any] = {"present": enabled_set, "rollup_span": span, "filter_clause": filter_clause}
         build_params = inspect.signature(batch.build_sql).parameters
-        if "baseline_hours" in build_params:
-            build_kwargs["baseline_hours"] = baseline_hours
-        if "window_hours" in build_params:
-            build_kwargs["window_hours"] = window_hours
+        for kw_name, kw_val in (
+            ("baseline_hours", baseline_hours),
+            ("window_hours", window_hours),
+            ("baseline_start", baseline_start),
+            ("window_start", window_start),
+            ("window_end", now),
+        ):
+            if kw_name in build_params:
+                build_kwargs[kw_name] = kw_val
         query_params = (
             {**params, "rollup_start": span[0], "rollup_end": span[1]} if (batch.rollup_shape and span) else params
         )
@@ -444,8 +457,14 @@ def _evaluate(
                 "rollup_span": span,
                 "filter_clause": filter_clause,
             }
-            if "window_hours" in inspect.signature(batch.build_candidates_sql).parameters:
-                cand_kwargs["window_hours"] = window_hours
+            cand_params_sig = inspect.signature(batch.build_candidates_sql).parameters
+            for kw_name, kw_val in (
+                ("window_hours", window_hours),
+                ("window_start", window_start),
+                ("window_end", now),
+            ):
+                if kw_name in cand_params_sig:
+                    cand_kwargs[kw_name] = kw_val
             cand_sql = rewrite_materialized_cf(
                 batch.build_candidates_sql(active_ids, **cand_kwargs),
                 params,

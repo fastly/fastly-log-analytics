@@ -219,7 +219,8 @@ def test_build_url_cache_samples_24h_window_and_evaluates_with_window_hours() ->
         force_refresh=True,
     )
     url_cache_q = next(q for q, _, _ in client.calls if "/* insight:batch_url_cache */" in q)
-    assert "intDiv(toUnixTimestamp(event_timestamp), 300) % 4 = 0" in url_cache_q
+    assert "intDiv(toUnixTimestamp(event_timestamp), 300) % 4 = 0" not in url_cache_q
+    assert "toDateTime(" in url_cache_q
     assert "toUInt64(4)" in url_cache_q
 
 

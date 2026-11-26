@@ -63,15 +63,25 @@ _network_json_cache: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=
 CacheRegistry.register("high_scale.network.json", _network_json_cache)
 _pop_rollup_cache: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=60.0)
 CacheRegistry.register("high_scale.network.pop_rollup", _pop_rollup_cache)
+_pop_fact_cache: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=60.0)
+CacheRegistry.register("high_scale.network.pop_fact", _pop_fact_cache)
 _SHIELD_ACTIVE_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=600)
 CacheRegistry.register("high_scale.network._SHIELD_ACTIVE_CACHE", _SHIELD_ACTIVE_CACHE)
 
 
 def _invalidate_network_caches(_service_id: str) -> int:
-    n = len(_network_model_cache) + len(_network_json_cache) + len(_pop_rollup_cache)
+    n = (
+        len(_network_model_cache)
+        + len(_network_json_cache)
+        + len(_pop_rollup_cache)
+        + len(_pop_fact_cache)
+        + len(_SHIELD_ACTIVE_CACHE)
+    )
     _network_model_cache.clear()
     _network_json_cache.clear()
     _pop_rollup_cache.clear()
+    _pop_fact_cache.clear()
+    _SHIELD_ACTIVE_CACHE.clear()
     return n
 
 
@@ -86,6 +96,21 @@ def _cache_minute_bound(value: str | datetime | None) -> int | str | None:
         dt = parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
         return int(dt.timestamp()) // 60
     return normalize_cache_bound(value)
+
+
+def _pop_fact_key(
+    service: HighScaleService, start: datetime | None, end: datetime | None, filters: Any
+) -> tuple[Any, ...] | None:
+    if start is None or end is None:
+        return None
+    f_items = tuple((k, v[0], tuple(v[1])) for k, v in serialize_filters_for_key(filters or {}).items())
+    return (
+        service.service_id,
+        client_cache_token(service.client),
+        _cache_minute_bound(start),
+        _cache_minute_bound(end),
+        f_items,
+    )
 
 
 def _fast_model_hit(memo_key: str) -> Any | None:
@@ -365,21 +390,27 @@ def _shielding_analysis(service: HighScaleService, start: datetime, end: datetim
     sh_join_stride = 1
     if is_real_ch:
         shield_cache_key = (service.service_id, client_cache_token(service.client))
+        shield_win_key = (
+            (
+                service.service_id,
+                client_cache_token(service.client),
+                _to_utc_epoch_s(start) // 300,
+                _to_utc_epoch_s(end) // 300,
+            )
+            if start is not None and end is not None
+            else None
+        )
         use_shield_cache = not os.getenv("PYTEST_CURRENT_TEST")
         cached_shield = _SHIELD_ACTIVE_CACHE.get(shield_cache_key) if use_shield_cache else None
+        if cached_shield is None and use_shield_cache and shield_win_key is not None:
+            cached_shield = _SHIELD_ACTIVE_CACHE.get(shield_win_key)
         if cached_shield is False:
             return ShieldingAnalysis(
                 **cache_result({}, state="bypass", prewarmer=False), has_data=False, edge_only=True, rows=[]
             )
         if cached_shield is not True:
-            probe_stride = (
-                _network_sample_stride(sh_span_s)
-                if (sh_span_s >= 21600 and not os.getenv("PYTEST_CURRENT_TEST"))
-                else 1
-            )
-            probe_clause = _network_time_sample_clause(probe_stride, start=start, end=end)
             shield_prewhere = (
-                f"{_BASE_WHERE}{probe_clause} AND custom_fields['edge'] IN ('false', '0', 'False', 'FALSE') "
+                f"{_BASE_WHERE} AND custom_fields['edge'] IN ('false', '0', 'False', 'FALSE') "
                 "AND custom_fields['prid'] != ''"
             )
             shield_rows = service.client.execute(
@@ -388,7 +419,10 @@ def _shielding_analysis(service: HighScaleService, start: datetime, end: datetim
             )
             if not shield_rows or int(shield_rows[0]["n"]) == 0:
                 if use_shield_cache:
-                    _SHIELD_ACTIVE_CACHE[shield_cache_key] = False
+                    if sh_span_s >= 86400:
+                        _SHIELD_ACTIVE_CACHE[shield_cache_key] = False
+                    elif shield_win_key is not None:
+                        _SHIELD_ACTIVE_CACHE[shield_win_key] = False
                 return ShieldingAnalysis(
                     **cache_result({}, state="bypass", prewarmer=False), has_data=False, edge_only=True, rows=[]
                 )
@@ -1590,13 +1624,16 @@ def get_pop_health(
                 pop_rollup_cache_key = (
                     service.service_id,
                     client_cache_token(service.client),
-                    int(start.timestamp()) // 60,
-                    int(end.timestamp()) // 60,
+                    _cache_minute_bound(start),
+                    _cache_minute_bound(end),
                 )
+                pop_fact_cache_key = _pop_fact_key(service, start, end, filters)
                 shared_rollup = pop_rollup_fut.result() if pop_rollup_fut is not None else None
                 if shared_rollup is None:
                     shared_rollup = _pop_rollup_cache.get(pop_rollup_cache_key)
                 shared_fact = pop_fact_fut.result() if pop_fact_fut is not None else None
+                if shared_fact is None and pop_fact_cache_key is not None:
+                    shared_fact = _pop_fact_cache.get(pop_fact_cache_key)
                 light_sql = (
                     "SELECT custom_fields['pop'] AS pop, count() AS requests, "
                     f"countIf({cache_hit_pred}) AS cache_hits, "
@@ -1615,6 +1652,40 @@ def get_pop_health(
                         lambda: service.client.execute(light_sql, params),
                         source="fact",
                     )
+                    if pop_fact_cache_key is not None and fact_rows:
+                        _pop_fact_cache[pop_fact_cache_key] = (fact_rows, pop_stride)
+                elif shared_fact is not None:
+                    fact_rows, pop_stride = shared_fact
+                    fence = visible_publication_fence_sql(
+                        "network_dimensions", client=service.client, service_id=service.service_id
+                    )
+                    rollup_sql = (
+                        "SELECT value AS pop, toUInt64(sum(requests)) AS req_count, "
+                        "toUInt64(sum(errors)) AS errors, "
+                        "sum(tcp_rtt_p50_us * tcp_rtt_count) / nullIf(sum(tcp_rtt_count), 0) AS p50_rtt_us, "
+                        "sum(ttfb_p95_us * requests) / nullIf(sumIf(requests, ttfb_p95_us IS NOT NULL), 0) * 1000.0 AS p95_ttfb_ms "
+                        "FROM network_minute_dimensions "
+                        "PREWHERE service_id={service_id:String} "
+                        "AND bucket_start >= {start:DateTime64(3)} AND bucket_start < {end:DateTime64(3)} "
+                        "AND dimension='pop' AND value != '' "
+                        f"WHERE {fence} "
+                        "GROUP BY pop"
+                    )
+                    rollup_rows = trace.run(
+                        "pop_health",
+                        lambda: service.client.execute(rollup_sql, params),
+                        source="projection",
+                    )
+                    for rr in rollup_rows:
+                        if rr.get("pop"):
+                            rollup_by_pop[str(rr["pop"])] = (
+                                int(rr.get("req_count") or 0),
+                                int(rr.get("errors") or 0),
+                                rr.get("p50_rtt_us"),
+                                rr.get("p95_ttfb_ms"),
+                            )
+                    if rollup_by_pop:
+                        _pop_rollup_cache[pop_rollup_cache_key] = rollup_by_pop
                 else:
                     fence = visible_publication_fence_sql(
                         "network_dimensions", client=service.client, service_id=service.service_id
@@ -1660,6 +1731,8 @@ def get_pop_health(
                             fact_rows.append({**cr, "requests": cr.get("req_count", cr.get("requests"))})
                     if rollup_by_pop:
                         _pop_rollup_cache[pop_rollup_cache_key] = rollup_by_pop
+                    if pop_fact_cache_key is not None and fact_rows:
+                        _pop_fact_cache[pop_fact_cache_key] = (fact_rows, pop_stride)
                 if (not fact_rows and (shared_fact is None or pop_stride > 1)) or (
                     not rollup_by_pop and pop_stride == 1 and shared_fact is None
                 ):
@@ -1847,7 +1920,11 @@ def get_transport_metrics(
                 tr_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
                 scale_factor = _network_sample_stride(tr_span_s)
                 hash_clause = _network_time_sample_clause(scale_factor, start=start, end=end)
-                want_pop_fact = pop_fact_sink is not None and not filter_sql
+                pop_fact_cache_key = _pop_fact_key(service, start, end, filters) if not filter_sql else None
+                want_pop_fact = not filter_sql and (
+                    pop_fact_sink is not None
+                    or (pop_fact_cache_key is not None and _pop_fact_cache.get(pop_fact_cache_key) is None)
+                )
                 cache_hit_pred = (
                     "(startsWith(custom_fields['cache'], 'HIT') OR startsWith(custom_fields['cache'], 'hit'))"
                 )
@@ -1891,7 +1968,10 @@ def get_transport_metrics(
                         }
                         for pop_code, req_cnt in sorted(reqs_d.items(), key=lambda kv: kv[1], reverse=True)
                     ]
-                    _finish_pop_fact((pop_fact_rows, scale_factor))
+                    pop_fact_val = (pop_fact_rows, scale_factor)
+                    if pop_fact_cache_key is not None and pop_fact_rows:
+                        _pop_fact_cache[pop_fact_cache_key] = pop_fact_val
+                    _finish_pop_fact(pop_fact_val)
                 quants = r_raw.get("rtt_quants")
                 q_vals = (
                     [float(x) / 1000.0 if x is not None else None for x in quants]

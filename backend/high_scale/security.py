@@ -691,6 +691,41 @@ def _sec_combined_overview(
     return bundle
 
 
+def _sec_combined_tls_ips(
+    service: HighScaleService, scope: _Scope, mask_ips: bool, sec_base_key: str | None
+) -> dict[str, Any]:
+    sql = (
+        "SELECT kind, k, v1, v2 FROM ("
+        "SELECT 'fp' AS kind, custom_fields['tls_ciphers_sha'] AS k, "
+        "toUInt64(uniqCombined64(client_ip)) AS v1, toUInt64(count()) AS v2 "
+        "FROM request_facts PREWHERE __WHERE__ AND custom_fields['tls_ciphers_sha'] != '' "
+        "GROUP BY k ORDER BY v2 DESC LIMIT 20"
+        ") UNION ALL "
+        "SELECT kind, k, v1, v2 FROM ("
+        "SELECT 'ip' AS kind, client_ip AS k, toUInt64(max(h)) AS v1, toUInt64(0) AS v2 FROM ("
+        "SELECT client_ip, toUInt64OrNull(custom_fields['req_header_bytes']) AS h "
+        "FROM request_facts PREWHERE __WHERE__ AND client_ip != '' AND custom_fields['req_header_bytes'] != ''"
+        ") WHERE h IS NOT NULL GROUP BY k ORDER BY v1 DESC LIMIT 10)"
+    )
+    rows = _run(service, scope, "tls_and_ips", sql)
+    fps = [
+        shape_security_fingerprint_row(r["k"], r["v1"], int(r["v2"])) for r in rows if str(r.get("kind") or "") == "fp"
+    ]
+    ips = [
+        shape_security_top_ip_header_row(r["k"], r["v1"], mask_ips=mask_ips)
+        for r in rows
+        if str(r.get("kind") or "") == "ip"
+    ]
+    fps.sort(key=lambda x: x["request_count"], reverse=True)
+    ips.sort(key=lambda x: x["max_header"], reverse=True)
+    bundle = {
+        "tls_fingerprints": fps,
+        "top_ips_header": ips,
+    }
+    _populate_sec_memo_bundle(sec_base_key, bundle)
+    return bundle
+
+
 def _maybe_mask(ip: Any, mask_ips: bool) -> Any:
     if not mask_ips or not ip:
         return ip
@@ -804,8 +839,29 @@ def security_aggregates(
                 )
             )
         )
+        use_combined_tls_ips = (
+            is_real_ch
+            and want("tls_fingerprints")
+            and want("top_ips_header")
+            and (
+                sec_base_key is None
+                or (
+                    f"{sec_base_key}:tls_fingerprints" not in _security_memo.cache
+                    and f"{sec_base_key}:top_ips_header" not in _security_memo.cache
+                )
+            )
+        )
         candidates: tuple[tuple[str, bool, Callable[[], Any]], ...] = (
-            ("tls_fingerprints", want("tls_fingerprints"), lambda: _tls_fingerprints(service, scope)),
+            (
+                "_combined_tls_ips",
+                use_combined_tls_ips,
+                lambda: _sec_combined_tls_ips(service, scope, mask_ips, sec_base_key),
+            ),
+            (
+                "tls_fingerprints",
+                want("tls_fingerprints") and not use_combined_tls_ips,
+                lambda: _tls_fingerprints(service, scope),
+            ),
             (
                 "_combined_overview",
                 use_combined_overview,
@@ -829,7 +885,7 @@ def security_aggregates(
             ),
             (
                 "top_ips_header",
-                want("top_ips_header"),
+                want("top_ips_header") and not use_combined_tls_ips,
                 lambda: _top_ips_header(service, scope, mask_ips),
             ),
             (
@@ -878,7 +934,7 @@ def security_aggregates(
             ("_proxies", want("proxies"), lambda: _proxies(service, scope, mask_ips)),
         )
         tasks = [
-            (k, fn if k in ("_combined_overview", "_combined_ngwaf") else _wrap_sec(k, fn))
+            (k, fn if k in ("_combined_overview", "_combined_ngwaf", "_combined_tls_ips") else _wrap_sec(k, fn))
             for k, w, fn in candidates
             if w
         ]
@@ -912,7 +968,7 @@ def security_aggregates(
                 for ok in overview_keys:
                     if ok in val and want(ok):
                         res[ok] = val[ok]
-            elif k == "_combined_ngwaf":
+            elif k in ("_combined_ngwaf", "_combined_tls_ips"):
                 res.update(val)
             else:
                 res[k] = val

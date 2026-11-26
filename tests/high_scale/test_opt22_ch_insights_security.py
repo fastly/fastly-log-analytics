@@ -188,7 +188,8 @@ def test_ip_outlier_supports_baseline_sampling_and_preserves_default() -> None:
         force_refresh=True,
     )
     ip_out_q = next(q for q, _ in client.calls if "/* insight:batch_ip_outlier */" in q)
-    assert "intDiv(toUnixTimestamp(event_timestamp), 300) % 8 = 0" in ip_out_q
+    assert "intDiv(toUnixTimestamp(event_timestamp), 300) % 8 = 0" not in ip_out_q
+    assert "toDateTime(" in ip_out_q
     assert "countIf(is_b AND req_header_bytes > 0) * 8 AS rs_b_total" in ip_out_q
 
 

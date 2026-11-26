@@ -6,6 +6,7 @@ import re
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from backend.core.clickhouse.client import rewrite_materialized_cf_sql
@@ -108,6 +109,108 @@ def window_sample_stride(window_hours: float) -> int:
     if window_hours >= 24:
         return 4
     return 1
+
+
+def _to_utc_epoch_s(dt: datetime) -> int:
+    utc_dt = dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+    return int(utc_dt.timestamp())
+
+
+def _pk_range_windows(start_ts: int, end_ts: int, stride: int) -> list[tuple[int, int]]:
+    """Split ``[start_ts, end_ts)`` into monotonic PK range slices covering ``~1 / stride`` of the span."""
+    span_s = end_ts - start_ts
+    if stride <= 1 or span_s <= 0:
+        return []
+    if span_s <= stride:
+        return [(start_ts, min(end_ts, start_ts + 1))]
+    target_sampled_s = max(1, span_s // stride)
+    n_windows = min(168, max(1, span_s // 3600), target_sampled_s)
+    step_s = span_s // n_windows
+    win_s = max(1, target_sampled_s // n_windows)
+    windows: list[tuple[int, int]] = []
+    for i in range(n_windows):
+        slot_lo = start_ts + i * step_s
+        slot_hi = end_ts if i == n_windows - 1 else start_ts + (i + 1) * step_s
+        slot_dur = slot_hi - slot_lo
+        w_dur = min(win_s, slot_dur)
+        if w_dur <= 0:
+            continue
+        slack = slot_dur - w_dur
+        offset = ((i * 13) % 24) * slack // 24 if slack > 0 else 0
+        windows.append((slot_lo + offset, slot_lo + offset + w_dur))
+    return windows
+
+
+def _pk_range_or_expr(windows: list[tuple[int, int]]) -> str:
+    clauses = [
+        f"(event_timestamp >= toDateTime({w_start}, 'UTC') AND event_timestamp < toDateTime({w_end}, 'UTC'))"
+        for w_start, w_end in windows
+    ]
+    return f"({' OR '.join(clauses)})"
+
+
+def build_pk_time_sample_clause(
+    *,
+    b_stride: int = 1,
+    w_stride: int = 1,
+    window_only: bool = False,
+    baseline_start: datetime | None = None,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
+    rollup_span: tuple[datetime, datetime] | None = None,
+) -> str:
+    """Build a granule-skipping PK time-sample PREWHERE suffix (falling back to modulo when bounds are omitted)."""
+    b_eff = 1 if window_only else b_stride
+    if b_eff <= 1 and w_stride <= 1:
+        return ""
+    have_bounds = window_start is not None and window_end is not None and (b_eff <= 1 or baseline_start is not None)
+    if not have_bounds:
+        if w_stride > 1 and b_eff > 1:
+            return (
+                f" AND ((event_timestamp >= {{window_start:DateTime64(3)}} AND intDiv(toUnixTimestamp(event_timestamp), 300) % {w_stride} = 0)"
+                f" OR (event_timestamp < {{window_start:DateTime64(3)}} AND intDiv(toUnixTimestamp(event_timestamp), 300) % {b_eff} = 0))"
+            )
+        if w_stride > 1 and window_only:
+            return f" AND intDiv(toUnixTimestamp(event_timestamp), 300) % {w_stride} = 0"
+        if w_stride > 1:
+            return f" AND (event_timestamp < {{window_start:DateTime64(3)}} OR intDiv(toUnixTimestamp(event_timestamp), 300) % {w_stride} = 0)"
+        return f" AND (event_timestamp >= {{window_start:DateTime64(3)}} OR intDiv(toUnixTimestamp(event_timestamp), 300) % {b_eff} = 0)"
+
+    assert window_start is not None and window_end is not None
+    w_ts = _to_utc_epoch_s(window_start)
+    e_ts = _to_utc_epoch_s(window_end)
+    w_windows = _pk_range_windows(w_ts, e_ts, w_stride) if w_stride > 1 else []
+
+    b_windows: list[tuple[int, int]] = []
+    if b_eff > 1:
+        assert baseline_start is not None
+        b_ts = _to_utc_epoch_s(baseline_start)
+        if rollup_span is not None and _to_utc_epoch_s(rollup_span[0]) < _to_utc_epoch_s(rollup_span[1]):
+            r_s_ts = _to_utc_epoch_s(rollup_span[0])
+            r_e_ts = _to_utc_epoch_s(rollup_span[1])
+            uncovered_hi = min(w_ts, r_s_ts)
+            uncovered_lo = max(b_ts, r_e_ts)
+            if b_ts < uncovered_hi:
+                b_windows.extend(_pk_range_windows(b_ts, uncovered_hi, b_eff))
+            if uncovered_lo < w_ts:
+                b_windows.extend(_pk_range_windows(uncovered_lo, w_ts, b_eff))
+        else:
+            b_windows = _pk_range_windows(b_ts, w_ts, b_eff)
+
+    if w_stride > 1 and b_eff > 1:
+        combined = b_windows + w_windows
+        return f" AND {_pk_range_or_expr(combined)}" if combined else ""
+    if w_stride > 1 and window_only:
+        return f" AND {_pk_range_or_expr(w_windows)}" if w_windows else ""
+    if w_stride > 1:
+        return (
+            f" AND (event_timestamp < {{window_start:DateTime64(3)}} OR {_pk_range_or_expr(w_windows)})"
+            if w_windows
+            else ""
+        )
+    if b_windows:
+        return f" AND (event_timestamp >= {{window_start:DateTime64(3)}} OR {_pk_range_or_expr(b_windows)})"
+    return " AND event_timestamp >= {window_start:DateTime64(3)}" if rollup_span is not None else ""
 
 
 _PROBE_SUBSTRINGS_SQL = (
@@ -913,6 +1016,9 @@ def _base_sql(
     params: Mapping[str, Any] | None = None,
     baseline_hours: float = 0.0,
     window_hours: float = 0.0,
+    baseline_start: datetime | None = None,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
 ) -> str:
     projection = ", ".join(f"{COLUMNS[column]} AS {column}" for column in detection.columns)
     lower = "{window_start:DateTime64(3)}" if detection.window_only else "{baseline_start:DateTime64(3)}"
@@ -923,19 +1029,14 @@ def _base_sql(
     b_scale = f" * {b_stride}" if b_stride > 1 else ""
     w_stride = window_sample_stride(window_hours) if detection.window_sampled else 1
     w_scale = f" * {w_stride}" if w_stride > 1 else ""
-    if w_stride > 1 and b_stride > 1:
-        time_sample = (
-            f" AND ((event_timestamp >= {{window_start:DateTime64(3)}} AND intDiv(toUnixTimestamp(event_timestamp), 300) % {w_stride} = 0)"
-            f" OR (event_timestamp < {{window_start:DateTime64(3)}} AND intDiv(toUnixTimestamp(event_timestamp), 300) % {b_stride} = 0))"
-        )
-    elif w_stride > 1 and detection.window_only:
-        time_sample = f" AND intDiv(toUnixTimestamp(event_timestamp), 300) % {w_stride} = 0"
-    elif w_stride > 1:
-        time_sample = f" AND (event_timestamp < {{window_start:DateTime64(3)}} OR intDiv(toUnixTimestamp(event_timestamp), 300) % {w_stride} = 0)"
-    elif b_stride > 1:
-        time_sample = f" AND (event_timestamp >= {{window_start:DateTime64(3)}} OR intDiv(toUnixTimestamp(event_timestamp), 300) % {b_stride} = 0)"
-    else:
-        time_sample = ""
+    time_sample = build_pk_time_sample_clause(
+        b_stride=b_stride,
+        w_stride=w_stride,
+        window_only=detection.window_only,
+        baseline_start=baseline_start,
+        window_start=window_start,
+        window_end=window_end,
+    )
     if detection.prewhere:
         row_filter = f" AND ({detection.row_filter})" if detection.row_filter else ""
         from_clause = (
@@ -955,6 +1056,15 @@ def _base_sql(
         "event_timestamp >= {window_start:DateTime64(3)} AS is_w "
         f"{from_clause}) {det_sql}"
     )
+    crawler_mod = f" AND intDiv(toUnixTimestamp(event_timestamp), 300) % {_CRAWLER_WINDOW_SAMPLE_STRIDE} = 0"
+    if window_start is not None and window_end is not None and crawler_mod in sql:
+        cw_sample = build_pk_time_sample_clause(
+            w_stride=_CRAWLER_WINDOW_SAMPLE_STRIDE,
+            window_only=True,
+            window_start=window_start,
+            window_end=window_end,
+        )
+        sql = sql.replace(crawler_mod, cw_sample)
     return rewrite_materialized_cf(sql, params, use_cf=use_cf)
 
 
