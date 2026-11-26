@@ -74,8 +74,21 @@ CREATE TABLE IF NOT EXISTS high_scale_source_cursors (
     PRIMARY KEY (service_id, domain),
     FOREIGN KEY (service_id) REFERENCES high_scale_ownership(service_id) ON DELETE CASCADE
 );
-ALTER TABLE high_scale_source_cursors ADD COLUMN IF NOT EXISTS reinspection_cursor TEXT NOT NULL DEFAULT '__initial__';
-ALTER TABLE high_scale_source_cursors ADD COLUMN IF NOT EXISTS forward_pages_since_reinspection INTEGER NOT NULL DEFAULT 0;
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_attribute WHERE attrelid = 'high_scale_source_cursors'::regclass
+          AND attname = 'reinspection_cursor' AND NOT attisdropped
+    ) THEN
+        ALTER TABLE high_scale_source_cursors ADD COLUMN IF NOT EXISTS reinspection_cursor TEXT NOT NULL DEFAULT '__initial__';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_attribute WHERE attrelid = 'high_scale_source_cursors'::regclass
+          AND attname = 'forward_pages_since_reinspection' AND NOT attisdropped
+    ) THEN
+        ALTER TABLE high_scale_source_cursors ADD COLUMN IF NOT EXISTS forward_pages_since_reinspection INTEGER NOT NULL DEFAULT 0;
+    END IF;
+END $$;
 CREATE TABLE IF NOT EXISTS high_scale_partition_cursors (
     service_id TEXT NOT NULL, domain TEXT NOT NULL, partition_id TEXT NOT NULL DEFAULT 'default',
     source_cursor TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
@@ -94,13 +107,34 @@ CREATE TABLE IF NOT EXISTS high_scale_source_objects (
     discovered_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(), UNIQUE (service_id, object_key)
 );
-ALTER TABLE high_scale_source_objects ADD COLUMN IF NOT EXISTS last_error TEXT;
-ALTER TABLE high_scale_source_objects DROP CONSTRAINT IF EXISTS high_scale_source_objects_status_check;
-ALTER TABLE high_scale_source_objects ADD CONSTRAINT high_scale_source_objects_status_check CHECK (status IN (
-    'discovered', 'claimed', 'appended', 'archived', 'acknowledged', 'source_deleted', 'source_missing'
-));
-CREATE INDEX IF NOT EXISTS high_scale_source_objects_claim_idx ON high_scale_source_objects (service_id, status, lease_until);
-CREATE INDEX IF NOT EXISTS high_scale_source_objects_domain_status_idx ON high_scale_source_objects (service_id, domain, status);
+-- Catalog-guarded like high_scale_archive_manifests below: unguarded ALTER/CREATE INDEX locks the table even as a no-op and deadlocks against _CONCURRENT_BILLING_INDEXES builds.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_attribute WHERE attrelid = 'high_scale_source_objects'::regclass
+          AND attname = 'last_error' AND NOT attisdropped
+    ) THEN
+        ALTER TABLE high_scale_source_objects ADD COLUMN IF NOT EXISTS last_error TEXT;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'high_scale_source_objects'::regclass
+          AND conname = 'high_scale_source_objects_status_check'
+          AND position('source_deleted' IN pg_get_constraintdef(oid)) > 0
+          AND position('source_missing' IN pg_get_constraintdef(oid)) > 0
+    ) THEN
+        ALTER TABLE high_scale_source_objects DROP CONSTRAINT IF EXISTS high_scale_source_objects_status_check;
+        ALTER TABLE high_scale_source_objects ADD CONSTRAINT high_scale_source_objects_status_check CHECK (status IN (
+            'discovered', 'claimed', 'appended', 'archived', 'acknowledged', 'source_deleted', 'source_missing'
+        )) NOT VALID;
+    END IF;
+    IF to_regclass('high_scale_source_objects_claim_idx') IS NULL THEN
+        CREATE INDEX IF NOT EXISTS high_scale_source_objects_claim_idx ON high_scale_source_objects (service_id, status, lease_until);
+    END IF;
+    IF to_regclass('high_scale_source_objects_domain_status_idx') IS NULL THEN
+        CREATE INDEX IF NOT EXISTS high_scale_source_objects_domain_status_idx ON high_scale_source_objects (service_id, domain, status);
+    END IF;
+END $$;
 CREATE TABLE IF NOT EXISTS high_scale_archive_manifests (
     manifest_id TEXT PRIMARY KEY, service_id TEXT NOT NULL, domain TEXT NOT NULL,
     source_key TEXT NOT NULL, source_checksum TEXT NOT NULL, source_size BIGINT NOT NULL CHECK (source_size >= 0),
@@ -166,7 +200,12 @@ CREATE TABLE IF NOT EXISTS high_scale_archive_manifest_sources (
     row_count BIGINT NOT NULL CHECK (row_count >= 0), deletion_deadline TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (manifest_id, source_key)
 );
-CREATE INDEX IF NOT EXISTS high_scale_archive_manifest_sources_key_idx ON high_scale_archive_manifest_sources (source_key);
+DO $$
+BEGIN
+    IF to_regclass('high_scale_archive_manifest_sources_key_idx') IS NULL THEN
+        CREATE INDEX IF NOT EXISTS high_scale_archive_manifest_sources_key_idx ON high_scale_archive_manifest_sources (source_key);
+    END IF;
+END $$;
 CREATE TABLE IF NOT EXISTS high_scale_batch_claims (
     batch_id TEXT PRIMARY KEY, service_id TEXT NOT NULL, domain TEXT NOT NULL, worker_id TEXT NOT NULL,
     owner_epoch BIGINT NOT NULL CHECK (owner_epoch > 0), lease_until TIMESTAMPTZ NOT NULL,
@@ -174,7 +213,12 @@ CREATE TABLE IF NOT EXISTS high_scale_batch_claims (
     state TEXT NOT NULL CHECK (state IN ('claimed', 'completed', 'released')),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
-CREATE INDEX IF NOT EXISTS high_scale_batch_claims_lease_idx ON high_scale_batch_claims (service_id, state, lease_until);
+DO $$
+BEGIN
+    IF to_regclass('high_scale_batch_claims_lease_idx') IS NULL THEN
+        CREATE INDEX IF NOT EXISTS high_scale_batch_claims_lease_idx ON high_scale_batch_claims (service_id, state, lease_until);
+    END IF;
+END $$;
 CREATE TABLE IF NOT EXISTS high_scale_publication_manifests (
     batch_id TEXT PRIMARY KEY, service_id TEXT NOT NULL, domain TEXT NOT NULL, generation TEXT NOT NULL,
     batch_digest TEXT NOT NULL, expected_rows BIGINT NOT NULL CHECK (expected_rows >= 0),
@@ -194,9 +238,11 @@ BEGIN
         ALTER TABLE high_scale_publication_manifests ADD CONSTRAINT high_scale_publication_manifests_status_check
             CHECK (status IN ('pending', 'visible', 'superseded', 'abandoned')) NOT VALID;
     END IF;
+    IF to_regclass('high_scale_publication_manifests_domain_status_idx') IS NULL THEN
+        CREATE INDEX IF NOT EXISTS high_scale_publication_manifests_domain_status_idx
+            ON high_scale_publication_manifests (service_id, domain, status);
+    END IF;
 END $$;
-CREATE INDEX IF NOT EXISTS high_scale_publication_manifests_domain_status_idx
-    ON high_scale_publication_manifests (service_id, domain, status);
 CREATE TABLE IF NOT EXISTS high_scale_deletion_authorizations (
     object_id TEXT NOT NULL REFERENCES high_scale_source_objects(object_id),
     manifest_id TEXT NOT NULL REFERENCES high_scale_archive_manifests(manifest_id),

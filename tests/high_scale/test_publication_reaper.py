@@ -255,7 +255,12 @@ def test_committed_manifest_index_build_does_not_block_writers(seed) -> None:
 def test_a_no_op_schema_bootstrap_takes_no_lock_on_archive_manifests(seed) -> None:
     """A running concurrent index build holds SHARE UPDATE EXCLUSIVE; another pod's boot must not queue behind it."""
     with _session(autocommit=False) as index_build:
-        index_build.execute("LOCK TABLE high_scale_archive_manifests IN SHARE UPDATE EXCLUSIVE MODE")
+        index_build.execute(
+            "LOCK TABLE high_scale_archive_manifests, high_scale_source_objects, "
+            "high_scale_source_cursors, high_scale_archive_manifest_sources, "
+            "high_scale_batch_claims, high_scale_publication_manifests "
+            "IN SHARE UPDATE EXCLUSIVE MODE"
+        )
         try:
             with seed.control.transaction() as connection:
                 connection.execute("SET LOCAL lock_timeout = '1s'")
@@ -315,6 +320,15 @@ def test_several_pods_creating_and_upgrading_the_schema_at_once_all_succeed() ->
                 "ALTER TABLE high_scale_publication_manifests ADD CONSTRAINT "
                 "high_scale_publication_manifests_status_check CHECK (status IN ('pending', 'visible'))"
             )
+            connection.execute(
+                "ALTER TABLE high_scale_source_objects DROP CONSTRAINT high_scale_source_objects_status_check"
+            )
+            connection.execute(
+                "ALTER TABLE high_scale_source_objects ADD CONSTRAINT "
+                "high_scale_source_objects_status_check CHECK (status IN ("
+                "'discovered', 'claimed', 'appended', 'archived', 'acknowledged', 'source_deleted'"
+                "))"
+            )
 
         _create_schema_from_several_pods_at_once(control)
 
@@ -324,10 +338,16 @@ def test_several_pods_creating_and_upgrading_the_schema_at_once_all_succeed() ->
                 "WHERE conrelid = 'high_scale_publication_manifests'::regclass AND contype = 'c' "
                 "AND pg_get_constraintdef(oid) LIKE '%%status%%'"
             ).fetchall()
+            source_checks = connection.execute(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conrelid = 'high_scale_source_objects'::regclass AND contype = 'c' "
+                "AND conname = 'high_scale_source_objects_status_check'"
+            ).fetchall()
             index = connection.execute(
                 "SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass(%s)", (COMMITTED_MANIFEST_INDEX,)
             ).fetchone()
         assert len(checks) == 1 and "superseded" in checks[0][0]
+        assert len(source_checks) == 1 and "source_missing" in source_checks[0][0]
         assert index is not None and index[0]
     finally:
         pool.close()
