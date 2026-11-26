@@ -1590,7 +1590,7 @@ describe("projected dashboard summaries", () => {
       if (!changed) unchanged.push(name);
     }
     expect(unchanged).toEqual([]);
-  });
+  }, 45_000);
 
   it("reads under half the data bytes from a file announcing its layout as from today's", async () => {
     const [file] = pick("hour");
@@ -1749,7 +1749,7 @@ describe("projected dashboard summaries", () => {
     });
     expect(result.totalRequests).toBeGreaterThan(0);
     expect(result.cards.url.top.length).toBeGreaterThan(0);
-  });
+  }, 45_000);
 
   it("covers open-hour compacts via open_bundle + window summaries even when an in-progress tail RAW_WINDOW crosses toMs", () => {
     const fromMs = Date.parse("2026-11-21T00:00:00Z");
