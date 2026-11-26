@@ -12,27 +12,24 @@ import AssetsLoading from './loading'
 
 export const dynamic = 'force-dynamic'
 
-export default async function AssetsShieldPage({
+export default function AssetsShieldPage({
   searchParams,
 }: {
   searchParams: Promise<ReportSearchParams>
 }) {
-  const { serviceId, isDefaultView } = await resolveReportPageParams(searchParams)
-
   return (
     <Suspense fallback={<AssetsLoading />}>
-      <AssetsHydratedSection serviceId={serviceId} isDefaultView={isDefaultView} />
+      <AssetsHydratedSection searchParams={searchParams} />
     </Suspense>
   )
 }
 
 async function AssetsHydratedSection({
-  serviceId,
-  isDefaultView,
+  searchParams,
 }: {
-  serviceId: string | undefined
-  isDefaultView: boolean
+  searchParams: Promise<ReportSearchParams>
 }) {
+  const { serviceId, isDefaultView } = await resolveReportPageParams(searchParams)
   const now = new Date()
   const seed = isDefaultView ? await fetchAssetsServerSide(serviceId, now) : null
   const dehydratedState = seed

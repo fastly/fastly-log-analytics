@@ -1,3 +1,4 @@
+import { Suspense } from 'react'
 import { HydrationBoundary } from '@tanstack/react-query'
 
 import { isCloudMode } from '@/lib/cloud-engine/mode'
@@ -11,12 +12,25 @@ import {
   type ReportSearchParams,
 } from '@/lib/ssr/upstream'
 import OriginClient from './_sections/OriginClient'
+import Loading from './loading'
 
 export * from './_sections/OriginClient'
 
 export const dynamic = 'force-dynamic'
 
-export default async function OriginPage({
+export default function OriginPage({
+  searchParams,
+}: {
+  searchParams: Promise<ReportSearchParams>
+}) {
+  return (
+    <Suspense fallback={<Loading />}>
+      <OriginHydratedSection searchParams={searchParams} />
+    </Suspense>
+  )
+}
+
+async function OriginHydratedSection({
   searchParams,
 }: {
   searchParams: Promise<ReportSearchParams>

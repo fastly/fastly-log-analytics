@@ -1,8 +1,10 @@
+import { Suspense } from 'react'
 import { HydrationBoundary } from '@tanstack/react-query'
 
 import { fetchAlertsServerSide } from '@/lib/ssr/upstream'
 import { resolvePageServiceId, seedDehydratedState } from '@/lib/ssr/upstream'
 import AlertsClient from './_sections/AlertsClient'
+import Loading from './loading'
 
 // Per-request RSC shell. We fetch the alerts list server-side and
 // dehydrate it into a HydrationBoundary so AlertsClient's useQuery
@@ -17,16 +19,28 @@ import AlertsClient from './_sections/AlertsClient'
 // cache the dehydrated state for the wrong audience.
 export const dynamic = 'force-dynamic'
 
-// Service id flows through the ?service= query param (FilterBar /
-// useUrlServiceSync writes it). When absent, fall back to the active
-// service from bootstrap so the SSR seed key matches AlertsClient's
-// useEffectiveServiceId() resolution on cold loads.
-export default async function AlertsPage({
+export default function AlertsPage({
   searchParams,
 }: {
   searchParams: Promise<{ service?: string | string[] }>
 }) {
-  const params = await searchParams
+  return (
+    <Suspense fallback={<Loading />}>
+      <AlertsHydratedSection searchParams={searchParams} />
+    </Suspense>
+  )
+}
+
+// Service id flows through the ?service= query param (FilterBar /
+// useUrlServiceSync writes it). When absent, fall back to the active
+// service from bootstrap so the SSR seed key matches AlertsClient's
+// useEffectiveServiceId() resolution on cold loads.
+async function AlertsHydratedSection({
+  searchParams,
+}: {
+  searchParams: Promise<{ service?: string | string[] }>
+}) {
+  const params = process.env.STATIC_EXPORT === '1' ? {} : await searchParams
   const serviceId = await resolvePageServiceId(params, {
     fallbackFirstService: true,
   })
