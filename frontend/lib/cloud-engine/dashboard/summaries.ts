@@ -574,6 +574,7 @@ export function planCompactsFromWindows(
   }
   const partialHours = new Set<string>();
   const liveWindowTags = new Map<string, Set<number>>();
+  const otherRawByHour = new Map<string, { startMs: number; endMs: number }[]>();
   const merged = new Map<
     string,
     { file: ManifestFile; rows: number; sources: number }[]
@@ -590,11 +591,23 @@ export function planCompactsFromWindows(
       const tags = liveWindowTags.get(hourKey) ?? new Set<number>();
       tags.add(fnv1a32(`window=${rawWin[3]}.parquet`));
       liveWindowTags.set(hourKey, tags);
-      if (Date.parse(file.start) < fromMs) partialHours.add(hourKey);
+      const startMs = Date.parse(file.start);
+      const endMs = Date.parse(file.end);
+      otherRawByHour.set(hourKey, [
+        ...(otherRawByHour.get(hourKey) ?? []),
+        { startMs, endMs },
+      ]);
+      if (startMs < fromMs) partialHours.add(hourKey);
       continue;
     }
-    if (Date.parse(file.start) < fromMs || Date.parse(file.end) > toMs) {
+    const startMs = Date.parse(file.start);
+    const endMs = Date.parse(file.end);
+    if (startMs < fromMs || endMs > toMs) {
       partialHours.add(hourKey);
+      otherRawByHour.set(hourKey, [
+        ...(otherRawByHour.get(hourKey) ?? []),
+        { startMs, endMs },
+      ]);
       continue;
     }
     if (!compact) continue;
@@ -627,8 +640,114 @@ export function planCompactsFromWindows(
     }
   }
   for (const [hourKey, compacts] of merged) {
-    if (partialHours.has(hourKey)) continue;
     const liveTags = liveWindowTags.get(hourKey);
+    if (partialHours.has(hourKey)) {
+      const sorted = [...compacts].sort((a, b) => {
+        const aStart = Date.parse(a.file.start);
+        const bStart = Date.parse(b.file.start);
+        const aEnd = Date.parse(a.file.end);
+        const bEnd = Date.parse(b.file.end);
+        return (
+          (Number.isFinite(aStart) ? aStart : Infinity) -
+            (Number.isFinite(bStart) ? bStart : Infinity) ||
+          (Number.isFinite(aEnd) ? aEnd : Infinity) -
+            (Number.isFinite(bEnd) ? bEnd : Infinity)
+        );
+      });
+      type Cluster = {
+        compacts: typeof compacts;
+        startMs: number;
+        endMs: number;
+        rows: number;
+        sources: number;
+      };
+      const clusters: Cluster[] = [];
+      for (const c of sorted) {
+        const startMs = Date.parse(c.file.start);
+        const endMs = Date.parse(c.file.end);
+        const prev = clusters[clusters.length - 1];
+        if (
+          prev &&
+          Number.isFinite(startMs) &&
+          Number.isFinite(prev.endMs) &&
+          startMs < prev.endMs
+        ) {
+          prev.compacts.push(c);
+          prev.endMs = Number.isFinite(endMs)
+            ? Math.max(prev.endMs, endMs)
+            : NaN;
+          prev.rows += c.rows;
+          prev.sources += c.sources;
+        } else {
+          clusters.push({
+            compacts: [c],
+            startMs,
+            endMs,
+            rows: c.rows,
+            sources: c.sources,
+          });
+        }
+      }
+      const otherRaw = otherRawByHour.get(hourKey) ?? [];
+      for (const cluster of clusters) {
+        if (
+          !Number.isFinite(cluster.startMs) ||
+          !Number.isFinite(cluster.endMs) ||
+          cluster.endMs <= cluster.startMs ||
+          cluster.startMs < fromMs ||
+          cluster.endMs > toMs
+        ) {
+          continue;
+        }
+        if (
+          otherRaw.some(
+            (o) =>
+              !Number.isFinite(o.startMs) ||
+              !Number.isFinite(o.endMs) ||
+              (o.startMs < cluster.endMs && o.endMs > cluster.startMs),
+          )
+        ) {
+          continue;
+        }
+        const unused = [...(windowsByHour.get(hourKey)?.entries() ?? [])]
+          .filter(([tag, w]) => !w.used && !liveTags?.has(tag))
+          .map(([, w]) => w);
+        let invalidOrStraddling = false;
+        const wCluster: Window[] = [];
+        for (const w of unused) {
+          const wStart = Date.parse(w.file.start);
+          const wEnd = Date.parse(w.file.end);
+          if (!Number.isFinite(wStart) || !Number.isFinite(wEnd)) {
+            invalidOrStraddling = true;
+            break;
+          }
+          if (
+            wStart < cluster.endMs &&
+            wEnd > cluster.startMs &&
+            (wStart < cluster.startMs || wEnd > cluster.endMs)
+          ) {
+            invalidOrStraddling = true;
+            break;
+          }
+          if (wStart >= cluster.startMs && wEnd <= cluster.endMs) {
+            wCluster.push(w);
+          }
+        }
+        if (invalidOrStraddling) continue;
+        if (
+          wCluster.length >= cluster.sources &&
+          wCluster.reduce((sum, w) => sum + w.rows, 0) === cluster.rows
+        ) {
+          const covers = cluster.compacts.map((c) => c.file);
+          for (const w of wCluster) {
+            w.used = true;
+            summaries.push({ file: w.file, covers });
+          }
+          for (const c of cluster.compacts) claimed.add(c.file.key);
+        }
+      }
+      continue;
+    }
     const unused = [...(windowsByHour.get(hourKey)?.entries() ?? [])]
       .filter(([tag, w]) => !w.used && !liveTags?.has(tag))
       .map(([, w]) => w);

@@ -37,7 +37,6 @@ import {
   planCoarsestFirst,
   planCompactsFromWindows,
   planFilteredSummaries,
-  planSummaries,
   PIVOT_FIELDS,
   SLICE_COLUMNS,
   SLICE_GROUPS,
@@ -1552,11 +1551,44 @@ async function collectAggregator(
           fromMs,
           toMs,
         );
-        files = compacted.raw;
+        const MAX_WINDOWS_PER_DASHBOARD_COMPACT = 10;
         summaryUses = plan.summaries;
+        const revertedRawKeys = new Set<string>();
         for (const group of groupByCovers(compacted.summaries)) {
+          if (
+            group.length >
+            Math.max(1, group[0].covers.length) *
+              MAX_WINDOWS_PER_DASHBOARD_COMPACT
+          ) {
+            for (const use of group) {
+              for (const rawFile of use.covers) revertedRawKeys.add(rawFile.key);
+            }
+            continue;
+          }
           if (group.length === 1) summaryUses.push(group[0]);
           else compactGroups.push(group);
+        }
+        if (revertedRawKeys.size > 0) {
+          const activeCoveredKeys = new Set<string>([
+            ...summaryUses.flatMap((use) => use.covers.map((f) => f.key)),
+            ...compactGroups
+              .flat()
+              .flatMap((use) => use.covers.map((f) => f.key)),
+          ]);
+          const keptRawKeys = new Set(compacted.raw.map((file) => file.key));
+          const seen = new Set<string>();
+          files = plan.raw.filter((file) => {
+            if (seen.has(file.key)) return false;
+            const keep =
+              keptRawKeys.has(file.key) ||
+              (revertedRawKeys.has(file.key) &&
+                !activeCoveredKeys.has(file.key));
+            if (!keep) return false;
+            seen.add(file.key);
+            return true;
+          });
+        } else {
+          files = compacted.raw;
         }
       }
     }
@@ -2896,7 +2928,7 @@ export async function searchFieldSummaries(
           });
     assertActive();
     if (listing?.complete) {
-      const plan = planSummaries(files, listing.files, fromMs, toMs);
+      const plan = planCoarsestFirst(files, listing.files, fromMs, toMs);
       const used = new Set(plan.summaries.map((use) => use.file.key));
       // A summary that fails marks the search partial, so grouped uses need no fallback.
       const compacted = planCompactsFromWindows(

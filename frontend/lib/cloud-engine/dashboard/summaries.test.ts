@@ -1321,6 +1321,91 @@ describe("pivot slices", () => {
     expectMatchesRaw(fallback, exact);
   });
 
+  it("reads high-fanout compacts raw when window summaries exceed MAX_WINDOWS_PER_DASHBOARD_COMPACT", async () => {
+    const windows09 = RAW.filter((f) => f.key.includes("/hour=09/"));
+    const pair = windows09.slice(0, 2);
+    const names = pair.map((w) => /window=(.+)\.parquet$/.exec(w.key)![1]);
+    const tags = names.map((n) => fnv1a32(`window=${n}.parquet`).toString(16).padStart(8, "0"));
+    const smallCompact: ManifestFile = {
+      ...pair[0],
+      key: pair[0].key.replace(
+        /window=.*$/,
+        `compact=1800003600-1800005400-c2-n${pair[0].rows! + pair[1].rows!}-${tags.join("")}.parquet`,
+      ),
+      end: pair[1].end,
+      rows: pair[0].rows! + pair[1].rows!,
+      sources: 2,
+    };
+    let second: Record<string, unknown>[] = [];
+    await editSummaryRows(BUFFERS[pair[1].key], (rows) => (second = rows));
+
+    const hourDir = "processed/request/year=2027/month=01/day=15/hour=09/";
+    const sumDir = "processed/summary/request/year=2027/month=01/day=15/hour=09/";
+    const fanoutRows = Array.from({ length: 11 }, (_, i) => ({
+      timestamp: (HOUR_09 + 2800 + i) * 1000,
+      status: 200,
+      cache: "HIT",
+      resp_bytes: 10,
+      host: "fanout.example",
+    }));
+    const fanoutWinNames = Array.from({ length: 11 }, (_, i) =>
+      `${HOUR_09 + 2700 + i * 60}-${HOUR_09 + 2760 + i * 60}-f${i}-n1`,
+    );
+    const fanoutTags = fanoutWinNames
+      .map((n) => fnv1a32(`window=${n}.parquet`))
+      .sort((a, b) => a - b)
+      .map((t) => t.toString(16).padStart(8, "0"))
+      .join("");
+    const fanoutCompact: ManifestFile = {
+      key: `${hourDir}compact=${HOUR_09 + 2700}-${HOUR_09 + 3360}-c11-n11-${fanoutTags}.parquet`,
+      start: iso(HOUR_09 + 2700),
+      end: iso(HOUR_09 + 3360),
+      rows: 11,
+      size: 1024,
+      sources: 11,
+    };
+    const fanoutSummaries: ManifestFile[] = fanoutWinNames.map((n, i) => ({
+      key: `${sumDir}summary=${n}.parquet`,
+      start: iso(HOUR_09 + 2700 + i * 60),
+      end: iso(HOUR_09 + 2760 + i * 60),
+      rows: 1,
+      size: 1024,
+      kind: "window",
+    }));
+
+    const buffers: Record<string, ArrayBuffer> = {
+      ...BUFFERS,
+      [smallCompact.key]: await editSummaryRows(BUFFERS[pair[0].key], (rows) => [...rows, ...second]),
+      [fanoutCompact.key]: await parquetFixture(fanoutRows),
+    };
+    for (const s of fanoutSummaries) {
+      buffers[s.key] = BUFFERS[pick("window", (e) => e.start === HOUR_09 + 2700)[0].key];
+    }
+
+    const raw = [
+      ...RAW.filter((f) => f.key.includes("/hour=08/")),
+      smallCompact,
+      ...windows09.slice(2),
+      fanoutCompact,
+    ];
+    const summaries = [
+      ...pick("hour", (e) => !e.early && e.key.includes("hour_bundle=08")),
+      ...pick("window", (e) => e.key.includes("/hour=09/")),
+      ...fanoutSummaries,
+    ];
+    const exact = await runDashboard(fixtureSource([page(raw)], buffers), { from, to });
+    clearDashboardMemo();
+
+    const source = fixtureSource([page(raw)], buffers, { json: [], files: [] }, [page(summaries)]);
+    const result = await runDashboard(source, { from, to });
+    expect(source.log.files).toContain(fanoutCompact.key);
+    for (const s of fanoutSummaries) {
+      expect(source.log.files).not.toContain(s.key);
+    }
+    expect(source.log.files).not.toContain(smallCompact.key);
+    expectMatchesRaw(result, exact);
+  });
+
   it("fetches the summaries of a filtered run and of an open hour's compacts in parallel", async () => {
     // Under load an hour is many small window summaries; a serial fetch chain
     // costs a round trip each.
@@ -1864,5 +1949,149 @@ describe("projected dashboard summaries", () => {
       { ...openBundle, key: openBundle.key.replace("-n550-", "-n549-") }, ...lateSummaries,
     ], fromMs, toMs);
     expect(short.raw.map((file) => file.key).sort()).toEqual([...compacts, ...bundled].map((file) => file.key).sort());
+  });
+
+  it("claims interior tier-1 and tier-2 compacts in a mid-hour boundary hour while leaving straddling compacts raw", () => {
+    const fromMs = Date.parse("2026-11-25T17:12:26Z");
+    const toMs = Date.parse("2026-11-25T18:00:00Z");
+    const hourDir = "processed/request/year=2026/month=11/day=25/hour=17/";
+    const sumDir = "processed/summary/request/year=2026/month=11/day=25/hour=17/";
+    const mkTime = (mm: number) => `2026-11-25T17:${String(mm).padStart(2, "0")}:00Z`;
+    const mkEpoch = (mm: number) => Date.parse(mkTime(mm)) / 1000;
+
+    const straddling: ManifestFile = {
+      key: `${hourDir}compact=${mkEpoch(8)}-${mkEpoch(14)}-c21-n1000-deadbeef.parquet`,
+      start: mkTime(8),
+      end: mkTime(14),
+      rows: 1000,
+      size: 10_000,
+      sources: 21,
+    };
+    const tier1WinNames = [
+      `${mkEpoch(14)}-${mkEpoch(16)}-w1-n100`,
+      `${mkEpoch(16)}-${mkEpoch(18)}-w2-n150`,
+    ];
+    const tier1Tags = tier1WinNames
+      .map((n) => fnv1a32(`window=${n}.parquet`).toString(16).padStart(8, "0"))
+      .join("");
+    const tier1: ManifestFile = {
+      key: `${hourDir}compact=${mkEpoch(14)}-${mkEpoch(18)}-c2-n250-${tier1Tags}.parquet`,
+      start: mkTime(14),
+      end: mkTime(18),
+      rows: 250,
+      size: 4_000,
+      sources: 2,
+    };
+    const tier2: ManifestFile = {
+      key: `${hourDir}compact=${mkEpoch(18)}-${mkEpoch(42)}-c2-n30244-1c067e82b4005d63.parquet`,
+      start: mkTime(18),
+      end: mkTime(42),
+      rows: 30244,
+      size: 50_000,
+      sources: 2,
+    };
+
+    const straddlingSummaries: ManifestFile[] = Array.from({ length: 21 }, (_, i) => ({
+      key: `${sumDir}summary=${mkEpoch(8) + i * 17}-${mkEpoch(8) + (i + 1) * 17}-s${i}-n40.parquet`,
+      start: mkTime(8),
+      end: mkTime(14),
+      rows: 40,
+      size: 1_000,
+      kind: "window",
+    }));
+    const tier1Summaries: ManifestFile[] = [
+      {
+        key: `${sumDir}summary=${tier1WinNames[0]}.parquet`,
+        start: mkTime(14),
+        end: mkTime(16),
+        rows: 100,
+        size: 1_000,
+        kind: "window",
+      },
+      {
+        key: `${sumDir}summary=${tier1WinNames[1]}.parquet`,
+        start: mkTime(16),
+        end: mkTime(18),
+        rows: 150,
+        size: 1_000,
+        kind: "window",
+      },
+    ];
+    const tier2Summaries: ManifestFile[] = Array.from({ length: 12 }, (_, i) => {
+      const startMin = 18 + i * 2;
+      const endMin = startMin + 2;
+      const rows = i === 11 ? 30244 - 11 * 2500 : 2500;
+      return {
+        key: `${sumDir}summary=${mkEpoch(startMin)}-${mkEpoch(endMin)}-t${i}-n${rows}.parquet`,
+        start: mkTime(startMin),
+        end: mkTime(endMin),
+        rows,
+        size: 1_000,
+        kind: "window",
+      };
+    });
+
+    const summaries = [...straddlingSummaries, ...tier1Summaries, ...tier2Summaries];
+    const plan = planCompactsFromWindows(
+      [straddling, tier1, tier2],
+      summaries,
+      fromMs,
+      toMs,
+    );
+    expect(plan.raw.map((f) => f.key)).toEqual([straddling.key]);
+    expect(plan.summaries.map((s) => s.file.key).sort()).toEqual(
+      [...tier1Summaries, ...tier2Summaries].map((s) => s.key).sort(),
+    );
+
+    // Row count mismatch on tier-2 fails closed: tier-2 stays in raw while tier-1 is still claimed.
+    const mismatch = planCompactsFromWindows(
+      [straddling, tier1, tier2],
+      summaries.slice(0, -1),
+      fromMs,
+      toMs,
+    );
+    expect(mismatch.raw.map((f) => f.key).sort()).toEqual(
+      [straddling.key, tier2.key].sort(),
+    );
+    expect(mismatch.summaries.map((s) => s.file.key).sort()).toEqual(
+      tier1Summaries.map((s) => s.key).sort(),
+    );
+
+    // An overlapping live raw window inside [17:18, 17:42) fails closed for tier-2.
+    const overlappingWin: ManifestFile = {
+      key: `${hourDir}window=${mkEpoch(20)}-${mkEpoch(22)}-live-n5.parquet`,
+      start: mkTime(20),
+      end: mkTime(22),
+      rows: 5,
+      size: 500,
+    };
+    const overlapped = planCompactsFromWindows(
+      [straddling, tier1, tier2, overlappingWin],
+      summaries,
+      fromMs,
+      toMs,
+    );
+    expect(overlapped.raw.map((f) => f.key).sort()).toEqual(
+      [straddling.key, tier2.key, overlappingWin.key].sort(),
+    );
+
+    // An unused window summary straddling the cluster boundary fails closed for tier-2.
+    const straddlingWinSummary: ManifestFile = {
+      key: `${sumDir}summary=${mkEpoch(17)}-${mkEpoch(20)}-straddle-n1.parquet`,
+      start: mkTime(17),
+      end: mkTime(20),
+      rows: 1,
+      size: 500,
+      kind: "window",
+    };
+    const straddled = planCompactsFromWindows(
+      [straddling, tier1, tier2],
+      [...summaries, straddlingWinSummary],
+      fromMs,
+      toMs,
+    );
+    expect(straddled.raw.map((f) => f.key).sort()).toEqual(
+      [straddling.key, tier2.key].sort(),
+    );
   });
 });

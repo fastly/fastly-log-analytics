@@ -421,6 +421,91 @@ describe("planRollup", () => {
     // A raw file of the hour that starts before the range still makes the hour partial.
     expect(planRollup(raw, summaries, T0 + HOUR + 5 * 60_000, toMs)).toBeNull();
   });
+
+  it("plans a mid-hour boundary hour with straddling, tier-1, and tier-2 compacts instead of returning null", () => {
+    const fromMs = Date.parse("2026-11-25T17:12:26Z");
+    const toMs = Date.parse("2026-11-25T18:00:00Z");
+    const hourDir = "processed/request/year=2026/month=11/day=25/hour=17/";
+    const sumDir = "processed/summary/request/year=2026/month=11/day=25/hour=17/";
+    const mkTime = (mm: number) => `2026-11-25T17:${String(mm).padStart(2, "0")}:00Z`;
+    const mkEpoch = (mm: number) => Date.parse(mkTime(mm)) / 1000;
+
+    const straddling: ManifestFile = {
+      key: `${hourDir}compact=${mkEpoch(8)}-${mkEpoch(14)}-c21-n1000-deadbeef.parquet`,
+      start: mkTime(8),
+      end: mkTime(14),
+      rows: 1000,
+      size: 10_000,
+      sources: 21,
+    };
+    const tier1WinNames = [
+      `${mkEpoch(14)}-${mkEpoch(16)}-w1-n100`,
+      `${mkEpoch(16)}-${mkEpoch(18)}-w2-n150`,
+    ];
+    const tier1Tags = tier1WinNames
+      .map((n) => fnv1a32(`window=${n}.parquet`).toString(16).padStart(8, "0"))
+      .join("");
+    const tier1: ManifestFile = {
+      key: `${hourDir}compact=${mkEpoch(14)}-${mkEpoch(18)}-c2-n250-${tier1Tags}.parquet`,
+      start: mkTime(14),
+      end: mkTime(18),
+      rows: 250,
+      size: 4_000,
+      sources: 2,
+    };
+    const tier2: ManifestFile = {
+      key: `${hourDir}compact=${mkEpoch(18)}-${mkEpoch(42)}-c2-n30244-1c067e82b4005d63.parquet`,
+      start: mkTime(18),
+      end: mkTime(42),
+      rows: 30244,
+      size: 50_000,
+      sources: 2,
+    };
+    const tier1Summaries: ManifestFile[] = [
+      {
+        key: `${sumDir}summary=${tier1WinNames[0]}.parquet`,
+        start: mkTime(14),
+        end: mkTime(16),
+        rows: 100,
+        size: 1_000,
+        kind: "window",
+      },
+      {
+        key: `${sumDir}summary=${tier1WinNames[1]}.parquet`,
+        start: mkTime(16),
+        end: mkTime(18),
+        rows: 150,
+        size: 1_000,
+        kind: "window",
+      },
+    ];
+    const tier2Summaries: ManifestFile[] = Array.from({ length: 12 }, (_, i) => {
+      const startMin = 18 + i * 2;
+      const endMin = startMin + 2;
+      const rows = i === 11 ? 30244 - 11 * 2500 : 2500;
+      return {
+        key: `${sumDir}summary=${mkEpoch(startMin)}-${mkEpoch(endMin)}-t${i}-n${rows}.parquet`,
+        start: mkTime(startMin),
+        end: mkTime(endMin),
+        rows,
+        size: 1_000,
+        kind: "window",
+      };
+    });
+
+    const plan = planRollup(
+      [straddling, tier1, tier2],
+      [...tier1Summaries, ...tier2Summaries],
+      fromMs,
+      toMs,
+    );
+    expect(plan).not.toBeNull();
+    expect(plan!.dataFromMs).toBe(Date.parse("2026-11-25T17:14:00Z"));
+    expect(plan!.dataThroughMs).toBe(Date.parse("2026-11-25T17:42:00Z"));
+    expect(plan!.files.map((use) => use.file.key).sort()).toEqual(
+      [...tier1Summaries, ...tier2Summaries].map((s) => s.key).sort(),
+    );
+  });
 });
 
 describe("queryRollup", () => {
