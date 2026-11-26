@@ -69,6 +69,7 @@ def test_raw_standalone_detections_are_not_fused_into_group_raw_standalone(monke
         "prid",
         "edge",
     ]
+    monkeypatch.setattr("backend.config.load_config", lambda _sid: {})
     monkeypatch.setattr("backend.config.active_log_field_ids", lambda _cfg: fields)
     monkeypatch.setattr("backend.utils.pop_utils.get_pop_lat_lon_map", lambda: {"SJC": (37.36, -121.93)})
 
@@ -176,6 +177,7 @@ def test_standalone_crawler_stale_shield_use_baseline_sampling_and_window_guards
 
 
 def test_history_cache_is_registered_and_reused_within_minute(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("backend.config.load_config", lambda _sid: {})
     monkeypatch.setattr("backend.config.active_log_field_ids", lambda _cfg: ["status", "url"])
     cache = evaluator._INSIGHTS_HISTORY_CACHE
     assert "high_scale.insights._INSIGHTS_HISTORY_CACHE" in CacheRegistry.names()
@@ -201,6 +203,7 @@ def test_history_cache_is_registered_and_reused_within_minute(monkeypatch: pytes
 
 
 def test_force_refresh_non_hs_service_also_applies_background_max_threads(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("backend.config.load_config", lambda _sid: {})
     monkeypatch.setattr("backend.config.active_log_field_ids", lambda _cfg: ["status", "url"])
 
     def _handler(sql: str, _params: dict[str, Any]) -> list[dict[str, Any]]:

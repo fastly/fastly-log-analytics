@@ -30,6 +30,8 @@ def _isolated_m1_state(tmp_path, monkeypatch):
     data_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("REMOTE_SHARE_DB_DIR", str(tmp_path / "system"))
     monkeypatch.setattr(svcconfig, "DATA_DIR", data_dir)
+    monkeypatch.setattr(svcconfig, "load_config", lambda _sid: None)
+    monkeypatch.setattr(svcconfig, "get_cdn_service_id_map", lambda: {})
     monkeypatch.delenv("ADMIN_GATEWAY_SECRET", raising=False)
     monkeypatch.delenv("ADMIN_GATEWAY_REQUIRED", raising=False)
     monkeypatch.delenv("METRICS_SCRAPE_CIDRS", raising=False)

@@ -379,6 +379,8 @@ def isolate_metadata_db(tmp_path, monkeypatch, request):
                 _pg_con.rollback()
             except Exception:
                 pass
+    elif os.environ.get("METADATA_DSN") and "e2e_security" not in str(request.node.fspath):
+        request.getfixturevalue("_pg_worker_schema")
 
     metadata_db._clear_ingested_filenames_cache()
     svcconfig.invalidate_config_cache()

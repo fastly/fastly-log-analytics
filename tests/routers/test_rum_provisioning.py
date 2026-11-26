@@ -125,6 +125,7 @@ def test_sec15_rum_settings_allows_valid_conditions(valid_condition: str) -> Non
 
     with (
         patch("backend.config.load_config", return_value=cfg),
+        patch("backend.config.snapshot_config", return_value=None),
         patch("backend.config.mutate_config", side_effect=_apply_mutation) as mock_mutate,
         patch("backend.provision.rum_assets.upload_rum_tracker_js", return_value={"skipped": False}) as mock_upload,
         patch("backend.provision.declarative.reconciler.reconcile_vcl_state", return_value=MagicMock(error=None)),
@@ -355,6 +356,7 @@ def test_rum_settings_save_sampling_controls_and_always_redeploy_tracker_and_vcl
     }
     with (
         patch("backend.config.load_config", return_value=cfg),
+        patch("backend.config.snapshot_config", return_value=None),
         patch("backend.config.mutate_config", side_effect=_apply_mutation),
         patch("backend.provision.rum_assets.upload_rum_tracker_js", return_value={"skipped": False}) as mock_upload,
         patch(

@@ -287,12 +287,11 @@ def _evaluate(
             else None
         )
         fut_sample = trace.submit(meta_pool, "fields", lambda: _exec(sample_sql, params), source="fact")
-        if cached_history is None:
-            assert fut_history is not None
+        if fut_history is not None:
             history = fut_history.result()
             _INSIGHTS_HISTORY_CACHE[history_cache_key] = history
         else:
-            history = cached_history
+            history = cached_history or []
         sample = fut_sample.result()
         earliest = history[0].get("earliest") if history else None
         window_total = int(history[0].get("window_total") or 0) if history else 0
