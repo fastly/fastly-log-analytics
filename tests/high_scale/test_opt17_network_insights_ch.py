@@ -87,7 +87,7 @@ def test_network_health_uses_time_block_sampling_and_empty_fallback(monkeypatch:
     def _handler(sql: str, _params: dict[str, Any]) -> list[dict[str, Any]]:
         if "FROM request_aggregates" in sql:
             return [{"asn": 13335, "cnt": 1000}]
-        if "event_timestamp >= toDateTime(" in sql:
+        if "line_ordinal % 20 = 0" in sql:
             return []
         if "AS rtt_quants" in sql and "GROUP BY asn, bucket_ts" in sql:
             return [
@@ -114,10 +114,10 @@ def test_network_health_uses_time_block_sampling_and_empty_fallback(monkeypatch:
     resp = network_health(service, req, start.isoformat(), end.isoformat())
 
     fact_sqls = [sql for sql, _, _ in client.calls if "FROM request_facts" in sql]
-    assert any("event_timestamp >= toDateTime(" in s for s in fact_sqls)
-    assert not any("% 20 = 0" in s for s in fact_sqls)
-    assert not any("line_ordinal % 20" in s for s in fact_sqls)
-    assert any("event_timestamp >= toDateTime(" not in s for s in fact_sqls)
+    assert any("line_ordinal % 20 = 0" in s for s in fact_sqls)
+    assert not any(") % 20 = 0" in s for s in fact_sqls)
+    assert not any("event_timestamp >= toDateTime(" in s for s in fact_sqls)
+    assert any("line_ordinal % 20 = 0" not in s for s in fact_sqls)
     assert resp.available is True
 
 

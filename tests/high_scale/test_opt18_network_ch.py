@@ -64,31 +64,37 @@ def test_network_time_sample_clause_emits_monotonic_pk_ranges_for_30d_and_bucket
     start_30d = end - timedelta(days=30)
     start_ts, end_ts = int(start_30d.timestamp()), int(end.timestamp())
 
-    # Non-bucketed 30d (stride=100): 24 windows totaling exact 1% (25,920s)
+    # Non-bucketed 30d (stride=100): <= 16 wide windows totaling exact 1% (25,920s)
     clause = _network_time_sample_clause(100, start=start_30d, end=end)
     assert "%" not in clause
     assert "intDiv" not in clause
     assert "line_ordinal" not in clause
     windows = _parse_windows(clause)
-    assert len(windows) == 24
+    assert len(windows) == 16
     assert sum(b - a for a, b in windows) == (end_ts - start_ts) // 100
     assert all(start_ts <= a < b <= end_ts for a, b in windows)
     assert all(windows[i][1] <= windows[i + 1][0] for i in range(len(windows) - 1))
     # Diurnal rotation: sampled windows should span multiple distinct UTC hours
     assert len({datetime.fromtimestamp(a, tz=UTC).hour for a, _ in windows}) >= 4
 
-    # Bucketed 30d with 1h buckets (720 buckets, stride=100): 1 36s slice per hour
-    b_clause = _network_time_sample_clause(100, bucket_seconds=3600, start=start_30d, end=end)
+    # Sparse bucketed span (<= 24 buckets, e.g. 24h at 3600s, stride=20): monotonic PK ranges
+    start_24h = end - timedelta(hours=24)
+    b_clause = _network_time_sample_clause(20, bucket_seconds=3600, start=start_24h, end=end)
     assert "%" not in b_clause
     assert "intDiv" not in b_clause
     b_windows = _parse_windows(b_clause)
-    assert len(b_windows) == 720
-    assert sum(b - a for a, b in b_windows) == (end_ts - start_ts) // 100
+    assert len(b_windows) == 24
+    assert sum(b - a for a, b in b_windows) == (24 * 3600) // 20
 
-    # High bucket count (30d at 300s = 8640 buckets) caps windows <= 360 to stay well under AST limits
-    capped = _network_time_sample_clause(100, bucket_seconds=300, start=start_30d, end=end)
-    c_windows = _parse_windows(capped)
-    assert 1 < len(c_windows) <= 360
+    # Dense bucket count (> 24 buckets, e.g. 30d at 3600s or 300s): single line_ordinal modulo avoids AST/granule blowup
+    assert (
+        _network_time_sample_clause(1000, bucket_seconds=3600, start=start_30d, end=end)
+        == " AND line_ordinal % 1000 = 0"
+    )
+    assert (
+        _network_time_sample_clause(1000, bucket_seconds=300, start=start_30d, end=end)
+        == " AND line_ordinal % 1000 = 0"
+    )
 
     # Naive datetimes must be treated as UTC, not host local timezone
     naive_clause = _network_time_sample_clause(
@@ -133,7 +139,7 @@ def test_network_endpoints_use_pk_range_sampling_for_30d_and_clean_fallback(
     assert not _RANGE_RE.search(pop_client.calls[1][0])
     assert pop_res.data[0].pop == "SJC"
 
-    # 2. network_quality: 30d region branch uses PK ranges, no modulo
+    # 2. network_quality: 30d region branch uses <= 16 PK ranges, no modulo
     q_client = _RecordingCHClient(
         lambda sql, _p: (
             [
@@ -148,10 +154,10 @@ def test_network_endpoints_use_pk_range_sampling_for_30d_and_clean_fallback(
     q_svc = HighScaleService(service_id="svc-q-30d", client=q_client, cursor_secret=b"s", request_watermark=None)
     network_quality(q_svc, NetworkQualityRequest(), start_30d.isoformat(), end.isoformat())
     bars_sql = next(s for s, _, _ in q_client.calls if "FROM network_minute_dimensions" in s)
-    assert len(_parse_windows(bars_sql)) == 24
+    assert len(_parse_windows(bars_sql)) == 16
     assert "% 100" not in bars_sql
 
-    # 3. network_health: 30d heatmap & map use 720 bucket-aligned PK ranges + clean fallback
+    # 3. network_health: 30d dense bucket heatmap & map use line_ordinal % 1000 + clean fallback
     nh_client = _RecordingCHClient(
         lambda sql, _p: (
             [{"asn": 13335, "cnt": 1000}]
@@ -173,7 +179,7 @@ def test_network_endpoints_use_pk_range_sampling_for_30d_and_clean_fallback(
                         "speed_map": {},
                     }
                 ]
-                if "AS rtt_quants" in sql and "GROUP BY asn, bucket_ts" in sql and "toDateTime(" not in sql
+                if "AS rtt_quants" in sql and "GROUP BY asn, bucket_ts" in sql and "line_ordinal % 1000" not in sql
                 else []
             )
         )
@@ -185,14 +191,15 @@ def test_network_endpoints_use_pk_range_sampling_for_30d_and_clean_fallback(
         start_30d.isoformat(),
         end.isoformat(),
     )
-    hm_sampled = [s for s, _, _ in nh_client.calls if "GROUP BY asn, bucket_ts" in s and _RANGE_RE.search(s)]
-    hm_fallback = [s for s, _, _ in nh_client.calls if "GROUP BY asn, bucket_ts" in s and not _RANGE_RE.search(s)]
-    assert len(hm_sampled) == 1 and len(_parse_windows(hm_sampled[0])) == 720
-    assert "% 100" not in hm_sampled[0]
+    hm_sampled = [s for s, _, _ in nh_client.calls if "GROUP BY asn, bucket_ts" in s and "line_ordinal % 1000 = 0" in s]
+    hm_fallback = [
+        s for s, _, _ in nh_client.calls if "GROUP BY asn, bucket_ts" in s and "line_ordinal % 1000 = 0" not in s
+    ]
+    assert len(hm_sampled) == 1 and not _RANGE_RE.search(hm_sampled[0])
     assert len(hm_fallback) == 1
     assert nh_resp.available is True
 
-    # 4. get_transport_metrics: 30d uses 24 PK ranges, no modulo
+    # 4. get_transport_metrics: 30d uses <= 16 PK ranges, no modulo
     tr_client = _RecordingCHClient(
         [
             {
@@ -209,5 +216,5 @@ def test_network_endpoints_use_pk_range_sampling_for_30d_and_clean_fallback(
     tr_svc = HighScaleService(service_id="svc-tr-30d", client=tr_client, cursor_secret=b"s", request_watermark=None)
     get_transport_metrics(tr_svc, start_30d.isoformat(), end.isoformat(), {})
     tr_sql = tr_client.calls[0][0]
-    assert len(_parse_windows(tr_sql)) == 24
+    assert len(_parse_windows(tr_sql)) == 16
     assert "% 100" not in tr_sql
