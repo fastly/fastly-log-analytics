@@ -2142,7 +2142,7 @@ def test_shapes_all_origin_sections_from_bounded_projection_queries() -> None:
     assert (
         result["path_breakdown"]["shielding_detected"] is True and result["pop_latency"]["rows"][2]["elevated"] is True
     )
-    assert result["ip_health"]["rows"][0]["error_pct"] == pytest.approx(14.285714)
+    assert result["ip_health"]["rows"][0]["error_pct"] == 14.3
     assert all(
         "high_scale_batch_publications FINAL" in sql and params["service_id"] == "svc" for sql, params in client.calls
     )
@@ -2165,6 +2165,22 @@ def test_shapes_all_origin_sections_from_bounded_projection_queries() -> None:
     for sql in percentile_queries:
         assert "quantilesExactWeightedArray" in sql and "_sk_v" in sql and "_sk_w" in sql
         assert "latency_p50_us" not in sql and "latency_p95_us" not in sql and "* latency_count" not in sql
+
+
+def test_origin_ip_health_rounds_error_pct_to_one_decimal_on_single_section_and_shaper() -> None:
+    from backend.repositories.utils.response_shaping import shape_origin_ip_health_row
+
+    client = _OriginClient()
+    service = SimpleNamespace(service_id="svc", client=client)
+    result = origin_aggregates(
+        service, _origin_request(), "2026-09-14T10:00:00Z", "2026-09-14T11:00:00Z", sections={"ip_health"}
+    )
+    assert result["ip_health"]["rows"][0]["error_pct"] == 14.3
+    assert shape_origin_ip_health_row("146.75.77.51", 19599, 77.5, 129.7, 1 * 100.0 / 19599)["error_pct"] == 0.0
+    assert (
+        shape_origin_ip_health_row("146.75.77.51", 19599, 77.5, 129.7, 1 * 100.0 / 19599, ndigits=2)["error_pct"]
+        == 0.01
+    )
 
 
 def test_filtered_requests_read_request_facts_exactly_instead_of_failing() -> None:

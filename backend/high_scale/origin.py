@@ -592,7 +592,7 @@ def origin_aggregates(
                         row["requests"],
                         _milliseconds(_quantile(row, "latency", 0)),
                         _milliseconds(_quantile(row, "latency", 1)),
-                        int(row.get("origin_5xx") or 0) * 100.0 / int(row["requests"]),
+                        round(int(row.get("origin_5xx") or 0) * 100.0 / int(row["requests"]), 1),
                     )
                     for row in rows
                     if int(row["requests"]) > 0
@@ -737,7 +737,7 @@ def origin_aggregates(
                             row["requests"],
                             _milliseconds(_quantile(row, "latency", 0)),
                             _milliseconds(_quantile(row, "latency", 1)),
-                            int(row.get("origin_5xx") or 0) * 100.0 / int(row["requests"]),
+                            round(int(row.get("origin_5xx") or 0) * 100.0 / int(row["requests"]), 1),
                         )
                         for row in ip_rows
                         if int(row["requests"]) > 0

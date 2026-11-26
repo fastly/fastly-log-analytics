@@ -983,7 +983,7 @@ def shape_origin_ip_health_row(
         "requests": int(requests or 0),
         "p50_ms": opt_float(p50_ms, ndigits),
         "p95_ms": opt_float(p95_ms, ndigits),
-        "error_pct": opt_float(error_pct, ndigits) if error_pct is not None else 0.0,
+        "error_pct": opt_float(error_pct, 1 if ndigits is None else ndigits) if error_pct is not None else 0.0,
     }
 
 
