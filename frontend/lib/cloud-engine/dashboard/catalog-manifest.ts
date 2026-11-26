@@ -243,6 +243,10 @@ export function manifestCacheKey(
   ]);
 }
 
+export function invalidateCatalogRecent(): void {
+  recent.clear();
+}
+
 export function clearCatalogManifests(): void {
   for (const s of inFlight.values()) {
     s.controller.abort();

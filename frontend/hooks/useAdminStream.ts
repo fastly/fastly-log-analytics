@@ -118,9 +118,12 @@ function parseIngestEventFrame(raw: string): IngestEventFrame | null {
   }
 }
 
-async function notifyDashboardCatalogChanged(): Promise<void> {
+async function notifyDashboardCatalogChanged(
+  event: { type: 'ready' | 'commit' | 'resync'; generation: number; manifest?: string | null },
+  serviceId: string | null,
+): Promise<void> {
   const { notifyDashboardCatalogChange } = await import('@/lib/cloud-engine/dashboard/client')
-  notifyDashboardCatalogChange()
+  notifyDashboardCatalogChange(event, serviceId)
 }
 
 export function useHeaderBadgeStream(enabled: boolean) {
@@ -172,12 +175,18 @@ export function useHeaderBadgeStream(enabled: boolean) {
         if (parsed.event === 'ready' || parsed.event === 'commit' || parsed.event === 'resync') {
           const generation = Number(parsed.data?.generation)
           if (Number.isSafeInteger(generation) && generation >= 0) {
-            observeCatalogCommit(source.fetchJson, {
-              type: parsed.event,
+            const eventType: 'ready' | 'commit' | 'resync' =
+              parsed.event === 'ready' || parsed.event === 'commit' ? parsed.event : 'resync'
+            const commitEvent = {
+              type: eventType,
               generation,
+              ...(typeof parsed.data?.manifest === 'string' ? { manifest: parsed.data.manifest } : {}),
+            }
+            observeCatalogCommit(source.fetchJson, {
+              ...commitEvent,
               manifest: typeof parsed.data?.manifest === 'string' ? parsed.data.manifest : undefined,
             })
-            void notifyDashboardCatalogChanged()
+            void notifyDashboardCatalogChanged(commitEvent, activeServiceId)
             if (parsed.event !== 'ready') {
               void queryClient.invalidateQueries({ queryKey: queryKeys.syncStatus(activeServiceId) })
             }

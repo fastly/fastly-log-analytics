@@ -23,9 +23,17 @@ import {
   type Scalar,
   type SearchFieldOptions,
 } from "./engine";
-import type { WorkerMessage, WorkerRequest } from "./engine.worker";
+import type {
+  CatalogCommitEvent,
+  WorkerMessage,
+  WorkerRequest,
+} from "./engine.worker";
 import type { DashboardFilter } from "./filters";
-import { clearManifestCache, type Manifest } from "./manifest";
+import {
+  clearManifestCache,
+  invalidateManifestRecent,
+  type Manifest,
+} from "./manifest";
 import { clearRollupQueryCache } from "./rollup-query";
 import {
   IDENTITY_CACHE_KEY,
@@ -368,11 +376,20 @@ class DashboardWorkerClient extends BaseWorkerRpcClient<
     worker.postMessage({ id, type: "prewarm" } satisfies WorkerRequest);
   }
 
-  catalogChanged(): void {
+  catalogChanged(
+    event?: CatalogCommitEvent,
+    serviceId?: string | null,
+  ): void {
     const worker = this.getWorker(this.handleMessage);
     if (!worker) return;
     const id = this.allocateId();
-    worker.postMessage({ id, type: "catalogChanged" } satisfies WorkerRequest);
+    worker.postMessage({
+      id,
+      type: "catalogChanged",
+      cacheScope: dashboardCacheScope(),
+      ...(serviceId ? { serviceId } : {}),
+      ...(event ? { event } : {}),
+    } satisfies WorkerRequest);
   }
 }
 
@@ -432,8 +449,14 @@ export function prewarmDashboardEngine(): void {
   getClient().prewarm();
 }
 
-export function notifyDashboardCatalogChange(): void {
-  rpcClient?.catalogChanged();
+export type { CatalogCommitEvent };
+
+export function notifyDashboardCatalogChange(
+  event?: CatalogCommitEvent,
+  serviceId?: string | null,
+): void {
+  invalidateManifestRecent();
+  rpcClient?.catalogChanged(event, serviceId);
 }
 
 type IdentityTransitionTarget = {

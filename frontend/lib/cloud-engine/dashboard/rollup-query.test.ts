@@ -798,4 +798,27 @@ describe("queryRollup", () => {
     });
     expect(result).toBeNull();
   });
+
+  it("collects all simultaneous MissingCloudFileError keys in one pass and replans once", async () => {
+    rangedReadsOnly();
+    const firstHourWindows = WINDOWS.filter((f) => at(f) >= T0 && at(f) < T0 + HOUR);
+    const missingKeys = new Set(firstHourWindows.map((f) => f.key));
+    const s = projectingSource(source(WINDOWS), BUFFERS);
+    const fetchFile = s.fetchFile;
+    const readsByKey = new Map<string, number>();
+    s.fetchFile = async (key, signal) => {
+      readsByKey.set(key, (readsByKey.get(key) ?? 0) + 1);
+      if (missingKeys.has(key)) throw new MissingCloudFileError(key);
+      return fetchFile(key, signal);
+    };
+    const result = await queryRollup(s, {
+      fromMs: T0,
+      toMs: T0 + 2 * HOUR,
+      residual: INSIGHTS_RESIDUAL,
+    });
+    expect(dimTotal(result!.rollup, "proto")).toBe(overall(await decodeAll(WINDOWS)));
+    for (const key of missingKeys) {
+      expect(readsByKey.get(key)).toBe(1);
+    }
+  });
 });

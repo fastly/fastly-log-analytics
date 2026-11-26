@@ -139,7 +139,7 @@ def test_front_has_separate_tick_and_flush_clocks_routed_to_the_shielded_tick_ba
 
 
 def test_shield_safe_vcl_contracts_falco_cannot_inject() -> None:
-    # Falco 2.0.1 hardcodes fastly.ff.visits_this_service and fastly_info.state.
+    # Falco hardcodes fastly.ff.visits_this_service, fastly_info.state, and req.restarts.
     vcl = (Path(__file__).parents[1] / "vcl/front/main.vcl").read_text()
     recv = vcl[: vcl.index("sub vcl_hash")]
     assert re.search(
@@ -147,13 +147,22 @@ def test_shield_safe_vcl_contracts_falco_cannot_inject() -> None:
         r"set req\.url = req\.url\.path;",
         recv,
     )
+    assert re.search(
+        r"if \(req\.restarts == 0\) \{\s+"
+        r"set req\.enable_segmented_caching = true;\s+"
+        r"set segmented_caching\.block_size = 20971520;\s+"
+        r"\} else \{\s+"
+        r"set req\.enable_segmented_caching = false;\s+\}",
+        recv,
+    )
+    assert "if (req.restarts > 0 || " in recv
     fetch = vcl[vcl.index("sub vcl_fetch") : vcl.index("sub vcl_deliver")]
     assert re.search(
         r"if \(fastly\.ff\.visits_this_service == 0\) \{\s+"
         r"unset beresp\.http\.x-flp-tick-ttl;\s+\}",
         fetch,
     )
-    deliver = vcl[vcl.index("sub vcl_deliver") :]
+    deliver = vcl[vcl.index("sub vcl_deliver") : vcl.index("sub vcl_error")]
     assert re.search(
         r"#RATELIMIT_END\s+if \(fastly\.ff\.visits_this_service == 0\) \{\s+"
         r"unset resp\.http\.x-flp-auth-fail;",
@@ -163,6 +172,22 @@ def test_shield_safe_vcl_contracts_falco_cannot_inject() -> None:
         'set resp.http.x-flp-fos-cache = if(fastly_info.state ~ "^HIT" '
         '&& fastly_info.state !~ "(SYNTH|PASS)", "HIT", "MISS");'
     ) in deliver
+    assert re.search(
+        r"\(req\.method == \"GET\" \|\| req\.method == \"HEAD\"\) &&\s+"
+        r"req\.restarts < 1 &&\s+"
+        r"resp\.status >= 500 && resp\.status < 600\s+"
+        r"\) \{\s+return\(restart\);",
+        deliver,
+    )
+    error = vcl[vcl.index("sub vcl_error") :]
+    assert re.search(
+        r"req\.http\.x-flp-fos-service &&\s+"
+        r"\(req\.method == \"GET\" \|\| req\.method == \"HEAD\"\) &&\s+"
+        r"req\.restarts < 1 &&\s+"
+        r"\(obj\.status == 628 \|\| \(obj\.status >= 500 && obj\.status < 600\)\)\s+"
+        r"\) \{\s+return\(restart\);",
+        error,
+    )
 
 
 def test_existing_install_storage_backends_are_added_without_replacing_others() -> None:

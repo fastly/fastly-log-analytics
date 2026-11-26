@@ -158,7 +158,10 @@ describe('Cloud header ingest events', () => {
       expect.any(Function),
       { type: 'ready', generation: 42, manifest: 'processed/_catalog/current.json' },
     )
-    expect(mocks.notifyDashboardCatalogChange).toHaveBeenCalledTimes(1)
+    expect(mocks.notifyDashboardCatalogChange).toHaveBeenCalledWith(
+      { type: 'ready', generation: 42, manifest: 'processed/_catalog/current.json' },
+      'svc-1',
+    )
     expect(invalidate).not.toHaveBeenCalled()
     await act(async () => { await vi.advanceTimersByTimeAsync(5_000) })
     expect(mocks.observeCatalogCommit).toHaveBeenCalledWith(
@@ -166,14 +169,20 @@ describe('Cloud header ingest events', () => {
       { type: 'commit', generation: 42, manifest: 'processed/_catalog/current.json' },
     )
     expect(invalidate).toHaveBeenCalledTimes(1)
-    expect(mocks.notifyDashboardCatalogChange).toHaveBeenCalledTimes(2)
+    expect(mocks.notifyDashboardCatalogChange).toHaveBeenCalledWith(
+      { type: 'commit', generation: 42, manifest: 'processed/_catalog/current.json' },
+      'svc-1',
+    )
     await act(async () => { await vi.advanceTimersByTimeAsync(5_000) })
     expect(mocks.observeCatalogCommit).toHaveBeenCalledWith(
       expect.any(Function),
       { type: 'resync', generation: 42, manifest: 'processed/_catalog/current.json' },
     )
     expect(invalidate).toHaveBeenCalledTimes(2)
-    expect(mocks.notifyDashboardCatalogChange).toHaveBeenCalledTimes(3)
+    expect(mocks.notifyDashboardCatalogChange).toHaveBeenCalledWith(
+      { type: 'resync', generation: 42, manifest: 'processed/_catalog/current.json' },
+      'svc-1',
+    )
     expect(requestUrls().every((url) => url.includes('/api/ingest/events'))).toBe(true)
   })
 

@@ -1158,8 +1158,8 @@ export type RollupResidual = {
   };
 };
 
-const DECODED_LIMIT = 256;
-const MERGED_LIMIT = 8;
+const DECODED_LIMIT = 1024;
+const MERGED_LIMIT = 32;
 const RESIDUAL_READ_CONCURRENCY = 4;
 let rollupEpoch = 0;
 type SharedRollup = {
@@ -1749,29 +1749,52 @@ async function runRollup(
       mergedResults.set(mergedKey, cachedMerged);
       return cachedMerged;
     }
-    try {
-      [decodedParts, residualPart] = await Promise.all([
-        Promise.all(
-          plan.files.map((use) =>
-            decodeCached(source, use.file, spec, signal, callRollupEpoch),
-          ),
+    const residualPromise =
+      residual && plan.residual?.length
+        ? readResidual(source, residual, plan.residual, fromMs, toMs, signal, assertRollupActive).then(
+            (value) => ({ ok: true as const, value }),
+            (error: unknown) => ({ ok: false as const, error }),
+          )
+        : Promise.resolve({ ok: true as const, value: null });
+    const [settledParts, settledResidual] = await Promise.all([
+      Promise.allSettled(
+        plan.files.map((use) =>
+          decodeCached(source, use.file, spec, signal, callRollupEpoch),
         ),
-        residual && plan.residual?.length
-          ? readResidual(source, residual, plan.residual, fromMs, toMs, signal, assertRollupActive)
-          : null,
-      ]);
-    } catch (error) {
-      assertRollupActive();
-      if (!(error instanceof MissingCloudFileError) || missing.has(error.key)
-        || !plan.files.some((use) => use.file.key === error.key)) throw error;
+      ),
+      residualPromise,
+    ]);
+    assertRollupActive();
+    const plannedKeys = new Set(plan.files.map((use) => use.file.key));
+    const missingInPass: string[] = [];
+    for (const entry of settledParts) {
+      if (entry.status === "fulfilled") continue;
+      const error = entry.reason;
+      if (
+        !(error instanceof MissingCloudFileError) ||
+        missing.has(error.key) ||
+        !plannedKeys.has(error.key)
+      ) {
+        throw error;
+      }
+      missingInPass.push(error.key);
+    }
+    if (missingInPass.length > 0) {
       if (manifest?.summaryFirst) {
-        console.warn(`flp: summary ${error.key} is listed but missing in summary-first mode; falling back`);
+        console.warn(`flp: summary ${missingInPass[0]} is listed but missing in summary-first mode; falling back`);
         return null;
       }
-      console.warn(`flp: summary ${error.key} is listed but missing; planning without it`);
-      missing.add(error.key);
+      for (const key of missingInPass) {
+        console.warn(`flp: summary ${key} is listed but missing; planning without it`);
+        missing.add(key);
+      }
       continue;
     }
+    if (!settledResidual.ok) {
+      throw settledResidual.error;
+    }
+    decodedParts = settledParts.map((entry) => (entry as PromiseFulfilledResult<Rollup | null>).value);
+    residualPart = settledResidual.value;
     break;
   }
   assertRollupActive();

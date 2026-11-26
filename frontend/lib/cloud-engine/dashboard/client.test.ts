@@ -54,6 +54,25 @@ describe("answerRollupInWorker", () => {
     const { answerRollupInWorker } = await import("./client");
     expect(answerRollupInWorker("/api/network-health", {}, "svc-1")).toBeNull();
   });
+
+  it("forwards catalog commit notifications with scope and serviceId to the worker", async () => {
+    vi.stubGlobal("Worker", FakeWorker);
+    const { answerRollupInWorker, notifyDashboardCatalogChange } = await import("./client");
+    const { dashboardCacheScope } = await import("./sources");
+
+    void answerRollupInWorker("/api/network-health", {}, "svc-1");
+    const [worker] = FakeWorker.created;
+    const event = { type: "commit" as const, generation: 42, manifest: "processed/_catalog/current.json" };
+    notifyDashboardCatalogChange(event, "svc-1");
+
+    expect(worker.postMessage).toHaveBeenLastCalledWith({
+      id: expect.any(Number),
+      type: "catalogChanged",
+      cacheScope: dashboardCacheScope(),
+      serviceId: "svc-1",
+      event,
+    });
+  });
 });
 
 describe("persistent storage", () => {

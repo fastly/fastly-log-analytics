@@ -13,7 +13,12 @@ import {
   type Scalar,
   type SearchFieldOptions,
 } from "./engine";
-import { clearManifestCache, type Manifest } from "./manifest";
+import {
+  clearManifestCache,
+  invalidateManifestRecent,
+  observeManifestCommit,
+  type Manifest,
+} from "./manifest";
 import { clearRollupQueryCache } from "./rollup-query";
 import { browserSource, type BrowserSourceCallEvent } from "./sources";
 
@@ -35,11 +40,20 @@ type SearchMessage = {
   cacheScope?: string;
 };
 
+export type CatalogCommitEvent = {
+  type: "ready" | "commit" | "resync";
+  generation: number;
+  manifest?: string | null;
+};
+
 type ControlMessage = {
   id: number;
   type: "prewarm" | "clearCache" | "catalogChanged";
   pageLoadId?: string | null;
   reportApiCalls?: boolean;
+  cacheScope?: string;
+  serviceId?: string;
+  event?: CatalogCommitEvent;
 };
 
 type ExecuteSqlMessage = {
@@ -173,12 +187,17 @@ self.onmessage = createWorkerRpcHost<WorkerRequest>(async (msg, ctx) => {
     return;
   }
   if (msg.type === "catalogChanged") {
-    clearDashboardMemo();
-    clearManifestCache();
-    clearRollupQueryCache();
-    clearSecurityRollupCache();
-    sharedSource?.clearMemoryCache?.();
-    rollupBase?.clearMemoryCache?.();
+    if (msg.event) {
+      const source = sourceForScope(msg.cacheScope ?? sharedScope).withOptions(
+        msg.serviceId ? { serviceId: msg.serviceId } : undefined,
+      );
+      observeManifestCommit(source.fetchJson, msg.event);
+      if (msg.event.type === "resync") {
+        clearDashboardMemo();
+      }
+    } else {
+      invalidateManifestRecent();
+    }
     return;
   }
   if (msg.type === "execute_sql") {

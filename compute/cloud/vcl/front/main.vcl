@@ -273,8 +273,12 @@ sub vcl_recv {
   }
 
   if (req.http.x-flp-fos-service) {
-    set req.enable_segmented_caching = true;
-    set segmented_caching.block_size = 20971520;
+    if (req.restarts == 0) {
+      set req.enable_segmented_caching = true;
+      set segmented_caching.block_size = 20971520;
+    } else {
+      set req.enable_segmented_caching = false;
+    }
     if (fastly.ff.visits_this_service > 1) {
       set req.max_stale_while_revalidate = 0s;
     }
@@ -338,8 +342,8 @@ sub vcl_recv {
     return(pass);
   }
   if (req.http.x-flp-fos-service) {
-    # Every FOS object key is written once; only bucket listings change underneath us.
-    if (req.url.path ~ "^/fos/[A-Za-z0-9]{22}/?$" || req.url.qs ~ "(^|&)(list-type|prefix|delimiter|continuation-token|start-after|marker|max-keys|encoding-type|fetch-owner)=") {
+    # Every FOS object key is written once; only bucket listings and 5xx retries bypass cache.
+    if (req.restarts > 0 || req.url.path ~ "^/fos/[A-Za-z0-9]{22}/?$" || req.url.qs ~ "(^|&)(list-type|prefix|delimiter|continuation-token|start-after|marker|max-keys|encoding-type|fetch-owner)=") {
       return(pass);
     }
     return(lookup);
@@ -610,6 +614,13 @@ sub vcl_deliver {
   unset resp.http.x-flp-front-key;
   unset resp.http.x-flp-front-rl;
   if (req.http.x-flp-fos-service) {
+    if (
+      (req.method == "GET" || req.method == "HEAD") &&
+      req.restarts < 1 &&
+      resp.status >= 500 && resp.status < 600
+    ) {
+      return(restart);
+    }
     declare local var.shield_fos_cache STRING;
     set var.shield_fos_cache = resp.http.x-flp-fos-cache;
     set resp.http.x-flp-fos-cache = if(fastly_info.state ~ "^HIT" && fastly_info.state !~ "(SYNTH|PASS)", "HIT", "MISS");
@@ -684,6 +695,14 @@ sub vcl_error {
     set obj.response = "Permanent Redirect";
     synthetic {""};
     return(deliver);
+  }
+  if (
+    req.http.x-flp-fos-service &&
+    (req.method == "GET" || req.method == "HEAD") &&
+    req.restarts < 1 &&
+    (obj.status == 628 || (obj.status >= 500 && obj.status < 600))
+  ) {
+    return(restart);
   }
   if (obj.status >= 624 && obj.status <= 629) {
     set obj.http.Content-Type = "application/json";

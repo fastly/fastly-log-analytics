@@ -665,3 +665,76 @@ sub host_flp_cdn_overrides_tossed_flp_cdn_and_supports_multi_segment_fos_prefix 
   testing.call_subroutine("vcl_recv");
   assert.error(622);
 }
+
+
+// @scope: fetch
+sub api_file_raises_628_on_fos_5xx_while_internal_fos_passes_uncached {
+  set req.method = "GET";
+  set req.http.x-flp-fos-service = "AAAAAAAAAAAAAAAAAAAAAA";
+  set req.http.x-flp-api-file = "1";
+  set beresp.status = 503;
+  testing.call_subroutine("vcl_fetch");
+  assert.error(628);
+
+  unset req.http.x-flp-api-file;
+  set beresp.status = 503;
+  testing.call_subroutine("vcl_fetch");
+  assert.false(beresp.cacheable);
+  assert.state(pass);
+}
+
+
+// @scope: error
+sub api_file_error_restarts_on_get_628_or_5xx_and_delivers_502_otherwise {
+  set req.method = "GET";
+  set req.http.x-flp-fos-service = "AAAAAAAAAAAAAAAAAAAAAA";
+  set obj.status = 628;
+  testing.call_subroutine("vcl_error");
+  assert.state(restart);
+
+  set obj.status = 503;
+  testing.call_subroutine("vcl_error");
+  assert.state(restart);
+
+  set req.method = "HEAD";
+  set obj.status = 628;
+  testing.call_subroutine("vcl_error");
+  assert.state(restart);
+
+  set req.method = "POST";
+  set obj.status = 628;
+  testing.call_subroutine("vcl_error");
+  assert.equal(obj.status, 502);
+  assert.state(deliver);
+
+  unset req.http.x-flp-fos-service;
+  set req.method = "GET";
+  set obj.status = 503;
+  testing.call_subroutine("vcl_error");
+  assert.not_restart();
+}
+
+
+// @scope: deliver
+sub fos_deliver_restarts_on_get_5xx_and_delivers_2xx_or_non_get {
+  set req.method = "GET";
+  set req.http.x-flp-fos-service = "AAAAAAAAAAAAAAAAAAAAAA";
+  set resp.status = 503;
+  testing.call_subroutine("vcl_deliver");
+  assert.state(restart);
+
+  set req.method = "HEAD";
+  set resp.status = 502;
+  testing.call_subroutine("vcl_deliver");
+  assert.state(restart);
+
+  set req.method = "GET";
+  set resp.status = 200;
+  testing.call_subroutine("vcl_deliver");
+  assert.state(deliver);
+
+  set req.method = "POST";
+  set resp.status = 503;
+  testing.call_subroutine("vcl_deliver");
+  assert.state(deliver);
+}

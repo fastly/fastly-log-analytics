@@ -62,6 +62,12 @@ type Segment = {
 
 let segment: Segment | null = null;
 
+/** Invalidates only recent/closed-segment cursors so future listings check freshness without aborting active loads. */
+export function invalidateManifestRecent(): void {
+  segment = null;
+  invalidateCatalogRecent();
+}
+
 /** Invalidates closed hours too: a committed late arrival can change them. */
 export function clearManifestCache(): void {
   segment = null;
@@ -434,6 +440,7 @@ import {
   clearCatalogManifests,
   fetchCatalogManifest,
   IncompleteManifestError,
+  invalidateCatalogRecent,
   manifestCacheKey,
   manifestGeneration,
   observeCatalogCommit,
