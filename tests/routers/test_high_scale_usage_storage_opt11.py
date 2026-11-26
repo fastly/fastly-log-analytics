@@ -218,3 +218,86 @@ def test_source_objects_activity_covering_index_registered_and_built():
     cp = PostgresControlPlane(pool=FakePool())
     assert cp.ensure_committed_manifest_index() == "built"
     assert any(SOURCE_OBJECTS_ACTIVITY_INDEX in s and s.startswith("CREATE INDEX CONCURRENTLY") for s in executed)
+
+
+def test_rolling_storage_cache_key_supports_sub_hour_run_window_and_swr_billing_caches(monkeypatch):
+    now = datetime(2026, 11, 26, 12, 0, 0, tzinfo=UTC)
+    src = {"name": "svc-run", "service_id": "svc-run", "bucket": "b", "prefix": ""}
+
+    # Sub-hour rolling window (< 300s rejected, >= 300s bucketed in 5-min increments)
+    assert (
+        usage._rolling_storage_cache_key(
+            "svc-run", src, now - timedelta(seconds=120), now, now, delete_after=True, retention_days=30
+        )
+        is None
+    )
+    k_run_1 = usage._rolling_storage_cache_key(
+        "svc-run", src, now - timedelta(seconds=610), now, now, delete_after=True, retention_days=30
+    )
+    k_run_2 = usage._rolling_storage_cache_key(
+        "svc-run", src, now - timedelta(seconds=640), now, now, delete_after=True, retention_days=30
+    )
+    assert k_run_1 is not None and k_run_1 == k_run_2
+    assert k_run_1[4] == ("5m", 2)
+
+    invalidate_service_cache("svc-run")
+    calls = {"billing": 0, "cc_del": 0, "cc_int": 0}
+    pg_fail = {"value": False}
+
+    class _FakePG:
+        def source_storage_window(self, sid, start, end):
+            return {"files": 1, "bytes": 100, "rum_bytes": 0}
+
+        def archive_storage_summary(self, sid):
+            return {"live_bytes": 100, "live_objects": 1, "expired_30d_bytes": 0, "live_rum_bytes": 0}
+
+        def storage_billing_summary(self, sid, start, end, *, minimum_days=30):
+            calls["billing"] += 1
+            if pg_fail["value"]:
+                raise RuntimeError("pg transient down")
+            return (1.0, 0.0, 0.0, True, ["high-scale:archive_manifests"])
+
+    def _cc_del(_n):
+        calls["cc_del"] += 1
+        return 0
+
+    def _cc_int(*_a, **_kw):
+        calls["cc_int"] += 1
+        return []
+
+    monkeypatch.setattr(usage, "get_high_scale_service_registry", lambda: _hs_reg({"svc-run"}))
+    monkeypatch.setattr(postgres_control, "PostgresControlPlane", _FakePG)
+    monkeypatch.setattr(svcconfig, "load_config", lambda _n: {})
+    monkeypatch.setattr(svcconfig, "get_status", lambda _n: {"storage_bytes": 10, "storage_files": 1})
+    monkeypatch.setattr("backend.core.metadata.ingest_log.get_quarantine_storage_total", lambda _n: 0)
+    monkeypatch.setattr(usage_log, "cloud_copy_deleted_bytes_in_billing_window", _cc_del)
+    monkeypatch.setattr(fos_usage, "cloud_copy_deletion_records_in_window", _cc_int)
+
+    real_now = datetime.now(UTC)
+    s_iso = (real_now - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    e_iso = real_now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    r1 = usage.usage_current_storage(start=s_iso, end=e_iso, source=src)
+    assert r1.storage_billing_complete is True
+    assert calls == {"billing": 1, "cc_del": 1, "cc_int": 1}
+
+    # Same 5-min rolling run window 20s later hits _USAGE_ROLLING_STORAGE_CACHE with 0 backend calls
+    s2_iso = (real_now - timedelta(minutes=10) + timedelta(seconds=20)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    e2_iso = (real_now + timedelta(seconds=20)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    r2 = usage.usage_current_storage(start=s2_iso, end=e2_iso, source=src)
+    assert r2.is_cached is True
+    assert calls == {"billing": 1, "cc_del": 1, "cc_int": 1}
+
+    # Even if rolling cache + response memo are cleared, the SWR caches for billing/cloud-copy hit on same minute
+    usage._USAGE_ROLLING_STORAGE_CACHE.clear()
+    usage._USAGE_RESPONSE_MEMO.cache.clear()
+    usage.usage_current_storage(start=s_iso, end=e_iso, source=src)
+    assert calls == {"billing": 1, "cc_del": 1, "cc_int": 1}
+
+    # Transient failure must not be cached by _swr_storage_fetch
+    invalidate_service_cache("svc-run")
+    pg_fail["value"] = True
+    r_err1 = usage.usage_current_storage(start=s_iso, end=e_iso, source=src)
+    r_err2 = usage.usage_current_storage(start=s_iso, end=e_iso, source=src)
+    assert r_err1.storage_billing_complete is False and r_err2.storage_billing_complete is False
+    assert calls["billing"] == 3
+    invalidate_service_cache("svc-run")

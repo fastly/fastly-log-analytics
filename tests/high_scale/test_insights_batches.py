@@ -72,6 +72,20 @@ class _BatchFakeClient:
                 for shape in ROLLUP_SHAPES
                 for h in hours
             ]
+        if name.endswith("_candidates"):
+            base = name.removesuffix("_candidates")
+            if base in self._fail:
+                raise RuntimeError(f"boom:{name}")
+            base_rows = self._rows.get(base, [])
+            if base == "batch_fingerprint_spread":
+                out: list[dict[str, Any]] = []
+                for row in base_rows:
+                    if row.get("fp_val"):
+                        out.append({"kind": "fp", "k": row["fp_val"]})
+                    if row.get("tls_ciphers_sha"):
+                        out.append({"kind": "cipher", "k": row["tls_ciphers_sha"]})
+                return out
+            return [{"k": row.get("ip") or row.get("url") or "cand"} for row in base_rows]
         if name.startswith("group_"):
             tags = re.findall(r"SELECT '(\w+)' AS _q, formatRow\('JSONEachRow', \*\) AS _r", sql)
             if any(tag in self._fail for tag in tags):
@@ -94,18 +108,100 @@ def _cards(response: Any) -> dict[str, dict[str, Any]]:
 
 
 def test_full_evaluation_consolidates_queries_by_at_least_half() -> None:
-    """A full 51-detector High-Scale evaluation must execute <= 10 ClickHouse queries."""
+    """A full 51-detector High-Scale evaluation un-fuses heavy baseline scans and stays <= 16 ClickHouse queries."""
     client = _BatchFakeClient(with_rollup=True)
     cards = _cards(_run(client))
     assert set(cards) == EVERY_CARD
     assert all(card["severity"] == "clean" for card in cards.values())
-    # 3 metadata (history, fields, rollup_coverage) + 5 multiplexed detector groups = 8 total
-    assert len(client.calls) <= 10, (
-        f"Expected <= 10 ClickHouse queries, got {len(client.calls)}: {list(client.queries())}"
-    )
-    assert 1 <= evaluator._MAX_WORKERS <= 2
-    assert evaluator._BACKGROUND_MAX_WORKERS == 1
+    queries = client.queries()
+    assert len(client.calls) <= 16, f"Expected <= 16 ClickHouse queries, got {len(client.calls)}: {list(queries)}"
+    group_map = dict(evaluator._MULTIPLEX_GROUPS)
+    assert "group_baseline_perf" not in group_map
+    assert "group_ip_abuse" not in group_map
+    assert "group_network_fp" not in group_map
+    assert group_map["group_window_perf"] == frozenset({"batch_window_url", "batch_beaconing"})
+    assert evaluator._MAX_WORKERS == 3
+    assert evaluator._BACKGROUND_MAX_WORKERS == 2
     assert evaluator._COLD_POOL._max_workers == 1
+
+
+def test_rollup_groups_are_not_fused_when_falling_back_to_raw_facts() -> None:
+    client = _BatchFakeClient(with_rollup=False)
+    _run(client)
+    queries = client.queries()
+    assert "group_rollup_batches" not in queries
+    assert "group_rollup_standalone" not in queries
+    assert {"batch_misc", "batch_geo", "batch_asn", "batch_url_cache"} <= set(queries)
+    assert {"error_spikes", "new_probe_urls", "ua_monoculture", "referer_monoculture", "waf_signal_spikes"} <= set(
+        queries
+    )
+
+
+def test_candidate_precheck_skips_empty_pushes_prewhere_and_falls_back_above_500() -> None:
+    # 1. 0 candidates -> skips baseline scans for ip_outlier, ip_abuse, fingerprint_spread, url_perf
+    empty_client = _BatchFakeClient(with_rollup=True)
+    _run(empty_client)
+    empty_queries = empty_client.queries()
+    for bname in ("batch_ip_outlier", "batch_ip_abuse", "batch_fingerprint_spread", "batch_url_perf"):
+        assert f"{bname}_candidates" in empty_queries
+        assert bname not in empty_queries
+
+    # 2. <= 500 candidates -> pushes concrete IN (...) into PREWHERE
+    class _FewCandClient(_BatchFakeClient):
+        def execute(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+            marker = re.search(r"/\* insight:(\w+) \*/", sql)
+            name = marker.group(1) if marker else ""
+            if name == "batch_url_perf_candidates":
+                self.calls.append((sql, params or {}))
+                return [{"k": "/api/a"}, {"k": "/api/b"}]
+            if name in ("batch_ip_outlier_candidates", "batch_ip_abuse_candidates"):
+                self.calls.append((sql, params or {}))
+                return [{"k": "198.51.100.1"}]
+            if name == "batch_fingerprint_spread_candidates":
+                self.calls.append((sql, params or {}))
+                return [{"kind": "fp", "k": "t13_fp_1"}]
+            return super().execute(sql, params)
+
+    few_client = _FewCandClient(with_rollup=True)
+    _run(few_client)
+    few_q = few_client.queries()
+    url_sql, url_params = few_q["batch_url_perf"]
+    url_pre = re.search(r"\bPREWHERE\b(.*?)WHERE \(url != ''\)", url_sql)
+    assert url_pre and "url IN (" in url_pre.group(1)
+    assert "IN (SELECT url FROM" not in url_sql
+    assert "/api/a" in url_params.values() and "/api/b" in url_params.values()
+
+    ip_out_sql, ip_out_params = few_q["batch_ip_outlier"]
+    ip_out_pre = re.search(r"\bPREWHERE\b(.*?)WHERE \(\(custom_fields\['req_header_bytes'\]", ip_out_sql)
+    assert ip_out_pre and "client_ip IN (" in ip_out_pre.group(1)
+    assert "IN (SELECT client_ip" not in ip_out_sql
+    assert "198.51.100.1" in ip_out_params.values()
+
+    ip_abuse_sql, _ = few_q["batch_ip_abuse"]
+    ip_abuse_pre = re.search(r"\bPREWHERE\b(.*?)WHERE \(client_ip != ''\)", ip_abuse_sql)
+    assert ip_abuse_pre and "client_ip IN (" in ip_abuse_pre.group(1)
+    assert "IN (SELECT client_ip" not in ip_abuse_sql
+
+    fp_sql, fp_params = few_q["batch_fingerprint_spread"]
+    fp_pre = re.search(r"\bPREWHERE\b(.*?)\)\s*SELECT\b", fp_sql)
+    assert fp_pre and "IN (" in fp_pre.group(1)
+    assert "IN (SELECT custom_fields" not in fp_sql
+    assert "t13_fp_1" in fp_params.values()
+
+    # 3. > 500 candidates -> falls back to existing subquery
+    class _ManyCandClient(_BatchFakeClient):
+        def execute(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+            marker = re.search(r"/\* insight:(\w+) \*/", sql)
+            name = marker.group(1) if marker else ""
+            if name == "batch_url_perf_candidates":
+                self.calls.append((sql, params or {}))
+                return [{"k": f"/u/{i}"} for i in range(501)]
+            return super().execute(sql, params)
+
+    many_client = _ManyCandClient(with_rollup=True)
+    _run(many_client)
+    many_sql, _ = many_client.queries()["batch_url_perf"]
+    assert "IN (SELECT url FROM" in many_sql
 
 
 def test_batched_rollup_queries_use_rollup_table_and_preserve_visibility_fence() -> None:

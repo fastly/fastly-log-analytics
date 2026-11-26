@@ -2400,6 +2400,20 @@ class _InsightsClient:
             return [{"earliest": params["window_end"] - timedelta(hours=self._history_hours), "window_total": 1234}]
         if name == "fields":
             return [{"fields": self._fields}]
+        if name.endswith("_candidates"):
+            base = name.removesuffix("_candidates")
+            if base in self._fail:
+                raise RuntimeError("clickhouse unavailable")
+            base_rows = self._rows.get(base, [])
+            if base == "batch_fingerprint_spread":
+                out: list[dict[str, Any]] = []
+                for row in base_rows:
+                    if row.get("fp_val"):
+                        out.append({"kind": "fp", "k": row["fp_val"]})
+                    if row.get("tls_ciphers_sha"):
+                        out.append({"kind": "cipher", "k": row["tls_ciphers_sha"]})
+                return out
+            return [{"k": row.get("ip") or row.get("url") or "cand"} for row in base_rows]
         if name.startswith("group_"):
             tags = re.findall(r"SELECT '(\w+)' AS _q, formatRow\('JSONEachRow', \*\) AS _r", sql)
             if any(tag in self._fail for tag in tags):
@@ -2522,6 +2536,7 @@ def test_every_detection_runs_and_query_is_visible_scoped_and_parameterized() ->
         assert "event_timestamp < {window_end:DateTime64(3)}" in sql
         window_only = (
             qkey in {"batch_window_url", "batch_beaconing"}
+            or qkey.endswith("_candidates")
             or (qkey in DETECTIONS and DETECTIONS[qkey].window_only)
             or qkey in {"repeated_patterns_fp", "impossible_distance"}
         )
@@ -2613,8 +2628,11 @@ def _query_key_for(insight_id: str, queries: dict[str, tuple[str, dict[str, Any]
     from backend.high_scale.insights.batches import BATCH_BY_DETECTION
 
     batch = BATCH_BY_DETECTION.get(insight_id)
-    if batch is not None and f"batch_{batch.name}" in queries:
-        return f"batch_{batch.name}"
+    if batch is not None:
+        if f"batch_{batch.name}" in queries:
+            return f"batch_{batch.name}"
+        if f"batch_{batch.name}_candidates" in queries:
+            return f"batch_{batch.name}_candidates"
     return insight_id
 
 
@@ -2712,7 +2730,7 @@ def test_insights_detector_telemetry_survives_async_and_worker_boundaries(
         set_page_load_id(previous_page)
         current_attribution.reset(token)
 
-    expected_detector = "error_spikes" if fails else "group_rollup_standalone"
+    expected_detector = "error_spikes"
     assert {"history", "fields", expected_detector} <= client.scopes.keys()
     for detector, (scope, thread) in client.scopes.items():
         assert scope["component"] == "insights" and scope["section"] == f"insights.{detector}"
@@ -2813,8 +2831,8 @@ def test_partial_insights_results_keep_card_errors_and_refresh_in_background(_in
     )
     assert _insight_cards(expired)["latency_regression"]["severity"] == "error"
     _drain_insights_refreshes()
-    # Clean refresh succeeds via the 9 multiplexed/meta calls without per-detector fallback.
-    expected_total = 2 * computed_calls + 9
+    # Clean refresh succeeds via one evaluation pass without per-detector fallback.
+    expected_total = 3 * computed_calls
     assert len(client.calls) == expected_total
 
     skew[0] += 200.0
@@ -3068,7 +3086,7 @@ def test_insufficient_history_and_missing_fields_or_pop_coords(monkeypatch: pyte
         )
         assert not (FINGERPRINT_DETECTIONS & set(_insight_cards(_run_insights(_InsightsClient()))))
     no_lat_queries = client_no_lat.queries()
-    assert "ja4 != ''" in no_lat_queries[_query_key_for("botnet_grouping", no_lat_queries)][0]
+    assert "custom_fields['ja4'] != ''" in no_lat_queries[_query_key_for("botnet_grouping", no_lat_queries)][0]
     with monkeypatch.context() as m:
         m.setattr(
             "backend.config.active_log_field_ids",
@@ -3077,7 +3095,7 @@ def test_insufficient_history_and_missing_fields_or_pop_coords(monkeypatch: pyte
         client_ja3 = _InsightsClient()
         _run_insights(client_ja3)
     ja3_queries = client_ja3.queries()
-    assert "ja3 != ''" in ja3_queries[_query_key_for("botnet_grouping", ja3_queries)][0]
+    assert "custom_fields['ja3'] != ''" in ja3_queries[_query_key_for("botnet_grouping", ja3_queries)][0]
 
     # Impossible distance POP code sanitization and empty POP map
     monkeypatch.setattr(

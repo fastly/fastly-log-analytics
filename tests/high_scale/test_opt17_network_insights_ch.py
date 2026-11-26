@@ -229,9 +229,10 @@ def test_pop_health_quality_transport_and_shielding_use_granule_skipping_and_fas
 
 
 def test_insights_baseline_sampling_pushed_pre_filters_and_standalone_fixes() -> None:
-    assert _baseline_sample_stride(24.0) == 1
-    assert _baseline_sample_stride(48.0) == 5
-    assert _baseline_sample_stride(168.0) == 10
+    assert _baseline_sample_stride(12.0) == 1
+    assert _baseline_sample_stride(24.0) == 2
+    assert _baseline_sample_stride(48.0) == 4
+    assert _baseline_sample_stride(168.0) == 8
 
     present = {
         "url",
@@ -264,13 +265,13 @@ def test_insights_baseline_sampling_pushed_pre_filters_and_standalone_fixes() ->
     }
 
     sample_clause = (
-        "event_timestamp >= {window_start:DateTime64(3)} OR intDiv(toUnixTimestamp(event_timestamp), 60) % 10 = 0"
+        "event_timestamp >= {window_start:DateTime64(3)} OR intDiv(toUnixTimestamp(event_timestamp), 300) % 8 = 0"
     )
     lat_sql, _ = _build_latency_dim(
         {"pop_latency_regression"}, present=present, rollup_span=None, filter_clause="", baseline_hours=168.0
     )
     assert sample_clause in lat_sql
-    assert "countIf(is_b) * 10 AS b_total" in lat_sql
+    assert "countIf(is_b) * 8 AS b_total" in lat_sql
 
     url_sql, _ = _build_url_perf(
         {"latency_regression", "payload_compression_regression"},
@@ -280,7 +281,7 @@ def test_insights_baseline_sampling_pushed_pre_filters_and_standalone_fixes() ->
         baseline_hours=168.0,
     )
     assert sample_clause in url_sql
-    assert "countIf(is_b AND elapsed IS NOT NULL) * 10 AS l_b_total" in url_sql
+    assert "countIf(is_b AND elapsed IS NOT NULL) * 8 AS l_b_total" in url_sql
 
     origin_sql, _ = _build_origin_perf(
         {"origin_latency_spike", "timeout_split"},
@@ -291,7 +292,7 @@ def test_insights_baseline_sampling_pushed_pre_filters_and_standalone_fixes() ->
     )
     assert sample_clause in origin_sql
     assert "custom_fields['ottfb'] != ''" in origin_sql
-    assert "countIf(is_b AND oconnect_ms IS NOT NULL) * 10 AS ts_b_total" in origin_sql
+    assert "countIf(is_b AND oconnect_ms IS NOT NULL) * 8 AS ts_b_total" in origin_sql
 
     asn_sql, _ = _build_network_asn(
         {"network_asn_health", "asn_metro_performance", "metro_delivery_degradation"},
@@ -301,22 +302,25 @@ def test_insights_baseline_sampling_pushed_pre_filters_and_standalone_fixes() ->
         baseline_hours=168.0,
     )
     assert sample_clause in asn_sql
-    assert "countIf(is_b) * 10 AS nah_b_total" in asn_sql
+    assert "countIf(is_b) * 8 AS nah_b_total" in asn_sql
 
     ip_out_sql, _ = _build_ip_outlier(
         {"request_size_anomaly", "connection_abuse"}, present=present, rollup_span=None, filter_clause=""
     )
     assert ip_out_sql.index("client_ip IN (SELECT client_ip") < ip_out_sql.index("FROM base")
+    assert "intDiv(toUnixTimestamp(event_timestamp)" not in ip_out_sql
 
     ip_abuse_sql, _ = _build_ip_abuse(
         {"content_discovery", "session_harvesting"}, present=present, rollup_span=None, filter_clause=""
     )
     assert ip_abuse_sql.index("client_ip IN (SELECT client_ip") < ip_abuse_sql.index("FROM base")
+    assert "intDiv(toUnixTimestamp(event_timestamp)" not in ip_abuse_sql
 
     fp_sql, _ = _build_fingerprint_spread(
         {"botnet_grouping", "cipher_spread"}, present=present, rollup_span=None, filter_clause=""
     )
     assert fp_sql.index("IN (SELECT custom_fields['ja4']") < fp_sql.index("FROM base")
+    assert "intDiv(toUnixTimestamp(event_timestamp)" not in fp_sql
 
     crawler_sql = _base_sql(DETECTIONS["crawler_disparity"], "crawler_disparity")
     assert "FROM base WHERE is_w" not in crawler_sql

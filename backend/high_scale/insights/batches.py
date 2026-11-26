@@ -43,13 +43,33 @@ def _parse_int(value: Any) -> int | None:
         return None
 
 
+_CANDIDATE_LIMIT = 500
+
+
 def _baseline_sample_stride(baseline_hours: float) -> int:
-    """Granule-skipping time-block stride for raw-fact baseline portions (>= 48h)."""
+    """Granule-skipping 5-minute time-block stride for raw-fact baseline portions (>= 24h)."""
     if baseline_hours >= 168:
-        return 10
+        return 8
     if baseline_hours >= 48:
-        return 5
+        return 4
+    if baseline_hours >= 24:
+        return 2
     return 1
+
+
+def _candidate_in_clause(
+    col_expr: str,
+    values: list[str],
+    prefix: str,
+    candidate_params: dict[str, Any] | None,
+) -> str:
+    placeholders: list[str] = []
+    for idx, val in enumerate(values):
+        pname = f"{prefix}_{idx}"
+        if candidate_params is not None:
+            candidate_params[pname] = val
+        placeholders.append(f"{{{pname}:String}}")
+    return f"{col_expr} IN ({', '.join(placeholders)})"
 
 
 def _base_cte(
@@ -60,6 +80,7 @@ def _base_cte(
     rollup_span: tuple[datetime, datetime] | None = None,
     window_only: bool = False,
     row_filter: str = "",
+    prewhere_clause: str = "",
     filter_clause: str = "",
     weighted: bool = False,
     baseline_sample_stride: int = 1,
@@ -97,16 +118,17 @@ def _base_cte(
     lower = "{window_start:DateTime64(3)}" if window_only else "{baseline_start:DateTime64(3)}"
     weight_col = ", toUInt64(1) AS n" if (weighted or rollup_shape) else ""
     baseline_sample = (
-        f" AND (event_timestamp >= {{window_start:DateTime64(3)}} OR intDiv(toUnixTimestamp(event_timestamp), 60) % {baseline_sample_stride} = 0)"
+        f" AND (event_timestamp >= {{window_start:DateTime64(3)}} OR intDiv(toUnixTimestamp(event_timestamp), 300) % {baseline_sample_stride} = 0)"
         if (baseline_sample_stride > 1 and not window_only)
         else ""
     )
+    prewhere_extra = f" AND ({prewhere_clause})" if prewhere_clause else ""
     raw = (
         f"SELECT {raw_proj}, "
         "event_timestamp < {window_start:DateTime64(3)} AS is_b, "
         f"event_timestamp >= {{window_start:DateTime64(3)}} AS is_w{weight_col} "
         f"FROM request_facts PREWHERE {fact_scope} AND event_timestamp >= {lower} "
-        f"AND event_timestamp < {{window_end:DateTime64(3)}}{baseline_sample}{raw_where}"
+        f"AND event_timestamp < {{window_end:DateTime64(3)}}{baseline_sample}{prewhere_extra}{raw_where}"
     )
     return f"/* insight:batch_{name} */ WITH base AS ({raw})", "fact"
 
@@ -850,6 +872,34 @@ _COMP_ROW = "status = 200 AND resp_bytes >= 1024 AND url != '' AND match(url, {c
 _UNCOMP = "NOT multiSearchAnyCaseInsensitive(resp_header_content_encoding, ['gzip', 'br', 'zstd', 'deflate'])"
 
 
+def _build_url_perf_candidates(
+    active: set[str],
+    *,
+    present: set[str],
+    rollup_span: tuple[datetime, datetime] | None,
+    filter_clause: str,
+) -> str:
+    url_win_from = _window_from(filter_clause=filter_clause, row_filter="url != ''")
+    return (
+        f"/* insight:batch_url_perf_candidates */ SELECT url AS k {url_win_from} "
+        "GROUP BY url HAVING countIf(custom_fields['elapsed'] != '') >= 5 "
+        f"OR countIf({COLUMNS['status']} = 200 AND {COLUMNS['resp_bytes']} >= 1024 AND match(url, {{compress_regex:String}})) >= 10 "
+        f"LIMIT {_CANDIDATE_LIMIT + 1}"
+    )
+
+
+def _parse_single_key_candidates(
+    key_name: str,
+    rows: list[dict[str, Any]],
+) -> dict[str, list[str] | None] | None:
+    keys = [str(r["k"]) for r in rows if r.get("k")]
+    if not keys:
+        return None
+    if len(keys) > _CANDIDATE_LIMIT:
+        return {key_name: None}
+    return {key_name: keys}
+
+
 def _build_url_perf(
     active: set[str],
     *,
@@ -857,6 +907,8 @@ def _build_url_perf(
     rollup_span: tuple[datetime, datetime] | None,
     filter_clause: str,
     baseline_hours: float = 0.0,
+    candidates: dict[str, list[str] | None] | None = None,
+    candidate_params: dict[str, Any] | None = None,
 ) -> tuple[str, QuerySource]:
     proj = [
         ("url", COLUMNS["url"]),
@@ -867,19 +919,30 @@ def _build_url_perf(
     ]
     b_stride = _baseline_sample_stride(baseline_hours)
     b_scale = f" * {b_stride}" if b_stride > 1 else ""
+    url_cands = candidates.get("url") if candidates is not None else None
+    prewhere_clause = (
+        _candidate_in_clause("url", url_cands, "cand_url", candidate_params)
+        if isinstance(url_cands, list) and url_cands
+        else ""
+    )
     cte, source = _base_cte(
         "url_perf",
         proj,
         row_filter="url != ''",
+        prewhere_clause=prewhere_clause,
         filter_clause=filter_clause,
         baseline_sample_stride=b_stride,
     )
-    url_win_from = _window_from(filter_clause=filter_clause, row_filter="url != ''")
-    win_urls = (
-        f"SELECT url {url_win_from} "
-        "GROUP BY url HAVING countIf(custom_fields['elapsed'] != '') >= 5 "
-        f"OR countIf(status = 200 AND {COLUMNS['resp_bytes']} >= 1024 AND match(url, {{compress_regex:String}})) >= 10"
-    )
+    if prewhere_clause:
+        base_filter = ""
+    else:
+        url_win_from = _window_from(filter_clause=filter_clause, row_filter="url != ''")
+        win_urls = (
+            f"SELECT url {url_win_from} "
+            "GROUP BY url HAVING countIf(custom_fields['elapsed'] != '') >= 5 "
+            f"OR countIf({COLUMNS['status']} = 200 AND {COLUMNS['resp_bytes']} >= 1024 AND match(url, {{compress_regex:String}})) >= 10"
+        )
+        base_filter = f"WHERE url != '' AND url IN ({win_urls}) "
     sql = (
         f"{cte} SELECT url, "
         f"{_P95}(elapsed, is_w AND elapsed IS NOT NULL) / 1000.0 AS l_w_p95, "
@@ -891,7 +954,7 @@ def _build_url_perf(
         f"countIf(is_w AND {_COMP_ROW}) AS c_w_total, "
         f"countIf(is_b AND {_COMP_ROW}){b_scale} AS c_b_total "
         "FROM base "
-        f"WHERE url != '' AND url IN ({win_urls}) "
+        f"{base_filter}"
         "GROUP BY url HAVING "
         "(l_w_total >= 5 AND l_b_total >= 20 AND l_w_p95 >= l_b_p95 * 2.0 AND l_w_p95 - l_b_p95 >= 200) "
         "OR (c_w_total >= 10 AND c_b_total >= 50 AND c_b_rate <= 0.20 AND c_w_rate >= 0.50 AND c_w_rate >= c_b_rate + 0.30)"
@@ -931,35 +994,70 @@ def _extract_url_perf(
 # ── Batch 8: baseline+window per-IP outlier (2 detections) ───────────────────
 
 
+def _build_ip_outlier_candidates(
+    active: set[str],
+    *,
+    present: set[str],
+    rollup_span: tuple[datetime, datetime] | None,
+    filter_clause: str,
+) -> str:
+    ip_out_win_from = _window_from(
+        filter_clause=filter_clause,
+        row_filter="client_ip != '' AND (custom_fields['req_header_bytes'] != '' OR custom_fields['conn_requests'] != '')",
+    )
+    return (
+        f"/* insight:batch_ip_outlier_candidates */ SELECT client_ip AS k {ip_out_win_from} "
+        f"GROUP BY client_ip HAVING countIf({COLUMNS['req_header_bytes']} > 0) >= 3 "
+        f"OR countIf({COLUMNS['conn_requests']} > 0) >= 5 "
+        f"LIMIT {_CANDIDATE_LIMIT + 1}"
+    )
+
+
 def _build_ip_outlier(
     active: set[str],
     *,
     present: set[str],
     rollup_span: tuple[datetime, datetime] | None,
     filter_clause: str,
+    candidates: dict[str, list[str] | None] | None = None,
+    candidate_params: dict[str, Any] | None = None,
 ) -> tuple[str, QuerySource]:
     proj = [
         ("ip", COLUMNS["ip"]),
         ("req_header_bytes", COLUMNS["req_header_bytes"]),
         ("conn_requests", COLUMNS["conn_requests"]),
     ]
-    ip_out_win_from = _window_from(
-        filter_clause=filter_clause,
-        row_filter="client_ip != '' AND (custom_fields['req_header_bytes'] != '' OR custom_fields['conn_requests'] != '')",
+    ip_cands = candidates.get("ip") if candidates is not None else None
+    prewhere_clause = (
+        _candidate_in_clause("client_ip", ip_cands, "cand_ip", candidate_params)
+        if isinstance(ip_cands, list) and ip_cands
+        else ""
     )
-    win_ips = (
-        f"SELECT client_ip {ip_out_win_from} "
-        f"GROUP BY client_ip HAVING countIf({COLUMNS['req_header_bytes']} > 0) >= 3 "
-        f"OR countIf({COLUMNS['conn_requests']} > 0) >= 5"
-    )
-    cte, source = _base_cte(
-        "ip_outlier",
-        proj,
-        row_filter=(
+    if prewhere_clause:
+        row_filter = (
+            "(custom_fields['req_header_bytes'] != '' OR custom_fields['conn_requests'] != '') AND "
+            "(req_header_bytes > 0 OR conn_requests > 0)"
+        )
+    else:
+        ip_out_win_from = _window_from(
+            filter_clause=filter_clause,
+            row_filter="client_ip != '' AND (custom_fields['req_header_bytes'] != '' OR custom_fields['conn_requests'] != '')",
+        )
+        win_ips = (
+            f"SELECT client_ip {ip_out_win_from} "
+            f"GROUP BY client_ip HAVING countIf({COLUMNS['req_header_bytes']} > 0) >= 3 "
+            f"OR countIf({COLUMNS['conn_requests']} > 0) >= 5"
+        )
+        row_filter = (
             f"client_ip IN ({win_ips}) AND "
             "(custom_fields['req_header_bytes'] != '' OR custom_fields['conn_requests'] != '') AND "
             "(req_header_bytes > 0 OR conn_requests > 0)"
-        ),
+        )
+    cte, source = _base_cte(
+        "ip_outlier",
+        proj,
+        row_filter=row_filter,
+        prewhere_clause=prewhere_clause,
         filter_clause=filter_clause,
     )
     sql = (
@@ -1007,12 +1105,46 @@ def _extract_ip_outlier(
 _DEEP_URL = "url LIKE '/%/%/%' AND url NOT LIKE '%.%' AND (referer = '' OR referer = '-')"
 
 
+def _ip_abuse_pre_having(active: set[str]) -> list[str]:
+    pre_having: list[str] = []
+    if "content_discovery" in active:
+        pre_having.append(f"countIf(url != '' AND {COLUMNS['status']} = 404) >= 20")
+    if "credential_enumeration" in active:
+        auth = "url != '' AND match(url, {auth_regex:String})"
+        pre_having.append(f"countIf({auth} AND {COLUMNS['status']} IN (401, 403)) >= 20")
+    if "session_harvesting" in active:
+        pre_having.append(f"uniqCombinedIf({COLUMNS['cookie_session']}, {COLUMNS['cookie_session']} != '') >= 20")
+    if "orphaned_deep_crawl" in active:
+        raw_deep_url = (
+            f"url LIKE '/%/%/%' AND url NOT LIKE '%.%' AND ({COLUMNS['referer']} = '' OR {COLUMNS['referer']} = '-')"
+        )
+        pre_having.append(f"countIf({raw_deep_url}) >= 50")
+    return pre_having
+
+
+def _build_ip_abuse_candidates(
+    active: set[str],
+    *,
+    present: set[str],
+    rollup_span: tuple[datetime, datetime] | None,
+    filter_clause: str,
+) -> str:
+    ip_abuse_win_from = _window_from(filter_clause=filter_clause, row_filter="client_ip != ''")
+    pre_having = _ip_abuse_pre_having(active)
+    return (
+        f"/* insight:batch_ip_abuse_candidates */ SELECT client_ip AS k {ip_abuse_win_from} "
+        f"GROUP BY client_ip HAVING {' OR '.join(pre_having)} LIMIT {_CANDIDATE_LIMIT + 1}"
+    )
+
+
 def _build_ip_abuse(
     active: set[str],
     *,
     present: set[str],
     rollup_span: tuple[datetime, datetime] | None,
     filter_clause: str,
+    candidates: dict[str, list[str] | None] | None = None,
+    candidate_params: dict[str, Any] | None = None,
 ) -> tuple[str, QuerySource]:
     proj: list[tuple[str, str]] = [("ip", COLUMNS["ip"])]
     if active & {"content_discovery", "credential_enumeration", "orphaned_deep_crawl"}:
@@ -1025,7 +1157,7 @@ def _build_ip_abuse(
         proj.append(("referer", COLUMNS["referer"]))
 
     sel = ["ip"]
-    pre_having: list[str] = []
+    pre_having = _ip_abuse_pre_having(active)
     having: list[str] = []
 
     if "content_discovery" in active:
@@ -1037,7 +1169,6 @@ def _build_ip_abuse(
                 "countIf(is_b AND url != '' AND status = 404) AS cd_b_404",
             ]
         )
-        pre_having.append("countIf(url != '' AND status = 404) >= 20")
         having.append("(cd_w_404 >= 20 AND cd_w_404 * 1.0 / nullIf(cd_w_total, 0) >= 0.7 AND cd_w_distinct >= 15)")
     if "credential_enumeration" in active:
         auth = "url != '' AND match(url, {auth_regex:String})"
@@ -1049,7 +1180,6 @@ def _build_ip_abuse(
                 f"countIf(is_b AND {auth} AND status IN (401, 403)) AS ce_b_denied",
             ]
         )
-        pre_having.append(f"countIf({auth} AND status IN (401, 403)) >= 20")
         having.append(
             "(ce_w_denied >= 20 AND ce_w_denied * 1.0 / nullIf(ce_w_attempts, 0) >= 0.5 "
             "AND ce_w_denied > ce_b_denied / greatest({baseline_hours:Float64}, 1.0) * {window_hours:Float64} * 3 + 5)"
@@ -1062,12 +1192,8 @@ def _build_ip_abuse(
                 "uniqCombinedIf(cookie_session, is_b AND cookie_session != '') AS sh_b_sessions",
             ]
         )
-        pre_having.append(f"uniqCombinedIf({COLUMNS['cookie_session']}, {COLUMNS['cookie_session']} != '') >= 20")
         having.append("(sh_w_sessions >= 20 AND sh_w_sessions > sh_b_sessions * 2 + 10)")
     if "orphaned_deep_crawl" in active:
-        raw_deep_url = (
-            f"url LIKE '/%/%/%' AND url NOT LIKE '%.%' AND ({COLUMNS['referer']} = '' OR {COLUMNS['referer']} = '-')"
-        )
         sel.extend(
             [
                 f"countIf(is_w AND {_DEEP_URL}) AS od_w_reqs",
@@ -1075,15 +1201,25 @@ def _build_ip_abuse(
                 f"countIf(is_b AND {_DEEP_URL}) AS od_b_reqs",
             ]
         )
-        pre_having.append(f"countIf({raw_deep_url}) >= 50")
         having.append("(od_w_reqs >= 50 AND od_w_distinct >= 10)")
 
-    ip_abuse_win_from = _window_from(filter_clause=filter_clause, row_filter="client_ip != ''")
-    win_ips = f"SELECT client_ip {ip_abuse_win_from} GROUP BY client_ip HAVING {' OR '.join(pre_having)}"
+    ip_cands = candidates.get("ip") if candidates is not None else None
+    prewhere_clause = (
+        _candidate_in_clause("client_ip", ip_cands, "cand_ip", candidate_params)
+        if isinstance(ip_cands, list) and ip_cands
+        else ""
+    )
+    if prewhere_clause:
+        row_filter = "client_ip != ''"
+    else:
+        ip_abuse_win_from = _window_from(filter_clause=filter_clause, row_filter="client_ip != ''")
+        win_ips = f"SELECT client_ip {ip_abuse_win_from} GROUP BY client_ip HAVING {' OR '.join(pre_having)}"
+        row_filter = f"client_ip != '' AND client_ip IN ({win_ips})"
     cte, source = _base_cte(
         "ip_abuse",
         proj,
-        row_filter=f"client_ip != '' AND client_ip IN ({win_ips})",
+        row_filter=row_filter,
+        prewhere_clause=prewhere_clause,
         filter_clause=filter_clause,
     )
     sql = f"{cte} SELECT {', '.join(sel)} FROM base GROUP BY ip HAVING {' OR '.join(having)}"
@@ -1405,40 +1541,120 @@ def _fp_col(present: set[str]) -> str:
     return "ja4" if "ja4" in present else ("ja3" if "ja3" in present else "")
 
 
+def _build_fingerprint_spread_candidates(
+    active: set[str],
+    *,
+    present: set[str],
+    rollup_span: tuple[datetime, datetime] | None,
+    filter_clause: str,
+) -> str:
+    fp = _fp_col(present) or "ja4"
+    has_fp = bool(active & {"botnet_grouping", "residential_fingerprint_dispersion"})
+    has_cipher = "cipher_spread" in active
+    branches: list[str] = []
+    if has_fp:
+        fp_col = COLUMNS[fp]
+        fp_win_from = _window_from(filter_clause=filter_clause, row_filter=f"{fp_col} != '' AND client_ip != ''")
+        branches.append(
+            f"SELECT 'fp' AS kind, {fp_col} AS k {fp_win_from} "
+            f"GROUP BY {fp_col} HAVING uniqCombined(client_ip) >= 4 LIMIT {_CANDIDATE_LIMIT + 1}"
+        )
+    if has_cipher:
+        cipher_col = COLUMNS["tls_ciphers_sha"]
+        cipher_win_from = _window_from(
+            filter_clause=filter_clause, row_filter=f"{cipher_col} != '' AND client_ip != ''"
+        )
+        branches.append(
+            f"SELECT 'cipher' AS kind, {cipher_col} AS k {cipher_win_from} "
+            f"GROUP BY {cipher_col} HAVING uniqCombined(client_ip) >= 4 LIMIT {_CANDIDATE_LIMIT + 1}"
+        )
+    if len(branches) == 1:
+        return f"/* insight:batch_fingerprint_spread_candidates */ {branches[0]}"
+    wrapped = " UNION ALL ".join(f"SELECT kind, k FROM ({b})" for b in branches)
+    return f"/* insight:batch_fingerprint_spread_candidates */ {wrapped}"
+
+
+def _parse_fingerprint_spread_candidates(
+    active: set[str],
+    rows: list[dict[str, Any]],
+) -> dict[str, list[str] | None] | None:
+    has_fp = bool(active & {"botnet_grouping", "residential_fingerprint_dispersion"})
+    has_cipher = "cipher_spread" in active
+    fp_keys = [str(r["k"]) for r in rows if r.get("kind") == "fp" and r.get("k")]
+    cipher_keys = [str(r["k"]) for r in rows if r.get("kind") == "cipher" and r.get("k")]
+    if (not has_fp or not fp_keys) and (not has_cipher or not cipher_keys):
+        return None
+    return {
+        "fp": (None if len(fp_keys) > _CANDIDATE_LIMIT else fp_keys) if has_fp else [],
+        "cipher": (None if len(cipher_keys) > _CANDIDATE_LIMIT else cipher_keys) if has_cipher else [],
+    }
+
+
 def _build_fingerprint_spread(
     active: set[str],
     *,
     present: set[str],
     rollup_span: tuple[datetime, datetime] | None,
     filter_clause: str,
+    candidates: dict[str, list[str] | None] | None = None,
+    candidate_params: dict[str, Any] | None = None,
 ) -> tuple[str, QuerySource]:
     fp = _fp_col(present) or "ja4"
     has_fp = bool(active & {"botnet_grouping", "residential_fingerprint_dispersion"})
     has_cipher = "cipher_spread" in active
+    if candidates is not None:
+        if has_fp and candidates.get("fp") == []:
+            has_fp = False
+        if has_cipher and candidates.get("cipher") == []:
+            has_cipher = False
     proj: list[tuple[str, str]] = [("ip", COLUMNS["ip"])]
     if has_fp:
         proj.append((fp, COLUMNS[fp]))
-    if "residential_fingerprint_dispersion" in active:
+    if has_fp and "residential_fingerprint_dispersion" in active:
         proj.extend([("asn", COLUMNS["asn"]), ("p_type", COLUMNS["p_type"])])
     if has_cipher:
         proj.append(("tls_ciphers_sha", COLUMNS["tls_ciphers_sha"]))
 
-    win_preds: list[str] = []
+    prewhere_preds: list[str] = []
+    where_preds: list[str] = []
     if has_fp:
         fp_col = COLUMNS[fp]
-        fp_win_from = _window_from(filter_clause=filter_clause, row_filter=f"{fp_col} != '' AND client_ip != ''")
-        win_fps = f"SELECT {fp_col} {fp_win_from} GROUP BY {fp_col} HAVING uniqCombined(client_ip) >= 4"
-        win_preds.append(f"({fp_col} != '' AND {fp_col} IN ({win_fps}))")
+        fp_cands = candidates.get("fp") if candidates is not None else None
+        if isinstance(fp_cands, list) and fp_cands:
+            prewhere_preds.append(f"({_candidate_in_clause(fp_col, fp_cands, 'cand_fp', candidate_params)})")
+        else:
+            fp_win_from = _window_from(filter_clause=filter_clause, row_filter=f"{fp_col} != '' AND client_ip != ''")
+            win_fps = f"SELECT {fp_col} {fp_win_from} GROUP BY {fp_col} HAVING uniqCombined(client_ip) >= 4"
+            where_preds.append(f"({fp_col} != '' AND {fp_col} IN ({win_fps}))")
     if has_cipher:
         cipher_col = COLUMNS["tls_ciphers_sha"]
-        cipher_win_from = _window_from(
-            filter_clause=filter_clause, row_filter=f"{cipher_col} != '' AND client_ip != ''"
-        )
-        win_ciphers = f"SELECT {cipher_col} {cipher_win_from} GROUP BY {cipher_col} HAVING uniqCombined(client_ip) >= 4"
-        win_preds.append(f"({cipher_col} != '' AND {cipher_col} IN ({win_ciphers}))")
-    row_filter = " OR ".join(win_preds)
+        cipher_cands = candidates.get("cipher") if candidates is not None else None
+        if isinstance(cipher_cands, list) and cipher_cands:
+            prewhere_preds.append(
+                f"({_candidate_in_clause(cipher_col, cipher_cands, 'cand_cipher', candidate_params)})"
+            )
+        else:
+            cipher_win_from = _window_from(
+                filter_clause=filter_clause, row_filter=f"{cipher_col} != '' AND client_ip != ''"
+            )
+            win_ciphers = (
+                f"SELECT {cipher_col} {cipher_win_from} GROUP BY {cipher_col} HAVING uniqCombined(client_ip) >= 4"
+            )
+            where_preds.append(f"({cipher_col} != '' AND {cipher_col} IN ({win_ciphers}))")
+    if prewhere_preds and not where_preds:
+        prewhere_clause = " OR ".join(prewhere_preds)
+        row_filter = ""
+    else:
+        prewhere_clause = ""
+        row_filter = " OR ".join([*prewhere_preds, *where_preds])
 
-    cte, source = _base_cte("fingerprint_spread", proj, row_filter=row_filter, filter_clause=filter_clause)
+    cte, source = _base_cte(
+        "fingerprint_spread",
+        proj,
+        row_filter=row_filter,
+        prewhere_clause=prewhere_clause,
+        filter_clause=filter_clause,
+    )
     use_sets = has_fp and has_cipher
     g_fp = f"grouping({fp})" if use_sets else ("toUInt8(0)" if has_fp else "toUInt8(1)")
     g_cipher = "grouping(tls_ciphers_sha)" if use_sets else ("toUInt8(0)" if has_cipher else "toUInt8(1)")
@@ -1457,7 +1673,7 @@ def _build_fingerprint_spread(
         "uniqCombinedIf(ip, is_b) AS b_ips",
     ]
     having: list[str] = []
-    if "botnet_grouping" in active:
+    if has_fp and "botnet_grouping" in active:
         having.append(
             f"(g_fp = 0 AND {fp} != '' AND w_ips >= 5 "
             "AND w_ips > b_ips / greatest({baseline_hours:Float64}, 1.0) * {window_hours:Float64} * 3)"
@@ -1467,7 +1683,7 @@ def _build_fingerprint_spread(
             "(g_cipher = 0 AND tls_ciphers_sha != '' AND w_ips >= 5 "
             "AND w_ips > b_ips / greatest({baseline_hours:Float64}, 1.0) * {window_hours:Float64} * 3)"
         )
-    if "residential_fingerprint_dispersion" in active:
+    if has_fp and "residential_fingerprint_dispersion" in active:
         sel.extend(
             [
                 "uniqCombinedIf(ip, is_w AND p_type != 'hosting') AS res_w_ips",
@@ -1609,6 +1825,8 @@ class DetectionBatch:
     extract_rows: Callable[..., dict[str, list[tuple[Any, ...]]]]
     rollup_shape: str | None = None
     window_only: bool = False
+    build_candidates_sql: Callable[..., str] | None = None
+    parse_candidates: Callable[[set[str], list[dict[str, Any]]], dict[str, list[str] | None] | None] | None = None
 
 
 DETECTION_BATCHES: tuple[DetectionBatch, ...] = (
@@ -1665,18 +1883,24 @@ DETECTION_BATCHES: tuple[DetectionBatch, ...] = (
         member_ids=("latency_regression", "payload_compression_regression"),
         build_sql=_build_url_perf,
         extract_rows=_extract_url_perf,
+        build_candidates_sql=_build_url_perf_candidates,
+        parse_candidates=lambda _active, rows: _parse_single_key_candidates("url", rows),
     ),
     DetectionBatch(
         name="ip_outlier",
         member_ids=("request_size_anomaly", "connection_abuse"),
         build_sql=_build_ip_outlier,
         extract_rows=_extract_ip_outlier,
+        build_candidates_sql=_build_ip_outlier_candidates,
+        parse_candidates=lambda _active, rows: _parse_single_key_candidates("ip", rows),
     ),
     DetectionBatch(
         name="ip_abuse",
         member_ids=("content_discovery", "credential_enumeration", "session_harvesting", "orphaned_deep_crawl"),
         build_sql=_build_ip_abuse,
         extract_rows=_extract_ip_abuse,
+        build_candidates_sql=_build_ip_abuse_candidates,
+        parse_candidates=lambda _active, rows: _parse_single_key_candidates("ip", rows),
     ),
     DetectionBatch(
         name="origin_perf",
@@ -1695,6 +1919,8 @@ DETECTION_BATCHES: tuple[DetectionBatch, ...] = (
         member_ids=("botnet_grouping", "cipher_spread", "residential_fingerprint_dispersion"),
         build_sql=_build_fingerprint_spread,
         extract_rows=_extract_fingerprint_spread,
+        build_candidates_sql=_build_fingerprint_spread_candidates,
+        parse_candidates=_parse_fingerprint_spread_candidates,
     ),
     DetectionBatch(
         name="beaconing",

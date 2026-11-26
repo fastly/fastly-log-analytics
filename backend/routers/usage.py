@@ -81,6 +81,9 @@ _USAGE_RESPONSE_MEMO = ResponseMemo(ttl=60.0, maxsize=256, prewarmer=False, inva
 _USAGE_ROLLING_STORAGE_CACHE: SWRTTLCache = SWRTTLCache(maxsize=64, ttl_seconds=60.0, stale_ttl_seconds=900.0)
 _SOURCE_STORAGE_WINDOW_CACHE: SWRTTLCache = SWRTTLCache(maxsize=64, ttl_seconds=60.0, stale_ttl_seconds=900.0)
 _ARCHIVE_STORAGE_SUMMARY_CACHE: SWRTTLCache = SWRTTLCache(maxsize=64, ttl_seconds=60.0, stale_ttl_seconds=900.0)
+_PG_BILLING_SUMMARY_CACHE: SWRTTLCache = SWRTTLCache(maxsize=128, ttl_seconds=60.0, stale_ttl_seconds=900.0)
+_CLOUD_COPY_DELETED_CACHE: SWRTTLCache = SWRTTLCache(maxsize=64, ttl_seconds=60.0, stale_ttl_seconds=900.0)
+_CLOUD_COPY_INTERVALS_CACHE: SWRTTLCache = SWRTTLCache(maxsize=128, ttl_seconds=60.0, stale_ttl_seconds=900.0)
 _rolling_storage_bg_guard = threading.Lock()
 _rolling_storage_bg_inflight: set[Any] = set()
 _CacheRegistry.register("routers.usage._FASTLY_STATS_CACHE", _FASTLY_STATS_CACHE)
@@ -92,6 +95,9 @@ _CacheRegistry.register("routers.usage._RUM_BREAKDOWN_CACHE", _RUM_BREAKDOWN_CAC
 _CacheRegistry.register("routers.usage._USAGE_ROLLING_STORAGE_CACHE", _USAGE_ROLLING_STORAGE_CACHE)
 _CacheRegistry.register("routers.usage._SOURCE_STORAGE_WINDOW_CACHE", _SOURCE_STORAGE_WINDOW_CACHE)
 _CacheRegistry.register("routers.usage._ARCHIVE_STORAGE_SUMMARY_CACHE", _ARCHIVE_STORAGE_SUMMARY_CACHE)
+_CacheRegistry.register("routers.usage._PG_BILLING_SUMMARY_CACHE", _PG_BILLING_SUMMARY_CACHE)
+_CacheRegistry.register("routers.usage._CLOUD_COPY_DELETED_CACHE", _CLOUD_COPY_DELETED_CACHE)
+_CacheRegistry.register("routers.usage._CLOUD_COPY_INTERVALS_CACHE", _CLOUD_COPY_INTERVALS_CACHE)
 
 
 def _clear_swr_for_service(cache: SWRTTLCache, service_id: str) -> int:
@@ -117,6 +123,9 @@ def _invalidate_rolling_storage_cache(service_id: str) -> int:
         _USAGE_ROLLING_STORAGE_CACHE,
         _SOURCE_STORAGE_WINDOW_CACHE,
         _ARCHIVE_STORAGE_SUMMARY_CACHE,
+        _PG_BILLING_SUMMARY_CACHE,
+        _CLOUD_COPY_DELETED_CACHE,
+        _CLOUD_COPY_INTERVALS_CACHE,
     ):
         removed += _clear_swr_for_service(cache, service_id)
     return removed
@@ -770,17 +779,24 @@ def _rolling_storage_cache_key(
     if abs((now - end_dt).total_seconds()) > 180.0:
         return None
     duration_seconds = (end_dt - start_dt).total_seconds()
+    if duration_seconds < 300.0:
+        return None
     if duration_seconds < 3600.0:
-        return None
-    rounded_hours = round(duration_seconds / 3600.0)
-    if rounded_hours < 1 or abs(duration_seconds - rounded_hours * 3600.0) > 180.0:
-        return None
+        bucket_5m = round(duration_seconds / 300.0)
+        if bucket_5m < 1:
+            return None
+        window_key: int | tuple[str, int] = ("5m", int(bucket_5m))
+    else:
+        rounded_hours = round(duration_seconds / 3600.0)
+        if rounded_hours < 1 or abs(duration_seconds - rounded_hours * 3600.0) > 180.0:
+            return None
+        window_key = int(rounded_hours)
     return (
         service_id,
         src.get("name"),
         src.get("bucket"),
         src.get("prefix"),
-        int(rounded_hours),
+        window_key,
         bool(delete_after),
         int(retention_days),
     )
@@ -941,39 +957,69 @@ def usage_current_storage(
                     should_cache=lambda res: bool(res[4]),
                 )
 
-            def _read_cloud_copy_deleted() -> tuple[int, bool]:
-                try:
-                    from backend.core.metadata.usage_log import cloud_copy_deleted_bytes_in_billing_window
+            start_min = bucket_time_to_minute(start_str)
+            end_min = bucket_time_to_minute(end_str)
 
-                    return cloud_copy_deleted_bytes_in_billing_window(src["name"]), True
-                except Exception:
-                    logger.debug("usage_current_storage: cloud copy deletions failed (ignored)", exc_info=True)
-                    return 0, False
+            def _read_cloud_copy_deleted() -> tuple[int, bool]:
+                def _fetch_cc_deleted() -> tuple[int, bool]:
+                    try:
+                        from backend.core.metadata.usage_log import cloud_copy_deleted_bytes_in_billing_window
+
+                        return cloud_copy_deleted_bytes_in_billing_window(src["name"]), True
+                    except Exception:
+                        logger.debug("usage_current_storage: cloud copy deletions failed (ignored)", exc_info=True)
+                        return 0, False
+
+                return _swr_storage_fetch(
+                    _CLOUD_COPY_DELETED_CACHE,
+                    (service_id, src.get("name")),
+                    _fetch_cc_deleted,
+                    label="cloud-copy-deleted",
+                    should_cache=lambda res: bool(res[1]),
+                )
 
             def _read_pg_billing() -> tuple[float, float, float, bool, list[str]]:
-                try:
-                    from backend.high_scale.postgres_control import PostgresControlPlane
+                def _fetch_pg_billing() -> tuple[float, float, float, bool, list[str]]:
+                    try:
+                        from backend.high_scale.postgres_control import PostgresControlPlane
 
-                    return PostgresControlPlane().storage_billing_summary(
-                        service_id, start_dt, end_dt, minimum_days=MIN_BILLING_DAYS
-                    )
-                except Exception:
-                    logger.debug("usage_current_storage: storage_billing_summary failed", exc_info=True)
-                    return 0.0, 0.0, 0.0, False, ["high-scale:postgres_unavailable"]
+                        return PostgresControlPlane().storage_billing_summary(
+                            service_id, start_dt, end_dt, minimum_days=MIN_BILLING_DAYS
+                        )
+                    except Exception:
+                        logger.debug("usage_current_storage: storage_billing_summary failed", exc_info=True)
+                        return 0.0, 0.0, 0.0, False, ["high-scale:postgres_unavailable"]
+
+                return _swr_storage_fetch(
+                    _PG_BILLING_SUMMARY_CACHE,
+                    (service_id, start_min, end_min, MIN_BILLING_DAYS),
+                    _fetch_pg_billing,
+                    label="pg-billing",
+                    should_cache=lambda res: "high-scale:postgres_unavailable" not in res[4],
+                )
 
             def _read_cloud_copy_intervals() -> tuple[list[dict[str, Any]], bool]:
-                try:
-                    from backend.core.metadata.fos_usage import cloud_copy_deletion_records_in_window
+                def _fetch_cc_intervals() -> tuple[list[dict[str, Any]], bool]:
+                    try:
+                        from backend.core.metadata.fos_usage import cloud_copy_deletion_records_in_window
 
-                    return (
-                        cloud_copy_deletion_records_in_window(
-                            src["name"], start_dt, end_dt, minimum_days=MIN_BILLING_DAYS
-                        ),
-                        True,
-                    )
-                except Exception:
-                    logger.debug("usage_current_storage: cloud copy deletion records failed", exc_info=True)
-                    return [], False
+                        return (
+                            cloud_copy_deletion_records_in_window(
+                                src["name"], start_dt, end_dt, minimum_days=MIN_BILLING_DAYS
+                            ),
+                            True,
+                        )
+                    except Exception:
+                        logger.debug("usage_current_storage: cloud copy deletion records failed", exc_info=True)
+                        return [], False
+
+                return _swr_storage_fetch(
+                    _CLOUD_COPY_INTERVALS_CACHE,
+                    (service_id, src.get("name"), start_min, end_min, MIN_BILLING_DAYS),
+                    _fetch_cc_intervals,
+                    label="cloud-copy-intervals",
+                    should_cache=lambda res: bool(res[1]),
+                )
 
             def _read_metadata_bundle() -> tuple[int, tuple[int, bool], tuple[list[dict[str, Any]], bool] | None]:
                 try:

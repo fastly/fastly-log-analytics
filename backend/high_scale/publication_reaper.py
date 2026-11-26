@@ -60,6 +60,18 @@ def clickhouse_visible_receipts(client: Any) -> VisibleReceipts:
         )
         return {str(row["batch_id"]) for row in rows}
 
+    def visible_with_rows(service_id: str, batch_uuids: frozenset[str]) -> dict[str, int]:
+        if not batch_uuids:
+            return {}
+        literals = ",".join(f"'{uuid.UUID(value)}'" for value in sorted(batch_uuids))
+        rows = client.execute(
+            "SELECT batch_id, visible_rows FROM high_scale_batch_publications FINAL "
+            f"WHERE service_id={{service_id:String}} AND batch_id IN ({literals}) AND publication_state='visible'",
+            {"service_id": service_id},
+        )
+        return {str(row["batch_id"]): int(row.get("visible_rows") or 0) for row in rows}
+
+    visible.with_rows = visible_with_rows  # type: ignore[attr-defined]
     return visible
 
 
@@ -74,6 +86,9 @@ class ReapResult:
     abandoned: tuple[str, ...] = ()
     abandoned_applied: int = 0
     abandoned_by_domain: dict[str, int] = field(default_factory=dict)
+    reconciled: tuple[str, ...] = ()
+    reconciled_applied: int = 0
+    reconciled_by_domain: dict[str, int] = field(default_factory=dict)
 
 
 class PublicationReaper:
@@ -83,7 +98,7 @@ class PublicationReaper:
         control: Any,
         visible_receipts: VisibleReceipts,
         grace_seconds: float = 3600.0,
-        max_age_seconds: float = 86400.0,
+        max_age_seconds: float | None = None,
         interval_seconds: float = 600.0,
         limit: int = 200,
         clock: Callable[[], float] = time.monotonic,
@@ -113,13 +128,15 @@ class PublicationReaper:
             after=self._cursor.get(service_id),
         )
         self._cursor[service_id] = result.cursor
-        if result.applied or result.kept:
+        if result.applied or result.reconciled_applied or result.kept:
             logger.info(
                 "high-scale publication reaper pass",
                 extra={
                     "service_id": service_id,
                     "superseded": result.applied,
                     "superseded_by_domain": result.by_domain,
+                    "reconciled_visible": result.reconciled_applied,
+                    "reconciled_by_domain": result.reconciled_by_domain,
                     "kept": result.kept,
                 },
             )
@@ -141,7 +158,7 @@ class PublicationReaper:
         )
         cursor = (orphans[-1][2], orphans[-1][0]) if len(orphans) >= limit else None
         domains = self._control.pending_publication_domains(service_id)
-        if not orphans or not domains:
+        if not domains:
             return ReapResult((), {}, 0, len(orphans), cursor)
 
         candidates = {
@@ -150,13 +167,76 @@ class PublicationReaper:
             for domain in domains
         }
         states = self._control.publication_manifest_states(service_id, tuple(candidates))
-        pending = {b: s for b, s in states.items() if s["status"] == "pending"}
+        pending: dict[str, dict[str, Any]] = {b: s for b, s in states.items() if s["status"] == "pending"}
+
+        pending_direct = (
+            self._control.pending_publication_manifests(service_id, min_age_seconds=grace_seconds, limit=limit)
+            if after is None
+            else []
+        )
+        direct_batches: set[str] = set()
+        for row in pending_direct:
+            b = row["batch_id"]
+            direct_batches.add(b)
+            if b not in pending:
+                pending[b] = {
+                    "status": "pending",
+                    "domain": row["domain"],
+                    "generation": row["generation"],
+                    "expected_rows": row["expected_rows"],
+                    "age_seconds": row["age_seconds"],
+                }
+
+        if not pending:
+            return ReapResult((), {}, 0, len(orphans), cursor)
+
+        # Check ClickHouse visible receipts first for every stale pending publication so receipts
+        # already visible in ClickHouse are reconciled in Postgres regardless of archive manifest state.
+        check_visible = [b for b, s in pending.items() if s["age_seconds"] >= grace_seconds]
+        uuids = {
+            publication_batch_uuid(service_id, pending[b]["domain"], pending[b]["generation"], b): b
+            for b in check_visible
+        }
+        visible = self._visible_receipts(service_id, frozenset(uuids))
+        visible_batches = {uuids[u] for u in visible}
+        reconcile_rows_by_batch: dict[str, int] = {}
+        if visible:
+            with_rows = getattr(self._visible_receipts, "with_rows", None)
+            rows_by_uuid = with_rows(service_id, frozenset(visible)) if callable(with_rows) else {}
+            for u in visible:
+                b = uuids[u]
+                reconcile_rows_by_batch[b] = (
+                    rows_by_uuid[u] if u in rows_by_uuid else int(pending[b].get("expected_rows") or 0)
+                )
+        reconciled = tuple(sorted(reconcile_rows_by_batch))
+        reconciled_applied = (
+            self._control.mark_publications_visible(service_id, reconcile_rows_by_batch)
+            if apply and reconcile_rows_by_batch
+            else 0
+        )
+
+        # Resolve manifest_id for any remaining non-visible pending manifests whose archive row moved
+        # out of manifest_committed (only when unbounded by max_age_seconds, or for direct pending rows).
+        remaining_pending = [b for b in pending if b not in visible_batches]
+        unmatched_pending = {b for b in remaining_pending if b not in candidates}
+        if unmatched_pending and max_age_seconds is None:
+            unmatched_domains = {pending[b]["domain"] for b in unmatched_pending}
+            for manifest_id, manifest_domain in self._control.archive_manifest_domains_for_service(
+                service_id, max_age_seconds=max_age_seconds
+            ):
+                for domain in unmatched_domains:
+                    bid = publication_batch_id(manifest_id, manifest_domain, domain)
+                    if bid in unmatched_pending and bid not in candidates:
+                        candidates[bid] = manifest_id
+
         kept: Counter[str] = Counter()
         unprovable: list[str] = []
-
-        sources = self._control.archive_manifest_source_states(service_id, sorted({candidates[b] for b in pending}))
+        provable_pending = [b for b in remaining_pending if b in candidates]
+        sources = self._control.archive_manifest_source_states(
+            service_id, sorted({candidates[b] for b in provable_pending})
+        )
         replacements: dict[str, frozenset[str]] = {}
-        for batch_id in pending:
+        for batch_id in provable_pending:
             manifest_id = candidates[batch_id]
             owners = _republished_under(manifest_id, sources.get(manifest_id, ()))
             if owners is None:
@@ -166,6 +246,10 @@ class PublicationReaper:
                 kept["recently_updated"] += 1
             else:
                 replacements[batch_id] = owners
+        for batch_id in remaining_pending:
+            if batch_id not in candidates and batch_id in direct_batches:
+                kept["sources_not_republished"] += 1
+                unprovable.append(batch_id)
 
         replacement_domains = self._control.archive_manifest_domains(
             service_id, sorted({m for owners in replacements.values() for m in owners})
@@ -197,20 +281,8 @@ class PublicationReaper:
             if abandon_after_seconds is not None
             else []
         )
-        uuids = {
-            publication_batch_uuid(service_id, pending[b]["domain"], pending[b]["generation"], b): b
-            for b in (*proven, *stale)
-        }
-        visible = self._visible_receipts(service_id, frozenset(uuids))
-        if visible:
-            kept["receipt_visible"] += len(visible)
-            logger.warning(
-                "high-scale publications pending in Postgres but visible in ClickHouse; leaving them pending",
-                extra={"service_id": service_id, "batch_ids": sorted(uuids[u] for u in visible)},
-            )
-        proven_set = set(proven)
-        superseded = tuple(sorted(b for u, b in uuids.items() if u not in visible and b in proven_set))
-        abandoned = tuple(sorted(b for u, b in uuids.items() if u not in visible and b not in proven_set))
+        superseded = tuple(sorted(proven))
+        abandoned = tuple(sorted(stale))
         applied = self._control.mark_publications_superseded(service_id, superseded) if apply and superseded else 0
         abandoned_applied = (
             self._control.mark_publications_abandoned(service_id, abandoned) if apply and abandoned else 0
@@ -225,6 +297,9 @@ class PublicationReaper:
             abandoned,
             abandoned_applied,
             dict(sorted(Counter(pending[b]["domain"] for b in abandoned).items())),
+            reconciled,
+            reconciled_applied,
+            dict(sorted(Counter(pending[b]["domain"] for b in reconciled).items())),
         )
 
 
@@ -253,11 +328,12 @@ def _visible_receipts_from_environment() -> VisibleReceipts:
 def reaper_from_environment(control: Any, clickhouse: Any) -> PublicationReaper | None:
     if os.getenv("HIGH_SCALE_PUBLICATION_REAPER_ENABLED", "1").strip().lower() not in {"1", "true", "yes", "on"}:
         return None
+    raw_max_age = os.getenv("HIGH_SCALE_PUBLICATION_REAPER_MAX_AGE_SECONDS", "").strip()
     return PublicationReaper(
         control=control,
         visible_receipts=clickhouse_visible_receipts(clickhouse),
         grace_seconds=float(os.getenv("HIGH_SCALE_PUBLICATION_REAPER_GRACE_SECONDS", "3600")),
-        max_age_seconds=float(os.getenv("HIGH_SCALE_PUBLICATION_REAPER_MAX_AGE_SECONDS", "86400")),
+        max_age_seconds=float(raw_max_age) if raw_max_age else None,
     )
 
 

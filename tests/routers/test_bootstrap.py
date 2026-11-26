@@ -88,6 +88,7 @@ def test_insight_availability_endpoint(client, test_service_source):
 
 
 def test_bootstrap_endpoint_success(client, tmp_path, monkeypatch):
+    assert bootstrap._BOOTSTRAP_CACHE_TTL_S == 10.0
     _seed_active_service(monkeypatch, tmp_path)
     resp = _get(client)
     assert resp.status_code == 200

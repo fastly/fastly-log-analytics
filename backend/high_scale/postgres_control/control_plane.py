@@ -1002,6 +1002,36 @@ class PostgresControlPlane:
             ).fetchall()
         return tuple(sorted(str(r[0]) for r in rows))
 
+    def pending_publication_manifests(
+        self,
+        service_id: str,
+        *,
+        min_age_seconds: float = 0.0,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Pending publication manifests older than ``min_age_seconds``, oldest first."""
+        _require_text(service_id, "service_id")
+        with self.transaction(read_only=True) as connection:
+            rows = connection.execute(
+                "SELECT batch_id, domain, generation, expected_rows, "
+                "EXTRACT(EPOCH FROM (clock_timestamp() - updated_at)) "
+                "FROM high_scale_publication_manifests "
+                "WHERE service_id=%s AND status='pending' "
+                "AND updated_at < clock_timestamp() - make_interval(secs => %s) "
+                "ORDER BY updated_at, batch_id LIMIT %s",
+                (service_id, float(min_age_seconds), max(1, int(limit))),
+            ).fetchall()
+        return [
+            {
+                "batch_id": str(r[0]),
+                "domain": str(r[1]),
+                "generation": str(r[2]),
+                "expected_rows": int(r[3]),
+                "age_seconds": float(r[4]),
+            }
+            for r in rows
+        ]
+
     def publication_manifest_states(self, service_id: str, batch_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
         _require_text(service_id, "service_id")
         if not batch_ids:
@@ -1009,12 +1039,19 @@ class PostgresControlPlane:
         with self.transaction(read_only=True) as connection:
             rows = connection.execute(
                 "SELECT batch_id, status, domain, generation, "
-                "EXTRACT(EPOCH FROM (clock_timestamp() - updated_at)) FROM high_scale_publication_manifests "
+                "EXTRACT(EPOCH FROM (clock_timestamp() - updated_at)), expected_rows "
+                "FROM high_scale_publication_manifests "
                 "WHERE service_id=%s AND batch_id = ANY(%s)",
                 (service_id, list(batch_ids)),
             ).fetchall()
         return {
-            str(r[0]): {"status": str(r[1]), "domain": str(r[2]), "generation": str(r[3]), "age_seconds": float(r[4])}
+            str(r[0]): {
+                "status": str(r[1]),
+                "domain": str(r[2]),
+                "generation": str(r[3]),
+                "age_seconds": float(r[4]),
+                "expected_rows": int(r[5]),
+            }
             for r in rows
         }
 
@@ -1047,6 +1084,37 @@ class PostgresControlPlane:
                 (service_id, list(manifest_ids)),
             ).fetchall()
         return {str(r[0]): str(r[1]) for r in rows}
+
+    def archive_manifest_domains_for_service(
+        self, service_id: str, *, max_age_seconds: float | None = None
+    ) -> list[tuple[str, str]]:
+        """Archive ``(manifest_id, domain)`` pairs for ``service_id`` across any archive state."""
+        _require_text(service_id, "service_id")
+        sql = "SELECT manifest_id, domain FROM high_scale_archive_manifests WHERE service_id=%s"
+        params: list[Any] = [service_id]
+        if max_age_seconds is not None:
+            sql += " AND created_at >= clock_timestamp() - make_interval(secs => %s)"
+            params.append(float(max_age_seconds))
+        with self.transaction(read_only=True) as connection:
+            rows = connection.execute(sql, tuple(params)).fetchall()
+        return [(str(r[0]), str(r[1])) for r in rows]
+
+    def mark_publications_visible(self, service_id: str, visible_rows_by_batch: Mapping[str, int]) -> int:
+        """Reconcile still-pending publications to ``visible`` with their ClickHouse ``visible_rows``."""
+        _require_text(service_id, "service_id")
+        if not visible_rows_by_batch:
+            return 0
+        updated = 0
+        with self.transaction() as connection:
+            for batch_id, visible_rows in sorted(visible_rows_by_batch.items()):
+                cursor = connection.execute(
+                    "UPDATE high_scale_publication_manifests "
+                    "SET status='visible', visible_rows=%s, updated_at=clock_timestamp() "
+                    "WHERE service_id=%s AND batch_id=%s AND status='pending'",
+                    (max(0, int(visible_rows)), service_id, batch_id),
+                )
+                updated += int(cursor.rowcount or 0)
+        return updated
 
     def mark_publications_superseded(self, service_id: str, batch_ids: Sequence[str]) -> int:
         """Move still-pending publications to ``superseded``; never touches a row that became visible."""

@@ -48,7 +48,7 @@ bootstrap_router = router
 # admin-only section, so they're already cheap and must not share an
 # admin-shaped body. Keyed by active service_id — the loopback admin is a
 # single identity.
-_BOOTSTRAP_CACHE_TTL_S = 3.0
+_BOOTSTRAP_CACHE_TTL_S = 10.0
 _bootstrap_cache: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=_BOOTSTRAP_CACHE_TTL_S)
 _bootstrap_inflight: dict[str, asyncio.Future] = {}
 

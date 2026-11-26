@@ -270,3 +270,61 @@ def test_cmcd_breakdowns_consolidate_flat_dimensions_with_grouping_sets_and_no_s
     breakdown_sql = next(sql for sql, _ in client.calls if "/* cmcd:breakdowns */" in sql)
     assert "SELECT * FROM (" not in breakdown_sql
     assert "GROUP BY GROUPING SETS ((ot), (sf))" in breakdown_sql
+    assert "WITH events AS (" in breakdown_sql
+    assert breakdown_sql.count("FROM cmcd_projection_facts") == 1
+    probe_sql = next(sql for sql, _ in client.calls if "/* cmcd:probe */" in sql)
+    assert (
+        "PREWHERE service_id={service_id:String} AND publication_state='visible' "
+        "AND event_timestamp >= {start:DateTime64(3)} AND event_timestamp < {end:DateTime64(3)}"
+    ) in probe_sql
+    assert "WHERE batch_id IN (" in probe_sql and "cmcd['sid'] != ''" in probe_sql
+
+
+def test_cmcd_probe_runs_in_parallel_wave_with_queries_and_preserves_ot_and_bs_gating() -> None:
+    import threading
+
+    barrier = threading.Barrier(4, timeout=2.0)
+
+    class _ParallelProbeClient(_FakeCmcdClient):
+        def execute(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+            if any(m in sql for m in ("cmcd:probe", "cmcd:timeseries", "cmcd:sessions", "cmcd:breakdowns")):
+                barrier.wait()
+            if "cmcd:probe" in sql:
+                return [{**_PROBE_ROW, "has_ot": 0, "has_bs": 0, "has_bl": 0}]
+            if "cmcd:timeseries" in sql:
+                return [
+                    {
+                        "bucket": "2026-09-14 10:05:00",
+                        "concurrent_sessions": 4,
+                        "rebuffer_session_pct": 33.333,
+                        "p50_buffer": 10.0,
+                        "p50_buffer_all": 99.0,
+                        "p95_buffer": 20.0,
+                        "starvation_rate": 5.0,
+                        "avg_bitrate": 2400.0,
+                        "avg_bitrate_all": 1800.0,
+                        "utilization_ratio": 0.5,
+                        "utilization_ratio_all": 0.75,
+                        "p50_throughput": 7000.0,
+                        "p50_throughput_all": 6000.0,
+                        "p95_throughput": 9000.0,
+                        "p95_throughput_all": 8500.0,
+                        "p99_throughput": 9500.0,
+                        "p99_throughput_all": 9100.0,
+                        "startup_ratio": 2.5,
+                    }
+                ]
+            return super().execute(sql, params)
+
+    client = _ParallelProbeClient()
+    svc = SimpleNamespace(service_id="svc-par-probe", client=client)
+    req = CmcdRequest(bucket_seconds=300, top_n=10)
+    res = cmcd_aggregates(svc, req, "2026-09-14T10:00:00Z", "2026-09-14T10:20:00Z", ALL_SECTIONS, False)
+    assert not barrier.broken
+    assert res["overview"]["avg_bitrate"] == 2400.0
+    assert res["overview"]["rebuffer_rate"] is None
+    assert "rebuffer_by_country" not in res
+    assert "rebuffer_by_asn" not in res
+    assert res["sessions_ts"][1]["rebuffer_session_pct"] is None
+    assert res["bitrate_ts"][1]["avg_bitrate"] == 1800.0
+    assert res["throughput_ts"][1]["p50"] == 6000.0

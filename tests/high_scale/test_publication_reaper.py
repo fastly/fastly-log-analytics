@@ -380,12 +380,13 @@ def test_reaper_keeps_every_row_it_cannot_prove_was_republished(seed) -> None:
     result = reaper.reap(seed.sid, apply=True)
 
     assert result.superseded == (proven,)
-    for kept in (missing, retrying, own, young, rep_pending, rep_absent, receipt):
+    assert result.reconciled == (receipt,)
+    assert seed.status(receipt) == "visible"
+    for kept in (missing, retrying, own, young, rep_pending, rep_absent):
         assert seed.status(kept) == "pending", kept
     assert result.kept == {
-        "sources_not_republished": 3,
+        "sources_not_republished": 4,
         "replacement_not_visible": 2,
-        "receipt_visible": 1,
     }
 
 
@@ -465,7 +466,7 @@ def test_reaper_abandons_only_old_unprovable_publications_and_only_on_apply(seed
     applied = reaper.reap(seed.sid, apply=True, abandon_after_seconds=7 * 86400)
     assert applied.abandoned_applied == 2
     assert seed.status(rows["lost"]) == "abandoned" and seed.status(rows["not_visible"]) == "abandoned"
-    assert seed.status(rows["recent_loss"]) == "pending" and seed.status(rows["receipt"]) == "pending"
+    assert seed.status(rows["recent_loss"]) == "pending" and seed.status(rows["receipt"]) == "visible"
     assert seed.status(rows["proven"]) == "superseded"
 
 
@@ -525,7 +526,7 @@ def test_cli_abandons_old_unprovable_publications_only_with_apply(seed, monkeypa
         publication_reaper.main(["--service-id", seed.sid, "--abandon-older-than-days", "0"])
 
 
-def test_automatic_reaping_is_throttled_and_bounded_to_recent_orphans() -> None:
+def test_automatic_reaping_is_throttled_and_covers_older_orphans() -> None:
     clock = iter([1000.0, 1100.0, 1700.0])
     reaper = PublicationReaper(control=MagicMock(), visible_receipts=_no_receipts, clock=lambda: next(clock))
     reaper.reap = MagicMock(return_value=publication_reaper.ReapResult((), {}, 0, 0, None))  # type: ignore[method-assign]
@@ -533,7 +534,7 @@ def test_automatic_reaping_is_throttled_and_bounded_to_recent_orphans() -> None:
         reaper.maybe_reap("svc")
     assert reaper.reap.call_count == 2
     kwargs = reaper.reap.call_args.kwargs
-    assert kwargs["apply"] is True and kwargs["max_age_seconds"] == reaper.max_age_seconds > 0
+    assert kwargs["apply"] is True and kwargs["max_age_seconds"] is None
     assert kwargs.get("abandon_after_seconds") is None
 
 
@@ -607,3 +608,64 @@ def test_cli_leaves_an_already_open_metadata_pool_open(monkeypatch, capsys) -> N
 
     assert publication_reaper.main(["--service-id", "svc"]) == 0
     assert pg_pool._pool is shared and not shared.closed
+
+
+def test_reaper_reconciles_pending_manifest_already_visible_in_clickhouse_with_visible_rows(seed) -> None:
+    seed.archive("vis-m", "request", state="source_deleted", age_hours=30)
+    batch_id = publication_batch_id("vis-m", "request", "request")
+    seed.publication(batch_id, "request", status="pending", age_hours=30, rows=42)
+    batch_uuid = publication_batch_uuid(seed.sid, "request", "1", batch_id)
+
+    ch_client = MagicMock()
+    ch_client.execute.side_effect = [
+        [{"batch_id": batch_uuid}],
+        [{"batch_id": batch_uuid, "visible_rows": 37}],
+    ]
+    reaper = PublicationReaper(control=seed.control, visible_receipts=clickhouse_visible_receipts(ch_client))
+
+    dry = reaper.reap(seed.sid, apply=False)
+    assert dry.reconciled == (batch_id,)
+    assert dry.reconciled_applied == 0
+    assert seed.status(batch_id) == "pending"
+
+    ch_client.execute.side_effect = [
+        [{"batch_id": batch_uuid}],
+        [{"batch_id": batch_uuid, "visible_rows": 37}],
+    ]
+    applied = reaper.reap(seed.sid, apply=True)
+    assert applied.reconciled == (batch_id,)
+    assert applied.reconciled_applied == 1
+    assert seed.status(batch_id) == "visible"
+    manifest = seed.control.get_batch_manifest(batch_id)
+    assert manifest is not None and manifest.visible_rows == 37
+
+
+def test_pending_publication_manifests_and_maybe_reap_clear_old_and_moved_orphans(seed) -> None:
+    # 1. Orphan > 24h old whose archive manifest already moved out of manifest_committed
+    old_sup, rep = _superseded_retry(seed, "old-moved", "old-moved-rep")
+    with seed.control.transaction() as connection:
+        connection.execute(
+            "UPDATE high_scale_archive_manifests SET state='source_deleted', "
+            "created_at = clock_timestamp() - interval '3 days' WHERE manifest_id='old-moved'"
+        )
+        connection.execute(
+            "UPDATE high_scale_publication_manifests SET updated_at = clock_timestamp() - interval '3 days' "
+            "WHERE batch_id=%s",
+            (old_sup,),
+        )
+
+    # 2. Old pending manifest > 24h with no archive manifest in manifest_committed, visible in CH
+    seed.archive("old-vis", "request", state="source_deleted", age_hours=72)
+    old_vis = publication_batch_id("old-vis", "request", "request")
+    seed.publication(old_vis, "request", status="pending", age_hours=72, rows=15)
+    old_vis_uuid = publication_batch_uuid(seed.sid, "request", "1", old_vis)
+
+    pending_rows = seed.control.pending_publication_manifests(seed.sid, min_age_seconds=3600)
+    assert {r["batch_id"] for r in pending_rows} == {old_sup, old_vis}
+
+    reaper = PublicationReaper(control=seed.control, visible_receipts=lambda _s, uuids: {old_vis_uuid} & set(uuids))
+    result = reaper.maybe_reap(seed.sid)
+    assert result is not None
+    assert seed.status(old_sup) == "superseded"
+    assert seed.status(old_vis) == "visible"
+    assert seed.status(rep) == "visible"

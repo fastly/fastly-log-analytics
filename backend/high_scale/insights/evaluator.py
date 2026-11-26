@@ -82,8 +82,8 @@ from .sql_queries import Detection, _base_sql, _detection_for, rewrite_materiali
 
 logger = logging.getLogger(__name__)
 
-_MAX_WORKERS = 2
-_BACKGROUND_MAX_WORKERS = 1
+_MAX_WORKERS = 3
+_BACKGROUND_MAX_WORKERS = 2
 _BACKGROUND_QUERY_MAX_THREADS = str(max(1, int(os.getenv("INSIGHTS_BG_MAX_THREADS", "2") or "2")))
 _INSIGHT_MARKER_RE = re.compile(r"^\s*/\*\s*insight:\w+\s*\*/\s*")
 _MULTIPLEX_GROUPS: tuple[tuple[str, frozenset[str]], ...] = (
@@ -94,19 +94,7 @@ _MULTIPLEX_GROUPS: tuple[tuple[str, frozenset[str]], ...] = (
     ),
     (
         "group_window_perf",
-        frozenset({"batch_window_url", "batch_beaconing", "batch_origin_perf"}),
-    ),
-    (
-        "group_baseline_perf",
-        frozenset({"batch_latency_dim", "batch_url_perf"}),
-    ),
-    (
-        "group_ip_abuse",
-        frozenset({"batch_ip_outlier", "batch_ip_abuse"}),
-    ),
-    (
-        "group_network_fp",
-        frozenset({"batch_network_asn", "batch_fingerprint_spread"}),
+        frozenset({"batch_window_url", "batch_beaconing"}),
     ),
 )
 _FIELD_SAMPLE_ROWS = 1000
@@ -316,6 +304,7 @@ def _evaluate(
         source: Literal["fact", "mixed"]
         finish: Callable[[list[dict[str, Any]]], list[tuple[str, dict[str, Any]]]]
         on_error: Callable[[Exception], list[tuple[str, dict[str, Any]]]]
+        run_fn: Callable[[], list[tuple[str, dict[str, Any]]]] | None = None
 
     def _error_card(definition: InsightDefinition, msg: str) -> tuple[str, dict[str, Any]]:
         return (
@@ -368,11 +357,9 @@ def _evaluate(
         build_kwargs: dict[str, Any] = {"present": enabled_set, "rollup_span": span, "filter_clause": filter_clause}
         if "baseline_hours" in inspect.signature(batch.build_sql).parameters:
             build_kwargs["baseline_hours"] = baseline_hours
-        sql, source = batch.build_sql(active_ids, **build_kwargs)
         query_params = (
             {**params, "rollup_start": span[0], "rollup_end": span[1]} if (batch.rollup_shape and span) else params
         )
-        sql = rewrite_materialized_cf(sql, query_params, use_cf=use_cf)
 
         def _on_error(exc: Exception) -> list[tuple[str, dict[str, Any]]]:
             msg = _failure_message(exc)
@@ -393,6 +380,53 @@ def _evaluate(
                     out.append(_error_card(definition, _failure_message(exc)))
             return out
 
+        if batch.build_candidates_sql is not None:
+            cand_sql = rewrite_materialized_cf(
+                batch.build_candidates_sql(
+                    active_ids, present=enabled_set, rollup_span=span, filter_clause=filter_clause
+                ),
+                params,
+                use_cf=use_cf,
+            )
+
+            def _run_with_candidates() -> list[tuple[str, dict[str, Any]]]:
+                try:
+                    cand_rows = trace.run(
+                        f"batch_{batch.name}_candidates",
+                        lambda: _exec(cand_sql, params),
+                        source="fact",
+                    )
+                    parsed = batch.parse_candidates(active_ids, cand_rows) if batch.parse_candidates else None
+                    if parsed is None:
+                        return _finish([])
+                    cand_params: dict[str, Any] = {}
+                    built_sql, built_source = batch.build_sql(
+                        active_ids,
+                        **build_kwargs,
+                        candidates=parsed,
+                        candidate_params=cand_params,
+                    )
+                    merged_params = {**query_params, **cand_params}
+                    built_sql = rewrite_materialized_cf(built_sql, merged_params, use_cf=use_cf)
+                    raw_rows = trace.run(
+                        f"batch_{batch.name}", lambda: _exec(built_sql, merged_params), source=built_source
+                    )
+                except Exception as exc:
+                    return _on_error(exc)
+                return _finish(raw_rows)
+
+            return _QueryUnit(
+                key=f"batch_{batch.name}",
+                sql="",
+                query_params=query_params,
+                source="fact",
+                finish=_finish,
+                on_error=_on_error,
+                run_fn=_run_with_candidates,
+            )
+
+        sql, source = batch.build_sql(active_ids, **build_kwargs)
+        sql = rewrite_materialized_cf(sql, query_params, use_cf=use_cf)
         return _QueryUnit(
             key=f"batch_{batch.name}",
             sql=sql,
@@ -403,6 +437,8 @@ def _evaluate(
         )
 
     def _run_unit(unit: _QueryUnit) -> list[tuple[str, dict[str, Any]]]:
+        if unit.run_fn is not None:
+            return unit.run_fn()
         try:
             raw_rows = trace.run(unit.key, lambda: _exec(unit.sql, unit.query_params), source=unit.source)
         except Exception as exc:
@@ -412,6 +448,11 @@ def _evaluate(
     def _run_group(group_name: str, group_units: list[_QueryUnit]) -> list[tuple[str, dict[str, Any]]]:
         if len(group_units) == 1:
             return _run_unit(group_units[0])
+        if group_name.startswith("group_rollup_") and not all(unit.source == "mixed" for unit in group_units):
+            out_individual: list[tuple[str, dict[str, Any]]] = []
+            for unit in group_units:
+                out_individual.extend(_run_unit(unit))
+            return out_individual
         combined_params = dict(params)
         branches: list[str] = []
         for idx, unit in enumerate(group_units):
@@ -504,7 +545,12 @@ def _evaluate(
     batches, standalone = plan_execution(eligible, enabled_set)
 
     def _group_name_for(unit_key: str) -> str:
-        return next((name for name, members in _MULTIPLEX_GROUPS if unit_key in members), "group_raw_standalone")
+        for name, members in _MULTIPLEX_GROUPS:
+            if unit_key in members:
+                return name
+        if unit_key.startswith("batch_"):
+            return unit_key
+        return "group_raw_standalone"
 
     rollup_dependent_groups: set[str] = set()
     for batch, _ in batches:
@@ -546,7 +592,11 @@ def _evaluate(
             gname = _group_name_for(definition.id)
             deferred_grouped.setdefault(gname, []).append(_prepare_standalone(definition, detection))
         for g, u in deferred_grouped.items():
-            futures.append(pool.submit(contextvars.copy_context().run, partial(_run_group, g, u)))
+            if g.startswith("group_rollup_") and not all(unit.source == "mixed" for unit in u):
+                for unit in u:
+                    futures.append(pool.submit(contextvars.copy_context().run, partial(_run_unit, unit)))
+            else:
+                futures.append(pool.submit(contextvars.copy_context().run, partial(_run_group, g, u)))
 
         for future in futures:
             for insight_id, card in future.result():

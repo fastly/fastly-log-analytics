@@ -299,8 +299,8 @@ def test_log_accounting_index_and_invalidation_scope() -> None:
 def test_insights_evaluator_concurrency_caps() -> None:
     from backend.high_scale.insights import evaluator as _ev
 
-    assert _ev._MAX_WORKERS <= 2
-    assert _ev._BACKGROUND_MAX_WORKERS == 1
+    assert _ev._MAX_WORKERS == 3
+    assert _ev._BACKGROUND_MAX_WORKERS == 2
     assert _ev._COLD_POOL._max_workers == 1
     assert _ev._REFRESH_POOL._max_workers == 1
 
