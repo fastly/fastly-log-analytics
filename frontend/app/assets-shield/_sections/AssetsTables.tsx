@@ -1,13 +1,19 @@
 'use client'
 
 import React from 'react'
+import dynamic from 'next/dynamic'
 import Link from 'next/link'
 import { AlertTriangle, HelpCircle, Loader2 } from 'lucide-react'
 import type { ColumnDef } from '@/lib/table'
-import { DataTableReadonly } from '@/components/DataTable'
+import type { DataTableReadonly as DataTableReadonlyType } from '@/components/DataTable'
 import { formatBytes, formatCount } from '@/lib/utils'
 import type { components } from '@/types/api.generated'
 import type { AssetHelpContent } from './AssetsSummaryAndHelp'
+
+const DataTableReadonly = dynamic(
+  () => import('@/components/DataTable').then((m) => m.DataTableReadonly),
+  { ssr: false, loading: () => <LoadingBlock message="Loading table..." /> },
+) as typeof DataTableReadonlyType
 
 export type AssetsAggregates = components['schemas']['AssetsAggregatesResponse']
 export type LargeUncompressedRow = components['schemas']['LargeUncompressedAssetRow']

@@ -204,6 +204,9 @@ import ClickHouseAdminPage from '@/app/admin/clickhouse/page'
 import { ClickHouseAdminClient, ClickHouseStatusNotice } from '@/app/admin/clickhouse/page'
 import { OperationsOverview, AdminTrendsClient, ServicesTable } from '@/app/admin/_sections/OperationsOverview'
 import { QuarantineSection } from '@/app/control-room/_sections/ControlRoomClient'
+import { QuarantineSection as ExtractedQuarantineSection } from '@/app/control-room/_sections/QuarantineSection'
+import ControlRoomPage from '@/app/control-room/page'
+import ControlRoomLoading from '@/app/control-room/loading'
 import TrendsLoading from '@/app/admin/trends/loading'
 import AdminTrendsPage from '@/app/admin/trends/page'
 import { getApiBase, queryKeys } from '@/lib/api'
@@ -269,6 +272,29 @@ test('Loading skeleton and AdminPage render zero-CLS contain-intrinsic-size rese
     expect(screen.getByTestId(id)).toBeInTheDocument()
   }
   expect(container.querySelectorAll('[class*="contain-intrinsic-size"]').length).toBeGreaterThanOrEqual(6)
+})
+
+test('ControlRoomPage streams synchronously behind Suspense and AdminPage wraps sections in Suspense', () => {
+  expect(QuarantineSection).toBe(ExtractedQuarantineSection)
+
+  const controlRoomEl = ControlRoomPage() as React.ReactElement<{ fallback: React.ReactElement; children: React.ReactElement }>
+  expect(controlRoomEl).not.toBeInstanceOf(Promise)
+  expect(controlRoomEl.type).toBe(React.Suspense)
+  expect(controlRoomEl.props.fallback.type).toBe(ControlRoomLoading)
+
+  const { unmount } = render(controlRoomEl.props.fallback)
+  expect(screen.getByText('Control Room')).toBeInTheDocument()
+  expect(screen.getByText('Real-time SRE monitoring')).toBeInTheDocument()
+  unmount()
+
+  const adminEl = AdminPage() as React.ReactElement<{ children: React.ReactNode }>
+  const children = React.Children.toArray(adminEl.props.children) as React.ReactElement<{ children?: React.ReactNode }>[]
+  const reservationChildren = children.slice(1)
+  expect(reservationChildren).toHaveLength(6)
+  for (const wrapper of reservationChildren) {
+    const inner = wrapper.props.children as React.ReactElement
+    expect(inner.type).toBe(React.Suspense)
+  }
 })
 
 test('OperationsOverview renders live query, ingest gap, slow query, and ingest ledger cards', async () => {

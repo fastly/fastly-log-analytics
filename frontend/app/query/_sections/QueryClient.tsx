@@ -1,6 +1,7 @@
 'use client'
 
 import React, { Suspense, useState, useEffect, useEffectEvent, useMemo, useCallback } from 'react'
+import dynamic from 'next/dynamic'
 import { parseAsString, parseAsStringLiteral, useQueryStates } from 'nuqs'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { useShallow } from 'zustand/react/shallow'
@@ -27,34 +28,35 @@ import { buildQueryRequest, buildStructuredSql } from '@/lib/sqlBuilder'
 import { parseJsonAsync } from '@/lib/workers/parseJson'
 import type { components } from '@/types/api.generated'
 import {
-  CodeEditor,
-  RawSqlMode,
   ModeToggle,
   StructuredMode,
   DatasetToggle,
   RUM_SCHEMAS,
   DEFAULT_LOG_SCHEMA,
-  type CodeEditorHandle,
   type QueryMode,
 } from './QueryEditorSection'
 import {
   QueryToolbar,
-  ResultsTable,
   QueryInitializingSkeleton,
   SKELETON_ROWS,
   type QueryResponse,
 } from './QueryToolbarAndResults'
 import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
 
+const RawSqlMode = dynamic(
+  () => import('./RawSqlEditor').then((m) => m.RawSqlMode),
+  { ssr: false, loading: () => <Skeleton className="h-[424px] w-full rounded-none" /> },
+)
+const ResultsTable = dynamic(
+  () => import('./QueryResultsTable').then((m) => m.ResultsTable),
+  { ssr: false, loading: () => <Skeleton className="h-[380px] w-full rounded-lg" /> },
+)
+
 export {
   buildStructuredSql,
-  CodeEditor,
-  RawSqlMode,
   QueryToolbar,
   ModeToggle,
   StructuredMode,
-  ResultsTable,
-  type CodeEditorHandle,
   type QueryMode,
 }
 

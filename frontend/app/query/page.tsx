@@ -5,17 +5,15 @@ import QueryClient from './_sections/QueryClient'
 
 export {
   QueryClient,
-  CodeEditor,
   buildStructuredSql,
   queryPageUrlParsers,
-  RawSqlMode,
   QueryToolbar,
   ModeToggle,
   StructuredMode,
-  ResultsTable,
-  type CodeEditorHandle,
   type QueryMode,
 } from './_sections/QueryClient'
+export { CodeEditor, RawSqlMode, type CodeEditorHandle } from './_sections/RawSqlEditor'
+export { ResultsTable } from './_sections/QueryResultsTable'
 
 export default function QueryPage() {
   return (

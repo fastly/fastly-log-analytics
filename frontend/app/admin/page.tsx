@@ -1,9 +1,12 @@
-import React from 'react'
+import React, { Suspense } from 'react'
 import { SystemHealthCard } from "@/components/SystemHealthCard"
 import { PageHeader } from '@/components/ui/confirm-dialog'
+import { Skeleton } from '@/components/ui/skeleton'
 
-import { OperationsOverview, AdminPrefetchLinks, ServicesTable, GlobalSettings, PricingSettings } from './_sections/OperationsOverview'
-import { QuarantineSection } from '@/app/control-room/_sections/ControlRoomClient'
+import { AdminPrefetchLinks, OperationsOverview } from './_sections/AdminOverviewCards'
+import { ServicesTable } from './_sections/AdminServicesTable'
+import { GlobalSettings, PricingSettings } from './_sections/AdminGlobalSettings'
+import { QuarantineSection } from '@/app/control-room/_sections/QuarantineSection'
 
 export const dynamic = 'force-dynamic'
 
@@ -14,49 +17,63 @@ export default function AdminPage() {
         title="Admin"
         description="Manage your global settings, Fastly services, and log ingestion pipelines."
       >
-        <AdminPrefetchLinks />
+        <Suspense fallback={null}>
+          <AdminPrefetchLinks />
+        </Suspense>
       </PageHeader>
 
       <div
         data-testid="admin-operations-reservation"
         className="min-h-[108px] [contain-intrinsic-size:auto_108px]"
       >
-        <OperationsOverview />
+        <Suspense fallback={<Skeleton className="h-[108px] w-full rounded-xl" />}>
+          <OperationsOverview />
+        </Suspense>
       </div>
 
       <div
         data-testid="admin-services-reservation"
         className="min-h-[296px] [contain-intrinsic-size:auto_296px]"
       >
-        <ServicesTable />
+        <Suspense fallback={<Skeleton className="h-[296px] w-full rounded-lg" />}>
+          <ServicesTable />
+        </Suspense>
       </div>
 
       <div
         data-testid="admin-health-reservation"
         className="min-h-[280px] [contain-intrinsic-size:auto_280px]"
       >
-        <SystemHealthCard />
+        <Suspense fallback={<Skeleton className="h-[280px] w-full rounded-xl" />}>
+          <SystemHealthCard />
+        </Suspense>
       </div>
 
       <div
         data-testid="admin-quarantine-reservation"
         className="min-h-[120px] [contain-intrinsic-size:auto_120px]"
       >
-        <QuarantineSection />
+        <Suspense fallback={null}>
+          <QuarantineSection />
+        </Suspense>
       </div>
 
       <div
         data-testid="admin-global-settings-reservation"
         className="min-h-[240px] [contain-intrinsic-size:auto_240px]"
       >
-        <GlobalSettings />
+        <Suspense fallback={<Skeleton className="h-[240px] w-full rounded-xl" />}>
+          <GlobalSettings />
+        </Suspense>
       </div>
 
       <div
         data-testid="admin-pricing-reservation"
         className="min-h-[220px] [contain-intrinsic-size:auto_220px]"
       >
-        <PricingSettings />
+        <Suspense fallback={<Skeleton className="h-[220px] w-full rounded-xl" />}>
+          <PricingSettings />
+        </Suspense>
       </div>
     </div>
   )

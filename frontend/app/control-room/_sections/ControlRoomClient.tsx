@@ -1,9 +1,11 @@
 'use client'
 
 import React, { useMemo } from 'react'
+import dynamic from 'next/dynamic'
 import { parseAsStringLiteral, useQueryState } from 'nuqs'
 import { Radio, BarChart3, Gauge, HardDrive, Shield, Network, Settings } from 'lucide-react'
 import { ReportShell } from '@/components/ReportLayout'
+import { DashboardSkeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { useTimezone } from '@/hooks/useSSE'
 import { useIsAnalyst } from '@/hooks/useBootstrap'
@@ -19,16 +21,30 @@ import {
   useErrorStream,
   useRealtimeStream,
 } from './ControlRoomWidgets'
-import {
-  OverviewTab,
-  PerformanceTab,
-  OriginTab,
-  SecurityTab,
-  NetworkTab,
-  AdminHealthTab,
-  MobileOverview,
-} from './ControlRoomTabs'
-import { QuarantineSection, SystemJobsStrip, BotSourcesPanel } from './ControlRoomAdminPanels'
+import { OverviewTab, MobileOverview } from './ControlRoomOverviewTab'
+import { QuarantineSection } from './QuarantineSection'
+import { SystemJobsStrip, BotSourcesPanel } from './BotSourcesAndJobsPanels'
+
+const PerformanceTab = dynamic(
+  () => import('./ControlRoomPerformanceOriginTabs').then((m) => m.PerformanceTab),
+  { ssr: false, loading: () => <DashboardSkeleton /> },
+)
+const OriginTab = dynamic(
+  () => import('./ControlRoomPerformanceOriginTabs').then((m) => m.OriginTab),
+  { ssr: false, loading: () => <DashboardSkeleton /> },
+)
+const SecurityTab = dynamic(
+  () => import('./ControlRoomSecurityNetworkTabs').then((m) => m.SecurityTab),
+  { ssr: false, loading: () => <DashboardSkeleton /> },
+)
+const NetworkTab = dynamic(
+  () => import('./ControlRoomSecurityNetworkTabs').then((m) => m.NetworkTab),
+  { ssr: false, loading: () => <DashboardSkeleton /> },
+)
+const AdminHealthTab = dynamic(
+  () => import('./ControlRoomAdminHealthTab').then((m) => m.AdminHealthTab),
+  { ssr: false, loading: () => <DashboardSkeleton /> },
+)
 
 export {
   useTickHistory,

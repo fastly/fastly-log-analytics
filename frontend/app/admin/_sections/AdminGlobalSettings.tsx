@@ -15,7 +15,7 @@ import { buildServiceHref, cn, panelDialogContent, panelDialogFooter, panelDialo
 import { useBootstrap, useMounted } from '@/hooks/useBootstrap'
 import { useServiceStore } from '@/stores/filterStore'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
-import { BotSourcesPanel } from '@/app/control-room/_sections/ControlRoomClient'
+import { BotSourcesPanel } from '@/app/control-room/_sections/BotSourcesAndJobsPanels'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
