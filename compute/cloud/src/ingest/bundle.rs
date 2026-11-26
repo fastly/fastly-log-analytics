@@ -91,6 +91,9 @@ pub const MAX_SOURCES: usize = 16;
 /// stage tail) and bounds per-execution fold vCPU well under 1,000 ms while still leaving
 /// enough headroom for `bundle_stage` to run after earlier stages in a shared tick.
 pub const STAGE_CALL_RESERVE: u32 = 11;
+/// Backend calls kept in reserve by a chained `summary_bundle` worker execution (which starts
+/// with its own fresh 32-call budget and no sibling maintenance stages).
+pub const WORKER_CALL_RESERVE: u32 = 6;
 /// Folds an open-hour turn reserves backend calls for before it starts; it folds on while
 /// calls and vCPU allow.
 const OPEN_BATCH_SOURCES: usize = 8;
@@ -3895,6 +3898,129 @@ pub struct DatasetReports {
     pub cmcd: Option<Result<BundleReport, String>>,
     pub rum: Option<Result<BundleReport, String>>,
     pub cmcd_first: bool,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct WorkerBundleReport {
+    pub hours: u32,
+    pub days: u32,
+    pub partials: u32,
+    pub sources: u64,
+    pub rows: u64,
+    pub bytes_written: u64,
+    pub deleted: u64,
+    pub discarded: u32,
+    pub more_pending: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped: Option<String>,
+    pub backend_calls: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+}
+
+impl From<BundleReport> for WorkerBundleReport {
+    fn from(r: BundleReport) -> Self {
+        Self {
+            hours: r.hours,
+            days: r.days,
+            partials: r.partials,
+            sources: r.sources,
+            rows: r.rows,
+            bytes_written: r.bytes_written,
+            deleted: r.deleted,
+            discarded: r.discarded,
+            more_pending: r.more_pending,
+            stopped: r.stopped.map(str::to_owned),
+            backend_calls: r.backend_calls,
+            errors: r.errors,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct WorkerDatasetReports {
+    pub request: Option<Result<WorkerBundleReport, String>>,
+    pub cmcd: Option<Result<WorkerBundleReport, String>>,
+    pub rum: Option<Result<WorkerBundleReport, String>>,
+    pub cmcd_first: bool,
+}
+
+impl From<DatasetReports> for WorkerDatasetReports {
+    fn from(r: DatasetReports) -> Self {
+        Self {
+            request: r.request.map(|res| res.map(WorkerBundleReport::from)),
+            cmcd: r.cmcd.map(|res| res.map(WorkerBundleReport::from)),
+            rum: r.rum.map(|res| res.map(WorkerBundleReport::from)),
+            cmcd_first: r.cmcd_first,
+        }
+    }
+}
+
+pub(super) fn handle_authorized_worker<R: Runtime>(
+    runtime: &R,
+    request: &crate::http::Request,
+    started: std::time::Instant,
+) -> crate::http::Response {
+    let calls_at_start = runtime.admin_remaining_calls();
+    let response = |mut value: serde_json::Value| {
+        value["calls"] = calls_at_start
+            .saturating_sub(runtime.admin_remaining_calls())
+            .into();
+        value["duration_ms"] = (started.elapsed().as_millis() as u64).into();
+        value["heap_mib"] = runtime.heap_mib().into();
+        if let Some(usage) = runtime.usage_agg() {
+            value["usage"] = usage
+                .drain_rows(&crate::auth::settings::UsageLogging::default())
+                .into();
+        }
+        let metrics = crate::telemetry::execution::ExecutionMetrics::snapshot(runtime, started);
+        value["vcpu_ms"] = metrics.vcpu_ms.into();
+        value["execution_metrics"] = serde_json::json!(metrics);
+        crate::http::Response::json(200, &value)
+    };
+    let body: serde_json::Value = match request.json() {
+        Ok(body) => body,
+        Err(_) => return crate::http::Response::new(400, "Invalid request").private(),
+    };
+    let service: crate::admin::Service = match serde_json::from_value(body["service"].clone()) {
+        Ok(service) => service,
+        Err(_) => return crate::http::Response::new(400, "Invalid service").private(),
+    };
+    if !super::retention::safe_scope(&super::scope(&service))
+        || !crate::admin::valid_bucket(&service.fos_bucket)
+        || !crate::admin::REGIONS.contains(&service.fos_region.as_str())
+    {
+        return crate::http::Response::new(400, "Invalid service").private();
+    }
+    let Some((access_key, secret_key)) = crate::admin::fos_credentials(runtime, &service) else {
+        return response(serde_json::json!({"status":"error","error":"credentials_unavailable"}));
+    };
+    let cdn_key = match runtime.secret("cdn_key") {
+        Ok(Some(key)) if !key.is_empty() => key,
+        _ => return response(serde_json::json!({"status":"error","error":"cdn_key_unavailable"})),
+    };
+    if let Some(usage) = runtime.usage_agg() {
+        usage.set_caller("worker:summary_bundle");
+    }
+    let pass_started = body["wall_ms"].as_u64().map_or(started, |ms| {
+        let wall = std::time::Duration::from_millis(ms).min(WALL_STOP);
+        started.checked_sub(WALL_STOP - wall).unwrap_or(started)
+    });
+    let store = Store {
+        runtime,
+        service: &service,
+        access_key,
+        secret_key,
+        started: pass_started,
+        vcpu_start: 0,
+    };
+    match bundle_datasets(&store, &cdn_key, WORKER_CALL_RESERVE, 6) {
+        Ok(reports) => response(serde_json::json!({
+            "status": "ok",
+            "reports": WorkerDatasetReports::from(reports),
+        })),
+        Err(error) => response(serde_json::json!({"status":"error","error":error})),
+    }
 }
 
 fn report_active(report: &Result<BundleReport, String>) -> bool {

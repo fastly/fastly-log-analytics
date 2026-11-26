@@ -993,7 +993,7 @@ pub(super) fn maintenance_stage(
             1 => compact_stage(&store, settings),
             2 => history_stage(&store, settings),
             3 => reconcile_stage(&store, &buffer),
-            4 => bundle_stage(&store),
+            4 => bundle_stage(&store, &buffer, &mut outcome.worker_executions_metrics),
             6 => reset::reset_stage(&store),
             _ => unreachable!("MAINT_STAGES has seven entries; request_compact has its own job"),
         };
@@ -1594,8 +1594,18 @@ impl PassChain {
     }
 }
 
+/// Extra worker passes `bundle_stage` may chain after its inline pass while a backlog remains.
+const MAX_BUNDLE_WORKER_PASSES: u32 = 6;
+
 /// Merges closed hours' window summaries into hour bundles and closed days into day bundles.
-fn bundle_stage<R: Runtime>(store: &Store<'_, R>) -> Option<StageRow> {
+/// When a backlog remains after the inline pass, chains fresh worker executions within the
+/// stage's remaining wall budget (like `request_compact_stage`) so multi-hour backlogs drain
+/// rapidly without exceeding any single execution's call or vCPU limit.
+fn bundle_stage<R: Runtime>(
+    store: &Store<'_, R>,
+    buffer: &LogBuffer,
+    worker_metrics: &mut Vec<telemetry::execution::WorkerExecutionMetrics>,
+) -> Option<StageRow> {
     let runtime = store.runtime;
     let reserve = bundle::STAGE_CALL_RESERVE.max(TAIL + 1);
     if !admit_stage(runtime.admin_remaining_calls(), reserve + MIN_BUNDLE_CALLS) {
@@ -1638,24 +1648,147 @@ fn bundle_stage<R: Runtime>(store: &Store<'_, R>) -> Option<StageRow> {
     };
     match request {
         Ok(report) => {
-            let cmcd = match cmcd {
-                Some(Ok(cmcd)) => Some(cmcd),
+            let mut req_report = bundle::WorkerBundleReport::from(report);
+            let mut cmcd_report = match cmcd {
+                Some(Ok(cmcd)) => Some(bundle::WorkerBundleReport::from(cmcd)),
                 Some(Err(error)) => {
                     row.error = Some(error);
                     None
                 }
                 None => None,
             };
-            let rum = match rum {
-                Some(Ok(rum)) => Some(rum),
+            let mut rum_report = match rum {
+                Some(Ok(rum)) => Some(bundle::WorkerBundleReport::from(rum)),
                 Some(Err(error)) => {
                     row.error = row.error.take().or(Some(error));
                     None
                 }
                 None => None,
             };
-            let mut combined = report.clone();
-            for extra in [cmcd.as_ref(), rum.as_ref()].into_iter().flatten() {
+            let merge_into = |dst: &mut bundle::WorkerBundleReport,
+                              src: &bundle::WorkerBundleReport| {
+                dst.hours += src.hours;
+                dst.days += src.days;
+                dst.partials += src.partials;
+                dst.sources += src.sources;
+                dst.rows += src.rows;
+                dst.bytes_written += src.bytes_written;
+                dst.deleted += src.deleted;
+                dst.discarded += src.discarded;
+                dst.more_pending = src.more_pending;
+                dst.stopped = src.stopped.clone().or(dst.stopped.take());
+                dst.backend_calls += src.backend_calls;
+                dst.errors.extend(src.errors.iter().cloned());
+            };
+            let any_pending =
+                |req: &bundle::WorkerBundleReport,
+                 cmcd: Option<&bundle::WorkerBundleReport>,
+                 rum: Option<&bundle::WorkerBundleReport>| {
+                    req.more_pending
+                        || cmcd.is_some_and(|c| c.more_pending)
+                        || rum.is_some_and(|r| r.more_pending)
+                };
+            let mut passes = 1u32;
+            let mut worker_vcpu = 0u64;
+            while passes <= MAX_BUNDLE_WORKER_PASSES
+                && row.error.is_none()
+                && req_report.errors.is_empty()
+                && any_pending(&req_report, cmcd_report.as_ref(), rum_report.as_ref())
+            {
+                let left = crate::ingest::storage::WALL_STOP
+                    .saturating_sub(runtime.admin_elapsed(store.started));
+                if left < MIN_COMPACT_PASS_WALL || !enough(runtime, 1) {
+                    break;
+                }
+                let wall = left.max(MIN_COMPACT_PASS_WALL);
+                let body = json!({
+                    "maintenance": "summary_bundle",
+                    "service": store.service,
+                    "wall_ms": wall.as_millis() as u64,
+                });
+                let requests = [(crate::ingest::worker::PATH.to_owned(), body)];
+                let reply = runtime
+                    .worker_dispatch(&requests, wall + COMPACT_REPLY_MARGIN)
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| Err("bundle_worker_reply_missing".into()));
+                if matches!(&reply, Err(err) if err == "worker_dispatch_forbidden") {
+                    break;
+                }
+                worker_metrics.push(telemetry::execution::WorkerExecutionMetrics::from_reply(
+                    "summary_bundle",
+                    None,
+                    reply.as_ref().ok(),
+                ));
+                let parsed = reply.and_then(|reply| {
+                    worker_vcpu += reply["vcpu_ms"].as_u64().unwrap_or(0);
+                    if let Some(rows) = reply["usage"].as_array() {
+                        for value in rows {
+                            write_log(runtime, buffer, WritableLogKind::FosUsage, value.clone());
+                        }
+                    }
+                    if reply["status"] != "ok" {
+                        return Err(reply["error"]
+                            .as_str()
+                            .unwrap_or("bundle_worker_failed")
+                            .to_owned());
+                    }
+                    serde_json::from_value::<bundle::WorkerDatasetReports>(reply["reports"].clone())
+                        .map_err(|e| e.to_string())
+                });
+                let next = match parsed {
+                    Ok(next) => next,
+                    Err(error) => {
+                        row.error = Some(error);
+                        break;
+                    }
+                };
+                passes += 1;
+                let mut progressed = false;
+                if let Some(res) = next.request {
+                    match res {
+                        Ok(r) => {
+                            progressed |= r.hours + r.days + r.partials > 0 || r.deleted > 0;
+                            merge_into(&mut req_report, &r);
+                        }
+                        Err(e) => row.error = row.error.take().or(Some(e)),
+                    }
+                }
+                if let Some(res) = next.cmcd {
+                    match res {
+                        Ok(r) => {
+                            progressed |= r.hours + r.days + r.partials > 0 || r.deleted > 0;
+                            if let Some(dst) = cmcd_report.as_mut() {
+                                merge_into(dst, &r);
+                            } else {
+                                cmcd_report = Some(r);
+                            }
+                        }
+                        Err(e) => row.error = row.error.take().or(Some(e)),
+                    }
+                }
+                if let Some(res) = next.rum {
+                    match res {
+                        Ok(r) => {
+                            progressed |= r.hours + r.days + r.partials > 0 || r.deleted > 0;
+                            if let Some(dst) = rum_report.as_mut() {
+                                merge_into(dst, &r);
+                            } else {
+                                rum_report = Some(r);
+                            }
+                        }
+                        Err(e) => row.error = row.error.take().or(Some(e)),
+                    }
+                }
+                if !progressed {
+                    break;
+                }
+            }
+            let mut combined = req_report.clone();
+            for extra in [cmcd_report.as_ref(), rum_report.as_ref()]
+                .into_iter()
+                .flatten()
+            {
                 combined.hours += extra.hours;
                 combined.days += extra.days;
                 combined.partials += extra.partials;
@@ -1665,7 +1798,7 @@ fn bundle_stage<R: Runtime>(store: &Store<'_, R>) -> Option<StageRow> {
                 combined.deleted += extra.deleted;
                 combined.discarded += extra.discarded;
                 combined.more_pending |= extra.more_pending;
-                combined.stopped = combined.stopped.or(extra.stopped);
+                combined.stopped = combined.stopped.or_else(|| extra.stopped.clone());
                 combined.backend_calls += extra.backend_calls;
                 combined.errors.extend(extra.errors.iter().cloned());
             }
@@ -1677,20 +1810,22 @@ fn bundle_stage<R: Runtime>(store: &Store<'_, R>) -> Option<StageRow> {
             row.more_pending = combined.more_pending;
             row.error = combined.errors.first().cloned().or(row.error.take());
             row.details = Some(json!({
-                "hours": report.hours,
-                "days": report.days,
-                "partials": report.partials,
+                "passes": passes,
+                "worker_vcpu_ms": worker_vcpu,
+                "hours": req_report.hours,
+                "days": req_report.days,
+                "partials": req_report.partials,
                 "discarded": combined.discarded,
-                "stopped": report.stopped,
+                "stopped": req_report.stopped,
                 "cmcd_first": cmcd_first,
-                "cmcd": cmcd.as_ref().map(|c| json!({
+                "cmcd": cmcd_report.as_ref().map(|c| json!({
                     "hours": c.hours,
                     "days": c.days,
                     "partials": c.partials,
                     "stopped": c.stopped,
                     "more_pending": c.more_pending,
                 })),
-                "rum": rum.as_ref().map(|r| json!({
+                "rum": rum_report.as_ref().map(|r| json!({
                     "hours": r.hours,
                     "days": r.days,
                     "partials": r.partials,

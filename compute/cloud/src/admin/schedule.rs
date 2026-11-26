@@ -38,7 +38,7 @@ pub fn ingest_grace_s(_log_period_s: u64) -> u64 {
 pub const MAINT_INTERVAL_S: u64 = 120;
 /// ... or this many while `summary_bundle` has work left, so closed hours get their bundles
 /// within minutes instead of falling behind the windows ingest writes.
-pub const MAINT_CATCHUP_S: u64 = 30;
+pub const MAINT_CATCHUP_S: u64 = 2;
 
 /// Whether maintenance catches up after an answered stage execution: `summary_bundle`'s own
 /// answer when the rotation reached it, otherwise the previous one, so turns that other stages

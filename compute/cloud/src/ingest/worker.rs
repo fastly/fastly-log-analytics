@@ -311,6 +311,13 @@ pub fn handle_worker_ingest<R: Runtime>(runtime: &R, request: &http::Request) ->
     {
         return super::compaction::handle_authorized_worker(runtime, request, started);
     }
+    if request.path == PATH
+        && request
+            .json::<Value>()
+            .is_ok_and(|value| value["maintenance"] == "summary_bundle")
+    {
+        return super::bundle::handle_authorized_worker(runtime, request, started);
+    }
     let Ok(shard) = request.json::<ShardRequest>() else {
         return deny(400, "Invalid request");
     };
