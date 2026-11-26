@@ -33,7 +33,7 @@ export const RANGE_REQUEST_COST_BYTES = 32 * 1024;
  */
 export const TARGET_RANGES_PER_FILE = 4;
 /** Largest gap merged when reducing a file's ranges toward [`TARGET_RANGES_PER_FILE`]. */
-export const SOFT_MERGE_MAX_GAP = 256 * 1024;
+export const SOFT_MERGE_MAX_GAP = 128 * 1024;
 /** Maximum fraction of file size Pass 2 may reach while coalescing toward [`TARGET_RANGES_PER_FILE`]. */
 export const SOFT_MERGE_MAX_FILE_RATIO = 0.45;
 /**
@@ -76,8 +76,6 @@ export function readsWholeFirst(file: { size: number; end: string; key?: string 
 export const WHOLE_FALLBACK_RANGE_RATIO = 0.85;
 export const WHOLE_FALLBACK_MANY_RANGES_MIN = 8;
 export const WHOLE_FALLBACK_MANY_RANGES_RATIO = 0.60;
-export const WHOLE_FALLBACK_MID_FANOUT_MIN = 10;
-export const WHOLE_FALLBACK_MID_FANOUT_RATIO = 0.40;
 export const WHOLE_FALLBACK_HIGH_FANOUT_MIN = 16;
 export const WHOLE_FALLBACK_HIGH_FANOUT_RATIO = 0.45;
 export const WHOLE_FALLBACK_HIGH_FANOUT_MAX_BYTES = 8 * 1024 * 1024;
@@ -106,13 +104,9 @@ export function shouldFallbackToWhole(
       || fileSize <= WHOLE_FALLBACK_EXTREME_FANOUT_MAX_BYTES)) {
     return true;
   }
-  if (plan.ranges.length >= WHOLE_FALLBACK_HIGH_FANOUT_MIN
+  return plan.ranges.length >= WHOLE_FALLBACK_HIGH_FANOUT_MIN
     && (plannedRangeBytes >= fileSize * WHOLE_FALLBACK_HIGH_FANOUT_RATIO
-      || fileSize <= WHOLE_FALLBACK_HIGH_FANOUT_MAX_BYTES)) {
-    return true;
-  }
-  return plan.ranges.length >= WHOLE_FALLBACK_MID_FANOUT_MIN
-    && plannedRangeBytes >= fileSize * WHOLE_FALLBACK_MID_FANOUT_RATIO;
+      || fileSize <= WHOLE_FALLBACK_HIGH_FANOUT_MAX_BYTES);
 }
 
 /** The footer of a Parquet file held whole. */

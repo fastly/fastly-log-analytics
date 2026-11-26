@@ -595,9 +595,23 @@ pub fn compact_pass<R: Runtime>(
     if !handed {
         run.state.lease_until = now.saturating_add(70);
         match run.save() {
-            Err(error) if error == "compact_state_conflict" => {
+            Err(error)
+                if error == "compact_state_conflict"
+                    || error == STATE_LAG
+                    || error == STATE_BUDGET
+                    || error == "admin_state_write_failed" =>
+            {
                 run.report.more_pending = true;
-                run.report.stopped = Some("lease_conflict".into());
+                run.report.stopped = Some(
+                    if error == "compact_state_conflict" {
+                        "lease_conflict"
+                    } else if error == STATE_BUDGET {
+                        "call_budget"
+                    } else {
+                        "state_lag"
+                    }
+                    .into(),
+                );
                 run.report.lease_generation = run.generation;
                 return Ok(run.report);
             }
@@ -805,7 +819,11 @@ pub fn compact_pass<R: Runtime>(
                 run.report.more_pending = true;
                 run.report.stopped = Some("call_budget".into());
             }
-            Err(error) if error == STATE_LAG => {
+            Err(error)
+                if error == STATE_LAG
+                    || error == "compact_state_conflict"
+                    || error == "admin_state_write_failed" =>
+            {
                 run.report.more_pending = true;
                 run.report.stopped = Some("state_lag".into());
             }
@@ -2325,6 +2343,8 @@ mod tests {
         now: Cell<u64>,
         kv: RefCell<BTreeMap<String, (u64, Value)>>,
         fos_lists: Cell<u32>,
+        cas_calls: Cell<u32>,
+        fail_cas_on_call: Cell<Option<u32>>,
     }
 
     impl TestRt {
@@ -2333,6 +2353,8 @@ mod tests {
                 now: Cell::new(now),
                 kv: RefCell::new(BTreeMap::new()),
                 fos_lists: Cell::new(0),
+                cas_calls: Cell::new(0),
+                fail_cas_on_call: Cell::new(None),
             }
         }
     }
@@ -2397,6 +2419,11 @@ mod tests {
             generation: Option<&str>,
             value: &Value,
         ) -> Result<bool, String> {
+            let call = self.cas_calls.get() + 1;
+            self.cas_calls.set(call);
+            if self.fail_cas_on_call.get() == Some(call) {
+                return Err("admin_state_write_failed".into());
+            }
             let mut kv = self.kv.borrow_mut();
             let current = kv.get(key).map(|(g, _)| *g);
             if current.map(|g| g.to_string()).as_deref() != generation {
@@ -2541,5 +2568,61 @@ mod tests {
             Some(MAX_COMPACT_BYTES)
         );
         assert_eq!(worker_target_bytes(Some(2 << 20)), Some(2 << 20));
+    }
+
+    #[test]
+    fn compact_pass_treats_lease_acquire_admin_state_write_failed_as_state_lag() {
+        let rt = TestRt::new(1_700_000_000);
+        rt.fail_cas_on_call.set(Some(1));
+        let svc = test_service();
+        let store = Store {
+            runtime: &rt,
+            service: &svc,
+            access_key: "ak".into(),
+            secret_key: "sk".into(),
+            started: std::time::Instant::now(),
+            vcpu_start: 0,
+        };
+        let report = compact_pass(
+            &store,
+            "ck",
+            64 << 20,
+            0,
+            None,
+            Dataset::Rum(super::super::rum::ERRORS),
+        )
+        .unwrap();
+        assert_eq!(rt.cas_calls.get(), 1);
+        assert!(report.more_pending);
+        assert_eq!(report.stopped.as_deref(), Some("state_lag"));
+        assert!(report.errors.is_empty());
+    }
+
+    #[test]
+    fn compact_pass_treats_final_save_admin_state_write_failed_as_state_lag() {
+        let rt = TestRt::new(1_700_000_000);
+        rt.fail_cas_on_call.set(Some(2));
+        let svc = test_service();
+        let store = Store {
+            runtime: &rt,
+            service: &svc,
+            access_key: "ak".into(),
+            secret_key: "sk".into(),
+            started: std::time::Instant::now(),
+            vcpu_start: 0,
+        };
+        let report = compact_pass(
+            &store,
+            "ck",
+            64 << 20,
+            0,
+            None,
+            Dataset::Rum(super::super::rum::ERRORS),
+        )
+        .unwrap();
+        assert_eq!(rt.cas_calls.get(), 2);
+        assert!(report.more_pending);
+        assert_eq!(report.stopped.as_deref(), Some("state_lag"));
+        assert!(report.errors.is_empty());
     }
 }

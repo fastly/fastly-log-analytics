@@ -916,9 +916,11 @@ impl Runtime for FastlyRuntime {
             Some(g) => Some(g.parse::<u64>().map_err(|_| "invalid_generation")?),
             None => None,
         };
-        for attempt in 0..2 {
-            if attempt > 0 {
-                std::thread::sleep(std::time::Duration::from_millis(1_100));
+        for attempt in 0..3 {
+            match attempt {
+                1 => std::thread::sleep(std::time::Duration::from_millis(1_150)),
+                2 => std::thread::sleep(std::time::Duration::from_millis(1_500)),
+                _ => {}
             }
             self.budget.charge()?;
             self.kv_ops.set(self.kv_ops.get().saturating_add(1));
@@ -1022,8 +1024,26 @@ impl Runtime for FastlyRuntime {
                     }
                     return Ok(false);
                 }
-                Err(_) if attempt == 0 => continue,
-                Err(_) => return Err("admin_state_write_failed".into()),
+                Err(_) if attempt < 2 => continue,
+                Err(_) => {
+                    if coordinated && parsed_gen.is_some() && self.budget.remaining() > 0 {
+                        if let (Some(g), Some(token)) = (parsed_gen, self.kv_rest_token()) {
+                            let rest_ts = now();
+                            let mut rest_val = value.clone();
+                            rest_val["_kv_written_ms"] = rest_ts.into();
+                            if let Ok(Some(new_gen)) =
+                                self.admin_cas_fresh(key, g, &rest_val.to_string(), &token)
+                            {
+                                self.admin_writes.borrow_mut().insert(key.into(), rest_ts);
+                                let mut state = coord.unwrap_or_default();
+                                state.record_rest_commit(rest_ts, rest_val, new_gen);
+                                self.kv_coord_put(key, &state);
+                                return Ok(true);
+                            }
+                        }
+                    }
+                    return Err("admin_state_write_failed".into());
+                }
             }
         }
         Err("admin_state_write_failed".into())
