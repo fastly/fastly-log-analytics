@@ -24,6 +24,7 @@ import { performanceFromRollup } from "./performance-rollup";
 import { insightsBaselineFromRollup, insightsFromRollup } from "./insights-rollup";
 import { securityFromRollup } from "./security-rollup";
 import { mergeRollups } from "./dashboard/rollup-query";
+import { SCORING_CORE_COLUMNS } from "./scoring-reads";
 
 vi.mock("./range-loader", async (importOriginal) => ({
   ...await importOriginal<typeof import("./range-loader")>(),
@@ -4010,7 +4011,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       new Request("http://localhost/api/services/svc-1/scoring/score-distribution?since_hours=24"),
     );
     expect(vi.mocked(ensureCloudRange).mock.calls[0]?.[4]?.projection).toMatchObject({
-      columns: ["timestamp", "ts_ms", "edge_score"],
+      columns: [...SCORING_CORE_COLUMNS],
       requireAnyColumns: ["edge_score"],
     });
 

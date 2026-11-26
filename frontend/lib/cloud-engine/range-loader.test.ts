@@ -1637,7 +1637,8 @@ describe("Cloud first-page analytical range loading", () => {
 
     const wideColumns = [
       "timestamp", "status", "cache", "resp_bytes", "edge", "url",
-      "ua", "referer", "ip", "host",
+      "ua", "referer", "ip", "host", "country", "asn",
+      "pop", "method", "proto", "tls",
     ];
 
     // Over-budget wide-projection (> closedHourUpToBytes) fails fast before issuing any 206 footer probes.

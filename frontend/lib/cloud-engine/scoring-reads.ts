@@ -56,33 +56,11 @@ export interface ScoringReadOptions {
   loadRange?: ScoringRangeLoader;
 }
 
-const SCORING_ROUTE_COLUMNS: Readonly<Record<string, readonly string[]>> = {
-  analytics: SCORING_CORE_COLUMNS,
-  "top-flagged": [
-    "timestamp", "ts_ms", "edge_sid", "edge_score", "edge_score_l1", "edge_score_l2",
-    "edge_cookie_compliance", "edge_score_reason",
-  ],
-  "score-distribution": ["timestamp", "ts_ms", "edge_score"],
-  "compliance-breakdown": ["timestamp", "ts_ms", "edge_score", "edge_cookie_compliance"],
-  "latency-timeseries": [
-    "timestamp", "ts_ms", "edge", "edge_score", "edge_score_reason", "edge_score_rtt_us", "edge_score_exec_us",
-  ],
-  health: [
-    "timestamp", "ts_ms", "edge", "edge_sid", "edge_score", "edge_score_l2",
-    "edge_score_reason", "edge_score_rtt_us", "edge_score_exec_us",
-  ],
-  "threshold-preview": ["timestamp", "ts_ms", "edge_score"],
-  evaluation: ["timestamp", "ts_ms", "edge_sid", "edge_score"],
-  "evaluation/per-reason": ["timestamp", "ts_ms", "edge_sid", "edge_score"],
-  curves: ["timestamp", "ts_ms", "edge_sid", "edge_score"],
-};
-
 export function scoringScanColumns(route?: string): string[] {
   if (route && /^sessions\/[^/]+\/events$/.test(route)) {
     return [...SCORING_EVENTS_COLUMNS];
   }
-  const cols = route ? SCORING_ROUTE_COLUMNS[route] : undefined;
-  return [...(cols ?? SCORING_CORE_COLUMNS)];
+  return [...SCORING_CORE_COLUMNS];
 }
 
 export function scoringRequiredAnyColumns(route?: string): string[] {

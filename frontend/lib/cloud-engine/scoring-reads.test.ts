@@ -3,7 +3,14 @@ import { parquetWriteBuffer } from "hyparquet-writer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getDuckDBEngine } from "./dashboard/duckdb";
 import { parquetFixture } from "./dashboard/test-fixtures";
-import { cloudScoringRead, queryCloudScoring, scoringRequiredAnyColumns, scoringScanColumns } from "./scoring-reads";
+import {
+  cloudScoringRead,
+  queryCloudScoring,
+  SCORING_CORE_COLUMNS,
+  SCORING_EVENTS_COLUMNS,
+  scoringRequiredAnyColumns,
+  scoringScanColumns,
+} from "./scoring-reads";
 import { CloudBudgetError } from "./range-loader";
 
 const settings = vi.hoisted(() => ({ ids: new Set(["edge_score"]), asked: [] as (string | undefined)[] }));
@@ -121,7 +128,7 @@ describe("Cloud scoring reads", () => {
     });
   });
 
-  it("projects route-specific narrow scoring columns and requiredAnyColumns", () => {
+  it("projects unified 11-column scoring core columns and requiredAnyColumns across overview routes", () => {
     for (const route of [
       "analytics", "top-flagged", "health", "score-distribution",
       "compliance-breakdown", "latency-timeseries", "threshold-preview",
@@ -132,28 +139,14 @@ describe("Cloud scoring reads", () => {
         expect(cols, `${route} should not project ${heavy}`).not.toContain(heavy);
       }
       expect(cols, `${route} should project edge_score`).toContain("edge_score");
+      expect(cols).toEqual([...SCORING_CORE_COLUMNS]);
+      expect(cols).toHaveLength(11);
       expect(scoringRequiredAnyColumns(route)).toEqual(["edge_score"]);
     }
-    expect(scoringScanColumns("score-distribution")).toEqual(["timestamp", "ts_ms", "edge_score"]);
-    expect(scoringScanColumns("threshold-preview")).toEqual(["timestamp", "ts_ms", "edge_score"]);
-    expect(scoringScanColumns("compliance-breakdown")).toEqual(["timestamp", "ts_ms", "edge_score", "edge_cookie_compliance"]);
-    expect(scoringScanColumns("evaluation")).toEqual(["timestamp", "ts_ms", "edge_sid", "edge_score"]);
-    expect(scoringScanColumns("evaluation/per-reason")).toEqual(["timestamp", "ts_ms", "edge_sid", "edge_score"]);
-    expect(scoringScanColumns("curves")).toEqual(["timestamp", "ts_ms", "edge_sid", "edge_score"]);
-    expect(scoringScanColumns("latency-timeseries")).toEqual([
-      "timestamp", "ts_ms", "edge", "edge_score", "edge_score_reason", "edge_score_rtt_us", "edge_score_exec_us",
-    ]);
-    expect(scoringScanColumns("health")).toEqual([
-      "timestamp", "ts_ms", "edge", "edge_sid", "edge_score", "edge_score_l2",
-      "edge_score_reason", "edge_score_rtt_us", "edge_score_exec_us",
-    ]);
-    expect(scoringScanColumns("top-flagged")).toEqual([
-      "timestamp", "ts_ms", "edge_sid", "edge_score", "edge_score_l1", "edge_score_l2",
-      "edge_cookie_compliance", "edge_score_reason",
-    ]);
-    expect(scoringScanColumns("analytics")).toHaveLength(11);
 
     const eventCols = scoringScanColumns("sessions/sid-a/events");
+    expect(eventCols).toEqual([...SCORING_EVENTS_COLUMNS]);
+    expect(eventCols).toHaveLength(10);
     expect(eventCols).toContain("url");
     expect(eventCols).toContain("status");
     for (const unused of ["ua", "ip", "country", "edge_score_rtt_us", "edge_score_exec_us"]) {
