@@ -33,6 +33,7 @@ import {
   CLOUD_SCORING_SCAN_ROUTES,
   cloudScoringPreflight,
   cloudScoringRead,
+  scoringRequiredAnyColumns,
   scoringScanColumns,
   type ScoringRangeLoader,
 } from "./scoring-reads";
@@ -1397,6 +1398,7 @@ async function prepareCloudScan(
     ? filtersPayloadToPredicates(params.filters as Parameters<typeof filtersPayloadToPredicates>[0], undefined) : [];
   const network = /^\/api\/network(?:\/(?:bundle|pop-health)|-health|-quality)$/.test(url.pathname);
   const originScan = url.pathname.startsWith("/api/origin/");
+  const scoringRoute = url.pathname.match(/^\/api\/services\/[^/]+\/scoring\/(.+)$/)?.[1];
   const scanColumns = network ? networkScanColumns(url.pathname, params)
     : originScan ? originScanColumns(url.pathname, params)
     : url.pathname === "/api/value/summary" ? valueScanColumns(params)
@@ -1426,8 +1428,7 @@ async function prepareCloudScan(
         "timestamp", "ts_ms", "rid", "method", "url", "host", "status", "cache",
         "pop", "country", "city", "region", "asn", "elapsed", "ttfb", "resp_bytes", "ip", "ua", "proto", "tls",
       ]
-    : /^\/api\/services\/[^/]+\/scoring\/(.+)$/.test(url.pathname)
-      ? scoringScanColumns(url.pathname.match(/^\/api\/services\/[^/]+\/scoring\/(.+)$/)?.[1]) : null;
+    : scoringRoute ? scoringScanColumns(scoringRoute) : null;
   const detectors = Array.isArray(params.detectors) ? params.detectors as string[] : undefined;
   const queryPlan = url.pathname === "/api/query" ? await planCloudQueryScan(params as unknown as QueryRequest, {
     tableName: rum ? String(dataset) : "requests",
@@ -1473,6 +1474,7 @@ async function prepareCloudScan(
     ? sessionsLoadFrom(params, Date.parse(scanStart), Date.parse(end)) : Date.parse(scanStart);
   const followUp = Boolean(detectors) && url.pathname === "/api/insights";
   const widenFollowUp = followUp && !insightsSummaryWindows.includes(insightsWindowKey(decodedServiceId, end));
+  const scoringRequireAny = scoringRoute ? scoringRequiredAnyColumns(scoringRoute) : [];
   const firstFrom = sessionsFrom > Date.parse(scanStart) ? new Date(sessionsFrom).toISOString() : scanStart;
   const loadRange = (wider: boolean, from = firstFrom) => ensureCloudRange(
     from, scanEnd, request.signal, rum ? ["rum"] : ["request"], {
@@ -1488,7 +1490,11 @@ async function prepareCloudScan(
     } } : scanColumns ? { projection: {
       columns: scanColumns,
       ...url.pathname === "/api/sessions" ? { preferWholeUpToBytes: WHOLE_FALLBACK_HIGH_FANOUT_MAX_BYTES } : {},
-      ...url.pathname === "/api/cmcd/aggregates" ? { requireAnyColumns: CMCD_REQUIRED_ANY_COLUMNS } : {},
+      ...url.pathname === "/api/cmcd/aggregates"
+        ? { requireAnyColumns: CMCD_REQUIRED_ANY_COLUMNS }
+        : scoringRequireAny.length > 0
+          ? { requireAnyColumns: scoringRequireAny }
+          : {},
       ...rowGroupFilters.length ? { filters: rowGroupFilters } : {},
     } } : {},
   });

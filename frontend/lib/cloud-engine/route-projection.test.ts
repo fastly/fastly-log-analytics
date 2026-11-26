@@ -445,7 +445,15 @@ describe("Cloud route column projections", () => {
     await guard([
       scoring("analytics"),
       scoring("analytics", "&mask_ips=1"),
+      scoring("top-flagged"),
+      scoring("score-distribution"),
+      scoring("compliance-breakdown"),
+      scoring("latency-timeseries"),
       scoring("health"),
+      scoring("threshold-preview", "&threshold=50"),
+      scoring("evaluation"),
+      scoring("evaluation/per-reason"),
+      scoring("curves"),
       scoring("sessions/edge_sid-1/events"),
     ]);
   });

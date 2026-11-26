@@ -3992,15 +3992,35 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect(await curvesRes!.json()).toMatchObject({ available: false, n_good: 0, n_bad: 0, auc: null });
     expect(ensureCloudRange).not.toHaveBeenCalled();
 
-    // When analytics runs with edge_score enabled, pass-1 projects ONLY narrow scoring columns (no url/ua/ip).
+    // When analytics runs with edge_score enabled, pass-1 projects ONLY narrow scoring columns (no url/ua/ip)
+    // and passes requireAnyColumns so unscored files are skipped after footer probes.
     await handleCloudAnalyticalRequest(
       new Request("http://localhost/api/services/svc-1/scoring/analytics?since_hours=24"),
     );
     expect(ensureCloudRange).toHaveBeenCalledTimes(1);
-    const projectedCols = vi.mocked(ensureCloudRange).mock.calls[0]?.[4]?.projection?.columns ?? [];
+    const analyticsProjection = vi.mocked(ensureCloudRange).mock.calls[0]?.[4]?.projection;
+    const projectedCols = analyticsProjection?.columns ?? [];
     for (const heavy of ["url", "ua", "ip", "status", "country"]) {
       expect(projectedCols).not.toContain(heavy);
     }
+    expect(analyticsProjection?.requireAnyColumns).toEqual(["edge_score"]);
+
+    vi.mocked(ensureCloudRange).mockClear();
+    await handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/services/svc-1/scoring/score-distribution?since_hours=24"),
+    );
+    expect(vi.mocked(ensureCloudRange).mock.calls[0]?.[4]?.projection).toMatchObject({
+      columns: ["timestamp", "ts_ms", "edge_score"],
+      requireAnyColumns: ["edge_score"],
+    });
+
+    vi.mocked(ensureCloudRange).mockClear();
+    await handleCloudAnalyticalRequest(
+      new Request("http://localhost/api/services/svc-1/scoring/sessions/sid-1/events?since_days=7"),
+    );
+    expect(vi.mocked(ensureCloudRange).mock.calls[0]?.[4]?.projection).toMatchObject({
+      requireAnyColumns: ["edge_score", "edge_sid"],
+    });
     vi.mocked(cloudActiveLogFieldIds).mockResolvedValue(new Set<string>());
   });
 });

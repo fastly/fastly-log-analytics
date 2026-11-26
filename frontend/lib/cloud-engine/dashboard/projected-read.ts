@@ -18,7 +18,7 @@ const QUERY_COLUMNS = ["timestamp", "status", "cache", "resp_bytes", "edge"];
 const RANGE_CONCURRENCY = 16;
 const WIDE_PROJECTION_MIN_COLUMNS = 10;
 const WIDE_PROJECTION_MIN_OVERLAP = 0.5;
-const WIDE_PROJECTION_MAX_BYTES = 32 * 1024 * 1024;
+const WIDE_PROJECTION_MAX_BYTES = 8 * 1024 * 1024;
 
 /**
  * Wide projections (dashboard cards, security residual) covering most of a multi-row-group

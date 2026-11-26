@@ -58,7 +58,7 @@ export const MAX_RANGES_PER_FILE = 64;
  * bytes; larger compacts keep ranges, where a dashboard projection reads far fewer bytes.
  * Open-hour compacts above `anyUpToBytes` keep ranges too.
  */
-export const wholeReadLimits = { anyUpToBytes: 256 * 1024, closedHourUpToBytes: 6 * 1024 * 1024 };
+export const wholeReadLimits = { anyUpToBytes: 256 * 1024, closedHourUpToBytes: 4 * 1024 * 1024 };
 
 const HOUR_MS = 3_600_000;
 
@@ -81,7 +81,7 @@ export const WHOLE_FALLBACK_HIGH_FANOUT_RATIO = 0.45;
 export const WHOLE_FALLBACK_HIGH_FANOUT_MAX_BYTES = 8 * 1024 * 1024;
 export const WHOLE_FALLBACK_EXTREME_FANOUT_MIN = 24;
 export const WHOLE_FALLBACK_EXTREME_FANOUT_RATIO = 0.30;
-export const WHOLE_FALLBACK_EXTREME_FANOUT_MAX_BYTES = 16 * 1024 * 1024;
+export const WHOLE_FALLBACK_EXTREME_FANOUT_MAX_BYTES = 8 * 1024 * 1024;
 
 /**
  * Whether a post-footer projection plan should fall back to a single shared whole-file fetch
