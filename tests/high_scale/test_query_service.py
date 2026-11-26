@@ -1855,7 +1855,9 @@ def test_high_scale_time_series_intervals_and_end_minute_fence():
 def test_high_scale_time_series_groups_by_returned_interval(interval: str, seconds: int) -> None:
     service, client = _recording_service()
     response = aggregates(service, AggregatesRequest(fields=["url"], chart_interval=interval), *_WINDOW)
-    query, params = next((sql, p) for sql, p in client.calls if "FROM request_aggregates" in sql and "AS value" in sql)
+    query, params = next(
+        (sql, p) for sql, p in client.calls if "FROM request_aggregates" in sql and "AS chart_bucket" in sql
+    )
     assert "toStartOfInterval(bucket_start, INTERVAL {bucket_seconds:UInt32} SECOND)" in query
     assert "GROUP BY chart_bucket ORDER BY chart_bucket" in query
     assert params["bucket_seconds"] == seconds and response.interval == interval and response.time_series[0].value == 12
