@@ -17,6 +17,7 @@ vi.mock('@/lib/cloud-engine/mode', async (importOriginal) => ({
 }))
 vi.mock('@/lib/cloud-engine/dashboard/client', () => ({
   prewarmDashboardEngine: () => engineCalls.push('prewarm'),
+  prewarmRollupWorker: vi.fn(),
   setDashboardCacheIdentity: async (identity: string) => {
     if (!engineCalls.includes(`identity:${identity}`)) engineCalls.push(`identity:${identity}`)
   },

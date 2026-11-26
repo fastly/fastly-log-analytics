@@ -2611,7 +2611,8 @@ def test_crawler_disparity_guard_reads_only_window_rows() -> None:
     assert "GROUP BY GROUPING SETS" in sql
     assert "SELECT custom_fields['ua'] AS ua, count() AS cnt FROM request_facts PREWHERE " in sql
     assert "event_timestamp >= {window_start:DateTime64(3)}" in sql
-    assert "intDiv(toUnixTimestamp(event_timestamp), 300) % 4 = 0" in sql
+    assert "intDiv(toUnixTimestamp(event_timestamp), 300) % 4 = 0" not in sql
+    assert "toDateTime(" in sql
     assert "HAVING sum(cnt) >= 50" in sql
 
 
