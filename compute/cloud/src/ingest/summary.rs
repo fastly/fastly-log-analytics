@@ -1707,11 +1707,14 @@ fn top_untimed<'a, T>(
     (ranked, total, truncated)
 }
 
-/// Retains `urls/url` entries across the union of slowest (`elapsed` max, `elapsed` avg, `ttfb` max)
-/// reserves and highest-request entries so high-latency long-tail URLs are not alphabetically evicted.
+/// Retains `urls/url` and `urls/asn` entries across the union of slowest (`elapsed` max,
+/// `elapsed` avg, `ttfb` max) reserves and highest-request entries so high-latency long-tail
+/// URLs and ASNs are not evicted. Slow reserves prioritize entries meeting `requests > min_requests`
+/// so low-volume spikes do not crowd out entries eligible for Slowest URLs / Slowest Networks.
 fn top_urls<'a>(
     map: FastMap<Cow<'a, str>, UrlAgg>,
     keep: usize,
+    min_requests: i64,
 ) -> (Vec<(Cow<'a, str>, UrlAgg)>, i64, bool) {
     let total = map.values().map(|u| u.requests).sum();
     let truncated = map.len() > keep;
@@ -1745,12 +1748,17 @@ fn top_urls<'a>(
         let cmp = |&i: &usize, &j: &usize| -> std::cmp::Ordering {
             let a = metrics[i];
             let b = metrics[j];
+            let a_elig = a.0 > min_requests;
+            let b_elig = b.0 > min_requests;
             let ord = match cmp_kind {
                 0 => b.1.cmp(&a.1).then_with(|| b.2.cmp(&a.2)),
                 1 => b.2.cmp(&a.2).then_with(|| b.1.cmp(&a.1)),
                 _ => b.3.cmp(&a.3).then_with(|| b.1.cmp(&a.1)),
             };
-            ord.then_with(|| b.0.cmp(&a.0))
+            b_elig
+                .cmp(&a_elig)
+                .then(ord)
+                .then_with(|| b.0.cmp(&a.0))
                 .then_with(|| items[i].0.cmp(&items[j].0))
         };
         if reserve > 0 && reserve < order.len() {
@@ -2579,8 +2587,15 @@ fn write_v3<'a>(
             }
             if let Some(col) = &url_col {
                 col.for_each_key(i, false, |key| {
+                    let rendered = key.render();
+                    let trimmed = rendered.trim();
+                    let url_key = if trimmed.len() == rendered.len() {
+                        rendered
+                    } else {
+                        Cow::Owned(trimmed.to_owned())
+                    };
                     by_url
-                        .entry(key.render())
+                        .entry(url_key)
                         .or_default()
                         .add(origin_lat, elapsed_lat);
                 });
@@ -2789,12 +2804,12 @@ fn write_v3<'a>(
         }
     }
 
-    let (kept_urls, url_total, url_truncated) = top_urls(by_url, URL_K);
+    let (kept_urls, url_total, url_truncated) = top_urls(by_url, URL_K, 5);
     push_total(out, bucket, "urls", "url", url_total, url_truncated);
     for (value, u) in &kept_urls {
         u.push(out, bucket, "url", value);
     }
-    let (kept_asns, asn_total, asn_truncated) = top_untimed(by_raw_asn, |u| u.requests, DIM_K);
+    let (kept_asns, asn_total, asn_truncated) = top_urls(by_raw_asn, DIM_K, 10);
     push_total(out, bucket, "urls", "asn", asn_total, asn_truncated);
     for (value, u) in &kept_asns {
         u.push(out, bucket, "asn", value);
@@ -4068,7 +4083,7 @@ mod map_metro_tests {
         slow_ttfb.add(Some(hist_val(8_200_000)), Some(hist_val(2_000)));
         map.insert(Cow::Borrowed("/z_slow_ttfb"), slow_ttfb);
 
-        let (kept, total, truncated) = top_urls(map, URL_K);
+        let (kept, total, truncated) = top_urls(map, URL_K, 5);
         assert!(truncated);
         assert_eq!(total, (URL_K + 502) as i64);
         assert_eq!(kept.len(), URL_K);

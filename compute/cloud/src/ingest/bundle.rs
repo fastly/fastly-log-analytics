@@ -1040,7 +1040,7 @@ impl Group {
             Unit::Hour => self.keep(field),
             Unit::Day if self.name == "series5" && field == "asn" => SERIES_ASN_TOP_K,
             Unit::Day if self.name == "series5" && field == "city" => SERIES_CITY_TOP_K,
-            Unit::Day if self.name == "urls" && field == "url" => DAY_URL_K,
+            Unit::Day if self.name == "urls" && (field == "url" || field == "asn") => DAY_URL_K,
             Unit::Day if self.name == "proxy" => summary::SAMPLE_K,
             Unit::Day if self.name == "ins_lat" => self.keep(field),
             Unit::Day => self.keep(field).min(DAY_TOP_K),
@@ -1293,6 +1293,7 @@ impl GroupAcc {
     fn url_selection_flags(
         entries: &[(&String, &BTreeMap<i64, Vec<Cell>>)],
         cut: usize,
+        min_requests: i64,
     ) -> Vec<bool> {
         let n = entries.len();
         if n <= cut {
@@ -1309,12 +1310,17 @@ impl GroupAcc {
             let cmp = |&i: &usize, &j: &usize| -> Ordering {
                 let a = metrics[i];
                 let b = metrics[j];
+                let a_elig = a.0 > min_requests;
+                let b_elig = b.0 > min_requests;
                 let ord = match cmp_kind {
                     0 => b.1.cmp(&a.1).then_with(|| b.2.cmp(&a.2)),
                     1 => b.2.cmp(&a.2).then_with(|| b.1.cmp(&a.1)),
                     _ => b.3.cmp(&a.3).then_with(|| b.1.cmp(&a.1)),
                 };
-                ord.then_with(|| b.0.cmp(&a.0))
+                b_elig
+                    .cmp(&a_elig)
+                    .then(ord)
+                    .then_with(|| b.0.cmp(&a.0))
                     .then_with(|| entries[i].0.cmp(entries[j].0))
             };
             if reserve > 0 && reserve < order.len() {
@@ -1345,7 +1351,7 @@ impl GroupAcc {
         selected
     }
 
-    fn retain_urls(&mut self, keep: usize) -> bool {
+    fn retain_urls(&mut self, keep: usize, min_requests: i64) -> bool {
         if self.values.len() <= keep {
             return false;
         }
@@ -1354,7 +1360,7 @@ impl GroupAcc {
             return true;
         }
         let entries: Vec<(&String, &BTreeMap<i64, Vec<Cell>>)> = self.values.iter().collect();
-        let selected = Self::url_selection_flags(&entries, keep);
+        let selected = Self::url_selection_flags(&entries, keep, min_requests);
         let drop_keys: std::collections::HashSet<String> = entries
             .into_iter()
             .zip(selected)
@@ -1365,9 +1371,13 @@ impl GroupAcc {
         true
     }
 
-    fn ranked_urls(&self, cut: usize) -> Vec<(&String, &BTreeMap<i64, Vec<Cell>>)> {
+    fn ranked_urls(
+        &self,
+        cut: usize,
+        min_requests: i64,
+    ) -> Vec<(&String, &BTreeMap<i64, Vec<Cell>>)> {
         let entries: Vec<(&String, &BTreeMap<i64, Vec<Cell>>)> = self.values.iter().collect();
-        let selected = Self::url_selection_flags(&entries, cut);
+        let selected = Self::url_selection_flags(&entries, cut, min_requests);
         let mut kept: Vec<_> = entries
             .into_iter()
             .zip(selected)
@@ -1905,7 +1915,9 @@ impl Acc {
             for (field, acc) in fields.iter_mut() {
                 let cut = group.keep(field);
                 let cut_any = if group.name == "urls" && field == "url" {
-                    acc.retain_urls(cut)
+                    acc.retain_urls(cut, 5)
+                } else if group.name == "urls" && field == "asn" {
+                    acc.retain_urls(cut, 10)
                 } else {
                     retain_top(&mut acc.values, cut, GroupAcc::requests)
                 };
@@ -2652,7 +2664,9 @@ impl Acc {
                 }
                 let cut = unit.map_or(acc.values.len(), |u| group.written(&field, u));
                 let mut ranked = if group.name == "urls" && field == "url" {
-                    acc.ranked_urls(cut)
+                    acc.ranked_urls(cut, 5)
+                } else if group.name == "urls" && field == "asn" {
+                    acc.ranked_urls(cut, 10)
                 } else {
                     acc.ranked()
                 };
@@ -5617,7 +5631,7 @@ mod tests {
         assert!(kept_urls.values.contains_key("/z_slow_elapsed"));
         assert!(kept_urls.values.contains_key("/z_slow_ttfb"));
 
-        let ranked_day = kept_urls.ranked_urls(DAY_URL_K);
+        let ranked_day = kept_urls.ranked_urls(DAY_URL_K, 5);
         let day_names: std::collections::HashSet<&str> =
             ranked_day.iter().map(|(u, _)| u.as_str()).collect();
         assert!(day_names.contains("/z_slow_elapsed"));

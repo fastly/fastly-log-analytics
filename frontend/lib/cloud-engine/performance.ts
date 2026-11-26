@@ -61,16 +61,16 @@ export const PERFORMANCE_ROLLUPS = {
 } as const;
 
 const KNOWN_ASN_LABELS: Readonly<Record<string, string>> = {
-  "15169": "AS15169 (Google LLC)",
-  "13335": "AS13335 (Cloudflare, Inc.)",
-  "16509": "AS16509 (Amazon.com, Inc.)",
-  "14618": "AS14618 (Amazon.com, Inc.)",
-  "8075": "AS8075 (Microsoft Corporation)",
-  "7922": "AS7922 (Comcast Cable Communications)",
-  "7018": "AS7018 (AT&T Services, Inc.)",
-  "701": "AS701 (Verizon Business)",
-  "20940": "AS20940 (Akamai International B.V.)",
-  "54113": "AS54113 (Fastly, Inc.)",
+  "15169": "Google LLC (15169)",
+  "13335": "Cloudflare, Inc. (13335)",
+  "16509": "Amazon.com, Inc. (16509)",
+  "14618": "Amazon.com, Inc. (14618)",
+  "8075": "Microsoft Corporation (8075)",
+  "7922": "Comcast Cable Communications (7922)",
+  "7018": "AT&T Services, Inc. (7018)",
+  "701": "Verizon Business (701)",
+  "20940": "Akamai International B.V. (20940)",
+  "54113": "Fastly, Inc. (54113)",
 };
 
 export function formatAsnLabel(asn: string | number): string {
