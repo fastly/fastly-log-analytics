@@ -14,8 +14,10 @@ use std::time::Duration;
 
 pub const STATE_KEY: &str = "ingest:ngwaf_bots_state";
 pub const SYNC_INTERVAL_S: u64 = 120;
-const PAGE_LIMIT: usize = 500;
-const MAX_PAGES_PER_RUN: usize = 3;
+/// NGWAF `/requests` entries carry full headers (~4–6 KB each); 100 fits well under the 2 MiB
+/// `bounded_json` backend response cap.
+const PAGE_LIMIT: usize = 100;
+const MAX_PAGES_PER_RUN: usize = 6;
 const DAY_FILE_LIMIT: usize = 2 * 1024 * 1024;
 const MAX_SEEN_PER_DAY: usize = 50_000;
 const MAX_QUERY_DAYS: usize = 31;
