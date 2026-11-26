@@ -176,14 +176,16 @@ def build_pk_time_sample_clause(
             return f" AND (event_timestamp < {{window_start:DateTime64(3)}} OR intDiv(toUnixTimestamp(event_timestamp), 300) % {w_stride} = 0)"
         return f" AND (event_timestamp >= {{window_start:DateTime64(3)}} OR intDiv(toUnixTimestamp(event_timestamp), 300) % {b_eff} = 0)"
 
-    assert window_start is not None and window_end is not None
+    if window_start is None or window_end is None:
+        raise ValueError("window_start and window_end are required when bounds are present")
     w_ts = _to_utc_epoch_s(window_start)
     e_ts = _to_utc_epoch_s(window_end)
     w_windows = _pk_range_windows(w_ts, e_ts, w_stride) if w_stride > 1 else []
 
     b_windows: list[tuple[int, int]] = []
     if b_eff > 1:
-        assert baseline_start is not None
+        if baseline_start is None:
+            raise ValueError("baseline_start is required when baseline sampling is active")
         b_ts = _to_utc_epoch_s(baseline_start)
         if rollup_span is not None and _to_utc_epoch_s(rollup_span[0]) < _to_utc_epoch_s(rollup_span[1]):
             r_s_ts = _to_utc_epoch_s(rollup_span[0])
