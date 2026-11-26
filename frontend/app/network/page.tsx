@@ -1,5 +1,9 @@
+import { Suspense } from 'react'
+
+import Loading from './loading'
+import NetworkClient from './_sections/NetworkClient'
+
 export {
-  default,
   NetworkClient,
   GlobalHealthHelp,
   AvgRttHelp,
@@ -17,3 +21,11 @@ export {
   SHIELDING_MIN_REQUESTS_OPTIONS,
   type ShieldingRowInput,
 } from './_sections/NetworkClient'
+
+export default function NetworkPage() {
+  return (
+    <Suspense fallback={<Loading />}>
+      <NetworkClient />
+    </Suspense>
+  )
+}

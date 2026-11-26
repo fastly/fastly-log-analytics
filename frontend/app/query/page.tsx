@@ -1,5 +1,9 @@
+import { Suspense } from 'react'
+
+import Loading from './loading'
+import QueryClient from './_sections/QueryClient'
+
 export {
-  default,
   QueryClient,
   CodeEditor,
   buildStructuredSql,
@@ -12,3 +16,11 @@ export {
   type CodeEditorHandle,
   type QueryMode,
 } from './_sections/QueryClient'
+
+export default function QueryPage() {
+  return (
+    <Suspense fallback={<Loading />}>
+      <QueryClient />
+    </Suspense>
+  )
+}
