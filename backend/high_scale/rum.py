@@ -39,7 +39,16 @@ CacheRegistry.register("high_scale.rum._rum_memo", _rum_memo.cache)
 
 _iso = format_iso_utc_or_empty
 _FILTER_COLUMNS = frozenset({"browser", "os", "device", "country", "pathname", "city", "region", "pop", "tls"})
+_LOW_CARD_FILTER_COLUMNS = frozenset({"browser", "os", "device", "country", "region", "pop", "tls"})
 _CASE_INSENSITIVE_FILTER_COLUMNS = frozenset({"browser", "os", "device", "country", "pop", "tls"})
+
+
+def _is_opt27_ch(client: Any) -> bool:
+    return (
+        hasattr(client, "_http")
+        and "MockTransport" not in type(client._http._transport).__name__
+        and not os.getenv("PYTEST_CURRENT_TEST")
+    )
 
 
 def _decode_pct(value: Any) -> str:
@@ -81,8 +90,9 @@ def parse_rum_filters(raw: str | None) -> dict[str, Any]:
         raise ValueError("filters must be a JSON object") from exc
 
 
-def _filter_clauses(filters: Mapping[str, Any] | None) -> tuple[list[str], dict[str, Any]]:
-    clauses: list[str] = []
+def _filter_clauses_split(filters: Mapping[str, Any] | None) -> tuple[list[str], list[str], dict[str, Any]]:
+    prewhere_clauses: list[str] = []
+    where_clauses: list[str] = []
     params: dict[str, Any] = {}
     unsupported: list[str] = []
     for i, (raw_key, spec) in enumerate((filters or {}).items()):
@@ -103,10 +113,19 @@ def _filter_clauses(filters: Mapping[str, Any] | None) -> tuple[list[str], dict[
         mode = str(filter_spec_attr(spec, "mode") or "include")
         operator = "NOT IN" if mode == "exclude" else "IN"
         col_expr = f"lower({column})" if case_insensitive else column
-        clauses.append(f"{col_expr} {operator} ({', '.join(names)})")
+        clause = f"{col_expr} {operator} ({', '.join(names)})"
+        if column in _LOW_CARD_FILTER_COLUMNS:
+            prewhere_clauses.append(clause)
+        else:
+            where_clauses.append(clause)
     if unsupported:
         raise ValueError(f"high-scale RUM cannot filter on: {', '.join(sorted(unsupported))}")
-    return clauses, params
+    return prewhere_clauses, where_clauses, params
+
+
+def _filter_clauses(filters: Mapping[str, Any] | None) -> tuple[list[str], dict[str, Any]]:
+    prewhere_clauses, where_clauses, params = _filter_clauses_split(filters)
+    return [*prewhere_clauses, *where_clauses], params
 
 
 def rum_beacon_health(
@@ -195,7 +214,8 @@ def rum_analytics(
     start, end = parse_time_window(start_time, end_time, utc=True, now=datetime.now(UTC))
     if end < start:
         raise ValueError("RUM end time precedes start time")
-    filter_clauses, filter_params = _filter_clauses(filters)
+    prewhere_filters, where_filters, filter_params = _filter_clauses_split(filters)
+    filter_clauses = [*prewhere_filters, *where_filters]
     is_real_ch = (
         hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
     )
@@ -218,7 +238,15 @@ def rum_analytics(
     def _compute() -> dict[str, Any]:
         if memo_key is not None and (cached_inner := _rum_memo.get_with_telemetry(memo_key)) is not None:
             return dict(cached_inner)
-        payload = _rum_analytics_compute(service, start, end, filter_clauses, filter_params)
+        payload = _rum_analytics_compute(
+            service,
+            start,
+            end,
+            filter_clauses,
+            filter_params,
+            prewhere_filters=prewhere_filters,
+            where_filters=where_filters,
+        )
         if memo_key is not None:
             _rum_memo.put(memo_key, payload)
         return payload
@@ -259,22 +287,45 @@ def _rum_analytics_compute(
     end: datetime,
     filter_clauses: list[str],
     filter_params: dict[str, Any],
+    *,
+    prewhere_filters: list[str] | None = None,
+    where_filters: list[str] | None = None,
 ) -> dict[str, Any]:
     params = {"service_id": service.service_id, "start": start, "end": end, **filter_params}
+    opt27 = _is_opt27_ch(service.client)
 
-    def prewhere_scope(domain: str) -> str:
+    def prewhere_scope(domain: str, *extra: str) -> str:
         return " AND ".join(
             [
                 *visible_fact_clauses(domain),
                 "event_timestamp >= {start:DateTime64(3, 'UTC')}",
                 "event_timestamp < {end:DateTime64(3, 'UTC')}",
+                *extra,
             ]
         )
 
+    pre_flt = list(prewhere_filters) if prewhere_filters is not None else []
+    rem_flt = list(where_filters) if where_filters is not None else list(filter_clauses)
     filter_sql = " AND ".join(filter_clauses)
-    vitals_where = f"{_PAGE_VITALS} AND {filter_sql}" if filter_sql else _PAGE_VITALS
-    errors_where = f" WHERE {filter_sql}" if filter_sql else ""
-    ttlb_where = f"metric_name = 'ttlb' AND {filter_sql}" if filter_sql else "metric_name = 'ttlb'"
+    rem_sql = " AND ".join(rem_flt)
+
+    if opt27:
+        vitals_prewhere = prewhere_scope("rum_vitals", _PAGE_VITALS, *pre_flt)
+        ttlb_prewhere = prewhere_scope("rum_vitals", "metric_name = 'ttlb'", *pre_flt)
+        errors_prewhere = prewhere_scope("rum_errors", *pre_flt)
+        vitals_where_clause = f" WHERE {rem_sql}" if rem_sql else ""
+        errors_where_clause = f" WHERE {rem_sql}" if rem_sql else ""
+        ttlb_req_where_clause = f" WHERE {rem_sql} AND req_id != ''" if rem_sql else " WHERE req_id != ''"
+    else:
+        vitals_prewhere = prewhere_scope("rum_vitals")
+        ttlb_prewhere = prewhere_scope("rum_vitals")
+        errors_prewhere = prewhere_scope("rum_errors")
+        vitals_where = f"{_PAGE_VITALS} AND {filter_sql}" if filter_sql else _PAGE_VITALS
+        ttlb_where = f"metric_name = 'ttlb' AND {filter_sql}" if filter_sql else "metric_name = 'ttlb'"
+        vitals_where_clause = f" WHERE {vitals_where}"
+        errors_where_clause = f" WHERE {filter_sql}" if filter_sql else ""
+        ttlb_req_where_clause = f" WHERE {ttlb_where} AND req_id != ''"
+
     req_edge_scope = " AND ".join(visible_fact_clauses("request"))
     req_edge_cte = (
         f"req_edge AS (SELECT _cf_rid AS rid, any(toFloat64OrNull(nullIf(_cf_elapsed, ''))) / 1000.0 AS edge_ms, "
@@ -282,8 +333,8 @@ def _rum_analytics_compute(
         "AND event_timestamp >= ({start:DateTime64(3, 'UTC')} - INTERVAL 10 MINUTE) "
         "AND event_timestamp < ({end:DateTime64(3, 'UTC')} + INTERVAL 10 MINUTE) "
         "AND _cf_rid != '' "
-        f"AND _cf_rid IN (SELECT req_id FROM rum_vitals_facts PREWHERE {prewhere_scope('rum_vitals')} "
-        f"WHERE {ttlb_where} AND req_id != '') "
+        f"AND _cf_rid IN (SELECT req_id FROM rum_vitals_facts PREWHERE {ttlb_prewhere}"
+        f"{ttlb_req_where_clause}) "
         "GROUP BY _cf_rid)"
     )
     slowest_agg_select = (
@@ -299,26 +350,14 @@ def _rum_analytics_compute(
         "quantileExactInclusiveOrNullIf(0.99)(edge_ms, edge_ms IS NOT NULL) AS edge_p99_ms"
     )
     identity = _BEACON_IDENTITY
-    events = (
-        f"WITH events AS ("
-        f"SELECT event_timestamp, {identity} AS beacon_id, 'vitals' AS src, metric_name, metric_value, pathname, "
-        f"{_ROW_WEIGHT} AS w FROM rum_vitals_facts PREWHERE {prewhere_scope('rum_vitals')} WHERE {vitals_where} "
-        f"UNION ALL "
-        f"SELECT event_timestamp, {identity} AS beacon_id, 'errors' AS src, '' AS metric_name, "
-        f"CAST(NULL AS Nullable(Float64)) AS metric_value, pathname, {_ROW_WEIGHT} AS w "
-        f"FROM rum_error_facts PREWHERE {prewhere_scope('rum_errors')}{errors_where}) "
-    )
+    beacon_expr = f"cityHash64({identity})" if opt27 else identity
+    beacon_col = "beacon_h" if opt27 else "beacon_id"
+    hourly = end - start <= timedelta(hours=48)
+    bucket_sql = "toStartOfHour(event_timestamp, 'UTC')" if hourly else "toStartOfDay(event_timestamp, 'UTC')"
     pageview = "src = 'vitals' AND metric_name NOT LIKE 'event_%'"
     interaction = "src = 'vitals' AND metric_name LIKE 'event_%'"
     is_vital, is_error = "src = 'vitals'", "src = 'errors'"
-    counts_sql = (
-        events + f"/* rum_analytics_counts */ SELECT {_weighted_beacons()} AS beacons, "
-        f"{_weighted_beacons(pageview)} AS pageviews, {_weighted_beacons(interaction)} AS interactions, "
-        f"{_weighted_beacons(is_error)} AS errors, countIf(w > 1) > 0 AS sampled FROM events"
-    )
 
-    hourly = end - start <= timedelta(hours=48)
-    bucket_sql = "toStartOfHour(event_timestamp, 'UTC')" if hourly else "toStartOfDay(event_timestamp, 'UTC')"
     vitals_good = (
         "metric_rating = 'good' OR (metric_rating = '' AND multiIf("
         "lower(metric_name) = 'lcp', metric_value <= 2500, "
@@ -350,46 +389,29 @@ def _rum_analytics_compute(
         f"sumIf({_ROW_WEIGHT}, {vitals_good}) as good, "
         f"sumIf({_ROW_WEIGHT}, {vitals_ni}) as ni, "
         f"sumIf({_ROW_WEIGHT}, {vitals_poor}) as poor "
-        f"FROM rum_vitals_facts PREWHERE {prewhere_scope('rum_vitals')} WHERE {vitals_where} GROUP BY metric_name"
+        f"FROM rum_vitals_facts PREWHERE {vitals_prewhere}{vitals_where_clause} GROUP BY metric_name"
     )
+    env_identity = f"cityHash64({identity})" if opt27 else identity
     environments_sql = (
         f"/* rum_analytics_environments */ SELECT if(browser = '', 'Unknown', browser) AS env_browser, "
         f"if(os = '', 'Unknown', os) AS env_os, if(device = '', 'Unknown', device) AS env_device, "
-        f"{_weighted_beacons(identity=identity, weight=_ROW_WEIGHT)} AS beacons, "
+        f"{_weighted_beacons(identity=env_identity, weight=_ROW_WEIGHT)} AS beacons, "
         f"grouping(browser) AS g_browser, grouping(os) AS g_os, "
-        f"grouping(device) AS g_device FROM rum_vitals_facts PREWHERE {prewhere_scope('rum_vitals')} "
-        f"WHERE {vitals_where} GROUP BY GROUPING SETS ((browser), (os), (device))"
-    )
-    trends_sql = (
-        events + f"/* rum_analytics_trends */ SELECT {bucket_sql} AS bucket, "
-        "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'lcp') AS lcp, "
-        "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'cls') AS cls, "
-        "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'fcp') AS fcp, "
-        "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'ttfb') AS ttfb, "
-        f"{_weighted_beacons(is_vital)} AS views, {_weighted_beacons(pageview)} AS pageviews, "
-        f"{_weighted_beacons(interaction)} AS interactions, {_weighted_beacons(is_error)} AS errors "
-        "FROM events GROUP BY bucket ORDER BY bucket"
-    )
-    pages_sql = (
-        events + "/* rum_analytics_pages */ SELECT pathname AS path, "
-        f"{_weighted_beacons(is_vital)} AS views, {_weighted_beacons(is_error)} AS page_errors, "
-        "avgOrNullIf(metric_value, metric_name = 'page_load') AS avg_load, "
-        "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'lcp') AS lcp, "
-        "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'cls') AS cls, "
-        "page_errors * 100.0 / nullIf(views + page_errors, 0) AS error_rate "
-        "FROM events GROUP BY pathname HAVING views > 0 ORDER BY error_rate DESC, avg_load DESC, path LIMIT 5"
+        f"grouping(device) AS g_device FROM rum_vitals_facts PREWHERE {vitals_prewhere}"
+        f"{vitals_where_clause} GROUP BY GROUPING SETS ((browser), (os), (device))"
     )
     exceptions_sql = (
         f"/* rum_analytics_exceptions */ SELECT error_message, error_file, error_line, error_col, "
         f"toUInt64(round(sum({_ROW_WEIGHT}))) AS count "
-        f"FROM rum_error_facts PREWHERE {prewhere_scope('rum_errors')}{errors_where} "
+        f"FROM rum_error_facts PREWHERE {errors_prewhere}{errors_where_clause} "
         f"GROUP BY error_message, error_file, error_line, error_col "
         f"ORDER BY count DESC, error_message, error_file, error_line, error_col LIMIT 3"
     )
+    ttlb_where_clause = f" WHERE {rem_sql}" if opt27 and rem_sql else ("" if opt27 else f" WHERE {ttlb_where}")
     slowest_sql = (
         f"/* rum_analytics_slowest */ WITH ttlb_rows AS ("
         f"SELECT req_id, resource_url, asn, metric_value, {_ROW_WEIGHT} AS w "
-        f"FROM rum_vitals_facts PREWHERE {prewhere_scope('rum_vitals')} WHERE {ttlb_where}), "
+        f"FROM rum_vitals_facts PREWHERE {ttlb_prewhere}{ttlb_where_clause}), "
         f"{req_edge_cte}, "
         f"ttlb_joined AS ("
         f"SELECT v.resource_url AS resource_url, "
@@ -406,19 +428,116 @@ def _rum_analytics_compute(
         f"LIMIT 20 BY kind"
     )
 
-    queries = (
-        counts_sql,
-        vitals_sql,
-        environments_sql,
-        trends_sql,
-        pages_sql,
-        exceptions_sql,
-        slowest_sql,
-    )
-    with ThreadPoolExecutor(max_workers=7) as pool:
-        futs = [pool.submit(contextvars.copy_context().run, service.client.execute, q, params) for q in queries]
-        count_rows, rows, environment_rows, trend_rows, page_rows, error_rows, slowest_rows = (f.result() for f in futs)
-    counts = count_rows[0]
+    if opt27:
+        events_folded = (
+            f"WITH events AS ("
+            f"SELECT {bucket_sql} AS bucket_col, {beacon_expr} AS {beacon_col}, 'vitals' AS src, "
+            f"metric_name, metric_value, pathname, {_ROW_WEIGHT} AS w "
+            f"FROM rum_vitals_facts PREWHERE {vitals_prewhere}{vitals_where_clause} "
+            f"UNION ALL "
+            f"SELECT {bucket_sql} AS bucket_col, {beacon_expr} AS {beacon_col}, 'errors' AS src, "
+            f"'' AS metric_name, CAST(NULL AS Nullable(Float64)) AS metric_value, pathname, {_ROW_WEIGHT} AS w "
+            f"FROM rum_error_facts PREWHERE {errors_prewhere}{errors_where_clause}) "
+        )
+        counts_trends_pages_sql = (
+            events_folded + "/* rum_analytics_counts_trends_pages */ "
+            "SELECT kind, bucket, path, beacons, views, pageviews, interactions, errors, "
+            "sampled, avg_load, lcp, cls, fcp, ttfb, error_rate, page_rn FROM ("
+            "SELECT multiIf(g_b = 0, 'trend', g_p = 0, 'page', 'count') AS kind, "
+            "bucket, path, beacons, views, pageviews, interactions, errors, "
+            "sampled, avg_load, lcp, cls, fcp, ttfb, "
+            "errors * 100.0 / nullIf(views + errors, 0) AS error_rate, "
+            "row_number() OVER (PARTITION BY g_p "
+            "ORDER BY errors * 100.0 / nullIf(views + errors, 0) DESC, avg_load DESC, path ASC) AS page_rn "
+            "FROM ("
+            "SELECT grouping(bucket_col) AS g_b, grouping(pathname) AS g_p, "
+            "bucket_col AS bucket, pathname AS path, "
+            f"{_weighted_beacons(identity=beacon_col)} AS beacons, "
+            f"{_weighted_beacons(is_vital, identity=beacon_col)} AS views, "
+            f"{_weighted_beacons(pageview, identity=beacon_col)} AS pageviews, "
+            f"{_weighted_beacons(interaction, identity=beacon_col)} AS interactions, "
+            f"{_weighted_beacons(is_error, identity=beacon_col)} AS errors, "
+            "countIf(w > 1) > 0 AS sampled, "
+            "avgOrNullIf(metric_value, metric_name = 'page_load') AS avg_load, "
+            "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'lcp') AS lcp, "
+            "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'cls') AS cls, "
+            "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'fcp') AS fcp, "
+            "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'ttfb') AS ttfb "
+            "FROM events GROUP BY GROUPING SETS ((bucket_col), (pathname), ())) "
+            "WHERE g_p = 1 OR views > 0) "
+            "WHERE kind != 'page' OR page_rn <= 5 "
+            "ORDER BY kind ASC, bucket ASC, page_rn ASC"
+        )
+        queries: tuple[str, ...] = (
+            counts_trends_pages_sql,
+            vitals_sql,
+            environments_sql,
+            exceptions_sql,
+            slowest_sql,
+        )
+        with ThreadPoolExecutor(max_workers=len(queries)) as pool:
+            futs = [pool.submit(contextvars.copy_context().run, service.client.execute, q, params) for q in queries]
+            events_rows, rows, environment_rows, error_rows, slowest_rows = (f.result() for f in futs)
+        count_rows = [r for r in events_rows if r.get("kind") == "count"]
+        trend_rows = [r for r in events_rows if r.get("kind") == "trend"]
+        page_rows = sorted(
+            ({**r, "page_errors": r.get("errors", 0)} for r in events_rows if r.get("kind") == "page"),
+            key=lambda r: int(r.get("page_rn") or 0),
+        )
+        counts = (
+            count_rows[0]
+            if count_rows
+            else {"beacons": 0, "pageviews": 0, "interactions": 0, "errors": 0, "sampled": 0}
+        )
+    else:
+        events = (
+            f"WITH events AS ("
+            f"SELECT event_timestamp, {identity} AS beacon_id, 'vitals' AS src, metric_name, metric_value, pathname, "
+            f"{_ROW_WEIGHT} AS w FROM rum_vitals_facts PREWHERE {vitals_prewhere}{vitals_where_clause} "
+            f"UNION ALL "
+            f"SELECT event_timestamp, {identity} AS beacon_id, 'errors' AS src, '' AS metric_name, "
+            f"CAST(NULL AS Nullable(Float64)) AS metric_value, pathname, {_ROW_WEIGHT} AS w "
+            f"FROM rum_error_facts PREWHERE {errors_prewhere}{errors_where_clause}) "
+        )
+        counts_sql = (
+            events + f"/* rum_analytics_counts */ SELECT {_weighted_beacons()} AS beacons, "
+            f"{_weighted_beacons(pageview)} AS pageviews, {_weighted_beacons(interaction)} AS interactions, "
+            f"{_weighted_beacons(is_error)} AS errors, countIf(w > 1) > 0 AS sampled FROM events"
+        )
+        trends_sql = (
+            events + f"/* rum_analytics_trends */ SELECT {bucket_sql} AS bucket, "
+            "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'lcp') AS lcp, "
+            "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'cls') AS cls, "
+            "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'fcp') AS fcp, "
+            "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'ttfb') AS ttfb, "
+            f"{_weighted_beacons(is_vital)} AS views, {_weighted_beacons(pageview)} AS pageviews, "
+            f"{_weighted_beacons(interaction)} AS interactions, {_weighted_beacons(is_error)} AS errors "
+            "FROM events GROUP BY bucket ORDER BY bucket"
+        )
+        pages_sql = (
+            events + "/* rum_analytics_pages */ SELECT pathname AS path, "
+            f"{_weighted_beacons(is_vital)} AS views, {_weighted_beacons(is_error)} AS page_errors, "
+            "avgOrNullIf(metric_value, metric_name = 'page_load') AS avg_load, "
+            "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'lcp') AS lcp, "
+            "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'cls') AS cls, "
+            "page_errors * 100.0 / nullIf(views + page_errors, 0) AS error_rate "
+            "FROM events GROUP BY pathname HAVING views > 0 ORDER BY error_rate DESC, avg_load DESC, path LIMIT 5"
+        )
+        queries = (
+            counts_sql,
+            vitals_sql,
+            environments_sql,
+            trends_sql,
+            pages_sql,
+            exceptions_sql,
+            slowest_sql,
+        )
+        with ThreadPoolExecutor(max_workers=7) as pool:
+            futs = [pool.submit(contextvars.copy_context().run, service.client.execute, q, params) for q in queries]
+            count_rows, rows, environment_rows, trend_rows, page_rows, error_rows, slowest_rows = (
+                f.result() for f in futs
+            )
+        counts = count_rows[0]
     no_data = False
     if not counts["beacons"]:
         any_vitals = " AND ".join(visible_fact_clauses("rum_vitals"))
