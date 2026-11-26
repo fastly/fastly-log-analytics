@@ -325,6 +325,11 @@ export function UsageStatCards({
             ) : (
               <strong className="text-foreground">{fmtUSD(roughCostA + roughCostB)}</strong>
             )}
+            {!opsUnavailable && (
+              <span className="text-[9px] uppercase tracking-tighter text-muted-foreground">
+                {operationsSource === 'fastly' ? 'Fastly Platform (account-wide)' : 'Measured · this install'}
+              </span>
+            )}
             <span className="text-[9px] uppercase tracking-tighter text-muted-foreground">
               A: ${rateA}/1K · B: ${rateBPer10k}/10K
             </span>
@@ -382,6 +387,8 @@ export function UsageStatCards({
       roughCostB,
       errorOps,
       opsIncomplete,
+      opsUnavailable,
+      operationsSource,
       rateA,
       rateBPer10k,
       roughBandwidth,
@@ -531,6 +538,14 @@ export function UsageStatCards({
                     {storageProvenance && storageProvenance.length > 0
                       ? ` (${storageProvenance.join(', ')})`
                       : ''}.
+                  </div>
+                )}
+                {!opsUnavailable && operationsSource === 'fastly' && (
+                  <div
+                    role="status"
+                    className="text-[10px] leading-tight text-amber-700 dark:text-amber-500 mt-0.5"
+                  >
+                    Operations use Fastly Platform account-wide fallback totals.
                   </div>
                 )}
               </div>

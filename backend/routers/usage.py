@@ -1526,7 +1526,8 @@ def usage_operations(
             "note": note,
             "fos_fields_found": ["usage_log.class_a", "usage_log.class_b"],
         }
-        _USAGE_RESPONSE_MEMO.put(ops_memo_key, payload)
+        if payload.get("complete") is not False and (payload["total_class_a"] != 0 or payload["total_class_b"] != 0):
+            _USAGE_RESPONSE_MEMO.put(ops_memo_key, payload)
         return payload
 
     ops_payload = _USAGE_RESPONSE_MEMO.coalesce(f"usage_operations:{ops_memo_key}", _compute_ops)

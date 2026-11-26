@@ -1431,6 +1431,139 @@ def test_usage_operations_marks_unavailable_local_ledger_incomplete(client):
         app.dependency_overrides.pop(get_source, None)
 
 
+def test_default_metadata_retention_usage_log_days_is_two():
+    from backend.core.metadata import fos_usage, pg_schema
+
+    assert pg_schema.DEFAULT_METADATA_RETENTION["usage_log_days"] == 2
+    assert fos_usage.DEFAULT_METADATA_RETENTION["usage_log_days"] == 2
+
+
+def test_usage_operations_dense_buckets_excludes_reconciliation_and_boundary_fallback(client):
+    svc = "svc-local-ops-dense"
+    con = _meta.get_con(svc)
+    con.execute("DELETE FROM usage_log WHERE service_id = ?", (svc,))
+    con.execute("DELETE FROM usage_log_hourly_summary WHERE service_id = ?", (svc,))
+    # Start boundary hour (2026-11-15T10) exists ONLY in hourly summary (simulating raw usage_log purged)
+    con.execute(
+        "INSERT INTO usage_log_hourly_summary (service_id, hour, operation_class, operation_type, count, bytes) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (svc, "2026-11-15T10", "A", "PUT", 5, 100),
+    )
+    # Reconciliation row in hourly summary must be excluded
+    con.execute(
+        "INSERT INTO usage_log_hourly_summary (service_id, hour, operation_class, operation_type, count, bytes) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (svc, "2026-11-15T11", "A", "RECONCILE_A", 999, 0),
+    )
+    # Raw usage_log starts much later (2026-11-23T23), plus hourly summary on 2026-11-22T12 and reconciliation rows
+    con.execute(
+        "INSERT INTO usage_log_hourly_summary (service_id, hour, operation_class, operation_type, count, bytes) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (svc, "2026-11-22T12", "B", "GET", 1, 50),
+    )
+    con.execute(
+        "INSERT INTO usage_log (timestamp, service_id, operation_class, operation_type, function_name, count, bytes) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("2026-11-23T23:15:00.000Z", svc, "B", "GET", "fos.get", 2, 100),
+    )
+    con.execute(
+        "INSERT INTO usage_log (timestamp, service_id, operation_class, operation_type, function_name, count, bytes) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("2026-11-23T23:30:00.000Z", svc, "A", "RECONCILE_A", "fastly.reconciliation", 777, 0),
+    )
+    con.commit()
+    app.dependency_overrides[get_source] = lambda: {"name": svc, "service_id": svc, "logging_service_id": svc}
+    try:
+        # 1) Hourly dense buckets + boundary-hour fallback for 2026-11-15T10:15..12:30 + reconciliation excluded
+        r_hour = client.get(
+            "/api/usage/operations",
+            params={"start": "2026-11-15T10:15:00Z", "end": "2026-11-15T12:30:00Z", "by": "hour"},
+        )
+        assert r_hour.status_code == 200
+        h_body = r_hour.json()
+        assert h_body["total_class_a"] == 5
+        assert h_body["total_class_b"] == 0
+        assert h_body["data"] == [
+            {"date": "2026-11-15T10:00", "class_a": 5, "class_b": 0},
+            {"date": "2026-11-15T11:00", "class_a": 0, "class_b": 0},
+            {"date": "2026-11-15T12:00", "class_a": 0, "class_b": 0},
+        ]
+
+        # 2) Daily dense buckets across gap + raw reconciliation row excluded
+        r_day = client.get(
+            "/api/usage/operations",
+            params={"start": "2026-11-21T00:00:00Z", "end": "2026-11-23T23:59:59Z", "by": "day"},
+        )
+        assert r_day.status_code == 200
+        d_body = r_day.json()
+        assert d_body["total_class_a"] == 0
+        assert d_body["total_class_b"] == 3
+        assert d_body["data"] == [
+            {"date": "2026-11-21", "class_a": 0, "class_b": 0},
+            {"date": "2026-11-22", "class_a": 0, "class_b": 1},
+            {"date": "2026-11-23", "class_a": 0, "class_b": 2},
+        ]
+    finally:
+        app.dependency_overrides.pop(get_source, None)
+        con.execute("DELETE FROM usage_log WHERE service_id = ?", (svc,))
+        con.execute("DELETE FROM usage_log_hourly_summary WHERE service_id = ?", (svc,))
+        con.commit()
+
+
+@pytest.mark.no_postgres
+def test_usage_operations_does_not_cache_incomplete_or_zero_totals(client):
+    from backend.routers import usage as usage_router
+
+    svc = "svc-local-ops-nocache"
+    app.dependency_overrides[get_source] = lambda: {"name": svc, "service_id": svc, "logging_service_id": svc}
+    calls = 0
+
+    def fake_buckets(_sid, _start, _end, _by):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("transient db error")
+        if calls == 2:
+            return {
+                "data": [{"date": "2026-11-22T12:00", "class_a": 0, "class_b": 0}],
+                "total_class_a": 0,
+                "total_class_b": 0,
+            }
+        return {
+            "data": [{"date": "2026-11-22T12:00", "class_a": 4, "class_b": 1}],
+            "total_class_a": 4,
+            "total_class_b": 1,
+        }
+
+    try:
+        usage_router._USAGE_RESPONSE_MEMO.cache.clear()
+        with patch("backend.core.metadata.fos_usage.get_usage_operation_buckets", side_effect=fake_buckets):
+            r1 = client.get(
+                "/api/usage/operations",
+                params={"start": "2026-11-22T12:00:00Z", "end": "2026-11-22T12:59:59Z", "by": "hour"},
+            )
+            r2 = client.get(
+                "/api/usage/operations",
+                params={"start": "2026-11-22T12:00:00Z", "end": "2026-11-22T12:59:59Z", "by": "hour"},
+            )
+            r3 = client.get(
+                "/api/usage/operations",
+                params={"start": "2026-11-22T12:00:00Z", "end": "2026-11-22T12:59:59Z", "by": "hour"},
+            )
+            r4 = client.get(
+                "/api/usage/operations",
+                params={"start": "2026-11-22T12:00:00Z", "end": "2026-11-22T12:59:59Z", "by": "hour"},
+            )
+        assert r1.json()["complete"] is False
+        assert r2.json()["complete"] is True and r2.json()["total_class_a"] == 0
+        assert r3.json()["total_class_a"] == 4 and r3.json()["_is_cached"] is False
+        assert r4.json()["total_class_a"] == 4 and r4.json()["_is_cached"] is True
+        assert calls == 3
+    finally:
+        app.dependency_overrides.pop(get_source, None)
+        usage_router._USAGE_RESPONSE_MEMO.cache.clear()
+
+
 def test_usage_rum_breakdown_counts_high_scale_beacons_in_the_exact_window(client):
     """High-scale ingest never writes ``ingested_files``; the card must read the ClickHouse RUM facts."""
     from backend.high_scale.archive import ServingWatermark

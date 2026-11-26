@@ -330,16 +330,48 @@ export function UsageChartsGrid({
   }, [logActivity?.data, accent])
 
   // ── Cost chart ──────────────────────────────────────────────────────────────
-  const costOpsY = opsClassA.map(
-    (a: number, i: number) => ((a ?? 0) / 1000) * rateA + ((opsClassB[i] ?? 0) / 1000) * rateB,
-  )
-  const bwByTime: Record<string, number> = {}
-  bwTimes.forEach((t: string, i: number) => {
-    bwByTime[t] = (bwBytes[i] / 1e9) * rateEgress
+  const isDailyInterval = effectiveInterval === '1 day'
+  const canonicalBucket = (raw: string): { key: string; sortMs: number } => {
+    const trimmed = raw.trim()
+    const iso = /^\d{4}-\d{2}-\d{2}$/.test(trimmed)
+      ? `${trimmed}T00:00:00Z`
+      : /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(trimmed)
+        ? `${trimmed}Z`
+        : trimmed
+    const ms = Date.parse(iso)
+    if (!Number.isFinite(ms)) return { key: trimmed, sortMs: Number.POSITIVE_INFINITY }
+    const utc = new Date(ms).toISOString()
+    const key =
+      isDailyInterval && utc.endsWith('T00:00:00.000Z')
+        ? utc.slice(0, 10)
+        : `${utc.slice(0, 13)}:00`
+    return { key, sortMs: ms }
+  }
+
+  const opsIncomplete = ops?.complete === false
+  const costBucketMap = new Map<string, { sortMs: number; opsUsd: number; egressUsd: number }>()
+  if (!opsIncomplete) {
+    opsDates.forEach((raw: string, i: number) => {
+      const { key, sortMs } = canonicalBucket(raw)
+      const entry = costBucketMap.get(key) ?? { sortMs, opsUsd: 0, egressUsd: 0 }
+      entry.opsUsd += ((opsClassA[i] ?? 0) / 1000) * rateA + ((opsClassB[i] ?? 0) / 1000) * rateB
+      costBucketMap.set(key, entry)
+    })
+  }
+  bwTimes.forEach((raw: string, i: number) => {
+    const { key, sortMs } = canonicalBucket(raw)
+    const entry = costBucketMap.get(key) ?? { sortMs, opsUsd: 0, egressUsd: 0 }
+    entry.egressUsd += (bwBytes[i] / 1e9) * rateEgress
+    costBucketMap.set(key, entry)
   })
-  const costEgressY = opsDates.map((t: string) => bwByTime[t] ?? 0)
-  const maxStackedCost = opsDates.reduce(
-    (max: number, _: string, i: number) => Math.max(max, (costOpsY[i] ?? 0) + (costEgressY[i] ?? 0)),
+  const costEntries = Array.from(costBucketMap.entries()).sort((a, b) =>
+    a[1].sortMs !== b[1].sortMs ? a[1].sortMs - b[1].sortMs : a[0].localeCompare(b[0]),
+  )
+  const costDates = costEntries.map(([key]) => key)
+  const costOpsY = costEntries.map(([, entry]) => (opsIncomplete ? 0 : entry.opsUsd))
+  const costEgressY = costEntries.map(([, entry]) => entry.egressUsd)
+  const maxStackedCost = costEntries.reduce(
+    (max: number, [, entry], i: number) => Math.max(max, (costOpsY[i] ?? 0) + entry.egressUsd),
     0,
   )
   const costTickFormat = costAxisTickFormat(maxStackedCost)
@@ -349,7 +381,7 @@ export function UsageChartsGrid({
       {
         type: 'bar',
         name: 'Operations',
-        x: opsDates,
+        x: costDates,
         y: costOpsY,
         marker: { color: accent },
         hovertemplate: `$%{y:${costTickFormat}}<extra></extra>`,
@@ -357,13 +389,13 @@ export function UsageChartsGrid({
       {
         type: 'bar',
         name: 'CDN Egress',
-        x: opsDates,
+        x: costDates,
         y: costEgressY,
         marker: { color: CHART_COLORS.warning },
         hovertemplate: `$%{y:${costTickFormat}}<extra></extra>`,
       },
     ],
-    [opsDates, costOpsY, costEgressY, accent, costTickFormat],
+    [costDates, costOpsY, costEgressY, accent, costTickFormat],
   )
   const costLayout = useMemo(
     () => ({
@@ -458,7 +490,13 @@ export function UsageChartsGrid({
     >
       <AnalyticsCard
         title="FOS Operations"
-        description="Class A and Class B operations from Fastly Platform Metrics"
+        description={
+          ops?.complete === false
+            ? 'Local Object Storage operation telemetry is unavailable for this period'
+            : ops?.source === 'fastly'
+              ? 'Fallback: account-wide Class A and Class B operations from Fastly Platform Metrics'
+              : 'Service-local Class A and Class B Object Storage operations'
+        }
         headerAction={fosOpsIntervalButtons}
         isLoading={loadingOps}
         isFetching={fetchingOps}
@@ -492,7 +530,7 @@ export function UsageChartsGrid({
         isLoading={loadingOps || loadingBw}
         isFetching={fetchingOps || fetchingBw}
         error={(errorOps ?? errorBw) as AnalyticsCardError | null}
-        isEmpty={opsDates.length === 0}
+        isEmpty={costDates.length === 0}
         className="h-[360px]"
         contentClassName="p-2"
       >

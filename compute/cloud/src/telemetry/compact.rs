@@ -30,6 +30,8 @@ const LOOKBACK_DAYS: i64 = 30;
 /// Compacted days stay under review this long, so a window flushed late is still picked up.
 const REVISIT_DAYS: i64 = 2;
 const REVISIT_INTERVAL_S: i64 = 6 * 3600;
+const OPEN_DAY_INTERVAL_S: i64 = 15 * 60;
+const OPEN_DAY_WINDOW_AGE_S: u64 = 5 * 60;
 /// Day LIST, queue read, two source GETs, PUT and queue insert.
 const MIN_CHUNK_CALLS: u32 = 6;
 const DRAIN_CALLS: u32 = 3;
@@ -519,6 +521,8 @@ fn compact_day<R: Runtime>(
     cdn_key: &str,
     kind: LogKind,
     day: i64,
+    is_open_day: bool,
+    now: i64,
     state: &mut State,
     report: &mut CompactReport,
     room: &dyn Fn(u32) -> bool,
@@ -573,11 +577,30 @@ fn compact_day<R: Runtime>(
                 state.pending.insert(id.clone());
                 return Ok(None);
             }
-            let uncovered: Vec<Window> = analysis
+            let mut uncovered: Vec<Window> = analysis
                 .uncovered
                 .into_iter()
                 .filter(|w| !queue.keys.contains(&w.key))
                 .collect();
+            if is_open_day {
+                let cutoff = now.max(0) as u64;
+                uncovered.retain(|w| {
+                    let start_s = if w.start < 1_000_000_000 && cutoff >= 1_000_000_000 {
+                        w.start.saturating_mul(60)
+                    } else {
+                        w.start
+                    };
+                    start_s.saturating_add(OPEN_DAY_WINDOW_AGE_S) <= cutoff
+                });
+                let total_bytes: u64 = uncovered.iter().map(|w| w.size).sum();
+                let total_rows: u64 = uncovered.iter().map(|w| w.rows).sum();
+                if uncovered.len() < CHUNK_SOURCES
+                    && total_bytes < MAX_CHUNK_BYTES
+                    && total_rows < MAX_CHUNK_ROWS
+                {
+                    return Ok(Some(DayOutcome::Done));
+                }
+            }
             if uncovered.len() < 2 {
                 return Ok(Some(DayOutcome::Done));
             }
@@ -771,18 +794,23 @@ pub fn log_compact<R: Runtime>(
     if let Some(usage) = runtime.usage_agg() {
         usage.set_caller("cron:log_compact");
     }
-    'kinds: for kind in LogKind::ALL {
+    let mut budget_hit = false;
+    let lookback_for = |kind: LogKind| -> i64 {
         let days = settings
             .retention_days_by_kind
             .get(kind.as_str())
             .copied()
             .unwrap_or_else(|| kind.default_retention_days());
-        let lookback = if days == 0 {
+        if days == 0 {
             LOOKBACK_DAYS
         } else {
             i64::from(days).min(LOOKBACK_DAYS)
-        };
-        let closed_last = (now - CLOSE_GRACE_S).div_euclid(DAY_S) - 1;
+        }
+    };
+    let closed_last = (now - CLOSE_GRACE_S).div_euclid(DAY_S) - 1;
+    // Pass 1: closed days (`<= closed_last`) take priority across all kinds before open-day work.
+    'closed: for kind in LogKind::ALL {
+        let lookback = lookback_for(kind);
         let first = state
             .done
             .get(kind.as_str())
@@ -809,6 +837,8 @@ pub fn log_compact<R: Runtime>(
                 cdn_key,
                 kind,
                 day,
+                false,
+                now,
                 &mut state,
                 &mut report,
                 &room,
@@ -821,12 +851,55 @@ pub fn log_compact<R: Runtime>(
                 }
                 DayOutcome::Budget => {
                     report.more_pending = true;
-                    break 'kinds;
+                    budget_hit = true;
+                    break 'closed;
                 }
                 DayOutcome::Blocked(error) => {
                     report.errors.push(error);
                     report.more_pending = true;
-                    continue 'kinds;
+                    continue 'closed;
+                }
+            }
+        }
+    }
+    // Pass 2: open days (`> closed_last`) compact full batches (`>= CHUNK_SOURCES`) without advancing `done`.
+    if !budget_hit {
+        'open: for kind in LogKind::ALL {
+            let lookback = lookback_for(kind);
+            let open_days = (closed_last + 1).max(today - lookback)..=today;
+            for day in open_days {
+                let id = format!("{}:{}", kind.as_str(), day_label(day));
+                if state
+                    .checked
+                    .get(&id)
+                    .is_some_and(|at| now - at < OPEN_DAY_INTERVAL_S)
+                {
+                    continue;
+                }
+                match compact_day(
+                    store,
+                    cdn_key,
+                    kind,
+                    day,
+                    true,
+                    now,
+                    &mut state,
+                    &mut report,
+                    &room,
+                    &stop,
+                ) {
+                    DayOutcome::Done => {
+                        state.checked.insert(id, now);
+                    }
+                    DayOutcome::Budget => {
+                        report.more_pending = true;
+                        break 'open;
+                    }
+                    DayOutcome::Blocked(error) => {
+                        report.errors.push(error);
+                        report.more_pending = true;
+                        continue 'open;
+                    }
                 }
             }
         }
@@ -984,5 +1057,330 @@ mod tests {
         assert!(names_source(&key, &w1));
         assert!(!names_source(&key, &w2));
         assert!(!names_source(&w1, &w1));
+    }
+
+    mod open_day_tests {
+        use super::*;
+        use crate::{
+            admin::{FosRequest, FosResponse, Record, Service},
+            setup::SetupStores,
+            shell::{CoreCacheEntry, CoreCacheError, KvPage, Runtime},
+        };
+        use std::{
+            cell::{Cell, RefCell},
+            collections::BTreeMap,
+            time::Instant,
+        };
+
+        struct OpenDayRt {
+            now: Cell<u64>,
+            remaining: Cell<u32>,
+            kv: RefCell<BTreeMap<String, (u64, Value)>>,
+            bucket: RefCell<BTreeMap<String, Vec<u8>>>,
+        }
+
+        impl OpenDayRt {
+            fn new(now: u64) -> Self {
+                Self {
+                    now: Cell::new(now),
+                    remaining: Cell::new(200),
+                    kv: RefCell::new(BTreeMap::new()),
+                    bucket: RefCell::new(BTreeMap::new()),
+                }
+            }
+        }
+
+        impl SetupStores for OpenDayRt {
+            fn config_present(&self, _: &str) -> Result<bool, String> {
+                Ok(true)
+            }
+            fn secret_present(&self, _: &str) -> Result<bool, String> {
+                Ok(true)
+            }
+            fn state_linked(&self) -> Result<bool, String> {
+                Ok(true)
+            }
+        }
+
+        impl Runtime for OpenDayRt {
+            fn config(&self, _: &str) -> Result<Option<String>, String> {
+                Ok(None)
+            }
+            fn secret(&self, _: &str) -> Result<Option<String>, String> {
+                Ok(Some("tok".into()))
+            }
+            fn random(&self) -> Result<[u8; 32], String> {
+                Ok([0; 32])
+            }
+            fn now(&self) -> u64 {
+                self.now.get()
+            }
+            fn checks(&self, _: bool) -> Result<Value, String> {
+                Ok(json!({}))
+            }
+            fn versions(&self) -> Result<Value, String> {
+                Ok(json!({}))
+            }
+            fn compute_service_id(&self) -> Option<String> {
+                None
+            }
+            fn compute_service_version(&self) -> Option<String> {
+                None
+            }
+            fn admin_remaining_calls(&self) -> u32 {
+                self.remaining.get()
+            }
+            fn admin_get(&self, key: &str) -> Result<Option<Record>, String> {
+                self.remaining.set(self.remaining.get().saturating_sub(1));
+                Ok(self.kv.borrow().get(key).map(|(g, v)| Record {
+                    generation: g.to_string(),
+                    value: v.clone(),
+                }))
+            }
+            fn admin_cas(
+                &self,
+                key: &str,
+                generation: Option<&str>,
+                value: &Value,
+            ) -> Result<bool, String> {
+                self.remaining.set(self.remaining.get().saturating_sub(1));
+                let mut kv = self.kv.borrow_mut();
+                let current = kv.get(key).map(|(g, _)| g.to_string());
+                if current.as_deref() != generation {
+                    return Ok(false);
+                }
+                let next = kv.get(key).map_or(1, |(g, _)| g + 1);
+                kv.insert(key.into(), (next, value.clone()));
+                Ok(true)
+            }
+            fn kv_delete(&self, key: &str) -> Result<(), String> {
+                self.remaining.set(self.remaining.get().saturating_sub(1));
+                self.kv.borrow_mut().remove(key);
+                Ok(())
+            }
+            fn core_cache_replace(
+                &self,
+                _: &str,
+                _: &[&str],
+                _: std::time::Duration,
+                _: &dyn Fn(Option<CoreCacheEntry>) -> CoreCacheEntry,
+            ) -> Result<(), CoreCacheError> {
+                unreachable!()
+            }
+            fn core_cache_lookup(&self, _: &str) -> Result<Option<CoreCacheEntry>, CoreCacheError> {
+                Ok(None)
+            }
+            fn kv_list(&self, _: &str, _: Option<&str>, _: u32) -> Result<KvPage, String> {
+                Ok(KvPage::default())
+            }
+            fn admin_fos(&self, request: FosRequest<'_>) -> Result<FosResponse, String> {
+                self.remaining.set(self.remaining.get().saturating_sub(1));
+                let ok = |body: Vec<u8>| {
+                    Ok(FosResponse {
+                        status: 200,
+                        body,
+                        cdn_cache: None,
+                        retry_after: None,
+                    })
+                };
+                if request.method == "GET" && request.query.contains("list-type=2") {
+                    let prefix = url::form_urlencoded::parse(request.query.as_bytes())
+                        .find(|(k, _)| k == "prefix")
+                        .map(|(_, v)| v.into_owned())
+                        .unwrap_or_default();
+                    let mut xml =
+                        String::from("<ListBucketResult><IsTruncated>false</IsTruncated>");
+                    for (k, v) in self.bucket.borrow().iter() {
+                        if k.starts_with(&prefix) {
+                            xml.push_str(&format!(
+                                "<Contents><Key>{k}</Key><Size>{}</Size></Contents>",
+                                v.len()
+                            ));
+                        }
+                    }
+                    xml.push_str("</ListBucketResult>");
+                    return ok(xml.into_bytes());
+                }
+                if request.method == "PUT" {
+                    self.bucket
+                        .borrow_mut()
+                        .insert(request.key.to_owned(), request.body);
+                    return ok(Vec::new());
+                }
+                if request.method == "POST" && request.query == "delete" {
+                    let xml = String::from_utf8(request.body).unwrap();
+                    let mut out = String::from("<DeleteResult>");
+                    for part in xml.split("<Key>").skip(1) {
+                        let key = part.split("</Key>").next().unwrap();
+                        self.bucket.borrow_mut().remove(key);
+                        out.push_str(&format!("<Deleted><Key>{key}</Key></Deleted>"));
+                    }
+                    out.push_str("</DeleteResult>");
+                    return ok(out.into_bytes());
+                }
+                Err(format!(
+                    "unexpected fos {} {}",
+                    request.method, request.query
+                ))
+            }
+            fn admin_cdn_get(
+                &self,
+                _: &str,
+                key: &str,
+                _: &str,
+                _: usize,
+                _: std::time::Duration,
+            ) -> Result<FosResponse, String> {
+                self.remaining.set(self.remaining.get().saturating_sub(1));
+                Ok(match self.bucket.borrow().get(key) {
+                    Some(body) => FosResponse {
+                        status: 200,
+                        body: body.clone(),
+                        cdn_cache: None,
+                        retry_after: None,
+                    },
+                    None => FosResponse {
+                        status: 404,
+                        body: Vec::new(),
+                        cdn_cache: None,
+                        retry_after: None,
+                    },
+                })
+            }
+        }
+
+        fn test_service() -> Service {
+            serde_json::from_value(json!({
+                "service_id": "svc", "name": "n", "status": "active", "created_at": 0, "updated_at": 0,
+                "config_version": 1, "logging_enabled": true, "logging_endpoint_name": "e",
+                "log_period": 60, "sample_rate": 1, "edge_only": false, "custom_condition": "",
+                "fos_bucket": "b", "fos_prefix": "", "fos_region": "us-east-1", "fos_endpoint": "x",
+                "log_fields": [], "field_limits": {}, "fastly_token_ref": "t",
+                "fos_access_key_ref": "ak", "fos_secret_key_ref": "sk", "owner": "o",
+                "bucket_adopted": false, "bucket_checked": false, "last_activated_version": null,
+                "last_reconcile": null, "pending_job_id": null,
+                "compaction": {"mode": "size_target", "size_target_mb": 64},
+                "rum": {"enabled": false}
+            }))
+            .unwrap()
+        }
+
+        fn seed_state_checked_other_kinds(rt: &OpenDayRt, today: i64, now: u64) {
+            let mut done = serde_json::Map::new();
+            let mut checked = serde_json::Map::new();
+            for k in LogKind::ALL {
+                if k != LogKind::ApiTelemetry {
+                    done.insert(k.as_str().into(), json!(today - 1));
+                    for d in (today - 2)..=today {
+                        checked.insert(format!("{}:{}", k.as_str(), day_label(d)), json!(now));
+                    }
+                } else {
+                    done.insert(k.as_str().into(), json!(today - 1));
+                }
+            }
+            rt.kv.borrow_mut().insert(
+                STATE_KEY.into(),
+                (1, json!({"done": done, "checked": checked})),
+            );
+        }
+
+        fn put_api_window(rt: &OpenDayRt, day: i64, start_min: u64, tag_id: usize) -> String {
+            let folder = day_folder_of(day);
+            let ts_ms = (start_min * 60_000) as i64;
+            let key = format!(
+                "processed/ops/api_telemetry/{folder}hour=00/window={start_min}-{}-t{tag_id:03}-n1.parquet",
+                start_min + 1
+            );
+            let row = json!({
+                "timestamp": ts_ms,
+                "event_id": format!("ev-{tag_id}"),
+                "service_id": "svc",
+                "severity": "info",
+                "method": "GET",
+                "status_code": 200
+            });
+            let bytes = schema::to_parquet(LogKind::ApiTelemetry, &[row]).unwrap();
+            rt.bucket.borrow_mut().insert(key.clone(), bytes);
+            key
+        }
+
+        #[test]
+        fn open_day_skips_under_24_old_windows_and_young_windows() {
+            let day = 20_000i64;
+            let now = (day * DAY_S + 8 * 3600) as u64;
+            let rt = OpenDayRt::new(now);
+            seed_state_checked_other_kinds(&rt, day, now);
+            let base_min = (day * DAY_S) as u64 / 60;
+            for i in 0..23 {
+                put_api_window(&rt, day, base_min + i * 2, i as usize);
+            }
+            // Add 5 young windows (< 5m old) so total >= 24, but old windows == 23 < 24.
+            let recent_min = now / 60 - 2;
+            for j in 0..5 {
+                put_api_window(&rt, day, recent_min, 100 + j);
+            }
+
+            let svc = test_service();
+            let store = Store {
+                runtime: &rt,
+                service: &svc,
+                access_key: "ak".into(),
+                secret_key: "sk".into(),
+                started: Instant::now(),
+                vcpu_start: 0,
+            };
+            let report = log_compact(&store, "ck", &OperationalLogSettings::default(), 3).unwrap();
+            assert_eq!(report.chunks, 0);
+            assert!(rt.bucket.borrow().keys().all(|k| !k.contains("/compact=")));
+            let state: State = serde_json::from_value(rt.kv.borrow()[STATE_KEY].1.clone()).unwrap();
+            assert_eq!(state.done.get("api_telemetry"), Some(&(day - 1)));
+        }
+
+        #[test]
+        fn open_day_compacts_24_old_windows_without_advancing_done_and_respects_cooldown() {
+            let day = 20_000i64;
+            let now = (day * DAY_S + 8 * 3600) as u64;
+            let rt = OpenDayRt::new(now);
+            seed_state_checked_other_kinds(&rt, day, now);
+            let base_min = (day * DAY_S) as u64 / 60;
+            // 25 old windows (>5m old) and 2 young windows (<5m old)
+            for i in 0..25 {
+                put_api_window(&rt, day, base_min + i * 2, i as usize);
+            }
+            let recent_min = now / 60 - 2;
+            for j in 0..2 {
+                put_api_window(&rt, day, recent_min, 100 + j);
+            }
+
+            let svc = test_service();
+            let store = Store {
+                runtime: &rt,
+                service: &svc,
+                access_key: "ak".into(),
+                secret_key: "sk".into(),
+                started: Instant::now(),
+                vcpu_start: 0,
+            };
+            let report = log_compact(&store, "ck", &OperationalLogSettings::default(), 3).unwrap();
+            assert_eq!(report.chunks, 1);
+            assert_eq!(report.sources, 24);
+            let state: State = serde_json::from_value(rt.kv.borrow()[STATE_KEY].1.clone()).unwrap();
+            assert_eq!(
+                state.done.get("api_telemetry"),
+                Some(&(day - 1)),
+                "open-day compaction must not advance state.done"
+            );
+
+            // Young windows + 1 leftover old window remain; immediate re-run hits 15m cooldown.
+            rt.remaining.set(200);
+            let calls_before = rt.remaining.get();
+            let second = log_compact(&store, "ck", &OperationalLogSettings::default(), 3).unwrap();
+            assert_eq!(second.chunks, 0);
+            assert_eq!(
+                calls_before - rt.remaining.get(),
+                1,
+                "cooldown skips open-day LIST within 15 minutes (only reads state)"
+            );
+        }
     }
 }

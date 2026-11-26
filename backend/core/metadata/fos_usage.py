@@ -784,15 +784,22 @@ def get_usage_operation_buckets(
     """Aggregate Class A/B FOS operation counts into UTC hour or day buckets from the local usage ledger.
 
     Uses ``usage_log_hourly_summary`` for fully contained interior hours and raw ``usage_log``
-    for the start and end boundary hours.
+    for the start and end boundary hours, falling back to ``usage_log_hourly_summary`` when
+    boundary hours fall before raw ``usage_log`` retention.
     """
     if by not in ("hour", "day"):
         raise ValueError(f"unsupported bucket granularity: {by}")
 
     start_bound = start[:-1] + ".000Z" if start.endswith("Z") and "." not in start else start
+    end_bound = end[:-1] + ".000Z" if end.endswith("Z") and "." not in end else end
     start_hour = (start_bound or "")[:13]
     end_hour = (end or "")[:13]
     bucket_len = 13 if by == "hour" else 10
+    raw_exclude = (
+        "AND COALESCE(function_name, '') <> 'fastly.reconciliation' "
+        "AND substr(COALESCE(operation_type, ''), 1, 10) <> 'RECONCILE_'"
+    )
+    summary_exclude = "AND substr(operation_type, 1, 10) <> 'RECONCILE_'"
 
     def _next_hour_start(hour_prefix: str) -> str:
         dt = (
@@ -807,6 +814,7 @@ def get_usage_operation_buckets(
     def _hour_start(hour_prefix: str) -> str:
         return hour_prefix + ":00:00.000Z"
 
+    fallback_rows: list[Any] = []
     con = open_readonly(service_id)
     try:
         if start_hour == end_hour:
@@ -817,12 +825,13 @@ def get_usage_operation_buckets(
                        SUM(count) AS c
                 FROM usage_log
                 WHERE service_id = ? AND timestamp >= ? AND timestamp <= ?
-                  AND operation_class IN ('A', 'B')
+                  AND operation_class IN ('A', 'B') {raw_exclude}
                 GROUP BY bucket, operation_class
                 ORDER BY bucket
                 """,
                 [service_id, start_bound, end],
             ).fetchall()
+            candidate_hours = [start_hour] if start_hour else []
         elif _is_hour_start(start_bound, start_hour):
             end_hour_start = _hour_start(end_hour)
             rows = con.execute(
@@ -834,14 +843,14 @@ def get_usage_operation_buckets(
                            count AS c
                     FROM usage_log_hourly_summary
                     WHERE service_id = ? AND hour >= ? AND hour < ?
-                      AND operation_class IN ('A', 'B')
+                      AND operation_class IN ('A', 'B') {summary_exclude}
                     UNION ALL
                     SELECT substr(timestamp, 1, {bucket_len}) AS bucket,
                            operation_class,
                            count AS c
                     FROM usage_log
                     WHERE service_id = ? AND timestamp >= ? AND timestamp <= ?
-                      AND operation_class IN ('A', 'B')
+                      AND operation_class IN ('A', 'B') {raw_exclude}
                 ) AS combined
                 GROUP BY bucket, operation_class
                 ORDER BY bucket
@@ -855,6 +864,7 @@ def get_usage_operation_buckets(
                     end,
                 ],
             ).fetchall()
+            candidate_hours = [end_hour] if end_hour and not _is_hour_start(end_bound, end_hour) else []
         else:
             start_hour_end = _next_hour_start(start_hour)
             end_hour_start = _hour_start(end_hour)
@@ -867,21 +877,21 @@ def get_usage_operation_buckets(
                            count AS c
                     FROM usage_log_hourly_summary
                     WHERE service_id = ? AND hour > ? AND hour < ?
-                      AND operation_class IN ('A', 'B')
+                      AND operation_class IN ('A', 'B') {summary_exclude}
                     UNION ALL
                     SELECT substr(timestamp, 1, {bucket_len}) AS bucket,
                            operation_class,
                            count AS c
                     FROM usage_log
                     WHERE service_id = ? AND timestamp >= ? AND timestamp < ?
-                      AND operation_class IN ('A', 'B')
+                      AND operation_class IN ('A', 'B') {raw_exclude}
                     UNION ALL
                     SELECT substr(timestamp, 1, {bucket_len}) AS bucket,
                            operation_class,
                            count AS c
                     FROM usage_log
                     WHERE service_id = ? AND timestamp >= ? AND timestamp <= ?
-                      AND operation_class IN ('A', 'B')
+                      AND operation_class IN ('A', 'B') {raw_exclude}
                 ) AS combined
                 GROUP BY bucket, operation_class
                 ORDER BY bucket
@@ -898,6 +908,38 @@ def get_usage_operation_buckets(
                     end,
                 ],
             ).fetchall()
+            candidate_hours = [
+                h for h in (start_hour, end_hour if not _is_hour_start(end_bound, end_hour) else "") if h
+            ]
+
+        if candidate_hours:
+            min_rows = con.execute(
+                f"""
+                SELECT MIN(timestamp)
+                FROM usage_log
+                WHERE service_id = ? AND operation_class IN ('A', 'B') {raw_exclude}
+                """,
+                [service_id],
+            ).fetchall()
+            min_ts = min_rows[0][0] if min_rows and min_rows[0] and min_rows[0][0] is not None else None
+            fallback_hours = [
+                h for h in dict.fromkeys(candidate_hours) if min_ts is None or _next_hour_start(h) <= str(min_ts)
+            ]
+            if fallback_hours:
+                hour_preds = " OR ".join("hour = ?" for _ in fallback_hours)
+                fallback_rows = con.execute(
+                    f"""
+                    SELECT substr(hour, 1, {bucket_len}) AS bucket,
+                           operation_class,
+                           SUM(count) AS c
+                    FROM usage_log_hourly_summary
+                    WHERE service_id = ? AND ({hour_preds})
+                      AND operation_class IN ('A', 'B') {summary_exclude}
+                    GROUP BY bucket, operation_class
+                    ORDER BY bucket
+                    """,
+                    [service_id, *fallback_hours],
+                ).fetchall()
     finally:
         try:
             con.close()
@@ -905,7 +947,7 @@ def get_usage_operation_buckets(
             logger.debug("usage_log: failed to close readonly connection", exc_info=True)
 
     agg: dict[str, dict[str, int]] = {}
-    for bucket_raw, op_class, count_val in rows:
+    for bucket_raw, op_class, count_val in [*rows, *fallback_rows]:
         bucket_str = str(bucket_raw)
         label = f"{bucket_str}:00" if by == "hour" else bucket_str
         entry = agg.setdefault(label, {"class_a": 0, "class_b": 0})
@@ -914,6 +956,23 @@ def get_usage_operation_buckets(
             entry["class_a"] += cnt
         elif op_class == "B":
             entry["class_b"] += cnt
+
+    start_dt = parse_iso_utc(start)
+    end_dt = parse_iso_utc(end)
+    if start_dt is not None and end_dt is not None and start_dt <= end_dt:
+        if by == "hour":
+            cur = start_dt.replace(minute=0, second=0, microsecond=0)
+            end_bucket = end_dt.replace(minute=0, second=0, microsecond=0)
+            step = timedelta(hours=1)
+            fmt = "%Y-%m-%dT%H:00"
+        else:
+            cur = start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+            end_bucket = end_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+            step = timedelta(days=1)
+            fmt = "%Y-%m-%d"
+        while cur <= end_bucket:
+            agg.setdefault(cur.strftime(fmt), {"class_a": 0, "class_b": 0})
+            cur += step
 
     points = [{"date": d, **v} for d, v in sorted(agg.items())]
     return {
@@ -1152,7 +1211,7 @@ def iter_usage_logs_chunks(
 # hour-dirs older than this window. Default 90d gives broad dashboard
 # query coverage while bounding disk; set to 0 to keep all history.
 DEFAULT_METADATA_RETENTION = {
-    "usage_log_days": 1,
+    "usage_log_days": 2,
     "ingested_files_days": 1,
     "cron_runs_days": 7,
     "rollups_days": 90,

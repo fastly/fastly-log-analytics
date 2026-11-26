@@ -2857,12 +2857,13 @@ async function dispatchCloudRequest(
     checkUsageEpoch();
     const { input, summary } = usageRes;
     const requestedBucket = searchParams.get("by");
+    const by = requestedBucket === "hour" || requestedBucket === "day"
+      ? requestedBucket
+      : toMs - fromMs <= 2 * 86_400_000 ? "hour" : "day";
     const points = bucketUsage(input.rows, {
       from: fromMs,
       to: toMs,
-      by: requestedBucket === "hour" || requestedBucket === "day"
-        ? requestedBucket
-        : toMs - fromMs <= 2 * 86_400_000 ? "hour" : "day",
+      by,
     });
     const resolvedBilling = await costBilling;
     checkUsageEpoch();
@@ -2937,11 +2938,17 @@ async function dispatchCloudRequest(
       );
     }
     if (pathname === "/api/usage/operations") {
+      const complete = input.telemetryCoverage?.fos_usage === true;
       return jsonResponse(
         {
           source: "local",
-          complete: input.telemetryCoverage?.fos_usage === true,
+          complete,
           provenance: ["fos_usage"],
+          granularity: by,
+          note: complete
+            ? "Measured from this service's local Object Storage operation ledger."
+            : "Local Object Storage operation ledger is incomplete or disabled for this range.",
+          fos_fields_found: complete ? ["fos_usage.class_a", "fos_usage.class_b"] : [],
           total_class_a: summary.totals.classA,
           total_class_b: summary.totals.classB,
           data: points.map((p) => ({

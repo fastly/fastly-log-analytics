@@ -1108,6 +1108,9 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
         source: "local",
         complete: true,
         provenance: ["fos_usage"],
+        granularity: "hour",
+        note: "Measured from this service's local Object Storage operation ledger.",
+        fos_fields_found: ["fos_usage.class_a", "fos_usage.class_b"],
         total_class_a: 7,
         total_class_b: 0,
         data: [
@@ -1142,7 +1145,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       const params = new URLSearchParams({
         start: new Date(from).toISOString(),
         end: new Date(to).toISOString(),
-        by: "hour",
+        by: "day",
       });
 
       const response = await handleCloudAnalyticalRequest(
@@ -1153,6 +1156,9 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
         source: "local",
         complete: false,
         provenance: ["fos_usage"],
+        granularity: "day",
+        note: "Local Object Storage operation ledger is incomplete or disabled for this range.",
+        fos_fields_found: [],
         total_class_a: 0,
         total_class_b: 0,
       });

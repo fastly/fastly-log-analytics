@@ -1,13 +1,24 @@
 import { fireEvent, render, screen, within } from '@testing-library/react'
+import type { ComponentProps } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { UsageStatCards, type StorageUsageData } from '@/app/usage/_sections/UsageStatCards'
 import { costAxisTickFormat, UsageChartsGrid } from '@/app/usage/_sections/UsageChartsGrid'
 import { CostCalculator } from '@/components/CostCalculator/CostCalculator'
 import { CloudCostCalculator } from '@/components/CostCalculator/CloudCostCalculator'
 import { calculate, DEFAULTS, type CalcState } from '@/components/CostCalculator/costCalculatorModel'
+import type { PlotlyChart } from '@/components/PlotlyChart'
+
+const plotlyMock = vi.fn<(props: ComponentProps<typeof PlotlyChart>) => void>()
 
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn() }),
+}))
+
+vi.mock('@/components/PlotlyChart', () => ({
+  PlotlyChart: (props: ComponentProps<typeof PlotlyChart>) => {
+    plotlyMock(props)
+    return <div data-testid="plotly-chart" />
+  },
 }))
 
 const storage: StorageUsageData = {
@@ -291,6 +302,152 @@ describe('observed Platform usage', () => {
     const statsGrid = statsContainer.firstElementChild as HTMLElement
     expect(statsGrid.className).toContain('min-h-[420px]')
     expect(statsGrid.className).toContain('[contain-intrinsic-size:420px]')
+  })
+
+  it('shows Operations provenance label and status note when using Fastly Platform fallback', () => {
+    const { rerender } = render(
+      <UsageStatCards
+        {...statProps}
+        totalClassA={1000}
+        totalClassB={2000}
+        operationsSource="local"
+        operationsComplete={true}
+      />,
+    )
+    expect(screen.getAllByText('Measured · this install').length).toBeGreaterThanOrEqual(2)
+    expect(screen.queryByText('Fastly Platform (account-wide)')).not.toBeInTheDocument()
+
+    rerender(
+      <UsageStatCards
+        {...statProps}
+        totalClassA={1000}
+        totalClassB={2000}
+        operationsSource="fastly"
+        operationsComplete={true}
+      />,
+    )
+    expect(screen.getByText('Fastly Platform (account-wide)')).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent(/Fastly Platform/i)
+  })
+
+  it('updates FOS Operations card description by provenance and decouples Estimated Cost x-axis from ops availability', () => {
+    plotlyMock.mockClear()
+    const baseGridProps = {
+      loadingOps: false,
+      fetchingOps: false,
+      errorOps: null,
+      loadingBw: false,
+      fetchingBw: false,
+      errorBw: null,
+      logActivity: undefined,
+      loadingActivity: false,
+      fetchingActivity: false,
+      errorActivity: null,
+      rumBreakdown: undefined,
+      loadingRumBreakdown: false,
+      fetchingRumBreakdown: false,
+      errorRumBreakdown: null,
+      isRumEnabled: false,
+      isFetchingAny: false,
+      isLoadingInitial: false,
+      isDark: false,
+      rateA: 0.005,
+      rateB: 0.001,
+      rateEgress: 0.12,
+      effectiveInterval: '1 hour' as const,
+      setChartInterval: () => {},
+    }
+
+    const { rerender } = render(
+      <UsageChartsGrid
+        {...baseGridProps}
+        ops={{
+          data: [{ date: '2026-11-22T12:00', class_a: 1000, class_b: 0 }],
+          total_class_a: 1000,
+          total_class_b: 0,
+          granularity: 'hour',
+          note: '',
+          fos_fields_found: [],
+          source: 'local',
+          complete: true,
+          provenance: ['high-scale:usage_log'],
+        } as never}
+        bw={{
+          data: [
+            { time: '2026-11-22T12:00:00.000Z', bandwidth_bytes: 1_000_000_000, requests: 1 },
+            { time: '2026-11-22T13:00', bandwidth_bytes: 2_000_000_000, requests: 2 },
+          ],
+          total_bytes: 3_000_000_000,
+          total_log_bytes: 0,
+          granularity: 'hour',
+        } as never}
+      />,
+    )
+    expect(screen.getByText('Service-local Class A and Class B Object Storage operations')).toBeInTheDocument()
+    const costCall = plotlyMock.mock.calls.find(([p]) =>
+      p.data.some((t) => t.name === 'CDN Egress'),
+    )
+    expect(costCall).toBeDefined()
+    const [opsTrace, egressTrace] = costCall![0].data
+    expect(opsTrace.x).toEqual(['2026-11-22T12:00', '2026-11-22T13:00'])
+    expect(opsTrace.y).toEqual([0.005, 0])
+    expect(egressTrace.x).toEqual(['2026-11-22T12:00', '2026-11-22T13:00'])
+    expect(egressTrace.y).toEqual([0.12, 0.24])
+
+    plotlyMock.mockClear()
+    rerender(
+      <UsageChartsGrid
+        {...baseGridProps}
+        ops={{
+          data: [{ date: '2026-11-22T12:00', class_a: 1000, class_b: 0 }],
+          total_class_a: 1000,
+          total_class_b: 0,
+          granularity: 'hour',
+          note: '',
+          fos_fields_found: [],
+          source: 'fastly',
+          complete: true,
+          provenance: [],
+        } as never}
+        bw={{ data: [], total_bytes: 0, total_log_bytes: 0, granularity: 'hour' } as never}
+      />,
+    )
+    expect(
+      screen.getByText('Fallback: account-wide Class A and Class B operations from Fastly Platform Metrics'),
+    ).toBeInTheDocument()
+
+    plotlyMock.mockClear()
+    rerender(
+      <UsageChartsGrid
+        {...baseGridProps}
+        ops={{
+          data: [],
+          total_class_a: 0,
+          total_class_b: 0,
+          granularity: 'hour',
+          note: '',
+          fos_fields_found: [],
+          source: 'local',
+          complete: false,
+          provenance: [],
+        } as never}
+        bw={{
+          data: [{ time: '2026-11-22T13:00', bandwidth_bytes: 1_000_000_000, requests: 1 }],
+          total_bytes: 1_000_000_000,
+          total_log_bytes: 0,
+          granularity: 'hour',
+        } as never}
+      />,
+    )
+    expect(
+      screen.getByText('Local Object Storage operation telemetry is unavailable for this period'),
+    ).toBeInTheDocument()
+    const incompleteCostCall = plotlyMock.mock.calls.find(([p]) =>
+      p.data.some((t) => t.name === 'CDN Egress'),
+    )
+    expect(incompleteCostCall).toBeDefined()
+    expect(incompleteCostCall![0].data[0].y).toEqual([0])
+    expect(incompleteCostCall![0].data[1].y).toEqual([0.12])
   })
 })
 

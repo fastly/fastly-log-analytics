@@ -633,7 +633,7 @@ def reset_ensure_flag_for_tests() -> None:
 # ── Metadata storage stats + age-based cleanup (folded from reconciliation.py) ─
 
 DEFAULT_METADATA_RETENTION = {
-    "usage_log_days": 1,
+    "usage_log_days": 2,
     "ingested_files_days": 1,
     "cron_runs_days": 7,
     "rollups_days": 90,
