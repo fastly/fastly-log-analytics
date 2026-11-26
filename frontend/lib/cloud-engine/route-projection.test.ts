@@ -6,7 +6,7 @@ vi.mock("./active-log-fields", () => ({
   cloudActiveLogFieldIds: async () => ({ has: () => true }) as unknown as Set<string>,
 }));
 import { ALL_TABLE_FIELDS, createNodeBackend, FIELD_DUCKDB_TYPES, type DuckDBReadContext } from "./dashboard/duckdb";
-import { assetsScanColumns, handleAssetsRequest } from "./assets";
+import { ASSETS_SCAN_COLUMNS, assetsScanColumns, handleAssetsRequest } from "./assets";
 import { handleOriginRequest, originScanColumns } from "./origin";
 import { handlePerformanceRequest, performanceScanColumns } from "./performance";
 import { handleValueRequest, valueScanColumns } from "./value";
@@ -230,7 +230,8 @@ describe("Cloud route column projections", () => {
       assets({ filters: { method: { mode: "include", values: ["method-1"] } } }),
       assets({ filters: [{ column: "geo_country", operator: "!=", value: "x" }, { column: "asset_type", operator: "=", value: "Image" }] }),
     ]);
-    // The raw URL tables read only their columns; the Cloud view lists the rest as NULL.
+    // All /assets-shield endpoints share the canonical ASSETS_SCAN_COLUMNS superset so summary
+    // fallback and URL-table scans coalesce onto a single file.scopedKey and DuckDB registration.
     const tables = ["large_uncompressed_assets", "low_ttl_assets"];
     await guard([
       assets({ filters: {}, service_id: "svc", sections: tables }),
@@ -239,13 +240,14 @@ describe("Cloud route column projections", () => {
       assets({ filters: [{ column: "cache_status", operator: "=", value: "MISS" }], sections: ["large_uncompressed_assets"] }),
       assets({ filters: {}, sections: ["summary"] }),
     ], true);
-    const raw = assetsScanColumns({}, tables)!;
-    expect(raw).toEqual(expect.not.arrayContaining(["ttfb", "elapsed", "ttfb_ms", "origin_Whole_ms", "origin_time_ms"]));
-    expect(assetsScanColumns({}, ["low_ttl_assets"])).toEqual(expect.not.arrayContaining(["resp_bytes", "status"]));
-    expect(assetsScanColumns({}, ["large_uncompressed_assets"])).not.toContain("ttl");
-    expect(assetsScanColumns({}, ["nope"])).toEqual(assetsScanColumns({}));
-    expect(assetsScanColumns({}, [])).toEqual(assetsScanColumns({}));
-    expect(assetsScanColumns([{ column: "ua", operator: "=", value: "x" }])).not.toContain("ua");
+    const canonical = [...ASSETS_SCAN_COLUMNS].toSorted();
+    expect(assetsScanColumns({}, tables)?.toSorted()).toEqual(canonical);
+    expect(assetsScanColumns({}, ["summary"])?.toSorted()).toEqual(canonical);
+    expect(assetsScanColumns({}, ["low_ttl_assets"])?.toSorted()).toEqual(canonical);
+    expect(assetsScanColumns({}, ["large_uncompressed_assets"])?.toSorted()).toEqual(canonical);
+    expect(assetsScanColumns({}, ["nope"])?.toSorted()).toEqual(canonical);
+    expect(assetsScanColumns({}, [])?.toSorted()).toEqual(canonical);
+    expect(assetsScanColumns([{ column: "ua", operator: "=", value: "x" }])?.toSorted()).toEqual(canonical);
     expect(assetsScanColumns("host")).toBeNull();
     expect(assetsScanColumns([null])).toBeNull();
   });

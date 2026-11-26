@@ -511,25 +511,14 @@ export const ASSETS_SCAN_COLUMNS = [
   "time_to_first_byte_ns", "time_elapsed_usec", "elapsed", "origin_Whole_ms", "origin_time_ms",
 ] as const;
 
-// The window, service and `derived_asset_type`/`norm_url` columns every section reads, then each section's own.
-const ASSETS_BASE_COLUMNS = ["timestamp", "ts_ms", "service_id", "url", "path"] as const;
-const ENCODING_BYTES_COLUMNS = ["content_encoding", "resp_header_content_encoding", "resp_body_size", "resp_bytes"] as const;
-const ASSETS_SECTION_COLUMNS: Record<AssetsSection, readonly string[]> = {
-  summary: ASSETS_SCAN_COLUMNS.filter((column) => column !== "status" && column !== "ttl"),
-  large_uncompressed_assets: [...ENCODING_BYTES_COLUMNS, "status"],
-  low_ttl_assets: ["ttl", "cache_status", "cache"],
-};
-
 /**
- * The columns a projected /api/assets/aggregates load needs, or null when the filters can't name theirs.
- * Named `sections` read only their own columns; the Cloud view lists the rest as NULL.
+ * The columns a projected /api/assets/aggregates load needs: the canonical
+ * ASSETS_SCAN_COLUMNS superset plus any filter columns, so summary-fallback and
+ * URL-table requests coalesce onto one `file.scopedKey` and DuckDB registration.
+ * Null when the filters can't name theirs.
  */
-export function assetsScanColumns(filters: unknown, sections?: unknown): string[] | null {
-  const named = Array.isArray(sections) && sections.length &&
-    sections.every((section) => Object.hasOwn(ASSETS_SECTION_COLUMNS, section)) ? sections as AssetsSection[] : null;
-  const columns: string[] = named
-    ? [...ASSETS_BASE_COLUMNS, ...named.flatMap((section) => ASSETS_SECTION_COLUMNS[section])]
-    : [...ASSETS_SCAN_COLUMNS];
+export function assetsScanColumns(filters: unknown, _sections?: unknown): string[] | null {
+  const columns: string[] = [...ASSETS_SCAN_COLUMNS];
   if (filters == null || filters === "") return [...new Set(columns)];
   if (typeof filters !== "object") return null;
   if (!Array.isArray(filters)) return [...new Set([...columns, ...Object.keys(filters)])];

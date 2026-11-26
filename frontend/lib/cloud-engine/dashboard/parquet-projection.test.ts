@@ -328,7 +328,7 @@ describe("column-projected Parquet", () => {
   it("coalesces medium inter-chunk gaps down to TARGET_RANGES_PER_FILE to cut HTTP 206s", async () => {
     // 18 row groups where each unneeded column chunk is ~50 KiB (above baseGap, below SOFT_MERGE_MAX_GAP),
     // shaped like /assets-shield compact files: soft coalescing should merge down toward TARGET_RANGES_PER_FILE
-    // (8) rather than leaving 18 separate HTTP 206 range requests.
+    // (4) rather than leaving 18 separate HTTP 206 range requests.
     const rowGroupSize = 500;
     const rowGroups = 18;
     const count = rowGroupSize * rowGroups;
@@ -344,9 +344,31 @@ describe("column-projected Parquet", () => {
     const footer = await readParquetFooter(bytes.byteLength, ranged(bytes).fetchRange);
     expect(footer.metadata.row_groups).toHaveLength(rowGroups);
     const plan = planParquetProjection(footer, new Set(["timestamp", "status"]));
-    expect(TARGET_RANGES_PER_FILE).toBeLessThanOrEqual(8);
+    expect(TARGET_RANGES_PER_FILE).toBe(4);
     expect(plan.ranges.length).toBeLessThan(rowGroups);
-    expect(plan.ranges.length).toBeLessThanOrEqual(12);
+    expect(plan.ranges.length).toBeLessThanOrEqual(4);
+  });
+
+  it("coalesces multi-row-group compact= files down to 4 ranges within 45% of file size", async () => {
+    const rowGroupSize = 500;
+    const rowGroups = 12;
+    const count = rowGroupSize * rowGroups;
+    const bytes = parquetWriteBuffer({
+      codec: "UNCOMPRESSED",
+      rowGroupSize,
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: count }, (_, i) => new Date(1700000000000 + i * 1000)) },
+        { name: "gap", type: "STRING", data: Array.from({ length: count }, () => noise(190)) },
+        { name: "status", type: "INT32", data: Array.from({ length: count }, () => 200) },
+      ],
+    });
+    const footer = await readParquetFooter(bytes.byteLength, ranged(bytes).fetchRange);
+    expect(footer.metadata.row_groups).toHaveLength(rowGroups);
+    // Boundary compact= slice keeping 8 of 12 row groups merges 4 gaps (~36% of file) down to 4 ranges.
+    const plan = planParquetProjection(footer, new Set(["timestamp", "status"]), (rg) => rg >= 4);
+    const plannedBytes = plan.ranges.reduce((sum, r) => sum + (r.end - r.start), 0);
+    expect(plan.ranges.length).toBeLessThanOrEqual(TARGET_RANGES_PER_FILE);
+    expect(plannedBytes).toBeLessThanOrEqual(Math.floor(bytes.byteLength * 0.45));
   });
 
   it("prunes row groups using Parquet column chunk statistics for include/exclude filters", async () => {

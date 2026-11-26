@@ -9,7 +9,7 @@ import {
 } from "./dashboard/sources";
 import {
   assembleProjectedParquet, fetchProjectedRanges, filterRowGroupFilter, planParquetProjection, readParquetFooter,
-  readsWholeFirst, readWholeParquetFooter, shouldFallbackToWhole, timestampRowGroupFilter, wholeReadLimits,
+  readsWholeFirst, readWholeParquetFooter, shouldFallbackToWhole, timestampRowGroupFilter,
   type ParquetFooter, type ParquetProjection, type RowGroupFilterPredicate,
 } from "./dashboard/parquet-projection";
 import { prefersWholeForWideProjection, wholeFileIdentity } from "./dashboard/projected-read";
@@ -29,6 +29,137 @@ const RANGE_CONCURRENCY = 16;
 const source = browserSource("");
 const requestReads = new WeakMap<Request, DuckDBReadContext>();
 const activeRangeDownloads = new Set<AbortController>();
+
+type ProjectedBuild = {
+  bytes: ArrayBuffer;
+  cached: boolean;
+  downloaded?: number;
+  presentColumns?: string[];
+};
+
+type SharedFlight<T> = {
+  controller: AbortController;
+  waiters: number;
+  settled: boolean;
+  activeCanPersist: Set<() => boolean>;
+  promise: Promise<T>;
+};
+
+let rangeLoaderEpoch = 0;
+let rangeSlots = RANGE_CONCURRENCY;
+const rangeWaiting: (() => void)[] = [];
+const activeFlightControllers = new Set<AbortController>();
+const inflightFooters = new Map<string, SharedFlight<ParquetFooter>>();
+const inflightProjections = new Map<string, SharedFlight<ProjectedBuild>>();
+
+async function inRangeSlot<T>(
+  flightSignal: AbortSignal,
+  read: () => Promise<T>,
+  lane: "raw" | "large" = "raw",
+): Promise<T> {
+  flightSignal.throwIfAborted();
+  if (rangeSlots === 0) {
+    await new Promise<void>((resolve, reject) => {
+      const wake = () => {
+        flightSignal.removeEventListener("abort", onAbort);
+        resolve();
+      };
+      const onAbort = () => {
+        const idx = rangeWaiting.indexOf(wake);
+        if (idx !== -1) rangeWaiting.splice(idx, 1);
+        reject(flightSignal.reason);
+      };
+      flightSignal.addEventListener("abort", onAbort, { once: true });
+      rangeWaiting.push(wake);
+    });
+  } else {
+    rangeSlots--;
+  }
+  try {
+    return await fetchLanes.run(lane, () => {
+      flightSignal.throwIfAborted();
+      return read();
+    }, flightSignal);
+  } finally {
+    const next = rangeWaiting.shift();
+    if (next) next();
+    else rangeSlots++;
+  }
+}
+
+function runSharedFlight<T>(
+  flights: Map<string, SharedFlight<T>>,
+  key: string,
+  signal: AbortSignal,
+  canPersistWaiter: () => boolean,
+  start: (sharedSignal: AbortSignal, canPersist: () => boolean) => Promise<T>,
+): Promise<T> {
+  signal.throwIfAborted();
+  let shared = flights.get(key);
+  if (!shared || shared.settled || shared.controller.signal.aborted) {
+    const controller = new AbortController();
+    const startEpoch = rangeLoaderEpoch;
+    const activeCanPersist = new Set<() => boolean>();
+    activeFlightControllers.add(controller);
+    const created: SharedFlight<T> = {
+      controller,
+      waiters: 0,
+      settled: false,
+      activeCanPersist,
+      promise: undefined as unknown as Promise<T>,
+    };
+    const canPersist = () =>
+      !controller.signal.aborted
+      && startEpoch === rangeLoaderEpoch
+      && [...activeCanPersist].some((fn) => fn());
+    created.promise = start(controller.signal, canPersist).finally(() => {
+      created.settled = true;
+      activeFlightControllers.delete(controller);
+      if (flights.get(key) === created) flights.delete(key);
+    });
+    created.promise.catch(() => {});
+    flights.set(key, created);
+    shared = created;
+  }
+  const active = shared;
+  active.waiters += 1;
+  active.activeCanPersist.add(canPersistWaiter);
+  let left = false;
+  const leave = (abortReason?: unknown) => {
+    if (left) return;
+    left = true;
+    active.waiters -= 1;
+    active.activeCanPersist.delete(canPersistWaiter);
+    if (active.waiters === 0 && !active.settled) {
+      active.controller.abort(
+        abortReason ?? new DOMException("The operation was aborted.", "AbortError"),
+      );
+    }
+  };
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      leave(signal.reason);
+      reject(signal.reason);
+    };
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+    active.promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        leave();
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        leave();
+        reject(error);
+      },
+    );
+  });
+}
 
 export { CloudBudgetError, type CloudBudgetDetail };
 
@@ -51,10 +182,17 @@ export function cloudFileSource(serviceId?: string) {
 }
 
 export function resetRangeLoaderCache(): void {
+  rangeLoaderEpoch += 1;
   for (const downloads of activeRangeDownloads) {
     downloads.abort(new DOMException("The operation was aborted.", "AbortError"));
   }
   activeRangeDownloads.clear();
+  for (const controller of activeFlightControllers) {
+    controller.abort(new DOMException("The operation was aborted.", "AbortError"));
+  }
+  activeFlightControllers.clear();
+  inflightFooters.clear();
+  inflightProjections.clear();
   source.clearMemoryCache?.();
 }
 
@@ -218,24 +356,8 @@ export async function ensureCloudRange(
     const abortDownloads = () => downloads.abort(signal.reason);
     signal.addEventListener("abort", abortDownloads, { once: true });
     if (signal.aborted) abortDownloads();
-    let slots = RANGE_CONCURRENCY;
-    const waiting: (() => void)[] = [];
-    const inSlot = async <T>(read: () => Promise<T>, lane: "raw" | "large" = "raw") => {
-      if (slots === 0) await new Promise<void>((resolve) => waiting.push(resolve));
-      else slots--;
-      try {
-        return await fetchLanes.run(lane, () => {
-          downloads.signal.throwIfAborted();
-          return read();
-        }, downloads.signal);
-      } finally {
-        const next = waiting.shift();
-        if (next) next();
-        else slots++;
-      }
-    };
-    const fetchRange = (file: typeof files[number], start: number, end: number) =>
-      inSlot(() => fileSource.fetchRange(file, start, end, downloads.signal, "low"));
+    const fetchRangeWithSignal = (file: typeof files[number], start: number, end: number, flightSignal: AbortSignal) =>
+      inRangeSlot(flightSignal, () => fileSource.fetchRange(file, start, end, flightSignal, "low"));
     const canPersistDerived = () => {
       if (downloads.signal.aborted) return false;
       try {
@@ -245,15 +367,31 @@ export async function ensureCloudRange(
         return false;
       }
     };
-    const readFooter = (file: typeof files[number]) => readPersistedFooter(fileSource, file,
-      (start, end) => fetchRange(file, start, end), () => {
-        generation.assertCurrent();
-        downloads.signal.throwIfAborted();
-      }, canPersistDerived);
-    const fetchWhole = async (file: typeof files[number]) => {
+    const readFooterWithSignal = (file: typeof files[number], flightSignal: AbortSignal, canPersist: () => boolean) =>
+      runSharedFlight(
+        inflightFooters,
+        `${wholeScope}|${file.footerKey}`,
+        flightSignal,
+        canPersist,
+        (sharedSignal, canPersistShared) => readPersistedFooter(
+          fileSource,
+          file,
+          (start, end) => fetchRangeWithSignal(file, start, end, sharedSignal),
+          () => { sharedSignal.throwIfAborted(); },
+          canPersistShared,
+        ),
+      );
+    const readFooter = async (file: typeof files[number]) => {
+      const footer = await readFooterWithSignal(file, downloads.signal, canPersistDerived);
+      generation.assertCurrent();
+      downloads.signal.throwIfAborted();
+      return footer;
+    };
+    const fetchWholeWithSignal = async (file: typeof files[number], flightSignal: AbortSignal) => {
       const lane = rawLaneForBytes(file.size);
-      const fetched = await inSlot(
-        () => fileSource.fetchFile(file.key, downloads.signal, {
+      const fetched = await inRangeSlot(
+        flightSignal,
+        () => fileSource.fetchFile(file.key, flightSignal, {
           identity: file.wholeKey,
           ...(lane === "large" ? { priority: "low" as const } : {}),
         }),
@@ -264,6 +402,7 @@ export async function ensureCloudRange(
       }
       return fetched;
     };
+    const fetchWhole = (file: typeof files[number]) => fetchWholeWithSignal(file, downloads.signal);
     try {
       const plans = new Map<string, ParquetProjection>();
       const persisted = new Map<string, DerivedFile>();
@@ -294,8 +433,8 @@ export async function ensureCloudRange(
         } else {
           // Greedily pack newest-first whole-file candidates up to a conservative share of byteLimit
           // while reserving projected headroom for remaining files, avoiding all-or-nothing range fan-out.
-          const wholeCap = Math.floor(byteLimit * 0.65);
-          const reserveOf = (file: typeof unknown[number]) => Math.min(file.size, 512 * 1024);
+          const wholeCap = Math.floor(byteLimit * 0.85);
+          const reserveOf = (file: typeof unknown[number]) => Math.min(Math.ceil(file.size * 0.25), 256 * 1024);
           let remainingReserve = unknown.reduce((sum, file) => sum + reserveOf(file), 0);
           let packedBytes = 0;
           const sortedCandidates = [...candidates].sort(
@@ -430,48 +569,67 @@ export async function ensureCloudRange(
         let held = wholes.get(file.scopedKey);
         wholes.delete(file.scopedKey);
         let plan = plans.get(file.scopedKey);
-        // Resident at the budget check but evicted since.
-        if (!plan && shouldReadWholeFirst(file, Date.now())) {
-          held = await fetchWhole(file);
-          plan = planForFile(file, await readWholeParquetFooter(held.bytes));
-        }
-        plan ??= planForFile(file, await readFooter(file));
-        const plannedRangeBytes = plan.ranges.reduce((sum, r) => sum + (r.end - r.start), 0);
-        // When coalesced ranges already cover most of a file (e.g. heavily compacted multi-row-group
-        // files), fetch the file once via `fileSource.fetchFile` so concurrent page sections share a
-        // single in-flight/cached download instead of each pulling the file separately via ranges.
-        if (held || shouldFallbackToWhole(plan, file.size, plannedRangeBytes)) {
-          const fetched = held ?? await fetchWhole(file);
-          const parts = await fetchProjectedRanges(plan, async (start, end) => fetched.bytes.slice(start, end));
-          const bytes = assembleProjectedParquet(plan, parts);
-          if (canPersistDerived()) {
-            void fileSource.writeDerivedFile(file.key, file.scopedKey, bytes, JSON.stringify(plan.presentColumns));
-          }
-          return {
-            bytes,
-            cached: fetched.cached,
-            downloaded: fetched.cached ? 0 : fetched.bytes.byteLength,
-            presentColumns: plan.presentColumns,
-          };
-        }
-        let downloaded = 0;
-        const parts = await fetchProjectedRanges(plan, async (start, end) => {
-          const part = await fetchRange(file, start, end);
-          downloaded += part.byteLength;
-          return part;
-        });
-        const bytes = assembleProjectedParquet(plan, parts);
-        if (canPersistDerived()) {
-          void fileSource.writeDerivedFile(file.key, file.scopedKey, bytes, JSON.stringify(plan.presentColumns));
-        }
-        return { bytes, cached: false, downloaded, presentColumns: plan.presentColumns };
+        const built = await runSharedFlight(
+          inflightProjections,
+          `${wholeScope}|${file.scopedKey}`,
+          downloads.signal,
+          canPersistDerived,
+          async (sharedSignal, canPersist) => {
+            const latestStored = await fileSource.readDerivedFile(file.key, file.scopedKey);
+            sharedSignal.throwIfAborted();
+            if (latestStored) {
+              const presentColumns: unknown = JSON.parse(latestStored.meta);
+              if (!Array.isArray(presentColumns) || !presentColumns.every((name) => typeof name === "string")) {
+                throw new Error(`Cached projection of ${file.key} has no column list`);
+              }
+              return { bytes: await latestStored.bytes(), cached: true, presentColumns };
+            }
+            // Resident at the budget check but evicted since.
+            if (!plan && shouldReadWholeFirst(file, Date.now())) {
+              held = await fetchWholeWithSignal(file, sharedSignal);
+              plan = planForFile(file, await readWholeParquetFooter(held.bytes));
+            }
+            plan ??= planForFile(file, await readFooterWithSignal(file, sharedSignal, canPersist));
+            const plannedRangeBytes = plan.ranges.reduce((sum, r) => sum + (r.end - r.start), 0);
+            // When coalesced ranges already cover most of a file (e.g. heavily compacted multi-row-group
+            // files), fetch the file once via `fileSource.fetchFile` so concurrent page sections share a
+            // single in-flight/cached download instead of each pulling the file separately via ranges.
+            if (held || shouldFallbackToWhole(plan, file.size, plannedRangeBytes)) {
+              const fetched = held ?? await fetchWholeWithSignal(file, sharedSignal);
+              const parts = await fetchProjectedRanges(plan, async (start, end) => fetched.bytes.slice(start, end));
+              const bytes = assembleProjectedParquet(plan, parts);
+              if (canPersist()) {
+                void fileSource.writeDerivedFile(file.key, file.scopedKey, bytes, JSON.stringify(plan.presentColumns));
+              }
+              return {
+                bytes,
+                cached: fetched.cached,
+                downloaded: fetched.cached ? 0 : fetched.bytes.byteLength,
+                presentColumns: plan.presentColumns,
+              };
+            }
+            let downloaded = 0;
+            const parts = await fetchProjectedRanges(plan, async (start, end) => {
+              const part = await fetchRangeWithSignal(file, start, end, sharedSignal);
+              downloaded += part.byteLength;
+              return part;
+            });
+            const bytes = assembleProjectedParquet(plan, parts);
+            if (canPersist()) {
+              void fileSource.writeDerivedFile(file.key, file.scopedKey, bytes, JSON.stringify(plan.presentColumns));
+            }
+            return { bytes, cached: false, downloaded, presentColumns: plan.presentColumns };
+          },
+        );
+        generation.assertCurrent();
+        downloads.signal.throwIfAborted();
+        return { ...built, bytes: built.bytes.slice(0) };
       };
-      const fetchOne = (file: typeof files[number]): Promise<{
-        bytes: ArrayBuffer; cached: boolean; downloaded?: number; presentColumns?: string[];
-      }> => {
+      const fetchOne = (file: typeof files[number]): Promise<ProjectedBuild> => {
         if (projectedColumns) return fetchProjected(file);
         const lane = rawLaneForBytes(file.size);
-        return inSlot(
+        return inRangeSlot(
+          downloads.signal,
           () => fileSource.fetchFile(file.key, downloads.signal, {
             identity: file.scopedKey,
             ...(lane === "large" ? { priority: "low" as const } : {}),

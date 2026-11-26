@@ -1791,4 +1791,129 @@ describe("Cloud first-page analytical range loading", () => {
     expect(fetchedWholeKeys).toContain(entries[3].key);
     expect(rangedKeys.has(entries[3].key)).toBe(false);
   });
+
+  it("packs compact= candidates up to 85% of byteLimit with 25% capped reserve", async () => {
+    Object.assign(wholeReadLimits, DEFAULT_WHOLE_READ_LIMITS);
+    const rgRows = 500;
+    const rowGroups = 6;
+    const totalRows = rgRows * rowGroups;
+    let seed = 67;
+    const randStr = (len: number) => Array.from({ length: len }, () => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return String.fromCharCode(33 + (seed % 90));
+    }).join("");
+    const baseStartMs = Date.parse("2026-11-25T01:00:00Z");
+    const stepMs = 1000;
+    const bytes = parquetWriteBuffer({
+      codec: "UNCOMPRESSED",
+      rowGroupSize: rgRows,
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: totalRows }, (_, i) => new Date(baseStartMs + i * stepMs)) },
+        { name: "status", type: "INT32", data: Array.from({ length: totalRows }, () => 200) },
+        { name: "url", type: "STRING", data: Array.from({ length: totalRows }, () => randStr(400)) },
+        { name: "ua", type: "STRING", data: Array.from({ length: totalRows }, () => randStr(400)) },
+      ],
+    });
+    expect(bytes.byteLength).toBeGreaterThan(2 * 1024 * 1024);
+    expect(bytes.byteLength).toBeLessThanOrEqual(DEFAULT_WHOLE_READ_LIMITS.closedHourUpToBytes);
+
+    const entries: ManifestFile[] = Array.from({ length: 4 }, (_, i) => {
+      const startMs = baseStartMs + i * 3_600_000;
+      return {
+        key: `processed/request/year=2026/month=11/day=25/hour=0${i + 1}/compact=c4-n${i}.parquet`,
+        start: new Date(startMs).toISOString(),
+        end: new Date(startMs + 3_000_000).toISOString(),
+        rows: totalRows,
+        size: bytes.byteLength,
+        etag: `"etag-pack85-${i}"`,
+      };
+    });
+    vi.mocked(fetchManifest).mockResolvedValue({ files: entries, complete: true });
+
+    const fetchedWholeKeys: string[] = [];
+    const rangedKeys = new Set<string>();
+    source.fetchFile.mockImplementation(async (key: string) => {
+      fetchedWholeKeys.push(key);
+      return { bytes: bytes.slice(0), cached: false };
+    });
+    source.fetchRange.mockImplementation(async (entry: ManifestFile, start: number, end: number) => {
+      rangedKeys.add(entry.key);
+      return bytes.slice(start, end);
+    });
+
+    // At byteLimit = 3.6 * fileSize, 0.85 * byteLimit = 3.06 * fileSize packs 3 of 4 compacts (vs 2 at 0.65).
+    const byteLimit = Math.floor(bytes.byteLength * 3.6);
+    const read = await ensureCloudRange(
+      new Date(baseStartMs).toISOString(),
+      new Date(baseStartMs + 4 * 3_600_000).toISOString(),
+      signal,
+      ["request"],
+      { projection: { columns: ["timestamp", "status"], maxBytes: byteLimit } },
+    );
+    const [{ n }] = await read.executeSql("SELECT count(*)::INT AS n FROM requests") as [{ n: number }];
+    expect(n).toBe(totalRows * 4);
+    read.release?.();
+
+    expect(fetchedWholeKeys).toHaveLength(3);
+    expect(fetchedWholeKeys).toEqual(expect.arrayContaining([entries[3].key, entries[2].key, entries[1].key]));
+    expect(rangedKeys.has(entries[1].key)).toBe(false);
+  });
+
+  it("deduplicates concurrent in-flight footer reads and fetchProjected builds with reference-counted abort", async () => {
+    const { entries } = projectedFiles(1);
+    const fullBytes = entries[0].size;
+    let footerReads = 0;
+    let dataReads = 0;
+    let releaseFirstRange!: () => void;
+    let firstRangePaused = false;
+    const firstRangeGate = new Promise<void>((resolve) => {
+      releaseFirstRange = resolve;
+    });
+
+    source.fetchRange.mockImplementation(async (entry: ManifestFile, start: number, end: number, rangeSignal: AbortSignal) => {
+      rangeSignal.throwIfAborted();
+      if (end === entry.size) {
+        footerReads++;
+      } else {
+        dataReads++;
+        if (!firstRangePaused) {
+          firstRangePaused = true;
+          await new Promise<void>((resolve, reject) => {
+            const onAbort = () => reject(rangeSignal.reason);
+            rangeSignal.addEventListener("abort", onAbort, { once: true });
+            void firstRangeGate.then(() => {
+              rangeSignal.removeEventListener("abort", onAbort);
+              resolve();
+            });
+          });
+        }
+      }
+      return entries[0].bytes.slice(start, end);
+    });
+
+    const controllerA = new AbortController();
+    const controllerB = new AbortController();
+    const flightA = ensureCloudRange(from, to, controllerA.signal, ["request"], projection(fullBytes));
+    const flightB = ensureCloudRange(from, to, controllerB.signal, ["request"], projection(fullBytes));
+
+    // Wait until the shared data range read is in flight, then abort caller A only.
+    await vi.waitFor(() => expect(firstRangePaused).toBe(true));
+    controllerA.abort(new Error("caller A left"));
+    await expect(flightA).rejects.toThrow(/caller A left/);
+
+    // Caller B's shared flight must remain alive and finish with no duplicate footer or data range GETs.
+    releaseFirstRange();
+    const readB = await flightB;
+    expect(footerReads).toBe(1);
+    expect(dataReads).toBeGreaterThan(0);
+    // Single flight means exactly one set of non-tail planned ranges (same count as a single load).
+    const singlePlan = planParquetProjection(
+      await readWholeParquetFooter(entries[0].bytes),
+      new Set(["timestamp", "status", "cache"]),
+    );
+    const tailStart = singlePlan.footer.tail!.start;
+    expect(dataReads).toBe(singlePlan.ranges.filter((r) => r.end <= tailStart).length);
+    expect(await readB.executeSql("SELECT count(*)::INT AS n FROM requests")).toEqual([{ n: 1600 }]);
+    readB.release?.();
+  });
 });

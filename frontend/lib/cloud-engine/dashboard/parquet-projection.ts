@@ -31,11 +31,11 @@ export const RANGE_REQUEST_COST_BYTES = 32 * 1024;
  * [`SOFT_MERGE_MAX_FILE_RATIO`] of the file size, reducing HTTP 206 counts
  * without swallowing wide unneeded columns.
  */
-export const TARGET_RANGES_PER_FILE = 8;
+export const TARGET_RANGES_PER_FILE = 4;
 /** Largest gap merged when reducing a file's ranges toward [`TARGET_RANGES_PER_FILE`]. */
 export const SOFT_MERGE_MAX_GAP = 128 * 1024;
 /** Maximum fraction of file size Pass 2 may reach while coalescing toward [`TARGET_RANGES_PER_FILE`]. */
-export const SOFT_MERGE_MAX_FILE_RATIO = 0.40;
+export const SOFT_MERGE_MAX_FILE_RATIO = 0.45;
 /**
  * Maximum fraction of file size Pass 2 may reach when coalescing below [`TARGET_RANGES_PER_FILE`]
  * down to a single range (e.g. a row-group-pruned boundary compact where the needed slice is a
@@ -381,7 +381,7 @@ function coalesceRanges(
 ): { start: number; end: number }[] {
   if (chunks.length === 0) return [];
   const targetRanges = options?.targetRanges ?? TARGET_RANGES_PER_FILE;
-  const softMergeMaxGap = options?.softMergeMaxGap ?? SOFT_MERGE_MAX_GAP;
+  const softMergeMaxGap = options?.softMergeMaxGap ?? Math.min(SOFT_MERGE_MAX_GAP, Math.floor(fileSize * 0.10));
   const softMergeMaxFileRatio = options?.softMergeMaxFileRatio ?? SOFT_MERGE_MAX_FILE_RATIO;
   // Merging any gap <= max(RANGE_MERGE_GAP, RANGE_REQUEST_COST_BYTES) strictly lowers or
   // preserves `bytes + ranges * RANGE_REQUEST_COST_BYTES` without pulling in large gaps.
