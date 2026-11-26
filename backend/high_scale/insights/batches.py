@@ -17,7 +17,7 @@ from typing import Any, Literal
 from backend.high_scale._common import visible_fact_clauses
 
 from .rollup import ROLLUP_TABLE, _to_rollup
-from .sql_queries import _CACHEABLE, _HIT, _P95, COLUMNS, baseline_sample_stride
+from .sql_queries import _CACHEABLE, _HIT, _P95, COLUMNS, baseline_sample_stride, window_sample_stride
 
 QuerySource = Literal["fact", "mixed"]
 
@@ -45,7 +45,9 @@ def _parse_int(value: Any) -> int | None:
 
 _CANDIDATE_LIMIT = 500
 _URL_PERF_CANDIDATE_LIMIT = 2000
+_IP_ABUSE_CANDIDATE_LIMIT = 2000
 _baseline_sample_stride = baseline_sample_stride
+_window_sample_stride = window_sample_stride
 
 
 def _candidate_in_clause(
@@ -75,6 +77,7 @@ def _base_cte(
     filter_clause: str = "",
     weighted: bool = False,
     baseline_sample_stride: int = 1,
+    window_sample_stride: int = 1,
 ) -> tuple[str, QuerySource]:
     """Build the ``/* insight:batch_<name> */ WITH base AS (...)`` prefix."""
     fact_scope = " AND ".join(visible_fact_clauses("request"))
@@ -87,16 +90,28 @@ def _base_cte(
         extra_where_parts.append(f"({row_filter})")
     raw_where = f" WHERE {' AND '.join(extra_where_parts)}" if extra_where_parts else ""
     raw_proj = ", ".join(f"{expr} AS {alias}" for alias, expr in projections)
-    baseline_sample = (
-        f" AND (event_timestamp >= {{window_start:DateTime64(3)}} OR intDiv(toUnixTimestamp(event_timestamp), 300) % {baseline_sample_stride} = 0)"
-        if (baseline_sample_stride > 1 and not window_only)
-        else ""
-    )
-    raw_weight = (
-        f"if(event_timestamp < {{window_start:DateTime64(3)}}, toUInt64({baseline_sample_stride}), toUInt64(1)) AS n"
-        if (baseline_sample_stride > 1 and not window_only)
-        else "toUInt64(1) AS n"
-    )
+    b_sample = baseline_sample_stride if not window_only else 1
+    w_sample = window_sample_stride
+    if w_sample > 1 and b_sample > 1:
+        baseline_sample = (
+            f" AND ((event_timestamp >= {{window_start:DateTime64(3)}} AND intDiv(toUnixTimestamp(event_timestamp), 300) % {w_sample} = 0)"
+            f" OR (event_timestamp < {{window_start:DateTime64(3)}} AND intDiv(toUnixTimestamp(event_timestamp), 300) % {b_sample} = 0))"
+        )
+        raw_weight = (
+            f"if(event_timestamp < {{window_start:DateTime64(3)}}, toUInt64({b_sample}), toUInt64({w_sample})) AS n"
+        )
+    elif w_sample > 1 and window_only:
+        baseline_sample = f" AND intDiv(toUnixTimestamp(event_timestamp), 300) % {w_sample} = 0"
+        raw_weight = f"toUInt64({w_sample}) AS n"
+    elif w_sample > 1:
+        baseline_sample = f" AND (event_timestamp < {{window_start:DateTime64(3)}} OR intDiv(toUnixTimestamp(event_timestamp), 300) % {w_sample} = 0)"
+        raw_weight = f"if(event_timestamp >= {{window_start:DateTime64(3)}}, toUInt64({w_sample}), toUInt64(1)) AS n"
+    elif b_sample > 1:
+        baseline_sample = f" AND (event_timestamp >= {{window_start:DateTime64(3)}} OR intDiv(toUnixTimestamp(event_timestamp), 300) % {b_sample} = 0)"
+        raw_weight = f"if(event_timestamp < {{window_start:DateTime64(3)}}, toUInt64({b_sample}), toUInt64(1)) AS n"
+    else:
+        baseline_sample = ""
+        raw_weight = "toUInt64(1) AS n"
     if rollup_shape and rollup_span and not filter_clause and not window_only:
         rollup_proj = ", ".join(f"{_to_rollup(expr)} AS {alias}" for alias, expr in projections)
         raw = (
@@ -768,6 +783,7 @@ def _build_latency_dim(
     rollup_span: tuple[datetime, datetime] | None,
     filter_clause: str,
     baseline_hours: float = 0.0,
+    window_hours: float = 0.0,
 ) -> tuple[str, QuerySource]:
     proj: list[tuple[str, str]] = [("elapsed", COLUMNS["elapsed"])]
     sets: list[str] = []
@@ -794,6 +810,8 @@ def _build_latency_dim(
 
     b_stride = _baseline_sample_stride(baseline_hours)
     b_scale = f" * {b_stride}" if b_stride > 1 else ""
+    w_stride = _window_sample_stride(window_hours)
+    w_scale = f" * {w_stride}" if w_stride > 1 else ""
     cte, source = _base_cte(
         "latency_dim",
         proj,
@@ -801,6 +819,7 @@ def _build_latency_dim(
         prewhere_clause="custom_fields['elapsed'] != ''",
         filter_clause=filter_clause,
         baseline_sample_stride=b_stride,
+        window_sample_stride=w_stride,
     )
     g_pop = "grouping(pop)" if "pop_latency_regression" in active else "toUInt8(1)"
     g_reg = "grouping(server_region)" if "region_latency" in active else "toUInt8(1)"
@@ -835,7 +854,7 @@ def _build_latency_dim(
         f"{cte} SELECT {g_pop} AS g_pop, {g_reg} AS g_reg, {g_city} AS g_city, "
         f"{pop_col}, {reg_col}, {city_cols}, "
         f"{_P95}(elapsed, is_w) / 1000.0 AS w_p95, {_P95}(elapsed, is_b) / 1000.0 AS b_p95, "
-        f"countIf(is_w) AS w_total, countIf(is_b){b_scale} AS b_total, {ottfb_sel} "
+        f"countIf(is_w){w_scale} AS w_total, countIf(is_b){b_scale} AS b_total, {ottfb_sel} "
         f"FROM base GROUP BY GROUPING SETS ({', '.join(sets)}) HAVING {' OR '.join(having)}"
     )
     return sql, source
@@ -917,6 +936,7 @@ def _build_url_perf(
     rollup_span: tuple[datetime, datetime] | None,
     filter_clause: str,
     baseline_hours: float = 0.0,
+    window_hours: float = 0.0,
     candidates: dict[str, list[str] | None] | None = None,
     candidate_params: dict[str, Any] | None = None,
 ) -> tuple[str, QuerySource]:
@@ -929,6 +949,8 @@ def _build_url_perf(
     ]
     b_stride = _baseline_sample_stride(baseline_hours)
     b_scale = f" * {b_stride}" if b_stride > 1 else ""
+    w_stride = _window_sample_stride(window_hours)
+    w_scale = f" * {w_stride}" if w_stride > 1 else ""
     url_cands = candidates.get("url") if candidates is not None else None
     prewhere_clause = (
         _candidate_in_clause("url", url_cands, "cand_url", candidate_params)
@@ -942,17 +964,18 @@ def _build_url_perf(
         prewhere_clause=prewhere_clause,
         filter_clause=filter_clause,
         baseline_sample_stride=b_stride,
+        window_sample_stride=w_stride,
     )
     base_filter = "" if prewhere_clause else "WHERE url != '' "
     sql = (
         f"{cte} SELECT url, "
         f"{_P95}(elapsed, is_w AND elapsed IS NOT NULL) / 1000.0 AS l_w_p95, "
         f"{_P95}(elapsed, is_b AND elapsed IS NOT NULL) / 1000.0 AS l_b_p95, "
-        "countIf(is_w AND elapsed IS NOT NULL) AS l_w_total, "
+        f"countIf(is_w AND elapsed IS NOT NULL){w_scale} AS l_w_total, "
         f"countIf(is_b AND elapsed IS NOT NULL){b_scale} AS l_b_total, "
         f"countIf(is_w AND {_COMP_ROW} AND {_UNCOMP}) * 1.0 / nullIf(countIf(is_w AND {_COMP_ROW}), 0) AS c_w_rate, "
         f"countIf(is_b AND {_COMP_ROW} AND {_UNCOMP}) * 1.0 / nullIf(countIf(is_b AND {_COMP_ROW}), 0) AS c_b_rate, "
-        f"countIf(is_w AND {_COMP_ROW}) AS c_w_total, "
+        f"countIf(is_w AND {_COMP_ROW}){w_scale} AS c_w_total, "
         f"countIf(is_b AND {_COMP_ROW}){b_scale} AS c_b_total "
         "FROM base "
         f"{base_filter}"
@@ -1138,7 +1161,7 @@ def _build_ip_abuse_candidates(
     pre_having = _ip_abuse_pre_having(active)
     return (
         f"/* insight:batch_ip_abuse_candidates */ SELECT client_ip AS k {ip_abuse_win_from} "
-        f"GROUP BY client_ip HAVING {' OR '.join(pre_having)} LIMIT {_CANDIDATE_LIMIT + 1}"
+        f"GROUP BY client_ip HAVING {' OR '.join(pre_having)} LIMIT {_IP_ABUSE_CANDIDATE_LIMIT + 1}"
     )
 
 
@@ -1148,6 +1171,7 @@ def _build_ip_abuse(
     present: set[str],
     rollup_span: tuple[datetime, datetime] | None,
     filter_clause: str,
+    baseline_hours: float = 0.0,
     candidates: dict[str, list[str] | None] | None = None,
     candidate_params: dict[str, Any] | None = None,
 ) -> tuple[str, QuerySource]:
@@ -1161,6 +1185,8 @@ def _build_ip_abuse(
     if "orphaned_deep_crawl" in active:
         proj.append(("referer", COLUMNS["referer"]))
 
+    b_stride = _baseline_sample_stride(baseline_hours)
+    b_scale = f" * {b_stride}" if b_stride > 1 else ""
     sel = ["ip"]
     pre_having = _ip_abuse_pre_having(active)
     having: list[str] = []
@@ -1171,7 +1197,7 @@ def _build_ip_abuse(
                 "countIf(is_w AND url != '' AND status = 404) AS cd_w_404",
                 "countIf(is_w AND url != '') AS cd_w_total",
                 "uniqCombinedIf(url, is_w AND url != '' AND status = 404) AS cd_w_distinct",
-                "countIf(is_b AND url != '' AND status = 404) AS cd_b_404",
+                f"countIf(is_b AND url != '' AND status = 404){b_scale} AS cd_b_404",
             ]
         )
         having.append("(cd_w_404 >= 20 AND cd_w_404 * 1.0 / nullIf(cd_w_total, 0) >= 0.7 AND cd_w_distinct >= 15)")
@@ -1182,7 +1208,7 @@ def _build_ip_abuse(
                 f"countIf(is_w AND {auth} AND status IN (401, 403)) AS ce_w_denied",
                 f"countIf(is_w AND {auth}) AS ce_w_attempts",
                 f"uniqCombinedIf(url, is_w AND {auth}) AS ce_w_paths",
-                f"countIf(is_b AND {auth} AND status IN (401, 403)) AS ce_b_denied",
+                f"countIf(is_b AND {auth} AND status IN (401, 403)){b_scale} AS ce_b_denied",
             ]
         )
         having.append(
@@ -1203,7 +1229,7 @@ def _build_ip_abuse(
             [
                 f"countIf(is_w AND {_DEEP_URL}) AS od_w_reqs",
                 f"uniqCombinedIf(url, is_w AND {_DEEP_URL}) AS od_w_distinct",
-                f"countIf(is_b AND {_DEEP_URL}) AS od_b_reqs",
+                f"countIf(is_b AND {_DEEP_URL}){b_scale} AS od_b_reqs",
             ]
         )
         having.append("(od_w_reqs >= 50 AND od_w_distinct >= 10)")
@@ -1226,6 +1252,7 @@ def _build_ip_abuse(
         row_filter=row_filter,
         prewhere_clause=prewhere_clause,
         filter_clause=filter_clause,
+        baseline_sample_stride=b_stride,
     )
     sql = f"{cte} SELECT {', '.join(sel)} FROM base GROUP BY ip HAVING {' OR '.join(having)}"
     return sql, source
@@ -1318,6 +1345,7 @@ def _build_origin_perf(
     rollup_span: tuple[datetime, datetime] | None,
     filter_clause: str,
     baseline_hours: float = 0.0,
+    window_hours: float = 0.0,
     candidates: dict[str, list[str] | None] | None = None,
     candidate_params: dict[str, Any] | None = None,
 ) -> tuple[str, QuerySource]:
@@ -1328,6 +1356,8 @@ def _build_origin_perf(
     ]
     b_stride = _baseline_sample_stride(baseline_hours)
     b_scale = f" * {b_stride}" if b_stride > 1 else ""
+    w_stride = _window_sample_stride(window_hours)
+    w_scale = f" * {w_stride}" if w_stride > 1 else ""
     cte, source = _base_cte(
         "origin_perf",
         proj,
@@ -1335,6 +1365,7 @@ def _build_origin_perf(
         prewhere_clause="custom_fields['ottfb'] != ''",
         filter_clause=filter_clause,
         baseline_sample_stride=b_stride,
+        window_sample_stride=w_stride,
     )
     read_ms = "greatest(ottfb / 1000.0 - oconnect_ms, 0)"
     has_conn = "oconnect_ms IS NOT NULL"
@@ -1342,10 +1373,10 @@ def _build_origin_perf(
         f"{cte}, keyed AS (SELECT if(is_w, url, '') AS w_url, ottfb, oconnect_ms, is_w, is_b FROM base) "
         f"SELECT grouping(w_url) AS g_url, w_url, "
         f"{_P95}(ottfb, is_w) / 1000.0 AS w_p95, {_P95}(ottfb, is_b) / 1000.0 AS b_p95, "
-        "countIf(is_w) AS w_reqs, round(quantileTDigestIf(0.95)(ottfb, is_w) / 1000.0, 1) AS url_p95_ms, "
+        f"countIf(is_w){w_scale} AS w_reqs, round(quantileTDigestIf(0.95)(ottfb, is_w) / 1000.0, 1) AS url_p95_ms, "
         f"{_P95}(oconnect_ms, is_w AND {has_conn}) AS w_conn, {_P95}(oconnect_ms, is_b AND {has_conn}) AS b_conn, "
         f"{_P95}({read_ms}, is_w AND {has_conn}) AS w_read, {_P95}({read_ms}, is_b AND {has_conn}) AS b_read, "
-        f"countIf(is_w AND {has_conn}) AS ts_w_total, countIf(is_b AND {has_conn}){b_scale} AS ts_b_total "
+        f"countIf(is_w AND {has_conn}){w_scale} AS ts_w_total, countIf(is_b AND {has_conn}){b_scale} AS ts_b_total "
         "FROM keyed GROUP BY GROUPING SETS ((), (w_url)) "
         "HAVING g_url = 1 OR w_reqs >= 10 "
         "ORDER BY g_url DESC, url_p95_ms DESC LIMIT 11"
@@ -1443,6 +1474,7 @@ def _build_network_asn(
     rollup_span: tuple[datetime, datetime] | None,
     filter_clause: str,
     baseline_hours: float = 0.0,
+    window_hours: float = 0.0,
     candidates: dict[str, list[str] | None] | None = None,
     candidate_params: dict[str, Any] | None = None,
 ) -> tuple[str, QuerySource]:
@@ -1516,6 +1548,8 @@ def _build_network_asn(
         row_filter = " OR ".join([*prewhere_preds, *asn_metro_filters])
     b_stride = _baseline_sample_stride(baseline_hours)
     b_scale = f" * {b_stride}" if b_stride > 1 else ""
+    w_stride = _window_sample_stride(window_hours)
+    w_scale = f" * {w_stride}" if w_stride > 1 else ""
     cte, source = _base_cte(
         "network_asn",
         proj,
@@ -1523,6 +1557,7 @@ def _build_network_asn(
         prewhere_clause=prewhere_clause,
         filter_clause=filter_clause,
         baseline_sample_stride=b_stride,
+        window_sample_stride=w_stride,
     )
     g_asn = "grouping(asn_str)" if has_asn else "toUInt8(1)"
     g_metro = "grouping(metro)" if has_metro else "toUInt8(1)"
@@ -1542,7 +1577,7 @@ def _build_network_asn(
                 f"{_P95}(rtt_var, is_b) AS b_jitter",
                 "avgIf(retrans, is_w) AS w_retrans",
                 "avgIf(retrans, is_b) AS b_retrans",
-                "countIf(is_w) AS nah_w_total",
+                f"countIf(is_w){w_scale} AS nah_w_total",
                 f"countIf(is_b){b_scale} AS nah_b_total",
             ]
         )
@@ -1558,7 +1593,7 @@ def _build_network_asn(
             [
                 f"quantileTDigestIf(0.50)(tcp_rtt, is_w AND {amp}) / 1000.0 AS amp_w_med",
                 f"quantileTDigestIf(0.50)(tcp_rtt, is_b AND {amp}) / 1000.0 AS amp_b_med",
-                f"countIf(is_w AND {amp}) AS amp_w_total",
+                f"countIf(is_w AND {amp}){w_scale} AS amp_w_total",
                 f"countIf(is_b AND {amp}){b_scale} AS amp_b_total",
             ]
         )
@@ -1571,7 +1606,7 @@ def _build_network_asn(
             [
                 "quantileTDigestIf(0.5)(delivery_rate, is_w AND delivery_rate > 0) AS mdd_w_med",
                 "quantileTDigestIf(0.5)(delivery_rate, is_b AND delivery_rate > 0) AS mdd_b_med",
-                "countIf(is_w AND delivery_rate > 0) AS mdd_w_total",
+                f"countIf(is_w AND delivery_rate > 0){w_scale} AS mdd_w_total",
                 f"countIf(is_b AND delivery_rate > 0){b_scale} AS mdd_b_total",
             ]
         )
@@ -2016,7 +2051,9 @@ DETECTION_BATCHES: tuple[DetectionBatch, ...] = (
         build_sql=_build_ip_abuse,
         extract_rows=_extract_ip_abuse,
         build_candidates_sql=_build_ip_abuse_candidates,
-        parse_candidates=lambda _active, rows: _parse_single_key_candidates("ip", rows),
+        parse_candidates=lambda _active, rows: _parse_single_key_candidates(
+            "ip", rows, limit=_IP_ABUSE_CANDIDATE_LIMIT
+        ),
     ),
     DetectionBatch(
         name="origin_perf",

@@ -61,6 +61,8 @@ _network_model_cache: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds
 CacheRegistry.register("high_scale.network.models", _network_model_cache)
 _network_json_cache: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=60.0)
 CacheRegistry.register("high_scale.network.json", _network_json_cache)
+_SHIELD_ACTIVE_CACHE: BoundedTTLCache = BoundedTTLCache(maxsize=128, ttl_seconds=600)
+CacheRegistry.register("high_scale.network._SHIELD_ACTIVE_CACHE", _SHIELD_ACTIVE_CACHE)
 
 
 def _invalidate_network_caches(_service_id: str) -> int:
@@ -357,15 +359,21 @@ def _shielding_analysis(service: HighScaleService, start: datetime, end: datetim
     sh_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
     sh_join_stride = 1
     if is_real_ch:
-        shield_prewhere = f"{_BASE_WHERE} AND custom_fields['edge'] IN ('false', '0', 'False', 'FALSE') AND custom_fields['prid'] != ''"
-        shield_rows = service.client.execute(
-            f"SELECT count() AS n FROM (SELECT 1 FROM request_facts PREWHERE {shield_prewhere} LIMIT 1)",
-            {"service_id": service.service_id, "start": start, "end": end},
-        )
-        if not shield_rows or int(shield_rows[0]["n"]) == 0:
-            return ShieldingAnalysis(
-                **cache_result({}, state="bypass", prewarmer=False), has_data=False, edge_only=True, rows=[]
+        shield_cache_key = (service.service_id, client_cache_token(service.client))
+        use_shield_cache = not os.getenv("PYTEST_CURRENT_TEST")
+        shield_active = bool(_SHIELD_ACTIVE_CACHE.get(shield_cache_key)) if use_shield_cache else False
+        if not shield_active:
+            shield_prewhere = f"{_BASE_WHERE} AND custom_fields['edge'] IN ('false', '0', 'False', 'FALSE') AND custom_fields['prid'] != ''"
+            shield_rows = service.client.execute(
+                f"SELECT count() AS n FROM (SELECT 1 FROM request_facts PREWHERE {shield_prewhere} LIMIT 1)",
+                {"service_id": service.service_id, "start": start, "end": end},
             )
+            if not shield_rows or int(shield_rows[0]["n"]) == 0:
+                return ShieldingAnalysis(
+                    **cache_result({}, state="bypass", prewarmer=False), has_data=False, edge_only=True, rows=[]
+                )
+            if use_shield_cache:
+                _SHIELD_ACTIVE_CACHE[shield_cache_key] = True
         if sh_span_s >= 1800 and not os.getenv("PYTEST_CURRENT_TEST"):
             sh_join_stride = (
                 100
@@ -1340,8 +1348,10 @@ def network_quality(
                         f"WHERE {_RTT} > 0 AND {_TTFB} > 0 LIMIT {_SCATTER_SAMPLE}"
                     )
 
-                fast_rows = service.client.execute(_scatter_query(" AND line_ordinal % 64 = 0"), params)
-                if len(fast_rows) >= 200:
+                q_span_s = (end - start).total_seconds() if start is not None and end is not None else 0.0
+                ord_stride = 16 if q_span_s <= 86400 else 64
+                fast_rows = service.client.execute(_scatter_query(f" AND line_ordinal % {ord_stride} = 0"), params)
+                if len(fast_rows) >= 50:
                     return fast_rows
                 return service.client.execute(_scatter_query(""), params)
             return service.client.execute(scatter_sql, params)

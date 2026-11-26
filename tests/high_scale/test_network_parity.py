@@ -433,7 +433,7 @@ def test_network_quality_mean_rtt_country_labels_and_hash_scatter(monkeypatch: p
     assert "avg(" in reg_sql and "median(" not in reg_sql
     assert rollup_sql == reg_sql
     sc_sql = client.matching("cache_state")[0][0]
-    assert "line_ordinal % 64 = 0" in sc_sql and "toUnixTimestamp64Milli" not in sc_sql
+    assert "line_ordinal % 16 = 0" in sc_sql and "toUnixTimestamp64Milli" not in sc_sql
     assert resp.by_country[0].label == "United States" and resp.by_country[0].value == "US"
     assert len(client.calls) == 2
 

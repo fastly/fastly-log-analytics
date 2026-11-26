@@ -86,6 +86,7 @@ class Detection:
     prewhere: str = ""
     needs_baseline: bool = True
     baseline_sampled: bool = False
+    window_sampled: bool = False
 
 
 def baseline_sample_stride(baseline_hours: float) -> int:
@@ -97,6 +98,11 @@ def baseline_sample_stride(baseline_hours: float) -> int:
     if baseline_hours >= 24:
         return 4
     return 1
+
+
+def window_sample_stride(window_hours: float) -> int:
+    """Granule-skipping 5-minute time-block stride for raw-fact window portions (>= 24h)."""
+    return 2 if window_hours >= 24 else 1
 
 
 @dataclass(frozen=True)
@@ -828,13 +834,13 @@ DETECTIONS: dict[str, Detection] = {
             if(is_bot_ua AND raw_tok != '', {_BOT_STEM}, '') AS bot_stem,
             if(ua_ref_tok != '', ua_ref_tok,
                 if(NOT is_bot_ua AND ip != '' AND referer != '' AND referer != '-',
-                    lower(extract(referer, '(?i)https?://(?:www\\.)?([^/.:;\\s]+)')), '')) AS ref_stem
+                    splitByChar('.', lower(cutWWW(domain(referer))))[1], '')) AS ref_stem
         FROM tagged),
     gs AS (SELECT grouping(bot_stem) AS g_bot, grouping(ref_stem) AS g_ref,
             bot_stem, ref_stem, is_w, is_b,
             minIf(raw_tok, raw_tok != '') AS raw_tok, max(ua_dom) AS ua_dom,
-            countIf(is_w) AS w_cnt, countIf(is_b)__B_SCALE__ AS b_cnt,
-            sumIf(coalesce(resp_bytes, 0), is_w) AS w_b, sumIf(coalesce(resp_bytes, 0), is_b)__B_SCALE__ AS b_b,
+            countIf(is_w)__W_SCALE__ AS w_cnt, countIf(is_b)__B_SCALE__ AS b_cnt,
+            sumIf(coalesce(resp_bytes, 0), is_w)__W_SCALE__ AS w_b, sumIf(coalesce(resp_bytes, 0), is_b)__B_SCALE__ AS b_b,
             uniqCombinedStateIf(ip, ref_stem != '') AS ip_state
         FROM classified
         GROUP BY GROUPING SETS ((bot_stem), (ref_stem, is_w, is_b))
@@ -869,6 +875,7 @@ DETECTIONS: dict[str, Detection] = {
             "OR positionCaseInsensitive(ua, '-user') > 0 OR positionCaseInsensitive(ua, '-externalfetcher') > 0)"
         ),
         baseline_sampled=True,
+        window_sampled=True,
     ),
 }
 
@@ -892,6 +899,7 @@ def _base_sql(
     use_cf: bool = False,
     params: Mapping[str, Any] | None = None,
     baseline_hours: float = 0.0,
+    window_hours: float = 0.0,
 ) -> str:
     projection = ", ".join(f"{COLUMNS[column]} AS {column}" for column in detection.columns)
     lower = "{window_start:DateTime64(3)}" if detection.window_only else "{baseline_start:DateTime64(3)}"
@@ -900,24 +908,34 @@ def _base_sql(
         baseline_sample_stride(baseline_hours) if (detection.baseline_sampled and not detection.window_only) else 1
     )
     b_scale = f" * {b_stride}" if b_stride > 1 else ""
-    baseline_sample = (
-        f" AND (event_timestamp >= {{window_start:DateTime64(3)}} OR intDiv(toUnixTimestamp(event_timestamp), 300) % {b_stride} = 0)"
-        if b_stride > 1
-        else ""
-    )
+    w_stride = window_sample_stride(window_hours) if detection.window_sampled else 1
+    w_scale = f" * {w_stride}" if w_stride > 1 else ""
+    if w_stride > 1 and b_stride > 1:
+        time_sample = (
+            f" AND ((event_timestamp >= {{window_start:DateTime64(3)}} AND intDiv(toUnixTimestamp(event_timestamp), 300) % {w_stride} = 0)"
+            f" OR (event_timestamp < {{window_start:DateTime64(3)}} AND intDiv(toUnixTimestamp(event_timestamp), 300) % {b_stride} = 0))"
+        )
+    elif w_stride > 1 and detection.window_only:
+        time_sample = f" AND intDiv(toUnixTimestamp(event_timestamp), 300) % {w_stride} = 0"
+    elif w_stride > 1:
+        time_sample = f" AND (event_timestamp < {{window_start:DateTime64(3)}} OR intDiv(toUnixTimestamp(event_timestamp), 300) % {w_stride} = 0)"
+    elif b_stride > 1:
+        time_sample = f" AND (event_timestamp >= {{window_start:DateTime64(3)}} OR intDiv(toUnixTimestamp(event_timestamp), 300) % {b_stride} = 0)"
+    else:
+        time_sample = ""
     if detection.prewhere:
         row_filter = f" AND ({detection.row_filter})" if detection.row_filter else ""
         from_clause = (
             f"FROM request_facts PREWHERE {detection.prewhere} WHERE {scope} AND event_timestamp >= {lower} "
-            f"AND event_timestamp < {{window_end:DateTime64(3)}}{baseline_sample}{row_filter}"
+            f"AND event_timestamp < {{window_end:DateTime64(3)}}{time_sample}{row_filter}"
         )
     else:
         where_clause = f" WHERE ({detection.row_filter})" if detection.row_filter else ""
         from_clause = (
             f"FROM request_facts PREWHERE {scope} AND event_timestamp >= {lower} "
-            f"AND event_timestamp < {{window_end:DateTime64(3)}}{baseline_sample}{where_clause}"
+            f"AND event_timestamp < {{window_end:DateTime64(3)}}{time_sample}{where_clause}"
         )
-    det_sql = detection.sql.replace("__B_SCALE__", b_scale)
+    det_sql = detection.sql.replace("__B_SCALE__", b_scale).replace("__W_SCALE__", w_scale)
     sql = (
         f"/* insight:{insight_id} */ WITH base AS (SELECT {projection}, "
         "event_timestamp < {window_start:DateTime64(3)} AS is_b, "

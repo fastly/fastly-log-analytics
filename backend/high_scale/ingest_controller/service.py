@@ -790,15 +790,18 @@ def assets_aggregates(
         if (cached_inner := _memo.get_with_telemetry(cache_key)) is not None:
             return cached_inner
         filter_clauses, filter_params = request_filter_clauses(req.filters)
-        where = " AND ".join(
-            [
-                *visible_fact_clauses("request"),
-                "event_timestamp >= {start_time:DateTime64(3)}",
-                "event_timestamp < {end_time:DateTime64(3)}",
-                "url != ''",
-                *filter_clauses,
-            ]
-        )
+        base_clauses = [
+            *visible_fact_clauses("request"),
+            "event_timestamp >= {start_time:DateTime64(3)}",
+            "event_timestamp < {end_time:DateTime64(3)}",
+            "url != ''",
+        ]
+        if is_real_ch:
+            where_extra = f" WHERE {' AND '.join(filter_clauses)}" if filter_clauses else ""
+            raw_from = f"FROM request_facts PREWHERE {' AND '.join(base_clauses)}{where_extra}"
+        else:
+            where = " AND ".join([*base_clauses, *filter_clauses])
+            raw_from = f"FROM request_facts WHERE {where}"
         params: dict[str, Any] = {
             "service_id": service.service_id,
             "start_time": start_dt,
@@ -813,13 +816,17 @@ def assets_aggregates(
                        count() AS req_cnt, sum(toInt64OrZero(custom_fields['resp_bytes'])) AS sum_bytes,
                        sum(coalesce(toFloat64OrNull(custom_fields['ttl']), 0.0)) AS sum_ttl,
                        countIf(toFloat64OrNull(custom_fields['ttl']) IS NOT NULL) AS cnt_ttl
-                FROM request_facts WHERE {where} GROUP BY url, cache, content_encoding, status
+                {raw_from} GROUP BY url, cache, content_encoding, status
             ),
             grouped_base AS (
-                SELECT *, lower(url) AS url_lower, lower(content_encoding) AS enc_lower FROM grouped_raw
+                SELECT url, cache, content_encoding, status, req_cnt, sum_bytes, sum_ttl, cnt_ttl,
+                       lower(url) AS url_lower,
+                       lower(splitByChar('#', splitByChar('?', url)[1])[1]) AS path_lower,
+                       lower(content_encoding) AS enc_lower
+                FROM grouped_raw
             ),
             assets_enriched AS (
-                SELECT url, cache, content_encoding, status, req_cnt, sum_bytes, sum_ttl, cnt_ttl,
+                SELECT url, path_lower, cache, content_encoding, status, req_cnt, sum_bytes, sum_ttl, cnt_ttl,
                        {_ASSET_TYPE_CASE} AS asset_type,
                        if(enc_lower IN ('gzip', 'br', 'deflate'), 1, 0) AS is_compressed,
                        if(url_lower LIKE '%.js' OR url_lower LIKE '%.mjs' OR url_lower LIKE '%.css'
@@ -842,22 +849,22 @@ def assets_aggregates(
         hotspots_sql = f"""
             /* assets:hotspots */
             {enriched_cte}
-            SELECT * FROM (
+            SELECT kind, url, requests, metric_float, total_bytes, status, asset_type FROM (
                 SELECT 'large' AS kind, url, toInt64(sum(req_cnt)) AS requests,
                        toFloat64(sum(sum_bytes)) / nullIf(toFloat64(sum(req_cnt)), 0.0) AS metric_float,
                        toInt64(sum(sum_bytes)) AS total_bytes, toInt32(status) AS status, '' AS asset_type
                 FROM assets_enriched
                 WHERE is_compressed = 0 AND is_compressible = 1 AND status NOT IN (304, 204)
-                  AND (lower(splitByChar('#', splitByChar('?', url)[1])[1]) LIKE '%.js'
-                       OR lower(splitByChar('#', splitByChar('?', url)[1])[1]) LIKE '%.mjs'
-                       OR lower(splitByChar('#', splitByChar('?', url)[1])[1]) LIKE '%.css'
-                       OR lower(splitByChar('#', splitByChar('?', url)[1])[1]) LIKE '%.svg'
-                       OR lower(splitByChar('#', splitByChar('?', url)[1])[1]) LIKE '%.html'
-                       OR lower(splitByChar('#', splitByChar('?', url)[1])[1]) LIKE '%.json')
+                  AND (path_lower LIKE '%.js'
+                       OR path_lower LIKE '%.mjs'
+                       OR path_lower LIKE '%.css'
+                       OR path_lower LIKE '%.svg'
+                       OR path_lower LIKE '%.html'
+                       OR path_lower LIKE '%.json')
                 GROUP BY url, status HAVING metric_float >= 10240 ORDER BY total_bytes DESC LIMIT 20
             )
             UNION ALL
-            SELECT * FROM (
+            SELECT kind, url, requests, metric_float, total_bytes, status, asset_type FROM (
                 SELECT 'low_ttl' AS kind, url, toInt64(sum(req_cnt)) AS requests,
                        toFloat64(sum(sum_ttl)) / nullIf(toFloat64(sum(cnt_ttl)), 0.0) AS metric_float,
                        toInt64(0) AS total_bytes, toInt32(0) AS status, asset_type

@@ -182,7 +182,7 @@ def test_pop_health_quality_transport_and_shielding_use_granule_skipping_and_fas
     assert "% 20 = 0" not in rollup_union
     assert "line_ordinal % 20" not in rollup_union
     scatter_q = next(s for s in q_sqls if "AS ttfb_ms" in s)
-    assert scatter_q.index("custom_fields['tcp_rtt'] != ''") < scatter_q.index("line_ordinal % 64 = 0")
+    assert scatter_q.index("custom_fields['tcp_rtt'] != ''") < scatter_q.index("line_ordinal % 16 = 0")
 
     tr_client = _RecordingCHClient(
         [

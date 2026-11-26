@@ -341,7 +341,7 @@ def _evaluate(
             query_params = {**params, "rollup_start": span[0], "rollup_end": span[1]}
             source = "mixed"
         else:
-            sql = _base_sql(detection, definition.id, baseline_hours=baseline_hours)
+            sql = _base_sql(detection, definition.id, baseline_hours=baseline_hours, window_hours=window_hours)
         if filter_clause:
             sql = sql.replace(
                 "AND event_timestamp < {window_end:DateTime64(3)}",
@@ -368,8 +368,11 @@ def _evaluate(
         active_ids = {definition.id for definition, _ in members}
         span = rollup_spans.get(batch.rollup_shape) if batch.rollup_shape else None
         build_kwargs: dict[str, Any] = {"present": enabled_set, "rollup_span": span, "filter_clause": filter_clause}
-        if "baseline_hours" in inspect.signature(batch.build_sql).parameters:
+        build_params = inspect.signature(batch.build_sql).parameters
+        if "baseline_hours" in build_params:
             build_kwargs["baseline_hours"] = baseline_hours
+        if "window_hours" in build_params:
+            build_kwargs["window_hours"] = window_hours
         query_params = (
             {**params, "rollup_start": span[0], "rollup_end": span[1]} if (batch.rollup_shape and span) else params
         )
