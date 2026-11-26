@@ -538,6 +538,29 @@ describe('ReloadLoopGuard', () => {
     }
     spy.mockRestore()
   })
+
+  test('does not trip across range query switches on the same pathname, while 6 same-URL loads still trip', () => {
+    const pathSpy = vi.spyOn(window.location, 'pathname', 'get').mockReturnValue('/dashboard')
+    const searchSpy = vi.spyOn(window.location, 'search', 'get')
+    try {
+      let last: ReturnType<typeof loadGuard> | null = null
+      for (const query of ['', '?range=1h', '?range=1h', '?range=6h', '?range=6h', '?range=24h', '?range=24h', '?range=7d']) {
+        searchSpy.mockReturnValue(query)
+        last?.unmount()
+        last = loadGuard()
+        expect(screen.getByText(CHILD)).toBeInTheDocument()
+      }
+      last?.unmount()
+      sessionStorage.clear()
+      searchSpy.mockReturnValue('?range=6h')
+      tripGuard()
+      expect(screen.queryByText(CHILD)).not.toBeInTheDocument()
+      expect(screen.getByText(/kept reloading/i)).toBeInTheDocument()
+    } finally {
+      searchSpy.mockRestore()
+      pathSpy.mockRestore()
+    }
+  })
 })
 
 type ErrorSpikesCard = Extract<InsightCardData, { id: 'error_spikes' }>

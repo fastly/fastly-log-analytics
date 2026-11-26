@@ -65,13 +65,17 @@ function clearHistory() {
   }
 }
 
+function currentLoadKey(): string {
+  return window.location.pathname + window.location.search
+}
+
 // Record one document load. Called from subscribe() (once per mount); the
 // snapshot below re-reads sessionStorage after subscription, so the freshly
 // recorded load is reflected without a manual notification.
 function recordLoad() {
   try {
     const now = Date.now()
-    const path = window.location.pathname
+    const path = currentLoadKey()
     const recent = readHistory().filter((e) => now - e.t < WINDOW_MS)
     recent.push({ t: now, path })
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(recent))
@@ -89,7 +93,7 @@ function subscribe() {
 function getClientSnapshot(): boolean {
   try {
     const now = Date.now()
-    const path = window.location.pathname
+    const path = currentLoadKey()
     const recent = readHistory().filter((e) => now - e.t < WINDOW_MS)
     return recent.filter((e) => e.path === path).length >= THRESHOLD
   } catch {
