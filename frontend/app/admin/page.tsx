@@ -1,12 +1,15 @@
 import React, { Suspense } from 'react'
-import { SystemHealthCard } from "@/components/SystemHealthCard"
 import { PageHeader } from '@/components/ui/confirm-dialog'
 import { Skeleton } from '@/components/ui/skeleton'
 
 import { AdminPrefetchLinks, OperationsOverview } from './_sections/AdminOverviewCards'
 import { ServicesTable } from './_sections/AdminServicesTable'
-import { GlobalSettings, PricingSettings } from './_sections/AdminGlobalSettings'
-import { QuarantineSection } from '@/app/control-room/_sections/QuarantineSection'
+import {
+  DeferredGlobalSettings,
+  DeferredPricingSettings,
+  DeferredQuarantineSection,
+  DeferredSystemHealthCard,
+} from './_sections/AdminDeferredSections'
 
 export const dynamic = 'force-dynamic'
 
@@ -45,7 +48,7 @@ export default function AdminPage() {
         className="min-h-[280px] [contain-intrinsic-size:auto_280px]"
       >
         <Suspense fallback={<Skeleton className="h-[280px] w-full rounded-xl" />}>
-          <SystemHealthCard />
+          <DeferredSystemHealthCard />
         </Suspense>
       </div>
 
@@ -54,7 +57,7 @@ export default function AdminPage() {
         className="min-h-[120px] [contain-intrinsic-size:auto_120px]"
       >
         <Suspense fallback={null}>
-          <QuarantineSection />
+          <DeferredQuarantineSection />
         </Suspense>
       </div>
 
@@ -63,7 +66,7 @@ export default function AdminPage() {
         className="min-h-[240px] [contain-intrinsic-size:auto_240px]"
       >
         <Suspense fallback={<Skeleton className="h-[240px] w-full rounded-xl" />}>
-          <GlobalSettings />
+          <DeferredGlobalSettings />
         </Suspense>
       </div>
 
@@ -72,7 +75,7 @@ export default function AdminPage() {
         className="min-h-[220px] [contain-intrinsic-size:auto_220px]"
       >
         <Suspense fallback={<Skeleton className="h-[220px] w-full rounded-xl" />}>
-          <PricingSettings />
+          <DeferredPricingSettings />
         </Suspense>
       </div>
     </div>

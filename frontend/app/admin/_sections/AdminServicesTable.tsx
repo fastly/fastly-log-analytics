@@ -1,6 +1,7 @@
 'use client'
 import React, { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import dynamic from 'next/dynamic'
 import { useRouter } from 'next/navigation'
 import { AlertCircle, Bot, ChevronDown, Eraser, ExternalLink, Eye, KeyRound, Play, Plus, RotateCcw, Settings, Settings2, Trash2 } from 'lucide-react'
 import type { ColumnDef } from '@/lib/table'
@@ -14,12 +15,14 @@ import { useMounted } from '@/hooks/useBootstrap'
 import { cronCacheBust } from '@/hooks/useSSE'
 import { useServiceStore } from '@/stores/filterStore'
 import { DataTableReadonly as DataTable } from '@/components/DataTable'
-import { ProvisionWizard } from '@/components/ProvisionWizard/ProvisionWizard'
-import { RestoreFromFosDialog } from '@/components/RestoreFromFosDialog'
-import { DeleteDataDialog, TeardownDialog } from '@/components/TeardownDialog'
-import { CronSettingsModal } from '@/components/CronSettingsModal/CronSettingsModal'
-import { LogSettingsModal } from '@/components/LogSettingsModal/LogSettingsModal'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+
+const ProvisionWizard = dynamic(() => import('@/components/ProvisionWizard/ProvisionWizard').then((m) => m.ProvisionWizard), { ssr: false })
+const RestoreFromFosDialog = dynamic(() => import('@/components/RestoreFromFosDialog').then((m) => m.RestoreFromFosDialog), { ssr: false })
+const DeleteDataDialog = dynamic(() => import('@/components/TeardownDialog').then((m) => m.DeleteDataDialog), { ssr: false })
+const TeardownDialog = dynamic(() => import('@/components/TeardownDialog').then((m) => m.TeardownDialog), { ssr: false })
+const CronSettingsModal = dynamic(() => import('@/components/CronSettingsModal/CronSettingsModal').then((m) => m.CronSettingsModal), { ssr: false })
+const LogSettingsModal = dynamic(() => import('@/components/LogSettingsModal/LogSettingsModal').then((m) => m.LogSettingsModal), { ssr: false })
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
@@ -345,23 +348,29 @@ export function ServicesTable() {
           <DataTable columns={columns} data={services?.services || []} isLoading={isLoading} searchKey="name" emptyMessage="No services yet" emptyHint="Add a service or restore one from Fastly Object Storage." />
         </div>
       </div>
-      <ProvisionWizard open={wizardOpen} onOpenChange={setWizardOpen} />
-      <RestoreFromFosDialog
-        open={restoreOpen}
-        onOpenChange={setRestoreOpen}
-        onRestored={(id) => {
-          setRestoreOpen(false)
-          switchToService(id)
-        }}
-      />
+      {wizardOpen && <ProvisionWizard open={wizardOpen} onOpenChange={setWizardOpen} />}
+      {restoreOpen && (
+        <RestoreFromFosDialog
+          open={restoreOpen}
+          onOpenChange={setRestoreOpen}
+          onRestored={(id) => {
+            setRestoreOpen(false)
+            switchToService(id)
+          }}
+        />
+      )}
       {cronService && <CronSettingsModal service={cronService} open={!!cronService} onOpenChange={(open) => !open && setCronService(null)} />}
       {settingsService && <LogSettingsModal service={settingsService} open={!!settingsService} onOpenChange={(open) => !open && setSettingsService(null)} />}
-      <TeardownDialog service={teardownService} open={!!teardownService} onOpenChange={(open) => !open && setTeardownService(null)} onComplete={() => {
-        queryClient.invalidateQueries({ queryKey: queryKeys.services() }); queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap() }); setTeardownService(null)
-      }} />
-      <DeleteDataDialog service={deleteDataService} open={!!deleteDataService} onOpenChange={(open) => !open && setDeleteDataService(null)} onComplete={() => {
-        cronCacheBust(queryClient, deleteDataService?.service_id); queryClient.invalidateQueries({ queryKey: queryKeys.services() }); setDeleteDataService(null)
-      }} />
+      {teardownService && (
+        <TeardownDialog service={teardownService} open={!!teardownService} onOpenChange={(open) => !open && setTeardownService(null)} onComplete={() => {
+          queryClient.invalidateQueries({ queryKey: queryKeys.services() }); queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap() }); setTeardownService(null)
+        }} />
+      )}
+      {deleteDataService && (
+        <DeleteDataDialog service={deleteDataService} open={!!deleteDataService} onOpenChange={(open) => !open && setDeleteDataService(null)} onComplete={() => {
+          cronCacheBust(queryClient, deleteDataService?.service_id); queryClient.invalidateQueries({ queryKey: queryKeys.services() }); setDeleteDataService(null)
+        }} />
+      )}
       <CredentialsDialog service={credentialsService} onClose={() => setCredentialsService(null)} />
       <NgwafDialog service={ngwafService} onClose={() => setNgwafService(null)} />
     </>

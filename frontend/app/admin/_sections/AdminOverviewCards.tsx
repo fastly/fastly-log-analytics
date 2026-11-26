@@ -8,7 +8,6 @@ import { adminJson, client, unwrapClient, queryKeys } from '@/lib/api'
 import { buildServiceHref, formatCount } from '@/lib/utils'
 import { useBootstrap, useMounted } from '@/hooks/useBootstrap'
 import { useServiceStore } from '@/stores/filterStore'
-import { scoringAnalyticsCompositeOptions, scoringConfigCompositeOptions } from '@/components/SessionScoring/ScoringAdminPanels'
 import { Badge } from '@/components/ui/badge'
 import { buttonVariants } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -35,7 +34,12 @@ export function AdminPrefetchLinks() {
     : ADMIN_PREFETCH_LINKS
   const handlePrefetch = (key: (typeof ADMIN_PREFETCH_LINKS)[number]['key']) => {
     if (key === 'share') queryClient.prefetchQuery({ queryKey: queryKeys.admin.shareStatus(), queryFn: async ({ signal }) => unwrapClient(client.GET('/api/admin/share/status', { signal })) })
-    else if (key === 'scoring' && activeServiceId) { queryClient.prefetchQuery(scoringAnalyticsCompositeOptions(activeServiceId, 24)); queryClient.prefetchQuery(scoringConfigCompositeOptions(activeServiceId)) }
+    else if (key === 'scoring' && activeServiceId) {
+      void import('@/components/SessionScoring/ScoringAdminPanels').then(({ scoringAnalyticsCompositeOptions, scoringConfigCompositeOptions }) => {
+        queryClient.prefetchQuery(scoringAnalyticsCompositeOptions(activeServiceId, 24))
+        queryClient.prefetchQuery(scoringConfigCompositeOptions(activeServiceId))
+      })
+    }
     else if (key === 'trends') queryClient.prefetchQuery({ queryKey: queryKeys.admin.metricHistoryBatch('1h'), queryFn: async ({ signal }) => unwrapClient(client.GET('/api/admin/metric-history/batch', { params: { query: { since: '1h' } }, signal })) })
     else if (key === 'queue') queryClient.prefetchQuery({ queryKey: queryKeys.admin.celeryStatus(), queryFn: async ({ signal }) => unwrapClient(client.GET('/api/admin/celery/status', { signal })) })
     else if (key === 'clickhouse' && activeServiceId) queryClient.prefetchQuery({

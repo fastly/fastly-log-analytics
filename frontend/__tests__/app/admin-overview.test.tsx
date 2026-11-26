@@ -203,6 +203,12 @@ import ClickHouseLoading from '@/app/admin/clickhouse/loading'
 import ClickHouseAdminPage from '@/app/admin/clickhouse/page'
 import { ClickHouseAdminClient, ClickHouseStatusNotice } from '@/app/admin/clickhouse/page'
 import { OperationsOverview, AdminTrendsClient, ServicesTable } from '@/app/admin/_sections/OperationsOverview'
+import {
+  DeferredGlobalSettings,
+  DeferredPricingSettings,
+  DeferredQuarantineSection,
+  DeferredSystemHealthCard,
+} from '@/app/admin/_sections/AdminDeferredSections'
 import { QuarantineSection } from '@/app/control-room/_sections/ControlRoomClient'
 import { QuarantineSection as ExtractedQuarantineSection } from '@/app/control-room/_sections/QuarantineSection'
 import ControlRoomPage from '@/app/control-room/page'
@@ -288,13 +294,52 @@ test('ControlRoomPage streams synchronously behind Suspense and AdminPage wraps 
   unmount()
 
   const adminEl = AdminPage() as React.ReactElement<{ children: React.ReactNode }>
-  const children = React.Children.toArray(adminEl.props.children) as React.ReactElement<{ children?: React.ReactNode }>[]
+  expect(adminEl).not.toBeInstanceOf(Promise)
+  const children = React.Children.toArray(adminEl.props.children) as React.ReactElement<{
+    'data-testid'?: string
+    children?: React.ReactNode
+  }>[]
   const reservationChildren = children.slice(1)
-  expect(reservationChildren).toHaveLength(6)
+  expect(reservationChildren.map((w) => w.props['data-testid'])).toEqual([
+    'admin-operations-reservation',
+    'admin-services-reservation',
+    'admin-health-reservation',
+    'admin-quarantine-reservation',
+    'admin-global-settings-reservation',
+    'admin-pricing-reservation',
+  ])
   for (const wrapper of reservationChildren) {
     const inner = wrapper.props.children as React.ReactElement
     expect(inner.type).toBe(React.Suspense)
   }
+  const deferredTypes = reservationChildren.slice(2).map((wrapper) => {
+    const suspense = wrapper.props.children as React.ReactElement<{ children: React.ReactElement }>
+    return suspense.props.children.type
+  })
+  expect(deferredTypes).toEqual([
+    DeferredSystemHealthCard,
+    DeferredQuarantineSection,
+    DeferredGlobalSettings,
+    DeferredPricingSettings,
+  ])
+
+  const ssrQueryClient = createTestQueryClient()
+  const ssrHtml = renderToString(
+    <QueryClientProvider client={ssrQueryClient}>
+      <AdminPage />
+    </QueryClientProvider>,
+  )
+  for (const id of [
+    'admin-operations-reservation',
+    'admin-services-reservation',
+    'admin-health-reservation',
+    'admin-quarantine-reservation',
+    'admin-global-settings-reservation',
+    'admin-pricing-reservation',
+  ]) {
+    expect(ssrHtml).toContain(`data-testid="${id}"`)
+  }
+  ssrQueryClient.clear()
 })
 
 test('OperationsOverview renders live query, ingest gap, slow query, and ingest ledger cards', async () => {
