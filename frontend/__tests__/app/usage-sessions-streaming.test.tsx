@@ -356,6 +356,48 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     expect(errorSpy).not.toHaveBeenCalled()
   })
 
+  test('usage initial shell renders substantive above-the-fold summary and keeps partial storage notice compact', () => {
+    reportLayoutChildArgs = null
+    mockIsDataReady = false
+    const { unmount } = renderWithQuery(<UsagePage />, { queryClient })
+
+    expect(screen.getByRole('heading', { name: 'System Usage' })).toBeInTheDocument()
+    const summary = screen.getByText(/Measure Fastly Object Storage impact/i)
+    expect(summary).toBeInTheDocument()
+    expect(summary.textContent?.length ?? 0).toBeGreaterThan(120)
+    unmount()
+
+    reportLayoutChildArgs = {
+      startTime: '2026-01-01T00:00:00Z', endTime: '2026-01-01T01:00:00Z', activeServiceId: 'test-svc',
+      filterPayload: {}, intervalButtons: null, bucketSeconds: 300,
+      config: { effectiveInterval: '5 minutes', interval: '5 minutes' },
+      setChartInterval: vi.fn(), timezone: 'UTC', data: { rows: [], total: 0 }, isLoading: false, isFetching: false,
+    }
+    mockIsDataReady = true
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === '/api/usage/current-storage') {
+        return {
+          data: {
+            live_bytes: 0, live_files: 0, quarantine_bytes: 0,
+            total_billed_bytes: 0, total_billed_gb_hours: 720,
+            storage_billing_complete: false,
+            storage_billing_provenance: ['high-scale:incomplete_lifecycle'],
+            total_files: 0, total_bytes: 0, deleted_bytes: 0,
+            start: '2026-01-01T00:00:00Z', end: '2026-01-01T01:00:00Z',
+          },
+        } as never
+      }
+      return undefined
+    })
+
+    renderWithQuery(<UsagePage />, { queryClient })
+    return screen.findByText(/Partial storage cost/).then((notice) => {
+      expect(notice.className).toContain('truncate')
+      expect(notice.className).toContain('max-w-[240px]')
+      expect(notice.getAttribute('title')).toContain('high-scale:incomplete_lifecycle')
+    })
+  })
+
   test('RUM failure keeps an unavailable section visible when RUM is enabled', async () => {
     useServiceStore.setState({
       activeServiceId: 'test-svc',

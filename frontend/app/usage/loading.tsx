@@ -3,7 +3,7 @@ export default function Loading() {
   return (
     <DashboardSkeleton
       title="System Usage"
-      description="Estimate Fastly Object Storage and CDN logging costs."
+      description="Measure Fastly Object Storage impact, Class A/B operations, CDN egress bandwidth, and log ingestion activity across your active service, and estimate monthly costs."
     />
   )
 }

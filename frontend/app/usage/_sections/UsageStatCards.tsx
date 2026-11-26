@@ -522,7 +522,11 @@ export function UsageStatCards({
                   </div>
                 )}
                 {storageIncomplete && (
-                  <div role="status" className="text-[10px] text-amber-700 dark:text-amber-500 mt-0.5">
+                  <div
+                    role="status"
+                    title={`Partial storage cost — incomplete lifecycle data${storageProvenance && storageProvenance.length > 0 ? ` (${storageProvenance.join(', ')})` : ''}.`}
+                    className="text-[10px] leading-tight text-amber-700 dark:text-amber-500 mt-0.5 max-w-[240px] truncate"
+                  >
                     Partial storage cost — incomplete lifecycle data
                     {storageProvenance && storageProvenance.length > 0
                       ? ` (${storageProvenance.join(', ')})`

@@ -101,6 +101,7 @@ export async function fetchAssetsServerSide(
     path: '/api/assets/aggregates',
     logPrefix: 'ssr/assets',
     now,
+    timeoutMs: 450,
   })
 }
 
@@ -117,6 +118,7 @@ export async function fetchPerformanceServerSide(
     path: '/api/performance/aggregates',
     logPrefix: 'ssr/performance',
     now,
+    timeoutMs: 450,
     body: {
       sort_by: PERFORMANCE_SSR_DEFAULTS.sortBy,
       sections: undefined,
@@ -138,7 +140,7 @@ export async function fetchStreamingServerSide(
     path: '/api/cmcd/aggregates',
     logPrefix: 'ssr/streaming',
     now,
-    timeoutMs: 8000,
+    timeoutMs: 500,
     body: {
       bucket_seconds: STREAMING_SSR_DEFAULTS.bucketSeconds,
       top_n: STREAMING_SSR_DEFAULTS.topN,
@@ -165,9 +167,9 @@ export const SECURITY_SSR_DEFAULTS = {
   bucketSeconds: 3600,
 } as const
 
-export const SECURITY_SSR_TIMEOUT_MS = 900
-export const INSIGHTS_SSR_TIMEOUT_MS = 900
-export const ORIGIN_SSR_TIMEOUT_MS = 900
+export const SECURITY_SSR_TIMEOUT_MS = 450
+export const INSIGHTS_SSR_TIMEOUT_MS = 450
+export const ORIGIN_SSR_TIMEOUT_MS = 450
 
 export async function fetchSecurityServerSide(
   serviceId: string | undefined,
@@ -319,13 +321,13 @@ export async function fetchInsightsServerSide(
 
 type BootstrapResponse = components['schemas']['BootstrapResponse']
 
-const _ADMIN_SSR_TTL_MS = 2000
+const _ADMIN_SSR_TTL_MS = 10000
 const _adminInflightMap = new Map<string, Promise<BootstrapResponse | null>>()
 const _adminCachedMap = new Map<string, { at: number; value: BootstrapResponse | null }>()
 
 function _fetchBootstrapUpstream(serviceId?: string | null): Promise<BootstrapResponse | null> {
   const path = serviceId ? `/api/bootstrap?service_id=${encodeURIComponent(serviceId)}` : '/api/bootstrap'
-  return ssrUpstreamGet({ path, logPrefix: 'ssr/bootstrap' }).then((resp) =>
+  return ssrUpstreamGet({ path, logPrefix: 'ssr/bootstrap', timeoutMs: 450 }).then((resp) =>
     parseSsrJson<BootstrapResponse>(resp, 'ssr/bootstrap'),
   )
 }
@@ -456,6 +458,7 @@ export async function fetchMetricHistoryBatchServerSide(): Promise<unknown | nul
     await ssrUpstreamGet({
       path: '/api/admin/metric-history/batch?since=1h',
       logPrefix: 'ssr/admin-trends',
+      timeoutMs: 450,
     }),
     'ssr/admin-trends',
   )

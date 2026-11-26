@@ -263,6 +263,9 @@ function DashboardBody({
   intervalButtons, allCards, visibleCards, relativeRange, isAutoRange, anchor,
 }: DashboardBodyProps) {
   const { data: catalog, isPending: catalogPending } = useLogFieldsCatalog()
+  React.useEffect(() => {
+    void import('@/components/Dashboard/TopTenTable')
+  }, [])
   const { addFilter, setRange, compareMode, compareStartTime, compareEndTime } = useFilterStore(
     useShallow(state => ({
       addFilter: state.addFilter, setRange: state.setRange, compareMode: state.compareMode,

@@ -245,7 +245,7 @@ export function CardGrid({
       : aggregates?.data?.[card.id]
 
     return (
-      <LazyMount key={card.id} minHeight={392}>
+      <LazyMount key={card.id} minHeight={392} rootMargin="6000px">
         <TopTenTable
           title={card.label} icon={card.id === '_bot_name' ? <Bot className="h-4 w-4" /> : undefined}
           field={card.id} inActiveFormat={card.inActiveFormat} data={tableData}

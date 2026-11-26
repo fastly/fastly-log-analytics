@@ -11,7 +11,7 @@ import { EventEmitter } from 'node:events'
 import { join } from 'node:path'
 import { Activity, Star } from 'lucide-react'
 import { describe, expect, it, test, vi, beforeAll, beforeEach, afterEach } from 'vitest'
-import DashboardClient, { buildChartLayout } from '@/app/dashboard/_sections/DashboardClient'
+import DashboardClient, { buildChartLayout, CardGrid } from '@/app/dashboard/_sections/DashboardClient'
 import AssetsClient, { AssetsReportContent } from '@/app/assets-shield/_sections/AssetsClient'
 import NetworkPage from '@/app/network/page'
 import QueryPage from '@/app/query/page'
@@ -326,6 +326,37 @@ describe('Dashboard page & chart helpers', () => {
         .every(([, options]) => options.body.fields !== undefined)).toBe(true)
     } finally {
       localStorage.removeItem('dashboard_cards')
+    }
+  })
+
+  test('CardGrid mounts LazyMount panels with large rootMargin so bundled cards render without sequential scroll stalls', () => {
+    const observedOptions: Array<IntersectionObserverInit | undefined> = []
+    vi.stubGlobal('IntersectionObserver', class {
+      constructor(_cb: IntersectionObserverCallback, options?: IntersectionObserverInit) {
+        observedOptions.push(options)
+      }
+      observe() {}
+      disconnect() {}
+    })
+    try {
+      renderWithQuery(
+        <CardGrid
+          visibleCardList={[{ id: 'status', label: 'HTTP Status', inActiveFormat: true }]}
+          isReady={true}
+          isFetchingAggs={false}
+          aggregates={{ data: { status: { total: 10, top: [{ value: '200', count: 10 }] } } }}
+          compareAggregates={undefined}
+          compareMode={false}
+          topBotsData={undefined}
+          collapsedSections={new Set()}
+          toggleSectionCollapsed={() => {}}
+          onRowClick={() => {}}
+        />,
+        { queryClient },
+      )
+      expect(observedOptions).toContainEqual(expect.objectContaining({ rootMargin: '6000px' }))
+    } finally {
+      vi.unstubAllGlobals()
     }
   })
 
