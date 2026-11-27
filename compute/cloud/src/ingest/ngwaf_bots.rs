@@ -368,7 +368,7 @@ pub fn sync_step<R: Runtime>(
             break;
         }
         let key = day_key(store.service, &day);
-        let mut summary = match store.get_direct(&key, DAY_FILE_LIMIT)? {
+        let mut summary = match store.get_uncached(&key, DAY_FILE_LIMIT)? {
             Some(bytes) => {
                 serde_json::from_slice::<DaySummary>(&bytes).unwrap_or_else(|_| DaySummary {
                     version: 1,
@@ -459,7 +459,7 @@ pub fn query_range<R: Runtime>(
             break;
         }
         let key = day_key(store.service, &day);
-        let Some(bytes) = store.get_direct(&key, DAY_FILE_LIMIT)? else {
+        let Some(bytes) = store.get_uncached(&key, DAY_FILE_LIMIT)? else {
             continue;
         };
         let Ok(summary) = serde_json::from_slice::<DaySummary>(&bytes) else {

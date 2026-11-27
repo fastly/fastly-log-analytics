@@ -504,6 +504,18 @@ impl<R: Runtime> Store<'_, R> {
         }
     }
 
+    /// Reads an object directly from FOS, bypassing the `/fos/` CDN cache.
+    /// Use for mutable keys rewritten in place (e.g. `ngwaf_bots` daily summaries).
+    pub fn get_uncached(&self, key: &str, limit: usize) -> Result<Option<Vec<u8>>, String> {
+        let response = self.fos_with_limit("GET", key, "", Vec::new(), limit)?;
+        match response.status {
+            200 if response.body.len() <= limit => Ok(Some(response.body)),
+            200 => Err("get_body_too_large".into()),
+            404 => Ok(None),
+            status => Err(format!("get_http_{status}")),
+        }
+    }
+
     /// [`Self::get_direct`] of the first `(key, limit)`, with the rest sent alongside it as
     /// speculative reads. Results keep request order; each sent request is one backend call. A
     /// speculative read whose answer was not read here answers [`PREFETCH_UNREAD`].
