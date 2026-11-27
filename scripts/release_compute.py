@@ -211,7 +211,8 @@ def _duckdb_links(out: Path) -> list[str]:
     versions = sorted(path for path in (out / "duckdb").glob("*") if path.is_dir())
     if len(versions) != 1:
         raise RuntimeError("Static export must contain exactly one /duckdb/<version>/ directory")
-    worker = versions[0] / "duckdb-browser-eh.worker.js"
+    v2_worker = versions[0] / "duckdb-browser-eh.v2.worker.js"
+    worker = v2_worker if v2_worker.is_file() else versions[0] / "duckdb-browser-eh.worker.js"
     wasm = versions[0] / "duckdb-eh.wasm"
     missing = [path.name for path in (worker, wasm) if not path.is_file()]
     if missing:
