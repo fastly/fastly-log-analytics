@@ -30,6 +30,10 @@ pub struct SyncState {
     pub last_ts: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_query: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_last_ts: Option<String>,
     #[serde(default)]
     pub last_run: u64,
 }
@@ -250,14 +254,22 @@ pub fn sync_step<R: Runtime>(
             ..Default::default()
         };
     }
+    if state.next_cursor.is_some() && state.active_query.is_none() {
+        state.next_cursor = None;
+        state.pending_last_ts = None;
+    }
     if state.next_cursor.is_none() && state.last_run.saturating_add(SYNC_INTERVAL_S) > now {
         return Ok(None);
     }
 
     let mut report = SyncReport::default();
     let mut by_day: BTreeMap<String, Vec<BotRecord>> = BTreeMap::new();
-    let from_rel = relative_time_range(state.last_ts.as_deref(), now as i64);
-    let mut newest_ts = state.last_ts.clone();
+    let prev_last_ts = state.last_ts.clone();
+    let mut newest_ts = state
+        .pending_last_ts
+        .clone()
+        .or_else(|| state.last_ts.clone());
+    let mut cursor_reset = false;
     let api_path = format!("/ngwaf/v1/workspaces/{workspace_id}/requests");
 
     for _ in 0..MAX_PAGES_PER_RUN {
@@ -265,8 +277,15 @@ pub fn sync_step<R: Runtime>(
             report.more_pending = true;
             break;
         }
+        let q = state
+            .active_query
+            .get_or_insert_with(|| {
+                let from_rel = relative_time_range(state.last_ts.as_deref(), now as i64);
+                format!("tag:VERIFIED-BOT from:{from_rel}")
+            })
+            .clone();
         let mut query = url::form_urlencoded::Serializer::new(String::new());
-        query.append_pair("q", &format!("tag:VERIFIED-BOT from:{from_rel}"));
+        query.append_pair("q", &q);
         query.append_pair("limit", &PAGE_LIMIT.to_string());
         if let Some(cursor) = state.next_cursor.as_deref() {
             query.append_pair("cursor", cursor);
@@ -282,10 +301,28 @@ pub fn sync_step<R: Runtime>(
         if resp.status == 401 || resp.status == 403 {
             return Err("ngwaf_api_unauthorized".into());
         }
+        if resp.status == 400 && state.next_cursor.is_some() {
+            state.next_cursor = None;
+            state.active_query = None;
+            state.pending_last_ts = None;
+            newest_ts = state.last_ts.clone();
+            if !cursor_reset {
+                cursor_reset = true;
+                continue;
+            }
+            let val = serde_json::to_value(&state).map_err(|e| e.to_string())?;
+            let _ = runtime.admin_cas(
+                STATE_KEY,
+                existing.as_ref().map(|r| r.generation.as_str()),
+                &val,
+            )?;
+            return Err("ngwaf_api_status_400".into());
+        }
         if !(200..300).contains(&resp.status) {
             return Err(format!("ngwaf_api_status_{}", resp.status));
         }
         report.pages += 1;
+        let mut reached_prev = false;
         if let Some(items) = resp.body["data"].as_array() {
             for item in items {
                 if let Some(rec) = extract_bot_record(item) {
@@ -295,12 +332,22 @@ pub fn sync_step<R: Runtime>(
                     {
                         newest_ts = Some(rec.timestamp_iso.clone());
                     }
+                    if prev_last_ts
+                        .as_deref()
+                        .is_some_and(|prev| rec.timestamp_iso.as_str() <= prev)
+                    {
+                        reached_prev = true;
+                    }
                     if let Some(day) = day_string(rec.timestamp_s) {
                         by_day.entry(day).or_default().push(rec);
                         report.records += 1;
                     }
                 }
             }
+        }
+        if reached_prev {
+            state.next_cursor = None;
+            break;
         }
         let next = resp.body["meta"]["next_cursor"]
             .as_str()
@@ -313,8 +360,10 @@ pub fn sync_step<R: Runtime>(
         }
     }
 
+    let mut write_truncated = false;
     for (day, records) in by_day {
         if runtime.admin_remaining_calls() <= tail + 2 || !store.within_wall() {
+            write_truncated = true;
             report.more_pending = true;
             break;
         }
@@ -342,10 +391,17 @@ pub fn sync_step<R: Runtime>(
         }
     }
 
-    if state.next_cursor.is_none() {
+    if state.next_cursor.is_none() && !write_truncated {
         state.last_ts = newest_ts.or_else(|| Some(rfc3339(now as i64)));
+        state.pending_last_ts = None;
+        state.active_query = None;
         state.last_run = now;
+    } else if state.next_cursor.is_some() {
+        state.pending_last_ts = newest_ts;
+        report.more_pending = true;
     } else {
+        state.active_query = None;
+        state.pending_last_ts = None;
         report.more_pending = true;
     }
     let val = serde_json::to_value(&state).map_err(|e| e.to_string())?;
@@ -517,5 +573,380 @@ mod tests {
         assert_eq!(merge_records(&mut summary, &[rec]), 0);
         assert_eq!(summary.buckets.len(), 1);
         assert_eq!(summary.buckets[0].n, 1);
+    }
+
+    use crate::admin::{ApiResponse, FosRequest, FosResponse, Record, Service};
+    use crate::setup::SetupStores;
+    use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
+    use std::time::Instant;
+
+    struct MockRt {
+        now: Cell<u64>,
+        kv: RefCell<BTreeMap<String, (u64, Value)>>,
+        fos: RefCell<BTreeMap<String, Vec<u8>>>,
+        api_responses: RefCell<VecDeque<ApiResponse>>,
+        api_queries: RefCell<Vec<String>>,
+    }
+
+    impl MockRt {
+        fn new(now: u64, responses: Vec<ApiResponse>) -> Self {
+            Self {
+                now: Cell::new(now),
+                kv: RefCell::new(BTreeMap::new()),
+                fos: RefCell::new(BTreeMap::new()),
+                api_responses: RefCell::new(responses.into()),
+                api_queries: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn state(&self) -> SyncState {
+            let v = self
+                .kv
+                .borrow()
+                .get(STATE_KEY)
+                .map(|(_, v)| v.clone())
+                .expect("state saved");
+            serde_json::from_value(v).expect("valid SyncState")
+        }
+
+        fn seed_state(&self, state: &SyncState) {
+            self.kv.borrow_mut().insert(
+                STATE_KEY.into(),
+                (1, serde_json::to_value(state).expect("json")),
+            );
+        }
+    }
+
+    impl SetupStores for MockRt {
+        fn config_present(&self, _: &str) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn secret_present(&self, _: &str) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn state_linked(&self) -> Result<bool, String> {
+            Ok(true)
+        }
+    }
+
+    impl Runtime for MockRt {
+        fn config(&self, _: &str) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+        fn secret(&self, _: &str) -> Result<Option<String>, String> {
+            Ok(Some("tok".into()))
+        }
+        fn random(&self) -> Result<[u8; 32], String> {
+            Ok([0; 32])
+        }
+        fn now(&self) -> u64 {
+            self.now.get()
+        }
+        fn checks(&self, _: bool) -> Result<Value, String> {
+            Ok(json!({}))
+        }
+        fn versions(&self) -> Result<Value, String> {
+            Ok(json!({}))
+        }
+        fn compute_service_id(&self) -> Option<String> {
+            None
+        }
+        fn compute_service_version(&self) -> Option<String> {
+            None
+        }
+        fn admin_remaining_calls(&self) -> u32 {
+            100
+        }
+        fn admin_get(&self, key: &str) -> Result<Option<Record>, String> {
+            Ok(self.kv.borrow().get(key).map(|(g, v)| Record {
+                generation: g.to_string(),
+                value: v.clone(),
+            }))
+        }
+        fn admin_cas(
+            &self,
+            key: &str,
+            generation: Option<&str>,
+            value: &Value,
+        ) -> Result<bool, String> {
+            let mut kv = self.kv.borrow_mut();
+            let current = kv.get(key).map(|(g, _)| *g);
+            if current.map(|g| g.to_string()).as_deref() != generation {
+                return Ok(false);
+            }
+            kv.insert(key.into(), (current.unwrap_or(0) + 1, value.clone()));
+            Ok(true)
+        }
+        fn admin_api(&self, req: ApiRequest<'_>) -> Result<ApiResponse, String> {
+            self.api_queries.borrow_mut().push(req.query.to_owned());
+            Ok(self
+                .api_responses
+                .borrow_mut()
+                .pop_front()
+                .expect("queued api response"))
+        }
+        fn admin_fos(&self, req: FosRequest<'_>) -> Result<FosResponse, String> {
+            match req.method {
+                "GET" => match self.fos.borrow().get(req.key) {
+                    Some(bytes) => Ok(FosResponse {
+                        status: 200,
+                        body: bytes.clone(),
+                        cdn_cache: None,
+                        retry_after: None,
+                    }),
+                    None => Ok(FosResponse {
+                        status: 404,
+                        body: Vec::new(),
+                        cdn_cache: None,
+                        retry_after: None,
+                    }),
+                },
+                "PUT" => {
+                    self.fos
+                        .borrow_mut()
+                        .insert(req.key.to_owned(), req.body.to_vec());
+                    Ok(FosResponse {
+                        status: 200,
+                        body: Vec::new(),
+                        cdn_cache: None,
+                        retry_after: None,
+                    })
+                }
+                other => Err(format!("unexpected_fos_{other}")),
+            }
+        }
+        fn admin_fos_etag(
+            &self,
+            req: FosRequest<'_>,
+        ) -> Result<(FosResponse, Option<String>), String> {
+            use md5::{Digest as _, Md5};
+            let etag = (req.method == "PUT")
+                .then(|| format!("\"{}\"", hex::encode(Md5::digest(&req.body))));
+            Ok((self.admin_fos(req)?, etag))
+        }
+    }
+
+    fn test_service() -> Service {
+        serde_json::from_value(json!({
+            "service_id": "svc-1",
+            "name": "demo",
+            "status": "active",
+            "created_at": 1,
+            "updated_at": 1,
+            "config_version": 1,
+            "logging_enabled": true,
+            "logging_endpoint_name": "ep",
+            "log_period": 60,
+            "sample_rate": 100,
+            "edge_only": false,
+            "custom_condition": "",
+            "fos_bucket": "bucket",
+            "fos_prefix": "logs/",
+            "fos_region": "us-east-1",
+            "fos_endpoint": "us-east.object.fastlystorage.app",
+            "log_fields": {},
+            "field_limits": {},
+            "fastly_token_ref": "tok",
+            "fos_access_key_ref": "ak",
+            "fos_secret_key_ref": "sk",
+            "owner": "owner",
+            "bucket_adopted": true,
+            "bucket_checked": true,
+            "ngwaf_workspace_id": "ws-demo"
+        }))
+        .expect("service")
+    }
+
+    fn make_entry(id: &str, ts: &str, bot: &str) -> Value {
+        json!({
+            "id": id,
+            "timestamp": ts,
+            "signals": [
+                {"id": "VERIFIED-BOT", "value": bot},
+                {"id": "VERIFIED-BOT.SEARCH-ENGINE"}
+            ]
+        })
+    }
+
+    fn make_store<'a>(rt: &'a MockRt, svc: &'a Service) -> Store<'a, MockRt> {
+        Store {
+            runtime: rt,
+            service: svc,
+            access_key: "ak".into(),
+            secret_key: "sk".into(),
+            started: Instant::now(),
+            vcpu_start: 0,
+        }
+    }
+
+    fn api_resp(status: u16, body: Value) -> ApiResponse {
+        ApiResponse {
+            status,
+            body,
+            retry_after: None,
+        }
+    }
+
+    #[test]
+    fn sync_step_clears_expired_cursor_on_400_and_recovers() {
+        let now = 1_795_800_000;
+        let rt = MockRt::new(
+            now,
+            vec![
+                api_resp(400, json!({"detail": "invalid cursor"})),
+                api_resp(
+                    200,
+                    json!({
+                        "data": [make_entry("r1", "2026-11-27T17:00:00Z", "GoogleBot")],
+                        "meta": {}
+                    }),
+                ),
+            ],
+        );
+        rt.seed_state(&SyncState {
+            workspace_id: "ws-demo".into(),
+            last_ts: Some("2026-11-27T16:00:00Z".into()),
+            next_cursor: Some("expired-cur".into()),
+            active_query: Some("tag:VERIFIED-BOT from:-24h".into()),
+            pending_last_ts: Some("2026-11-27T16:30:00Z".into()),
+            last_run: now - 600,
+        });
+        let svc = test_service();
+        let store = make_store(&rt, &svc);
+        let report = sync_step(&store, 0).expect("ok").expect("ran");
+        assert_eq!(report.pages, 1);
+        assert_eq!(report.added, 1);
+        assert!(!report.more_pending);
+        let queries = rt.api_queries.borrow();
+        assert_eq!(queries.len(), 2);
+        assert!(queries[0].contains("cursor=expired-cur"));
+        assert!(!queries[1].contains("cursor="));
+        let st = rt.state();
+        assert_eq!(st.next_cursor, None);
+        assert_eq!(st.active_query, None);
+        assert_eq!(st.pending_last_ts, None);
+        assert_eq!(st.last_ts.as_deref(), Some("2026-11-27T17:00:00Z"));
+    }
+
+    #[test]
+    fn sync_step_reuses_active_query_and_preserves_pending_last_ts_across_turns() {
+        let now = 1_795_800_000;
+        let mut responses = Vec::new();
+        for i in 0..MAX_PAGES_PER_RUN {
+            responses.push(api_resp(
+                200,
+                json!({
+                    "data": [make_entry(
+                        &format!("r{i}"),
+                        &format!("2026-11-27T17:{:02}:00Z", 50 - i),
+                        "GoogleBot"
+                    )],
+                    "meta": {"next_cursor": format!("cur-{}", i + 1)}
+                }),
+            ));
+        }
+        responses.push(api_resp(
+            200,
+            json!({
+                "data": [make_entry("r-last", "2026-11-27T17:40:00Z", "GoogleBot")],
+                "meta": {}
+            }),
+        ));
+        let rt = MockRt::new(now, responses);
+        let svc = test_service();
+        let store = make_store(&rt, &svc);
+
+        let r1 = sync_step(&store, 0).expect("turn 1").expect("ran");
+        assert_eq!(r1.pages, MAX_PAGES_PER_RUN as u64);
+        assert!(r1.more_pending);
+        let st1 = rt.state();
+        assert_eq!(st1.next_cursor.as_deref(), Some("cur-6"));
+        assert_eq!(
+            st1.active_query.as_deref(),
+            Some("tag:VERIFIED-BOT from:-24h")
+        );
+        assert_eq!(st1.pending_last_ts.as_deref(), Some("2026-11-27T17:50:00Z"));
+        assert_eq!(st1.last_ts, None);
+
+        rt.now.set(now + 360);
+        let r2 = sync_step(&store, 0).expect("turn 2").expect("ran");
+        assert_eq!(r2.pages, 1);
+        assert!(!r2.more_pending);
+        let queries = rt.api_queries.borrow();
+        let last_q = queries.last().expect("turn 2 query");
+        assert!(last_q.contains("q=tag%3AVERIFIED-BOT+from%3A-24h"));
+        assert!(last_q.contains("cursor=cur-6"));
+        let st2 = rt.state();
+        assert_eq!(st2.next_cursor, None);
+        assert_eq!(st2.active_query, None);
+        assert_eq!(st2.pending_last_ts, None);
+        assert_eq!(st2.last_ts.as_deref(), Some("2026-11-27T17:50:00Z"));
+    }
+
+    #[test]
+    fn sync_step_stops_early_when_reaching_last_ts() {
+        let now = 1_795_800_000;
+        let rt = MockRt::new(
+            now,
+            vec![api_resp(
+                200,
+                json!({
+                    "data": [
+                        make_entry("r-new", "2026-11-27T17:05:00Z", "GoogleBot"),
+                        make_entry("r-old", "2026-11-27T17:00:00Z", "GoogleBot")
+                    ],
+                    "meta": {"next_cursor": "should-not-follow"}
+                }),
+            )],
+        );
+        rt.seed_state(&SyncState {
+            workspace_id: "ws-demo".into(),
+            last_ts: Some("2026-11-27T17:00:00Z".into()),
+            last_run: now - 300,
+            ..Default::default()
+        });
+        let svc = test_service();
+        let store = make_store(&rt, &svc);
+        let report = sync_step(&store, 0).expect("ok").expect("ran");
+        assert_eq!(report.pages, 1);
+        assert!(!report.more_pending);
+        let st = rt.state();
+        assert_eq!(st.next_cursor, None);
+        assert_eq!(st.last_ts.as_deref(), Some("2026-11-27T17:05:00Z"));
+    }
+
+    #[test]
+    fn sync_step_resets_legacy_cursor_without_active_query() {
+        let now = 1_795_800_000;
+        let rt = MockRt::new(
+            now,
+            vec![api_resp(
+                200,
+                json!({
+                    "data": [make_entry("r1", "2026-11-27T17:10:00Z", "GoogleBot")],
+                    "meta": {}
+                }),
+            )],
+        );
+        rt.seed_state(&SyncState {
+            workspace_id: "ws-demo".into(),
+            last_ts: Some("2026-11-27T00:00:00Z".into()),
+            next_cursor: Some("legacy-wedged-cursor".into()),
+            active_query: None,
+            pending_last_ts: None,
+            last_run: now - 600,
+        });
+        let svc = test_service();
+        let store = make_store(&rt, &svc);
+        let report = sync_step(&store, 0).expect("ok").expect("ran");
+        assert_eq!(report.pages, 1);
+        assert_eq!(report.added, 1);
+        let queries = rt.api_queries.borrow();
+        assert_eq!(queries.len(), 1);
+        assert!(!queries[0].contains("cursor="));
+        let st = rt.state();
+        assert_eq!(st.next_cursor, None);
+        assert_eq!(st.last_ts.as_deref(), Some("2026-11-27T17:10:00Z"));
     }
 }

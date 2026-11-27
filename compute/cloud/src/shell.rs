@@ -1378,9 +1378,15 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
         let latest_log_at = edge("latest_log_at");
         let total_rows = edge("total_rows").unwrap_or(Value::Null);
         let total_rows_partial = edge("total_rows_partial").unwrap_or(Value::Bool(false));
-        let last_sync_at = last_tick_at
-            .clone()
-            .or_else(|| cron_runs.first().map(|r| r.started_at.clone()));
+        let last_sync_at = [
+            last_tick_at.as_deref(),
+            snapshot.last_ingest_at.as_deref(),
+            cron_runs.first().map(|r| r.finished_at.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+        .map(str::to_owned);
         let rum = configured
             .then(|| crate::ingest::rum_extents(self.runtime).ok().flatten())
             .flatten()
