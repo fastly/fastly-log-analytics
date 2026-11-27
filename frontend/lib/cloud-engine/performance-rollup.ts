@@ -17,6 +17,7 @@ import {
 import { hasFilterValues, PERFORMANCE_ROLLUP_SECTIONS } from "./rollup-sections";
 import { defineSummarySpec, type SummarySpec } from "./dashboard/summary-projection";
 import { loadAsnNames } from "./asn-names";
+import { PERFORMANCE_RESIDUAL } from "./performance-residual";
 
 export type PerformanceRollupBody = {
   start_time?: string | number | null;
@@ -224,7 +225,7 @@ export async function performanceFromRollup(
   const toMs = parseEpochMs(body.end_time ?? undefined);
   if (fromMs === null || toMs === null || fromMs >= toMs) return null;
   const [result] = await Promise.all([
-    queryRollup(source, { fromMs, toMs, signal, spec: spec ?? undefined }),
+    queryRollup(source, { fromMs, toMs, signal, spec: spec ?? undefined, residual: PERFORMANCE_RESIDUAL }),
     body.sections?.includes("top_asns") ? loadAsnNames() : Promise.resolve(null),
   ]);
   return result ? performanceAggregatesFromRollup(result, body) : null;

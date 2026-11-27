@@ -880,8 +880,6 @@ export function mergeRollups(rollups: readonly Rollup[], keys?: ReadonlySet<stri
       mergeKept(out, rollup, keep, has);
       continue;
     }
-    const samples = own(rollup, "samples");
-    if (samples) (out.samples ??= []).push(...samples);
     for (const [field, values] of own(rollup, "value") ?? []) {
       for (const [value, days] of values) {
         for (const [day, sums] of days) addValue((out.value ??= new Map()), field, value, day, sums);
@@ -895,8 +893,6 @@ export function mergeRollups(rollups: readonly Rollup[], keys?: ReadonlySet<stri
       const totals = (out.binsTotals ??= new Map());
       totals.set(field, (totals.get(field) ?? 0) + n);
     }
-    const waterfall = own(rollup, "waterfall");
-    if (waterfall) out.waterfall = addWaterfall(out.waterfall, waterfall);
     const overview = own(rollup, "overview");
     if (overview) out.overview = addSums(out.overview, overview, OVERVIEW_KEYS);
     const assets = own(rollup, "assets");
@@ -931,6 +927,14 @@ function mergeKept(
   if (has(rollup, "series5")) addSeries(out.series, rollup.series, (field) => keep(`series5/${field}`));
   const series1 = own(rollup, "series1");
   if (series1) addSeries((out.series1 ??= new Map()), series1, (field) => keep(`series1/${field}`));
+  if (keep("overview/waterfall")) {
+    const waterfall = own(rollup, "waterfall");
+    if (waterfall) out.waterfall = addWaterfall(out.waterfall, waterfall);
+  }
+  if (keep("sample")) {
+    const samples = own(rollup, "samples");
+    if (samples) (out.samples ??= []).push(...samples);
+  }
 }
 
 function addSeries(
