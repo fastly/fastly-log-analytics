@@ -14,7 +14,7 @@ import { SCATTER_SAMPLE_SIZE } from "./performance";
 const SERIES_STEP_MS = 300_000;
 
 const PRESENT = ["urls/url", "urls/asn", "urls/ttl_bucket"] as const;
-const KEYS = new Set<string>([...PRESENT, "overview/waterfall", "sample"]);
+const KEYS = new Set<string>([...PRESENT, "overview/waterfall", "sample", "all_fields/ttl"]);
 
 const COLUMNS = [
   "timestamp",
@@ -132,6 +132,7 @@ export const PERFORMANCE_RESIDUAL: RollupResidual = {
     const urls = new Map<string, RollupAgg>();
     const asns = new Map<string, RollupAgg>();
     const ttlBuckets = new Map<string, RollupAgg>();
+    const ttlCounts = new Map<string, number>();
     const waterfall: RollupWaterfall = {
       count: 0,
       edgeProcessing: 0,
@@ -181,6 +182,8 @@ export const PERFORMANCE_RESIDUAL: RollupResidual = {
           const ttl = toFiniteNumber(ttlCol[i]);
           if (ttl !== null) {
             aggOf(ttlBuckets, ttlBucketFor(ttl)).requests += 1;
+            const ttlKey = String(ttl);
+            ttlCounts.set(ttlKey, (ttlCounts.get(ttlKey) ?? 0) + 1);
           }
 
           if (elapsed !== null && ttfb !== null) {
@@ -221,7 +224,7 @@ export const PERFORMANCE_RESIDUAL: RollupResidual = {
           dims: new Map(),
           series: new Map(),
           seriesStepMs: SERIES_STEP_MS,
-          fields: new Map(),
+          fields: ttlCounts.size > 0 ? new Map([["ttl", ttlCounts]]) : new Map(),
           truncated: new Set(),
           waterfall: waterfall.count > 0 ? waterfall : undefined,
           groups: new Map([

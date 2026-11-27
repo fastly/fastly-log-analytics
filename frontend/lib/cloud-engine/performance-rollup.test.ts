@@ -4,6 +4,7 @@ import { DuckDBAnalyticalEngine as ParquetEngine } from "./dashboard/duckdb";
 import type { ManifestFile } from "./dashboard/manifest";
 import { decodeRollup, mergeRollups, type Rollup, type RollupResult } from "./dashboard/rollup-query";
 import { FIXTURE_START, fixturePage, loadSummaryFixtures } from "./dashboard/summary-fixtures";
+import { editSummaryRows } from "./dashboard/summary-layout-fixture";
 import { fixtureSource } from "./dashboard/test-fixtures";
 import {
   executePerformanceAggregates, type PerfScatterItem, type PerfTopAsnItem, type PerfTopUrlItem,
@@ -340,5 +341,21 @@ describe("performanceFromRollup", () => {
     expect(exact(got!.top_asns)).toEqual(exact(want.top_asns));
     expect(got!.scatter!.length).toBeGreaterThan(200);
     expect(s.log.files).toContain(RAW[RAW.length - 1].key);
+  });
+
+  it("preserves legacy all_fields/ttl counts when merging pre-ttl_bucket summaries with residual raw files", async () => {
+    const buffers = { ...BUFFERS };
+    const partialWindows = await Promise.all(WINDOWS.slice(0, -1).map(async (file) => {
+      buffers[file.key] = await editSummaryRows(BUFFERS[file.key], (rows) => rows.filter(
+        (row) => !(row.bundle === "urls" && row.field === "ttl_bucket")
+          && !(row.bundle === "dim_totals" && row.field === "ttl_bucket" && row.value === "urls"),
+      ));
+      return { ...file, size: buffers[file.key].byteLength };
+    }));
+    const s = fixtureSource([fixturePage(RAW)], buffers, { json: [], files: [] }, [fixturePage(partialWindows)]);
+    const got = await performanceFromRollup("/api/performance/aggregates", body({ sections: ["ttl_dist"] }), s);
+    expect(got).not.toBeNull();
+    const want = performanceAggregatesFromRollup(await rollupOf(WINDOWS), body({ sections: ["ttl_dist"] }))!;
+    expect(got!.ttl_dist).toEqual(want.ttl_dist);
   });
 });
