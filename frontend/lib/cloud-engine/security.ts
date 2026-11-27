@@ -203,7 +203,8 @@ export interface SecurityAggregatesResponse extends Partial<SecurityProxiesData>
   wellknown_bots?: WellknownBotRow[];
   bot_efficiency?: BotEfficiencyRow[];
   bots?: BotRow[];
-  ngwaf_bots?: Array<{ bot_name: string; bot_category: string | null; requests: number }>;
+  ngwaf_bots?: Array<{ bot_name: string; name?: string; bot_category: string | null; requests: number }>;
+  rdns_verification_available?: boolean;
   truncated?: boolean;
   _approx?: boolean;
   _approx_note?: string;
@@ -268,17 +269,11 @@ function toIsoTimestamp(value: unknown): string {
   return String(value ?? "");
 }
 
+import { maskIp } from "./pii-mask";
+
 export function maskIpValue(ip: string, maskIps = false): string {
-  if (!maskIps || !ip) return ip;
-  if (ip.includes(":")) {
-    const parts = ip.split(":");
-    return `${parts.slice(0, 2).join(":")}::xxxx`;
-  }
-  const octets = ip.split(".");
-  if (octets.length === 4) {
-    return `${octets[0]}.${octets[1]}.${octets[2]}.xxx`;
-  }
-  return "0.0.0.0";
+  if (!maskIps) return ip;
+  return maskIp(ip);
 }
 
 /**
@@ -861,21 +856,40 @@ export function shapeSecurityThreatIntelRows(
   };
 }
 
+export const PROXY_TYPE_DECODE: Record<string, string> = {
+  A: "anonymous",
+  O: "aol",
+  K: "blackberry",
+  P: "consumer-privacy",
+  C: "corporate",
+  E: "edu",
+  H: "hosting",
+  U: "public",
+  T: "transparent",
+};
+
+export function decodeProxyType(raw: string): string {
+  return PROXY_TYPE_DECODE[raw] ?? raw;
+}
+
+const VALID_EXPORT_THRESHOLDS = new Set(["high", "medium", "low"]);
+const VALID_EXPORT_FORMATS = new Set(["fastly-acl", "csv", "txt", "plain", "ip-list"]);
+
 /**
  * Formats active proxy clients for `/api/security/proxies/export`:
- * - `format="fastly-acl"` -> CSV with `"ip,comment"` header
- * - `format="plain"` -> newline-delimited IP list
+ * - `format="fastly-acl"` | `"csv"` -> CSV with `"ip,comment"` header
+ * - `format="plain"` | `"txt"` | `"ip-list"` -> newline-delimited IP list
  */
 export function formatProxiesExportPayload(
   clients: ReadonlyArray<Partial<SecurityActiveClientItem>>,
   options: { threshold?: string; format?: string } = {},
 ): { body: string; mediaType: string; filename: string } {
-  const threshold = options.threshold ?? "High";
-  const format = options.format ?? "fastly-acl";
+  const threshold = (options.threshold ?? "High").trim().toLowerCase();
+  const format = (options.format ?? "fastly-acl").trim().toLowerCase();
 
   const filtered = clients.filter((c) => {
-    if (threshold === "High") return c.risk_level === "High";
-    if (threshold === "Medium") return c.risk_level === "High" || c.risk_level === "Medium";
+    if (threshold === "high") return c.risk_level === "High";
+    if (threshold === "medium") return c.risk_level === "High" || c.risk_level === "Medium";
     return c.risk_level === "High" || c.risk_level === "Medium" || c.risk_level === "Low";
   });
 
@@ -907,7 +921,7 @@ export function formatProxiesExportPayload(
     return {
       body: `${lines.join("\n")}\n`,
       mediaType: "text/csv",
-      filename: `watchdog_blocklist_${threshold.toLowerCase()}_${format}.csv`,
+      filename: `watchdog_blocklist_${threshold}_${format}.csv`,
     };
   }
 
@@ -915,7 +929,7 @@ export function formatProxiesExportPayload(
   return {
     body: lines.length > 0 ? `${lines.join("\n")}\n` : "",
     mediaType: "text/plain",
-    filename: `blocklist_${threshold.toLowerCase()}.txt`,
+    filename: `blocklist_${threshold}.txt`,
   };
 }
 
@@ -977,7 +991,9 @@ export async function executeSecurityAggregates(
   const sections = expandSecuritySections(req.sections);
   const maskIps = Boolean(req.mask_ips);
 
-  const response: SecurityAggregatesResponse = {};
+  const response: SecurityAggregatesResponse = {
+    rdns_verification_available: false,
+  };
   const tasks: Promise<void>[] = [];
 
   if (sections.has("tls_fingerprints")) {
@@ -1065,10 +1081,14 @@ export async function executeSecurityAggregates(
       (async () => {
         const { sql, params } = buildSecurityProxyDistSql(req, availableColumns);
         const rows = await client.query(sql, params);
-        response.proxy_dist = rows.map((r) => ({
-          type: String(r.type ?? r.proxy_type ?? ""),
-          count: Math.trunc(toNum(r.count)),
-        }));
+        const merged = new Map<string, number>();
+        for (const r of rows) {
+          const decoded = decodeProxyType(String(r.type ?? r.proxy_type ?? ""));
+          merged.set(decoded, (merged.get(decoded) ?? 0) + Math.trunc(toNum(r.count)));
+        }
+        response.proxy_dist = [...merged.entries()]
+          .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+          .map(([type, count]) => ({ type, count }));
       })(),
     );
   }
@@ -1261,11 +1281,23 @@ export async function handleSecurityRequest(
   }
 
   if (pathname === "/api/security/proxies/export") {
+    const threshold = (parsedUrl.searchParams.get("threshold") ?? "High").trim().toLowerCase();
+    if (!VALID_EXPORT_THRESHOLDS.has(threshold)) {
+      return Response.json(
+        { detail: { error: "bad_request", message: "threshold must be High, Medium, or Low" } },
+        { status: 400 },
+      );
+    }
+    const format = (parsedUrl.searchParams.get("format") ?? "fastly-acl").trim().toLowerCase();
+    if (!VALID_EXPORT_FORMATS.has(format)) {
+      return Response.json(
+        { detail: { error: "bad_request", message: "Unsupported export format" } },
+        { status: 400 },
+      );
+    }
     const secReq = await parseSecurityRequest(req, parsedUrl);
     secReq.sections = ["proxies"];
     const data = await executeSecurityAggregates(secReq, context);
-    const threshold = parsedUrl.searchParams.get("threshold") ?? "High";
-    const format = parsedUrl.searchParams.get("format") ?? "fastly-acl";
     const exported = formatProxiesExportPayload(data.active_clients ?? [], {
       threshold,
       format,

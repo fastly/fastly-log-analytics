@@ -106,7 +106,7 @@ describe("cloud-engine insights module", () => {
 
     const ceCard = env.insights.find((c) => c.id === "credential_enumeration");
     expect(ceCard?.severity).toBe("critical");
-    expect(ceCard?.items[0].label).toBe("0.0.0.0");
+    expect(ceCard?.items[0].label).toBe("198.51.100.xxx");
     expect(JSON.stringify(env)).not.toContain("198.51.100.77");
   });
 
@@ -164,7 +164,9 @@ describe("cloud-engine insights module", () => {
       other: 0,
     });
     expect(detail.timeline[0].expected_hits).toBe(45);
-    expect(detail.recent_misses[0].ip).toBe("0.0.0.0");
+    expect(detail.timeline[0].hit_rate).toBeCloseTo(0.2);
+    expect(detail.clusters).toEqual([]);
+    expect(detail.recent_misses[0].ip).toBe("203.0.113.xxx");
   });
 
   it("computes zscore, threshold_checks, and build_insights_envelope", () => {
@@ -270,5 +272,77 @@ describe("cloud-engine insights module", () => {
     expect(env.insights.find((c) => c.id === "method_drift")?.severity).toBe("critical");
     expect(env.insights.find((c) => c.id === "asn_concentration")?.severity).toBe("critical");
     expect(env.insights.find((c) => c.id === "asn_hosting_shift")?.severity).toBe("critical");
+  });
+
+  it("matches High-Scale meta keys, 15-item cap, and envelope pending/refreshing fields", async () => {
+    const urls = Array.from({ length: 20 }, (_, i) => ({
+      url: `/err/${i}`,
+      w_total: 20 + i,
+      b_total: 100,
+      w_5xx: 10 + i,
+      b_5xx: 0,
+      w_lat_total: 20,
+      b_lat_total: 50,
+      w_p95: 1000,
+      b_p95: 100,
+      w_p99: 2000,
+      w_p50: 100,
+    }));
+    const env = await handleInsights(
+      { service_id: "svc-meta", window_size_hrs: 1, baseline_hours: 24 },
+      {
+        availableColumns: new Set(["url", "status", "elapsed", "ip", "city", "country", "ua", "referer", "method", "p_type", "asn", "pop", "cache", "transport"]),
+        availableHistoryHours: 24,
+        windowTotalRequests: 5000,
+        baselineTotalRequests: 50000,
+        urlAggregateRows: urls,
+        ipSecurityRows: [{ ip: "198.51.100.5", cd_w_404: 50, w_total: 60, cd_distinct_404: 20, cd_b_404: 0 }],
+        cityAggregateRows: [{ city: "austin", region: "TX", country: "US", w_cnt: 50, b_cnt: 100, w_errors_4xx: 30, b_errors_4xx: 1, w_lat_total: 20, b_lat_total: 60, w_p95: 2000, b_p95: 100 }],
+        dimensionAggregateRows: [
+          { dimension: "ua", ua: "Bot/1", w_cnt: 3000, b_cnt: 10 },
+          { dimension: "ua", ua: "Human/1", w_cnt: 2000, b_cnt: 49990 },
+          { dimension: "method", method: "POST", w_cnt: 1500, b_cnt: 50 },
+          { dimension: "method", method: "GET", w_cnt: 3500, b_cnt: 49950 },
+          { dimension: "p_type", p_type: "hosting", w_cnt: 1000, b_cnt: 10 },
+          { dimension: "p_type", p_type: "", w_cnt: 4000, b_cnt: 49990 },
+        ],
+        asnAggregateRows: [{ asn: 64513, w_cnt: 3000, b_cnt: 100, w_proxy_total: 100, b_proxy_total: 100, w_hosting: 80, b_hosting: 5 }],
+        geoLatencyRows: [{ pop: "IAD", w_lat_total: 50, b_lat_total: 100, w_p95: 500, b_p95: 100 }],
+        scalarAggregateRows: [{ w_hits: 10, w_cacheable: 200, b_hits: 300, b_cacheable: 300, w_quic: 10, w_tr_total: 200, b_quic: 150, b_tr_total: 200 }],
+      },
+    );
+
+    expect(env.pending).toBe(false);
+    expect(env.refreshing).toBe(false);
+    expect(env.insights.find((c) => c.id === "error_spikes")?.items).toHaveLength(15);
+    expect(env.insights.find((c) => c.id === "error_spikes")?.items[0].meta).toMatchObject({
+      requests: expect.any(Number),
+      errors: expect.any(Number),
+    });
+    expect(env.insights.find((c) => c.id === "error_spikes")?.items[0].meta).not.toHaveProperty("window_errors");
+    expect(env.insights.find((c) => c.id === "latency_regression")?.items[0].meta).toMatchObject({
+      regression_ratio: 10,
+      window_requests: 20,
+    });
+    expect(env.insights.find((c) => c.id === "tail_latency")?.items[0].meta).toMatchObject({
+      p99_ms: 2000,
+      p50_ms: 100,
+      ratio: 20,
+      requests: 20,
+    });
+    expect(env.insights.find((c) => c.id === "content_discovery")?.items[0].meta).toMatchObject({
+      requests: 60,
+      not_found: 50,
+      distinct_404_urls: 20,
+    });
+    expect(env.insights.find((c) => c.id === "city_surges")?.items[0].meta).toHaveProperty("spike_ratio");
+    expect(env.insights.find((c) => c.id === "city_error_spikes")?.items[0].meta).toMatchObject({ requests: 50, errors: 30 });
+    expect(env.insights.find((c) => c.id === "city_latency_regressions")?.items[0].meta).toMatchObject({ regression_ratio: 20, requests: 20 });
+    expect(env.insights.find((c) => c.id === "method_drift")?.items[0].meta).toMatchObject({ requests: 1500, method: "POST" });
+    expect(env.insights.find((c) => c.id === "proxy_surge")?.items[0].meta).toMatchObject({ requests: 1000 });
+    expect(env.insights.find((c) => c.id === "asn_hosting_shift")?.items[0].meta).toMatchObject({ window_hosting: 80, window_total: 100, asn: 64513 });
+    expect(env.insights.find((c) => c.id === "pop_latency_regression")?.items[0].meta).toMatchObject({ regression_ratio: 5, window_requests: 50 });
+    expect(env.insights.find((c) => c.id === "cache_hit_cliff")?.items[0].meta).toMatchObject({ window_cacheable: 200, baseline_cacheable: 300 });
+    expect(env.insights.find((c) => c.id === "http3_fallback")?.items[0].meta).toMatchObject({ window_quic: 10, window_total: 200, filters: { transport: "tcp" } });
   });
 });

@@ -344,7 +344,7 @@ describe("securityAggregatesFromRollup", () => {
   it("answers only the requested sections, with their raw companions", async () => {
     const out = await securityAggregatesFromRollup(await rollupOf(RUST_WINDOWS), body({ sections: ["tls_fingerprints", "ngwaf_verified_bots"] }));
     expect(Object.keys(out!).sort()).toEqual([
-      "fingerprint_coverage", "ngwaf_configured", "ngwaf_verified_bots", "ngwaf_verified_bots_ts", "rollup", "tls_fingerprints",
+      "fingerprint_coverage", "ngwaf_configured", "ngwaf_verified_bots", "ngwaf_verified_bots_ts", "rdns_verification_available", "rollup", "tls_fingerprints",
     ]);
   });
 });

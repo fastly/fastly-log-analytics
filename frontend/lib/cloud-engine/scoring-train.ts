@@ -348,6 +348,8 @@ export async function retrainCloudScoring(
   retrained_at?: string;
   kv_pushed?: boolean;
   auc_against_labels: number | null;
+  n_good?: number;
+  n_bad?: number;
   stats: MatrixTrainStats;
 }> {
   const sinceDays = Math.min(90, Math.max(1, Math.floor(options.sinceDays ?? 7)));
@@ -372,6 +374,8 @@ export async function retrainCloudScoring(
   });
 
   let aucAgainstLabels: number | null = null;
+  let nGood = 0;
+  let nBad = 0;
   try {
     const labelsResp = await fetch(
       `/api/services/${encodeURIComponent(serviceId)}/scoring/labels`,
@@ -379,13 +383,17 @@ export async function retrainCloudScoring(
     );
     if (labelsResp.ok) {
       const payload = (await labelsResp.json()) as {
-        labels?: Array<{ edge_sid: string; label: "good" | "bad" | "neutral" }>;
+        labels?: Array<{ sid?: string; edge_sid?: string; label: "good" | "bad" | "neutral" }>;
       };
       const traces: LabeledSessionTrace[] = [];
       for (const item of payload.labels ?? []) {
-        const urls = sessionUrlsBySid.get(item.edge_sid);
+        const sid = item.sid ?? item.edge_sid ?? "";
+        if (!sid) continue;
+        if (item.label === "good") nGood += 1;
+        else if (item.label === "bad") nBad += 1;
+        const urls = sessionUrlsBySid.get(sid);
         if (urls && urls.length >= 2) {
-          traces.push({ edge_sid: item.edge_sid, label: item.label, urls });
+          traces.push({ edge_sid: sid, label: item.label, urls });
         }
       }
       aucAgainstLabels = evaluateMatrixAuc(matrix, traces);
@@ -424,6 +432,8 @@ export async function retrainCloudScoring(
     retrained_at: body.retrained_at,
     kv_pushed: body.kv_pushed,
     auc_against_labels: aucAgainstLabels,
+    n_good: nGood,
+    n_bad: nBad,
     stats,
   };
 }

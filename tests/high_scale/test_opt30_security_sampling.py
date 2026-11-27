@@ -169,3 +169,4 @@ def test_security_aggregates_samples_30d_and_leaves_24h_unsampled(monkeypatch: p
         assert "toDateTime(" not in q
     assert res_6h["req_size_dist"] == [{"bucket": "0-256B", "count": 100}]
     assert res_6h["tls_fingerprints"] == [{"fingerprint": "sha-1", "ip_count": 4, "request_count": 50}]
+    assert res_6h["rdns_verification_available"] is True

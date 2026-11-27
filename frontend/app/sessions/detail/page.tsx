@@ -16,7 +16,6 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useBootstrapResolved, useEffectiveServiceId, useFieldLabel } from '@/hooks/useBootstrap'
 import { useDateFormat } from '@/hooks/useSSE'
 import { client, extractApiError, unwrapClient } from '@/lib/api'
-import { readCloudSessionReference } from '@/lib/cloud-engine/session-reference'
 import type { ColumnDef } from '@/lib/table'
 import { buildServiceHref, buildSessionDashboardUrl, formatBytes, formatCount } from '@/lib/utils'
 import type { SessionDetailResponse } from '@/types/api'
@@ -228,20 +227,18 @@ function SessionTrace({ detail, serviceId }: { detail: SessionDetailResponse; se
 function SessionDetailClient() {
   const params = useSearchParams()
   const token = params.get('token')
-  const reference = params.get('ref')
-  const hasSession = Boolean(token || reference)
+  const hasSession = Boolean(token)
   const activeServiceId = useEffectiveServiceId()
   const serviceId = params.get('service') || activeServiceId
   const bootstrapResolved = useBootstrapResolved()
   const detail = useQuery({
-    queryKey: ['sessions', 'detail-page', serviceId, reference, token],
+    queryKey: ['sessions', 'detail-page', serviceId, token],
     queryFn: ({ signal }) => {
-      const sessionToken = reference ? readCloudSessionReference(reference) : token
-      if (!sessionToken || !serviceId) {
+      if (!token || !serviceId) {
         throw new Error('Session link unavailable. Reopen Session Details from the Sessions list in this tab.')
       }
       return unwrapClient(client.POST('/api/sessions/detail', {
-        signal, headers: { 'x-service-id': serviceId }, body: { session_token: sessionToken },
+        signal, headers: { 'x-service-id': serviceId }, body: { session_token: token },
       }))
     },
     enabled: !!serviceId && hasSession,
@@ -272,7 +269,7 @@ function SessionDetailClient() {
           </AlertDescription>
         </Alert>
       ) : detail.data?.data.length ? (
-        <SessionTrace key={JSON.stringify([serviceId, reference, token])} detail={detail.data} serviceId={serviceId} />
+        <SessionTrace key={JSON.stringify([serviceId, token])} detail={detail.data} serviceId={serviceId} />
       ) : (
         <Alert role="status"><AlertTitle>No requests found</AlertTitle><AlertDescription>No records are available for this session in your accessible time window.</AlertDescription></Alert>
       )}

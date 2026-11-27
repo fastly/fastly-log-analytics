@@ -13,7 +13,6 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { client, queryKeys } from '@/lib/api'
-import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { normalizeCookieCompliance } from '@/lib/utils'
 import type { components } from '@/types/api'
 import { TopFlaggedHelp } from './help-content'
@@ -257,9 +256,7 @@ export function TopFlaggedTable({ serviceId, sinceHours = 24 }: TopFlaggedTableP
   return (
     <AnalyticsCard
       title={`Top flagged sessions — last ${since}`}
-      description={isCloudMode()
-        ? "Recorded scored requests, sortable and filterable. Select a session ID to view its timeline. Session labels are unavailable in Cloud."
-        : "Sortable + filterable. Use the Flag column to label sessions for matrix evaluation."}
+      description="Sortable + filterable. Use the Flag column to label sessions for matrix evaluation."
       isLoading={flagged.isLoading}
       isFetching={flagged.isFetching}
       error={flagged.error as (Error & { status?: number }) | null}

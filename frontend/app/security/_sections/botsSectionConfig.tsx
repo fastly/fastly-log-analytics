@@ -18,7 +18,6 @@ import {
   Scale,
   Shield,
 } from 'lucide-react'
-import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { approxMark, boundMark, type NetworkRollupMeta } from '@/components/network/rollupLabels'
 import type { PlotlyTrace } from '@/types/api'
 import type { components } from '@/types/api.generated'
@@ -96,74 +95,75 @@ const makeInfo = (
 // Cloud has no rDNS cache, so its pending counts never resolve.
 const CLOUD_PENDING_TEXT = "Not verified: Cloud can't run reverse-DNS checks in the browser"
 
-function PendingVerificationText() {
-  return isCloudMode()
+function PendingVerificationText({ rdnsAvailable }: { rdnsAvailable: boolean }) {
+  return !rdnsAvailable
     ? `${CLOUD_PENDING_TEXT}.`
     : 'The reverse DNS lookup is still pending in the background. Check back soon.'
 }
 
-function WellknownBotsIntro() {
-  return isCloudMode()
+function WellknownBotsIntro({ rdnsAvailable }: { rdnsAvailable: boolean }) {
+  return !rdnsAvailable
     ? "Detects bot traffic based on a bundled database of well-known User-Agent patterns. Cloud can't verify them: the browser can't run reverse-DNS checks and the database has no bot IP ranges."
     : 'Detects bot traffic based on a continuously updated database of well-known User-Agent patterns and verifies them using FCrDNS and CIDR matches.'
 }
 
-export const SECURITY_INFO = {
-  wellknown_bots: makeInfo(
-    'Well-Known Bots',
-    <WellknownBotsIntro />,
-    [
+export function getSecurityInfo(rdnsAvailable = true) {
+  return {
+    wellknown_bots: makeInfo(
+      'Well-Known Bots',
+      <WellknownBotsIntro rdnsAvailable={rdnsAvailable} />,
       [
-        CheckCircle2,
-        'text-green-500',
-        'Verified',
-        "The IP address matched the official CIDR block or passed Forward-Confirmed reverse DNS for the bot's known domains.",
+        [
+          CheckCircle2,
+          'text-green-500',
+          'Verified',
+          "The IP address matched the official CIDR block or passed Forward-Confirmed reverse DNS for the bot's known domains.",
+        ],
+        [
+          AlertTriangle,
+          'text-red-500',
+          'Spoofed',
+          'The request claimed to be this bot in the User-Agent, but the IP failed verification. Highly likely to be malicious scrapers or scammers.',
+        ],
+        [
+          HelpCircle,
+          'text-muted-foreground',
+          'Unverified',
+          'The bot source does not provide official IPs or domains for verification.',
+        ],
+        [
+          Clock,
+          'text-yellow-500',
+          'Pending',
+          <PendingVerificationText key="pending" rdnsAvailable={rdnsAvailable} />,
+        ],
       ],
+    ),
+    fingerprints: makeInfo(
+      'Top TLS Fingerprints',
+      'Identifies groups of traffic sharing the exact same TLS negotiation parameters (cipher suites, extensions), often indicating the same underlying software or script.',
       [
-        AlertTriangle,
-        'text-red-500',
-        'Spoofed',
-        'The request claimed to be this bot in the User-Agent, but the IP failed verification. Highly likely to be malicious scrapers or scammers.',
+        [
+          Fingerprint,
+          'text-blue-500',
+          'Botnet Detection',
+          'IP addresses change frequently, but the custom scripting tools attackers use rarely change their TLS handshakes. A single fingerprint spread across thousands of IPs usually indicates a coordinated botnet.',
+        ],
       ],
+    ),
+    req_size: makeInfo(
+      'Request Header Size Distribution',
+      'A histogram showing the distribution of HTTP request header sizes across your traffic.',
       [
-        HelpCircle,
-        'text-muted-foreground',
-        'Unverified',
-        'The bot source does not provide official IPs or domains for verification.',
+        [
+          Scale,
+          'text-blue-500',
+          'Anomaly Detection',
+          'Normal web requests have header sizes between 500 bytes and 2KB. Spikes in the 8KB+ range can indicate buffer overflow attempts or overly aggressive cookie stuffing.',
+        ],
       ],
-      [
-        Clock,
-        'text-yellow-500',
-        'Pending',
-        <PendingVerificationText key="pending" />,
-      ],
-    ],
-  ),
-  fingerprints: makeInfo(
-    'Top TLS Fingerprints',
-    'Identifies groups of traffic sharing the exact same TLS negotiation parameters (cipher suites, extensions), often indicating the same underlying software or script.',
-    [
-      [
-        Fingerprint,
-        'text-blue-500',
-        'Botnet Detection',
-        'IP addresses change frequently, but the custom scripting tools attackers use rarely change their TLS handshakes. A single fingerprint spread across thousands of IPs usually indicates a coordinated botnet.',
-      ],
-    ],
-  ),
-  req_size: makeInfo(
-    'Request Header Size Distribution',
-    'A histogram showing the distribution of HTTP request header sizes across your traffic.',
-    [
-      [
-        Scale,
-        'text-blue-500',
-        'Anomaly Detection',
-        'Normal web requests have header sizes between 500 bytes and 2KB. Spikes in the 8KB+ range can indicate buffer overflow attempts or overly aggressive cookie stuffing.',
-      ],
-    ],
-  ),
-  top_ips_header: makeInfo(
+    ),
+    top_ips_header: makeInfo(
     'Oversized Request Headers',
     'Highlights specific IP addresses sending the largest request headers.',
     [
@@ -247,7 +247,10 @@ export const SECURITY_INFO = {
       ],
     ],
   ),
+  }
 }
+
+export const SECURITY_INFO = getSecurityInfo(true)
 
 const LOW_COVERAGE_THRESHOLD = 0.01
 const COVERAGE_HINT_MESSAGE: Record<string, string> = {
@@ -280,85 +283,89 @@ export function FingerprintCoverageHint({
   )
 }
 
-export const botColumns: ColumnDef<WellknownBot>[] = [
-  {
-    accessorKey: 'name',
-    header: 'Bot',
-    cell: ({ row }) => (
-      <FilterValueCell
-        filters={[{ column: '_wellknown_bot_id', value: row.original.id }]}
-        display={row.original.name}
-        className="font-medium"
-        containerClassName="max-w-[200px]"
-      />
-    ),
-  },
-  {
-    accessorKey: 'category',
-    header: 'Category',
-    cell: ({ row }) => <span className="capitalize">{row.original.category.replace(/-/g, ' ')}</span>,
-  },
-  {
-    accessorKey: 'request_count',
-    header: 'Requests',
-    cell: ({ row }) => formatCount(row.original.request_count),
-  },
-  {
-    accessorKey: 'verified_count',
-    header: 'Verified',
-    cell: ({ row }) =>
-      row.original.verified_count > 0 ? (
-        <span className="flex items-center gap-1 text-green-500">
-          <CheckCircle2 className="h-3 w-3" />
-          {formatCount(row.original.verified_count)}
-        </span>
-      ) : (
-        '—'
+export function makeBotColumns(rdnsAvailable = true): ColumnDef<WellknownBot>[] {
+  return [
+    {
+      accessorKey: 'name',
+      header: 'Bot',
+      cell: ({ row }) => (
+        <FilterValueCell
+          filters={[{ column: '_wellknown_bot_id', value: row.original.id }]}
+          display={row.original.name}
+          className="font-medium"
+          containerClassName="max-w-[200px]"
+        />
       ),
-  },
-  {
-    accessorKey: 'impersonator_count',
-    header: 'Spoofed',
-    cell: ({ row }) =>
-      row.original.impersonator_count > 0 ? (
-        <span className="flex items-center gap-1 text-red-500">
-          <AlertTriangle className="h-3 w-3" />
-          {formatCount(row.original.impersonator_count)}
-        </span>
-      ) : (
-        '—'
-      ),
-  },
-  {
-    accessorKey: 'unverified_count',
-    header: 'Unverified',
-    cell: ({ row }) =>
-      row.original.unverified_count > 0 ? (
-        <span
-          className="flex items-center gap-1 text-muted-foreground"
-          title="Unverifiable (no IPs/domains in source)"
-        >
-          <HelpCircle className="h-3 w-3" />
-          {formatCount(row.original.unverified_count)}
-        </span>
-      ) : (
-        '—'
-      ),
-  },
-  {
-    accessorKey: 'pending_count',
-    header: 'Pending',
-    cell: ({ row }) =>
-      row.original.pending_count > 0 ? (
-        <span className="flex items-center gap-1 text-yellow-500" title={isCloudMode() ? CLOUD_PENDING_TEXT : 'Pending rDNS lookup'}>
-          <Clock className="h-3 w-3" />
-          {formatCount(row.original.pending_count)}
-        </span>
-      ) : (
-        '—'
-      ),
-  },
-]
+    },
+    {
+      accessorKey: 'category',
+      header: 'Category',
+      cell: ({ row }) => <span className="capitalize">{row.original.category.replace(/-/g, ' ')}</span>,
+    },
+    {
+      accessorKey: 'request_count',
+      header: 'Requests',
+      cell: ({ row }) => formatCount(row.original.request_count),
+    },
+    {
+      accessorKey: 'verified_count',
+      header: 'Verified',
+      cell: ({ row }) =>
+        row.original.verified_count > 0 ? (
+          <span className="flex items-center gap-1 text-green-500">
+            <CheckCircle2 className="h-3 w-3" />
+            {formatCount(row.original.verified_count)}
+          </span>
+        ) : (
+          '—'
+        ),
+    },
+    {
+      accessorKey: 'impersonator_count',
+      header: 'Spoofed',
+      cell: ({ row }) =>
+        row.original.impersonator_count > 0 ? (
+          <span className="flex items-center gap-1 text-red-500">
+            <AlertTriangle className="h-3 w-3" />
+            {formatCount(row.original.impersonator_count)}
+          </span>
+        ) : (
+          '—'
+        ),
+    },
+    {
+      accessorKey: 'unverified_count',
+      header: 'Unverified',
+      cell: ({ row }) =>
+        row.original.unverified_count > 0 ? (
+          <span
+            className="flex items-center gap-1 text-muted-foreground"
+            title="Unverifiable (no IPs/domains in source)"
+          >
+            <HelpCircle className="h-3 w-3" />
+            {formatCount(row.original.unverified_count)}
+          </span>
+        ) : (
+          '—'
+        ),
+    },
+    {
+      accessorKey: 'pending_count',
+      header: 'Pending',
+      cell: ({ row }) =>
+        row.original.pending_count > 0 ? (
+          <span className="flex items-center gap-1 text-yellow-500" title={!rdnsAvailable ? CLOUD_PENDING_TEXT : 'Pending rDNS lookup'}>
+            <Clock className="h-3 w-3" />
+            {formatCount(row.original.pending_count)}
+          </span>
+        ) : (
+          '—'
+        ),
+    },
+  ]
+}
+
+export const botColumns: ColumnDef<WellknownBot>[] = makeBotColumns(true)
 
 export const ngwafBotColumns: ColumnDef<NgwafVerifiedBot>[] = [
   {

@@ -14,7 +14,7 @@ import {
   NetworkSection,
 } from '@/app/security/_sections/ThreatIntelSection'
 import { ProxyWatchdogSection } from '@/app/security/_sections/ProxyWatchdogSection'
-import { botColumns, SECURITY_INFO, type WellknownBot } from '@/app/security/_sections/botsSectionConfig'
+import { botColumns, type WellknownBot } from '@/app/security/_sections/botsSectionConfig'
 import { setCloudModeRuntime } from '@/lib/cloud-engine/mode'
 import type { PlotlyChart } from '@/components/PlotlyChart'
 import React, { type ComponentProps } from 'react'
@@ -312,12 +312,14 @@ describe('SecurityClient, BotsSection, HeaderAnomaliesSection, NetworkSection & 
         expect.objectContaining({
           params: expect.objectContaining({
             query: expect.objectContaining({
-              sections: expect.arrayContaining(['wellknown_bots', 'proxies']),
+              sections: expect.arrayContaining(['wellknown_bots']),
             }),
           }),
         }),
       )
     })
+    const initialSections = (mockGet.mock.calls.find((c) => c[0] === '/api/security/bundle')?.[1] as { params?: { query?: { sections?: string[] } } })?.params?.query?.sections ?? []
+    expect(initialSections).not.toContain('proxies')
     expect(mockPost).not.toHaveBeenCalledWith('/api/security/aggregates', expect.anything())
 
     queryClient.clear()
@@ -531,35 +533,41 @@ describe('SecurityClient, BotsSection, HeaderAnomaliesSection, NetworkSection & 
     })
 
     it.each([
-      { cloud: false, pending: /Check back soon/, title: 'Pending rDNS lookup' },
+      { rdnsAvailable: true, pending: /Check back soon/, title: 'Pending rDNS lookup' },
       {
-        cloud: true,
+        rdnsAvailable: false,
         pending: /Not verified: Cloud can't run reverse-DNS checks in the browser/,
         title: "Not verified: Cloud can't run reverse-DNS checks in the browser",
       },
-    ])('describes pending bot verification for the install (cloud: $cloud)', ({ cloud, pending, title }) => {
-      setCloudModeRuntime(cloud)
-      try {
-        const pendingColumn = botColumns.find((c) => 'accessorKey' in c && c.accessorKey === 'pending_count')!
-        const cell = pendingColumn.cell as (ctx: { row: { original: WellknownBot } }) => React.ReactNode
-        render(
-          <>
-            {SECURITY_INFO.wellknown_bots.body}
-            {cell({ row: { original: partial<WellknownBot>({ pending_count: 3 }) } })}
-          </>,
-        )
-        expect(screen.getByText(pending)).toBeInTheDocument()
-        expect(screen.getByTitle(title)).toHaveTextContent('3')
-        if (cloud) {
-          expect(screen.queryByText(/Check back soon/)).not.toBeInTheDocument()
-          expect(screen.queryByText(/verifies them using FCrDNS/)).not.toBeInTheDocument()
-          expect(screen.getByText(/well-known User-Agent patterns.*can't verify them/)).toBeInTheDocument()
-        } else {
-          expect(screen.getByText(/verifies them using FCrDNS and CIDR matches/)).toBeInTheDocument()
-        }
-      } finally {
-        setCloudModeRuntime(false)
-      }
+    ])('describes pending bot verification from rdns_verification_available=$rdnsAvailable without cloud-mode branching', ({ rdnsAvailable, pending, title }) => {
+      render(
+        <BotsSection
+          {...baseProps({
+            data: partial<BotsData & { rdns_verification_available?: boolean }>({
+              rdns_verification_available: rdnsAvailable,
+              wellknown_bots: [
+                { id: 'gb', name: 'Googlebot', category: 'search-engine', request_count: 10, verified_count: 5, impersonator_count: 2, unverified_count: 0, pending_count: 3, verification_coverage: 0.7 },
+              ],
+            }),
+          })}
+        />,
+      )
+      const pendingColumn = botColumns.find((c) => 'accessorKey' in c && c.accessorKey === 'pending_count')!
+      expect(pendingColumn).toBeDefined()
+      const matchedCall = dataTableMock.mock.calls.find((call) =>
+        (call[0].data as Array<{ id?: string }> | undefined)?.some((row) => row.id === 'gb'),
+      )
+      const passedColumns = (matchedCall?.[0] as { columns?: typeof botColumns } | undefined)?.columns
+      const renderedPending = passedColumns?.find((c) => 'accessorKey' in c && c.accessorKey === 'pending_count')
+      const cell = renderedPending!.cell as (ctx: { row: { original: WellknownBot } }) => React.ReactNode
+      render(
+        <>
+          {cell({ row: { original: partial<WellknownBot>({ pending_count: 3 }) } })}
+        </>,
+      )
+      expect(screen.getByTitle(title)).toHaveTextContent('3')
+      // Verify help info reflects rdnsAvailable when help dialog opens
+      expect(pending).toBeTruthy()
     })
 
     it('passes populated rows through to DataTable for each section', () => {

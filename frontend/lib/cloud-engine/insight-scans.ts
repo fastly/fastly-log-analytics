@@ -184,12 +184,22 @@ export function insightsOverBudget(body: InsightsRequest & { end_time?: string }
   };
 }
 
+function selectInsightBucketMs(totalHours: number): number {
+  if (totalHours <= 2) return 60_000;
+  if (totalHours <= 12) return 300_000;
+  if (totalHours <= 48) return 900_000;
+  if (totalHours <= 168) return 3_600_000;
+  if (totalHours <= 720) return 14_400_000;
+  return 86_400_000;
+}
+
 export async function queryCloudCacheCollapse(
   body: CacheCollapseDetailRequest,
   options: { signal: AbortSignal; maskIps: boolean; engine?: DuckDBReadContext },
 ) {
   const engine = options.engine ?? getDuckDBEngine().readContext();
   const { end, start, windowStart } = resolveInsightWindow(body);
+  const bucketMs = selectInsightBucketMs((end - start) / 3_600_000);
   const where = `url = ${duckSqlString(body.url)} AND ts_ms >= ${start} AND ts_ms < ${end}`;
   const [rates, timelineRows, missRows] = await Promise.all([
     engine.executeSql(`SELECT
@@ -198,10 +208,10 @@ export async function queryCloudCacheCollapse(
       ${["w", "b"].flatMap((side) => ["HIT", "MISS", "PASS"].map((state) =>
         `COUNT(*) FILTER (WHERE ts_ms ${side === "w" ? ">=" : "<"} ${windowStart} AND starts_with(cache, '${state}')) AS ${side}_${state.toLowerCase() === "hit" ? "hits" : state.toLowerCase()}`,
       )).join(", ")} FROM requests WHERE ${where}`, [], options.signal),
-    engine.executeSql(`SELECT epoch_ms((ts_ms // 3600000) * 3600000)::VARCHAR AS bucket,
+    engine.executeSql(`SELECT epoch_ms((ts_ms // ${bucketMs}) * ${bucketMs})::VARCHAR AS bucket,
       COUNT(*) AS total_requests, COUNT(*) FILTER (WHERE starts_with(cache, 'HIT')) AS real_hits,
       COUNT(*) FILTER (WHERE starts_with(cache, 'MISS')) AS misses
-      FROM requests WHERE ${where} AND ts_ms >= ${windowStart} GROUP BY 1 ORDER BY 1`, [], options.signal),
+      FROM requests WHERE ${where} GROUP BY 1 ORDER BY 1`, [], options.signal),
     engine.executeSql(`SELECT timestamp::VARCHAR AS timestamp, cache, pop, ip, status FROM requests
       WHERE ${where} AND ts_ms >= ${windowStart} AND starts_with(cache, 'MISS')
       ORDER BY ts_ms DESC LIMIT 50`, [], options.signal),

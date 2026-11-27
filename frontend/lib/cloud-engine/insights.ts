@@ -12,6 +12,7 @@ import { escapeSqlLiteral, requireSafeIdent } from "./sql-validator";
 import type { InsightsBaselineSource } from "./insights-rollup";
 import type { Schema } from "@/types/api";
 import { formatAsnDisplayLabel, loadAsnNames } from "./asn-names";
+import { maskIp } from "./pii-mask";
 
 export const INSIGHTS_ROLLUP_MIN_COVERAGE = 0.8; // 80% hourly rollup coverage threshold
 export const min_Baseline = 24;
@@ -430,6 +431,8 @@ export interface InsightsEnvelope {
   window_hours: number;
   baseline_hours: number;
   window_total_requests: number;
+  pending: boolean;
+  refreshing: boolean;
 }
 
 export function build_insights_envelope(
@@ -452,6 +455,8 @@ export function build_insights_envelope(
     window_hours,
     baseline_hours,
     window_total_requests,
+    pending: false,
+    refreshing: false,
   };
 }
 
@@ -626,10 +631,10 @@ export async function handleInsights(
       return rows;
     };
     const latency = (r: Record<string, unknown>, label: string, filters: Record<string, unknown>,
-      minW: number, minB: number, multiplier: number, delta: number) => {
+      minW: number, minB: number, multiplier: number, delta: number, reqsKey: "window_requests" | "requests" = "window_requests") => {
       const w = n(r, "w_p95"), b = n(r, "b_p95");
       if (n(r, "w_lat_total") >= minW && n(r, "b_lat_total") >= minB && b > 0 && w >= b * multiplier && w - b >= delta) {
-        add(label, w, b, "ms P95", { window_requests: n(r, "w_lat_total"), baseline_requests: n(r, "b_lat_total"), filters },
+        add(label, w, b, "ms P95", { regression_ratio: w / b, [reqsKey]: n(r, "w_lat_total"), filters },
           w >= b * 5 ? "critical" : "warning");
       }
     };
@@ -647,7 +652,7 @@ export async function handleInsights(
             if (r.b_ins_url_absent) continue;
             const w = pct(n(r, "w_5xx"), wTotal), b = pct(n(r, "b_5xx"), bTotal);
             if (wTotal >= 3 && w >= 5 && (bTotal < 10 || w >= b * 2 + 5)) {
-              add(label, w, b, "% 5xx", { ...meta, window_errors: n(r, "w_5xx") }, w >= 20 ? "critical" : "warning");
+              add(label, w, b, "% 5xx", { requests: wTotal, errors: n(r, "w_5xx"), filters: { url: r.url } }, w >= 20 ? "critical" : "warning");
             }
           } else if (d.id === "cache_collapse") {
             const wCount = n(r, "w_hits") + n(r, "w_miss"), bCount = n(r, "b_hits") + n(r, "b_miss");
@@ -670,7 +675,8 @@ export async function handleInsights(
                 : Math.round((n(r, "w_p99") / n(r, "w_p50")) * 10) / 10;
             if (rawRatio > 5) {
               add(label, n(r, "w_p99"), n(r, "w_p50"), "ms (P99 vs P50)",
-                { ...meta, ratio: rawRatio }, rawRatio > 10 ? "critical" : "warning",
+                { p99_ms: n(r, "w_p99"), p50_ms: n(r, "w_p50"), ratio: rawRatio, requests: n(r, "w_lat_total"), filters: { url: r.url } },
+                rawRatio > 10 ? "critical" : "warning",
                 source?.approximate.has("tail_latency") ? "≈ P50" : "P50");
             }
           }
@@ -679,7 +685,7 @@ export async function handleInsights(
       case "credential_enumeration":
       case "content_discovery":
         for (const r of scan(ctx.ipSecurityRows)) {
-          const label = maskIps ? "0.0.0.0" : String(r.ip);
+          const label = maskIps ? maskIp(r.ip == null ? "" : String(r.ip)) : String(r.ip);
           if (d.id === "credential_enumeration") {
             const denied = n(r, "ce_w_denied"), attempts = n(r, "ce_w_attempts");
             if (denied >= IP_DETECTOR_MIN_HITS && pct(denied, attempts) >= 50 && denied > scaled(n(r, "ce_b_denied")) * 3 + 5) {
@@ -688,8 +694,9 @@ export async function handleInsights(
                 denied >= 100 ? "critical" : "warning");
             }
           } else if (n(r, "cd_w_404") >= IP_DETECTOR_MIN_HITS && pct(n(r, "cd_w_404"), n(r, "w_total")) >= 70 && n(r, "cd_distinct_404") >= 15) {
-            add(label, n(r, "cd_w_404"), scaled(n(r, "cd_b_404")), "404 requests",
-              { distinct_paths: n(r, "cd_distinct_404"), requests: n(r, "w_total"), filters: { ip: label } });
+            const w404 = n(r, "cd_w_404"), reqTotal = n(r, "w_total");
+            add(label, w404, scaled(n(r, "cd_b_404")), "404 requests",
+              { requests: reqTotal, not_found: w404, not_found_rate_pct: pct(w404, reqTotal), distinct_404_urls: n(r, "cd_distinct_404"), filters: { ip: label } });
           }
         }
         break;
@@ -702,11 +709,12 @@ export async function handleInsights(
           const w = n(r, "w_cnt"), b = n(r, "b_cnt");
           const filters = Object.fromEntries(["city", "region", "country"].filter((key) => r[key] != null).map((key) => [key, r[key]]));
           if (d.id === "city_latency_regressions") {
-            latency(r, label, filters, 10, 50, 3, 500);
+            latency(r, label, filters, 10, 50, 3, 500, "requests");
           } else if (d.id === "city_error_spikes") {
-            const wRate = pct(n(r, "w_errors_4xx"), w), bRate = pct(n(r, "b_errors_4xx"), b);
+            const wErrors = n(r, "w_errors_4xx");
+            const wRate = pct(wErrors, w), bRate = pct(n(r, "b_errors_4xx"), b);
             if (w >= 10 && wRate >= 10 && (b < 50 || wRate >= bRate * 3 + 5)) {
-              add(label, wRate, bRate, "% errors", { window_requests: w, baseline_requests: b, filters },
+              add(label, wRate, bRate, "% errors", { requests: w, errors: wErrors, filters },
                 wRate >= 50 ? "critical" : "warning");
             }
           } else if (d.id === "new_city_traffic") {
@@ -715,7 +723,7 @@ export async function handleInsights(
             }
           } else if (w >= 20 && w > scaled(b) * 3) {
             const spikeRatio = w / Math.max(scaled(b), 1);
-            add(label, w, scaled(b), "requests", { filters }, spikeRatio < 10 ? "info" : "warning");
+            add(label, w, scaled(b), "requests", { spike_ratio: Math.round(spikeRatio * 10) / 10, filters }, spikeRatio < 10 ? "info" : "warning");
           }
         }
         break;
@@ -738,13 +746,17 @@ export async function handleInsights(
           } else if (d.id === "proxy_surge") {
             const wProxy = pct(rows.filter((r) => r[key] != null && r[key] !== "").reduce((s, r) => s + n(r, "w_cnt"), 0), wTotal);
             const bProxy = pct(rows.filter((r) => r[key] != null && r[key] !== "").reduce((s, r) => s + n(r, "b_cnt"), 0), bTotal);
-            if (w > 0 && wProxy >= 5 && wProxy >= bProxy * 2 + 5) add(label, wShare, bShare, "% traffic", { filters: { [key]: label } });
+            if (w > 0 && wProxy >= 5 && wProxy >= bProxy * 2 + 5) add(label, wShare, bShare, "% traffic", { requests: w, filters: { [key]: label } });
+          } else if (d.id === "method_drift") {
+            if (w >= 20 && wShare >= 10 && (bTotal === 0 || wShare >= bShare * 2 + 5)) {
+              const sev = wShare >= 25 ? "critical" : "warning";
+              add(label, wShare, bShare, "% traffic", { requests: w, method: label, filters: { method: label } }, sev);
+            }
           } else {
-            const method = d.id === "method_drift";
-            const floor = method ? 10 : d.id === "ua_monoculture" ? 25 : 20;
-            if ((!method || w >= 20) && wShare >= floor && (bTotal === 0 || wShare >= bShare * (method ? 2 : 3) + (method ? 5 : 10))) {
-              const sev = wShare >= (method ? 25 : 50) ? "critical" : "warning";
-              add(label, wShare, bShare, "% traffic", { window_requests: w, baseline_requests: b, filters: { [key]: label } }, sev);
+            const floor = d.id === "ua_monoculture" ? 25 : 20;
+            if (wShare >= floor && (bTotal === 0 || wShare >= bShare * 3 + 10)) {
+              const sev = wShare >= 50 ? "critical" : "warning";
+              add(label, wShare, bShare, "% traffic", { requests: w, filters: { [key]: label } }, sev);
             }
           }
         }
@@ -756,14 +768,14 @@ export async function handleInsights(
         for (const r of scan(ctx.asnAggregateRows)) {
           if (r.asn == null) continue;
           const label = formatAsnDisplayLabel(r.asn as string | number), w = n(r, "w_cnt"), b = n(r, "b_cnt");
-          const meta = { window_requests: w, baseline_requests: b, filters: { asn: r.asn } };
+          const meta = { requests: w, asn: r.asn, filters: { asn: r.asn } };
           if (d.id === "new_asn_traffic") {
             if (w >= 20 && b === 0) add(label, w, 0, "requests", meta, w >= 100 ? "warning" : "info");
           } else if (d.id === "asn_hosting_shift") {
-            const wProxy = n(r, "w_proxy_total"), bProxy = n(r, "b_proxy_total");
-            const wShare = pct(n(r, "w_hosting"), wProxy), bShare = pct(n(r, "b_hosting"), bProxy);
+            const wProxy = n(r, "w_proxy_total"), bProxy = n(r, "b_proxy_total"), wHosting = n(r, "w_hosting");
+            const wShare = pct(wHosting, wProxy), bShare = pct(n(r, "b_hosting"), bProxy);
             if (wProxy >= 50 && wShare >= 30 && (bProxy === 0 || wShare >= bShare * 3 + 10)) {
-              add(label, wShare, bShare, "% hosting", meta, wShare >= 60 ? "critical" : "warning");
+              add(label, wShare, bShare, "% hosting", { window_hosting: wHosting, window_total: wProxy, asn: r.asn, filters: { asn: r.asn } }, wShare >= 60 ? "critical" : "warning");
             }
           } else {
             const wShare = pct(w, ctx.windowTotalRequests ?? 0), bShare = pct(b, ctx.baselineTotalRequests ?? 0);
@@ -784,11 +796,21 @@ export async function handleInsights(
           const cache = d.id === "cache_hit_cliff";
           const wTotal = n(r, cache ? "w_cacheable" : "w_tr_total");
           const bTotal = n(r, cache ? "b_cacheable" : "b_tr_total");
+          const wQuic = n(r, "w_quic");
           const w = pct(n(r, cache ? "w_hits" : "w_quic"), wTotal);
           const b = pct(n(r, cache ? "b_hits" : "b_quic"), bTotal);
           if (wTotal >= 100 && bTotal >= (cache ? 200 : 100) && b >= (cache ? 40 : 30) && w <= b - (cache ? 15 : 20)) {
-            add(cache ? "Service-wide cache HIT ratio" : "Service-wide HTTP/3 share", w, b, cache ? "% HIT" : "% QUIC",
-              { window_requests: wTotal, baseline_requests: bTotal, drop_pts: b - w }, b - w >= 30 ? "critical" : "warning");
+            const dropPts = Math.round((b - w) * 10) / 10;
+            add(
+              cache ? "Service-wide cache HIT ratio" : "Service-wide HTTP/3 share",
+              w,
+              b,
+              cache ? "% HIT" : "% QUIC",
+              cache
+                ? { window_cacheable: wTotal, baseline_cacheable: bTotal, drop_pts: dropPts }
+                : { window_quic: wQuic, window_total: wTotal, share_drop_pts: dropPts, filters: { transport: "tcp" } },
+              b - w >= 30 ? "critical" : "warning",
+            );
           }
         }
         break;
@@ -796,7 +818,7 @@ export async function handleInsights(
         throw new Error(`Cloud detector ${d.id} is advertised without an implementation`);
     }
     items.sort((a, b) => Math.abs(b.current_val - b.baseline_val) - Math.abs(a.current_val - a.baseline_val));
-    const findings = items.slice(0, 20);
+    const findings = items.slice(0, 15);
     for (const item of findings) {
       const filters = item.meta.filters as Record<string, unknown> | undefined;
       const params = new URLSearchParams({ service: serviceId, start: windowStart, end: windowEnd });
@@ -862,6 +884,7 @@ export interface CacheCollapseDetailResponse {
   };
   timeline: CacheCollapseTimelinePoint[];
   recent_misses: CacheCollapseRecentMiss[];
+  clusters: unknown[];
   has_data: boolean;
 }
 
@@ -923,7 +946,7 @@ export async function handleCacheCollapseDetail(
         real_hits: pt.real_hits,
         misses: pt.misses,
         expected_hits: Math.round(cacheable * bHitRateRatio),
-        hit_rate: cacheable > 0 ? (pt.real_hits / cacheable) * 100 : 0,
+        hit_rate: cacheable > 0 ? pt.real_hits / cacheable : 0,
       };
     },
   );
@@ -933,7 +956,7 @@ export async function handleCacheCollapseDetail(
       timestamp: m.timestamp,
       cache: m.cache || "UNKNOWN",
       pop: m.pop ?? null,
-      ip: m.ip ? (maskIps ? "0.0.0.0" : m.ip) : null,
+      ip: m.ip ? (maskIps ? maskIp(m.ip) : m.ip) : null,
       status: m.status != null ? Number(m.status) : null,
     }),
   );
@@ -952,6 +975,7 @@ export async function handleCacheCollapseDetail(
     },
     timeline,
     recent_misses: recentMisses,
+    clusters: [],
     has_data: r.w_total + r.b_total > 0,
   };
 }

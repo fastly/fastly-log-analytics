@@ -18,8 +18,16 @@ import { useServiceStore } from '@/stores/filterStore'
 import { ComplianceChart, ScoreDistChart, ScorerLatencyChart } from './ScoringOverviewTab'
 import { TopFlaggedTable } from './TopFlaggedTable'
 
-type Analytics = Extract<Awaited<ReturnType<typeof queryCloudScoring>>, { top_flagged: unknown }>
+type Analytics = Extract<Awaited<ReturnType<typeof queryCloudScoring>>, { available: true }>
 type Unavailable = { available: false; reason: string }
+
+function hasAvailableRows(section: { available?: boolean; rows?: unknown[] } | undefined): boolean {
+  return Boolean(section && section.available !== false && 'rows' in section)
+}
+
+function isAvailableAnalytics(data: Analytics | Unavailable | undefined): data is Analytics {
+  return Boolean(data && (!('available' in data) || data.available !== false) && 'top_flagged' in data)
+}
 
 async function read<T>(path: string, signal: AbortSignal): Promise<T> {
   const response = await adminFetch(path, { signal })
@@ -54,20 +62,20 @@ export function CloudScoringOverview() {
       const data = await read<Analytics | Unavailable>(
         `/api/services/${encodeURIComponent(serviceId!)}/scoring/analytics?since_hours=${sinceHours}`, signal,
       )
-      if ('top_flagged' in data) {
+      if (isAvailableAnalytics(data)) {
         qc.setQueryData(['scoring-top-flagged', serviceId, sinceHours], data.top_flagged)
         qc.setQueryData(['scoring-score-dist', serviceId, sinceHours], data.score_distribution)
-        if ('rows' in data.compliance_breakdown) {
+        if (hasAvailableRows(data.compliance_breakdown)) {
           qc.setQueryData(['scoring-compliance', serviceId, sinceHours], data.compliance_breakdown)
         }
-        if ('rows' in data.latency_timeseries) {
+        if (hasAvailableRows(data.latency_timeseries)) {
           qc.setQueryData(['scoring-latency-timeseries', serviceId, sinceHours], data.latency_timeseries)
         }
       }
       return data
     },
   })
-  const data = analytics.data && 'top_flagged' in analytics.data ? analytics.data : null
+  const data = isAvailableAnalytics(analytics.data) ? analytics.data : null
   const error = services.error ?? analytics.error
   return (
     <div className="space-y-6" data-testid="admin-session-scoring-root">
@@ -122,10 +130,10 @@ export function CloudScoringOverview() {
           </AnalyticsCard>
           <TopFlaggedTable serviceId={serviceId} sinceHours={sinceHours} />
           <ScoreDistChart serviceId={serviceId} sinceHours={sinceHours} />
-          {'rows' in data.compliance_breakdown ? <ComplianceChart serviceId={serviceId} sinceHours={sinceHours} /> : (
+          {hasAvailableRows(data.compliance_breakdown) ? <ComplianceChart serviceId={serviceId} sinceHours={sinceHours} /> : (
             <Alert role="status"><AlertDescription>Cookie compliance was not recorded in these logs.</AlertDescription></Alert>
           )}
-          {'rows' in data.latency_timeseries ? <ScorerLatencyChart serviceId={serviceId} sinceHours={sinceHours} /> : (
+          {hasAvailableRows(data.latency_timeseries) ? <ScorerLatencyChart serviceId={serviceId} sinceHours={sinceHours} /> : (
             <Alert role="status"><AlertDescription>Scorer execution and round-trip latency were not recorded in these logs.</AlertDescription></Alert>
           )}
         </>

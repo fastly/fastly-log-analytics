@@ -20,8 +20,6 @@ import { Label } from '@/components/ui/label'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn, buildSessionDashboardUrl, buildSessionDetailUrl, buildStreamDetailUrl, formatBytes, formatCountMaybe } from '@/lib/utils'
 import { PopLabel } from '@/components/DataTable'
-import { isCloudMode } from '@/lib/cloud-engine/mode'
-import { saveCloudSessionReference } from '@/lib/cloud-engine/session-reference'
 import { OBJECT_TYPE_LABELS, STREAM_TYPE_LABELS, STREAMING_FORMAT_LABELS, cmcdLabel } from '@/app/streaming/_sections/StreamingConstants'
 import { durationMs } from '@/app/sessions/detail/trace'
 import type { Session, SessionDetailResponse, SessionsResponse } from '@/types/api'
@@ -67,52 +65,24 @@ export interface SessionDetailProps {
 }
 
 function StreamDetailLink({ token, serviceId }: { token: string; serviceId: string | null }) {
-  const [reference] = React.useState(() => isCloudMode() ? crypto.randomUUID() : null)
-  const [storageFailed, setStorageFailed] = React.useState(false)
   return (
-    <>
-      <Link
-        href={buildStreamDetailUrl(reference ?? token, serviceId, reference ? 'ref' : 'token')}
-        onClick={(event) => {
-          if (!reference) return
-          try {
-            saveCloudSessionReference(reference, token)
-          } catch {
-            event.preventDefault()
-            setStorageFailed(true)
-          }
-        }}
-        className="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-md bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 hover:bg-blue-500/20 transition-colors"
-      >
-        <Film className="h-3 w-3" />Stream Details<ExternalLink className="h-3 w-3" />
-      </Link>
-      {storageFailed && <span role="alert" className="text-xs text-destructive">Allow browser storage to open Stream Details.</span>}
-    </>
+    <Link
+      href={buildStreamDetailUrl(token, serviceId)}
+      className="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-md bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 hover:bg-blue-500/20 transition-colors"
+    >
+      <Film className="h-3 w-3" />Stream Details<ExternalLink className="h-3 w-3" />
+    </Link>
   )
 }
 
 function RequestTraceLink({ token, serviceId }: { token: string; serviceId: string | null }) {
-  const [reference] = React.useState(() => isCloudMode() ? crypto.randomUUID() : null)
-  const [storageFailed, setStorageFailed] = React.useState(false)
   return (
-    <>
-      <Link
-        href={buildSessionDetailUrl(reference ?? token, serviceId, reference ? 'ref' : 'token')}
-        onClick={(event) => {
-          if (!reference) return
-          try {
-            saveCloudSessionReference(reference, token)
-          } catch {
-            event.preventDefault()
-            setStorageFailed(true)
-          }
-        }}
-        className="inline-flex items-center gap-1.5 rounded-md border border-primary/20 bg-primary/10 px-2.5 py-1 text-xs font-semibold text-primary transition-colors hover:bg-primary/20"
-      >
-        <Activity className="h-3 w-3" />Session Details<ExternalLink className="h-3 w-3" />
-      </Link>
-      {storageFailed && <span role="alert" className="text-xs text-destructive">Allow browser storage to open Session Details.</span>}
-    </>
+    <Link
+      href={buildSessionDetailUrl(token, serviceId)}
+      className="inline-flex items-center gap-1.5 rounded-md border border-primary/20 bg-primary/10 px-2.5 py-1 text-xs font-semibold text-primary transition-colors hover:bg-primary/20"
+    >
+      <Activity className="h-3 w-3" />Session Details<ExternalLink className="h-3 w-3" />
+    </Link>
   )
 }
 

@@ -26,6 +26,7 @@ import { hasFilterValues, SECURITY_ROLLUP_SECTIONS } from "./rollup-sections";
 import { loadAsnNames } from "./asn-names";
 import { readSecurityResidual, SECURITY_RESIDUAL_MAX_BYTES } from "./security-residual";
 import {
+  decodeProxyType,
   expandSecuritySections,
   maskIpValue,
   SECURITY_CONN_REUSE_BUCKETS,
@@ -697,7 +698,9 @@ export async function securityAggregatesFromRollup(
   body: SecurityRollupBody,
 ): Promise<(SecurityAggregatesResponse & { rollup: NetworkRollupMeta }) | null> {
   const sections = expandSecuritySections(body.sections);
-  const out: SecurityAggregatesResponse = {};
+  const out: SecurityAggregatesResponse = {
+    rdns_verification_available: false,
+  };
   const approximate: string[] = [];
   const lowerBound: string[] = [];
   // Raw prefers a custom `client_ip` over `ip` and `proxy_type` over `p_type`; summaries hold only the latter.
@@ -755,8 +758,13 @@ export async function securityAggregatesFromRollup(
 
   if (sections.has("proxy_dist")) {
     if (present("proxy_type")) return null;
-    out.proxy_dist = [...sumFields(rollup, "p_type")]
-      .filter(([type]) => type !== "")
+    const merged = new Map<string, number>();
+    for (const [rawType, count] of sumFields(rollup, "p_type")) {
+      if (rawType === "") continue;
+      const decoded = decodeProxyType(rawType);
+      merged.set(decoded, (merged.get(decoded) ?? 0) + count);
+    }
+    out.proxy_dist = [...merged.entries()]
       .sort(byCountThenValue)
       .map(([type, count]) => ({ type, count }));
     if (fieldCut(rollup, "p_type")) lowerBound.push("proxy_dist");
