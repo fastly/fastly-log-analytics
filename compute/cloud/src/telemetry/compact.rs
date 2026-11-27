@@ -768,7 +768,9 @@ pub fn log_compact<R: Runtime>(
     }
     let runtime = store.runtime;
     let started_with = runtime.admin_remaining_calls();
-    let room = |need: u32| runtime.admin_remaining_calls() >= reserve + need;
+    // Keep 1 extra call for the trailing `admin_cas(STATE_KEY)` so `log_compact` never dips into
+    // the caller's `reserve` (e.g. `TAIL + 1 = 4` -> `<= 28` backend calls out of 32).
+    let room = |need: u32| runtime.admin_remaining_calls() >= reserve + 1 + need;
     // Measured for the whole execution: a maintenance step may follow a Delete Data step.
     let stop = || {
         if runtime.admin_elapsed(store.started) >= WALL_STOP {
@@ -1380,6 +1382,39 @@ mod tests {
                 calls_before - rt.remaining.get(),
                 1,
                 "cooldown skips open-day LIST within 15 minutes (only reads state)"
+            );
+        }
+
+        #[test]
+        fn log_compact_preserves_caller_reserve_including_final_state_cas() {
+            let day = 20_000i64;
+            let now = (day * DAY_S + 8 * 3600) as u64;
+            let rt = OpenDayRt::new(now);
+            rt.remaining.set(32);
+            seed_state_checked_other_kinds(&rt, day, now);
+            let base_min = (day * DAY_S) as u64 / 60;
+            for i in 0..30 {
+                put_api_window(&rt, day, base_min + i * 2, i as usize);
+            }
+            let svc = test_service();
+            let store = Store {
+                runtime: &rt,
+                service: &svc,
+                access_key: "ak".into(),
+                secret_key: "sk".into(),
+                started: Instant::now(),
+                vcpu_start: 0,
+            };
+            let report = log_compact(&store, "ck", &OperationalLogSettings::default(), 4).unwrap();
+            assert!(
+                report.backend_calls <= 28,
+                "expected <= 28 backend calls, got {}",
+                report.backend_calls
+            );
+            assert!(
+                rt.remaining.get() >= 4,
+                "expected >= 4 remaining calls for caller reserve, got {}",
+                rt.remaining.get()
             );
         }
     }
