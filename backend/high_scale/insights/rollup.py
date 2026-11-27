@@ -173,6 +173,49 @@ SAMPLED_ROLLUP_DETECTIONS: frozenset[str] = frozenset(
 )
 
 
+def _rollup_hour_sample_clause_and_weight(
+    rollup_span: tuple[datetime, datetime] | None,
+    *,
+    sampled: bool,
+    baseline_hours: float,
+) -> tuple[str, str]:
+    """Build contiguous hour-bucket PK range predicates for long sampled rollup scans."""
+    if not sampled or baseline_hours < 72.0 or rollup_span is None:
+        return "", "request_count AS n"
+    start_ts = int(_utc(rollup_span[0]).timestamp())
+    end_ts = int(_utc(rollup_span[1]).timestamp())
+    total_h = (end_ts - start_ts) // 3600
+    if total_h < 72:
+        return "", "request_count AS n"
+    stride = 8 if total_h >= 336 else 4
+    sampled_h = max(1, total_h // stride)
+    n_win = min(14, sampled_h)
+    windows: list[tuple[int, int]] = []
+    for i in range(n_win):
+        slot_lo_h = i * total_h // n_win
+        slot_hi_h = total_h if i == n_win - 1 else (i + 1) * total_h // n_win
+        win_h = sampled_h * (i + 1) // n_win - sampled_h * i // n_win
+        win_h = max(1, min(win_h, slot_hi_h - slot_lo_h))
+        slack_h = (slot_hi_h - slot_lo_h) - win_h
+        offset_h = ((i * 13) % 24) * slack_h // 24 if slack_h > 0 else 0
+        h_lo = start_ts + (slot_lo_h + offset_h) * 3600
+        windows.append((h_lo, h_lo + win_h * 3600))
+    clause = (
+        " AND ("
+        + " OR ".join(
+            f"(bucket_start >= toDateTime({lo}, 'UTC') AND bucket_start < toDateTime({hi}, 'UTC'))"
+            for lo, hi in windows
+        )
+        + ")"
+    )
+    weight = (
+        f"request_count * {total_h // sampled_h} AS n"
+        if total_h % sampled_h == 0
+        else f"toUInt64(round(request_count * {total_h / sampled_h:.6f})) AS n"
+    )
+    return clause, weight
+
+
 def rollup_base_sql(
     detection: Detection,
     insight_id: str,
@@ -180,6 +223,7 @@ def rollup_base_sql(
     *,
     baseline_hours: float = 0.0,
     window_hours: float = 0.0,
+    rollup_span: tuple[datetime, datetime] | None = None,
 ) -> str:
     """Like ``_base_sql`` but baseline hours in [rollup_start, rollup_end) come from the rollup."""
     if problems := rollup_problems(detection, shape):
@@ -226,11 +270,14 @@ def rollup_base_sql(
         "AND (event_timestamp < {rollup_start:DateTime64(3)} OR event_timestamp >= {rollup_end:DateTime64(3)})"
         f"{raw_sample}"
     )
+    rollup_sample_clause, rollup_weight = _rollup_hour_sample_clause_and_weight(
+        rollup_span, sampled=sampled, baseline_hours=baseline_hours
+    )
     rollup = (
-        f"SELECT {rollup_projection}, toUInt8(1) AS is_b, toUInt8(0) AS is_w, request_count AS n "
+        f"SELECT {rollup_projection}, toUInt8(1) AS is_b, toUInt8(0) AS is_w, {rollup_weight} "
         f"FROM {ROLLUP_TABLE}{rollup_prewhere} WHERE {scope} AND shape = '{shape}' "
         "AND bucket_start >= {rollup_start:DateTime64(3)} AND bucket_start < {rollup_end:DateTime64(3)}"
-        f"{_to_rollup(row_filter)}"
+        f"{rollup_sample_clause}{_to_rollup(row_filter)}"
     )
     return f"/* insight:{insight_id} */ WITH base AS ({raw} UNION ALL {rollup}) {count_to_sum(detection.sql)}"
 

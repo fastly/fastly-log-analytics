@@ -338,7 +338,7 @@ impl<R: Runtime> Store<'_, R> {
         let md5 = hex::encode(digest);
         let content_md5 = base64::engine::general_purpose::STANDARD.encode(digest);
         let send = |body: Vec<u8>| -> Result<Sent, String> {
-            let (response, etag) = self.runtime.admin_fos_etag(FosRequest {
+            let (response, etag) = match self.runtime.admin_fos_etag(FosRequest {
                 method: "PUT",
                 region: &self.service.fos_region,
                 bucket: &self.service.fos_bucket,
@@ -350,7 +350,13 @@ impl<R: Runtime> Store<'_, R> {
                 timeout: request_timeout(FOS_TIMEOUT, self.runtime.admin_elapsed(self.started)),
                 response_limit: crate::admin::transport::FOS_RESPONSE_LIMIT,
                 content_md5: Some(&content_md5),
-            })?;
+            }) {
+                Ok(pair) => pair,
+                Err(err) if crate::admin::transport::retryable_transport(&err) => {
+                    return Ok(Sent::Transient(err, None));
+                }
+                Err(err) => return Err(err),
+            };
             let error = format!("put_http_{}", response.status);
             if transient_status(response.status, &response.body) {
                 return Ok(Sent::Transient(error, response.retry_after));
@@ -365,19 +371,17 @@ impl<R: Runtime> Store<'_, R> {
                 Err("etag_mismatch".into())
             }))
         };
-        let keep = retry.is_some_and(|r| r.spare.get() > 0);
-        let first = if keep {
-            body.clone()
-        } else {
-            std::mem::take(&mut body)
-        };
-        match send(first)? {
-            Sent::Done(result) => result,
-            Sent::Transient(_, wait) if keep && self.retry_wait(retry, wait) => match send(body)? {
-                Sent::Done(result) => result,
-                Sent::Transient(error, _) => Err(error),
-            },
-            Sent::Transient(error, _) => Err(error),
+        loop {
+            let attempt = if retry.is_some_and(|r| r.spare.get() > 0) {
+                body.clone()
+            } else {
+                std::mem::take(&mut body)
+            };
+            match send(attempt)? {
+                Sent::Done(result) => return result,
+                Sent::Transient(_, wait) if self.retry_wait(retry, wait) => continue,
+                Sent::Transient(error, _) => return Err(error),
+            }
         }
     }
 
@@ -483,18 +487,49 @@ impl<R: Runtime> Store<'_, R> {
     /// Direct GET; `Ok(None)` is a missing object. On Wasm (`FastlyRuntime`), routes write-once
     /// object reads through the Front VCL CDN (`/fos/<service>/<key>`) when `cdn_key` is present.
     pub fn get_direct(&self, key: &str, limit: usize) -> Result<Option<Vec<u8>>, String> {
+        let retry = (self.within_wall() && self.runtime.admin_remaining_calls() >= 2)
+            .then(|| Retry::new(1, WALL_STOP));
         #[cfg(target_arch = "wasm32")]
         if let Ok(Some(cdn_key)) = self
             .runtime
             .secret("cdn_key")
             .map(|k| k.filter(|s| !s.is_empty()))
         {
-            return match self.get(&cdn_key, key, limit) {
+            return match self.get_retrying(&cdn_key, key, limit, retry.as_ref()) {
                 Ok(body) => Ok(body),
                 Err(err) if err == "cdn_body_too_large" => Err("get_body_too_large".into()),
                 Err(err) => Err(err),
             };
         }
+        loop {
+            match self.fos_with_limit("GET", key, "", Vec::new(), limit) {
+                Ok(response) => {
+                    if transient_status(response.status, &response.body)
+                        && self.retry_wait(retry.as_ref(), response.retry_after)
+                    {
+                        continue;
+                    }
+                    return match response.status {
+                        200 if response.body.len() <= limit => Ok(Some(response.body)),
+                        200 => Err("get_body_too_large".into()),
+                        404 => Ok(None),
+                        status => Err(format!("get_http_{status}")),
+                    };
+                }
+                Err(err)
+                    if crate::admin::transport::retryable_transport(&err)
+                        && self.retry_wait(retry.as_ref(), None) =>
+                {
+                    continue;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    /// Reads an object directly from FOS, bypassing the `/fos/` CDN cache.
+    /// Use for mutable keys rewritten in place (e.g. `ngwaf_bots` daily summaries).
+    pub fn get_uncached(&self, key: &str, limit: usize) -> Result<Option<Vec<u8>>, String> {
         let response = self.fos_with_limit("GET", key, "", Vec::new(), limit)?;
         match response.status {
             200 if response.body.len() <= limit => Ok(Some(response.body)),
@@ -798,16 +833,28 @@ impl<R: Runtime> Store<'_, R> {
                 request_timeout(FOS_TIMEOUT, self.runtime.admin_elapsed(self.started)),
             )
         };
-        let mut response = send()?;
-        if transient_status(response.status, &response.body)
-            && self.retry_wait(retry, response.retry_after)
-        {
-            response = send()?;
-        }
-        match response.status {
-            200 => Ok(Some(response.body)),
-            404 => Ok(None),
-            status => Err(format!("get_http_{status}")),
+        loop {
+            match send() {
+                Ok(response) => {
+                    if transient_status(response.status, &response.body)
+                        && self.retry_wait(retry, response.retry_after)
+                    {
+                        continue;
+                    }
+                    return match response.status {
+                        200 => Ok(Some(response.body)),
+                        404 => Ok(None),
+                        status => Err(format!("get_http_{status}")),
+                    };
+                }
+                Err(err)
+                    if crate::admin::transport::retryable_transport(&err)
+                        && self.retry_wait(retry, None) =>
+                {
+                    continue;
+                }
+                Err(err) => return Err(err),
+            }
         }
     }
 }

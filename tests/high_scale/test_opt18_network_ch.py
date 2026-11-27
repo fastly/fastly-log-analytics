@@ -86,11 +86,16 @@ def test_network_time_sample_clause_emits_monotonic_pk_ranges_for_30d_and_bucket
     assert len(b_windows) == 24
     assert sum(b - a for a, b in b_windows) == (24 * 3600) // 20
 
-    # Dense bucket count (> 24h multi-day spans, e.g. 30d at 3600s or 300s): monotonic PK range slices avoid scanning 100% of files
-    for bs in (3600, 300):
-        dense_30d_clause = _network_time_sample_clause(1000, bucket_seconds=bs, start=start_30d, end=end)
-        assert "line_ordinal" not in dense_30d_clause
-        assert len(_parse_windows(dense_30d_clause)) == 16
+    # Dense bucket count on multi-day spans: 3600s (720 <= 1000) uses aligned PK intervals + residual ordinal;
+    # 300s (8640 > 1000) falls back to 16 monotonic PK range slices.
+    dense_30d_hour = _network_time_sample_clause(1000, bucket_seconds=3600, start=start_30d, end=end)
+    assert "toStartOfInterval(event_timestamp, INTERVAL 18 SECOND) IN (" in dense_30d_hour
+    assert dense_30d_hour.count("toDateTime(") == 720
+    assert dense_30d_hour.endswith(" AND line_ordinal % 5 = 0")
+
+    dense_30d_300 = _network_time_sample_clause(1000, bucket_seconds=300, start=start_30d, end=end)
+    assert "line_ordinal" not in dense_30d_300
+    assert len(_parse_windows(dense_30d_300)) == 16
 
     # Naive datetimes must be treated as UTC, not host local timezone
     naive_clause = _network_time_sample_clause(
@@ -153,7 +158,7 @@ def test_network_endpoints_use_pk_range_sampling_for_30d_and_clean_fallback(
     assert len(_parse_windows(bars_sql)) == 16
     assert "% 100" not in bars_sql
 
-    # 3. network_health: 30d dense bucket heatmap & map use <= 16 PK range slices + clean fallback
+    # 3. network_health: 30d hourly heatmap & map use aligned PK interval set + residual ordinal + clean fallback
     nh_client = _RecordingCHClient(
         lambda sql, _p: (
             [{"asn": 13335, "cnt": 1000}]
@@ -175,7 +180,9 @@ def test_network_endpoints_use_pk_range_sampling_for_30d_and_clean_fallback(
                         "speed_map": {},
                     }
                 ]
-                if "AS rtt_quants" in sql and "GROUP BY asn, bucket_ts" in sql and not _RANGE_RE.search(sql)
+                if "AS rtt_quants" in sql
+                and "GROUP BY asn, bucket_ts" in sql
+                and "toStartOfInterval(event_timestamp, INTERVAL 18 SECOND)" not in sql
                 else []
             )
         )
@@ -187,10 +194,21 @@ def test_network_endpoints_use_pk_range_sampling_for_30d_and_clean_fallback(
         start_30d.isoformat(),
         end.isoformat(),
     )
-    hm_sampled = [s for s, _, _ in nh_client.calls if "GROUP BY asn, bucket_ts" in s and _RANGE_RE.search(s)]
-    hm_fallback = [s for s, _, _ in nh_client.calls if "GROUP BY asn, bucket_ts" in s and not _RANGE_RE.search(s)]
-    assert len(hm_sampled) == 1 and len(_parse_windows(hm_sampled[0])) == 16
-    assert "line_ordinal" not in hm_sampled[0]
+    hm_sampled = [
+        s
+        for s, _, _ in nh_client.calls
+        if "GROUP BY asn, bucket_ts" in s and "toStartOfInterval(event_timestamp, INTERVAL 18 SECOND) IN (" in s
+    ]
+    hm_fallback = [
+        s
+        for s, _, _ in nh_client.calls
+        if "GROUP BY asn, bucket_ts" in s
+        and "toStartOfInterval(" not in s
+        and not _RANGE_RE.search(s)
+        and "line_ordinal" not in s
+    ]
+    assert len(hm_sampled) == 1 and hm_sampled[0].count("toDateTime(") == 720
+    assert "AND line_ordinal % 5 = 0" in hm_sampled[0]
     assert len(hm_fallback) == 1
     assert nh_resp.available is True
 

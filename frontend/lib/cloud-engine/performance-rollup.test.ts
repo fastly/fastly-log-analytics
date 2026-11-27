@@ -333,4 +333,21 @@ describe("performanceFromRollup", () => {
     expect([...(PERFORMANCE_SUMMARY_SPEC.only.get("sample_key") ?? [])]).toEqual(["sample"]);
     expect([...(PERFORMANCE_SUMMARY_SPEC.only.get("count") ?? [])]).toEqual(["all_fields"]);
   });
+
+  it("merges unsummarized residual tail raw files alongside summaries with full parity", async () => {
+    const partialWindows = WINDOWS.slice(0, -1);
+    const s = fixtureSource([fixturePage(RAW)], BUFFERS, { json: [], files: [] }, [fixturePage(partialWindows)]);
+    const page = body({ sections: ["ttl_dist", "waterfall", ...TOPS, "scatter"], sort_by: "avg" });
+    const got = await performanceFromRollup("/api/performance/aggregates", page, s);
+    expect(got).not.toBeNull();
+    const want = performanceAggregatesFromRollup(await rollupOf(WINDOWS), page)!;
+    expect(got!.waterfall).toEqual(want.waterfall);
+    expect(got!.ttl_dist).toEqual(want.ttl_dist);
+    const exact = (rows: (PerfTopUrlItem | PerfTopAsnItem)[] | undefined) =>
+      rows!.map((r) => ["url" in r ? r.url : `${r.asn} ${r.label}`, r.requests, r.avg]);
+    expect(exact(got!.top_urls)).toEqual(exact(want.top_urls));
+    expect(exact(got!.top_asns)).toEqual(exact(want.top_asns));
+    expect(got!.scatter!.length).toBeGreaterThan(200);
+    expect(s.log.files).toContain(RAW[RAW.length - 1].key);
+  });
 });

@@ -39,30 +39,37 @@ impl FastlyState {
 }
 impl Kv for SdkKv {
     fn get(&self, key: &str) -> Result<Option<KvRecord>, StateError> {
-        self.budget.charge().map_err(StateError)?;
         let store = self
             .store
             .as_ref()
             .ok_or_else(|| StateError("flp_state is not linked".into()))?;
-        match store.lookup(key) {
-            Ok(mut response) => {
-                let generation = response.current_generation().to_string();
-                let (revision, written_ms) = response
-                    .metadata()
-                    .map(|b| parse_kv_meta(&b))
-                    .unwrap_or((None, None));
-                if let Some(ts) = written_ms {
-                    self.writes.borrow_mut().insert(key.into(), ts);
-                }
-                Ok(Some(KvRecord {
-                    generation,
-                    revision,
-                    value: response.take_body_bytes(),
-                }))
+        for attempt in 0..2 {
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            Err(KVStoreError::ItemNotFound) => Ok(None),
-            Err(_) => Err(StateError("KV lookup failed".into())),
+            self.budget.charge().map_err(StateError)?;
+            match store.lookup(key) {
+                Ok(mut response) => {
+                    let generation = response.current_generation().to_string();
+                    let (revision, written_ms) = response
+                        .metadata()
+                        .map(|b| parse_kv_meta(&b))
+                        .unwrap_or((None, None));
+                    if let Some(ts) = written_ms {
+                        self.writes.borrow_mut().insert(key.into(), ts);
+                    }
+                    return Ok(Some(KvRecord {
+                        generation,
+                        revision,
+                        value: response.take_body_bytes(),
+                    }));
+                }
+                Err(KVStoreError::ItemNotFound) => return Ok(None),
+                Err(_) if attempt == 0 && self.budget.remaining() > 0 => continue,
+                Err(_) => return Err(StateError("KV lookup failed".into())),
+            }
         }
+        Err(StateError("KV lookup failed".into()))
     }
     fn put(
         &self,

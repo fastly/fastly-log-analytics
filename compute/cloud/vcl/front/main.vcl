@@ -658,6 +658,13 @@ sub vcl_deliver {
         set resp.http.Cache-Control = "no-cache";
       }
     }
+  } else if (
+    (req.method == "GET" || req.method == "HEAD") &&
+    req.restarts < 1 &&
+    req.url.path ~ "^/api/(files|log-extents|sync-status|header-badge|services|log-fields/catalog|rum/versions)$" &&
+    resp.status >= 500 && resp.status < 600
+  ) {
+    return(restart);
   }
   # Edge timing for the browser's PerformanceResourceTiming.serverTiming; appended after any
   # Compute phases. `cdn-cache` is the shield-aware FOS object outcome, `edge` this node's state.
@@ -701,6 +708,16 @@ sub vcl_error {
     (req.method == "GET" || req.method == "HEAD") &&
     req.restarts < 1 &&
     (obj.status == 628 || (obj.status >= 500 && obj.status < 600))
+  ) {
+    return(restart);
+  }
+  if (
+    !req.http.x-flp-fos-service &&
+    (req.method == "GET" || req.method == "HEAD") &&
+    req.restarts < 1 &&
+    req.url.path ~ "^/api/(files|log-extents|sync-status|header-badge|services|log-fields/catalog|rum/versions)$" &&
+    obj.status >= 500 && obj.status < 600 &&
+    obj.status != 620
   ) {
     return(restart);
   }

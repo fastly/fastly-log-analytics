@@ -245,4 +245,11 @@ describe("DuckDB worker failure during initialization", () => {
     await expect(created).rejects.toThrow("DuckDB worker failed: synthetic worker failure");
     expect(state.terminations).toBe(1);
   });
+
+  it("rejects on initialization timeout and terminates the wedged worker", async () => {
+    state.fail = "hang";
+    const created = createBrowserBackend({ initTimeoutMs: 25 });
+    await expect(created).rejects.toThrow(/DuckDB worker initialization timed out/);
+    expect(state.terminations).toBe(1);
+  });
 });

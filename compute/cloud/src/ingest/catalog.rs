@@ -349,12 +349,25 @@ pub fn fetch_batched_reserving<R: Runtime>(
         }
     }
     let mut results = store.get_direct_many(&batch).into_iter();
-    let needed = results
+    let mut needed = results
         .next()
         .unwrap_or_else(|| Err("catalog_object_not_visible".into()));
     for ((key, _), result) in batch.iter().skip(1).zip(results) {
-        if !matches!(&result, Err(error) if error == crate::shell::PREFETCH_UNREAD) {
+        if !matches!(
+            &result,
+            Err(error)
+                if error == crate::shell::PREFETCH_UNREAD
+                    || super::storage::transient_error(error)
+        ) {
             prefetched.insert(key.clone(), result);
+        }
+    }
+    if let Err(ref error) = needed {
+        if super::storage::transient_error(error)
+            && store.within_wall()
+            && store.runtime.admin_remaining_calls() > reserve
+        {
+            needed = store.get_direct(key, limit);
         }
     }
     needed
@@ -2005,5 +2018,123 @@ mod tests {
             "iter39: retire_reserving must accept legacy v2 Day with service_id: None, got {:?}",
             retired.err()
         );
+    }
+
+    #[test]
+    fn opt33_fetch_batched_reserving_skips_caching_transient_prefetch_and_retries_primary() {
+        struct RetryPrefetchRt {
+            inner: MockRt,
+            attempts: RefCell<BTreeMap<String, u32>>,
+        }
+        impl SetupStores for RetryPrefetchRt {
+            fn config_present(&self, n: &str) -> Result<bool, String> {
+                self.inner.config_present(n)
+            }
+            fn secret_present(&self, n: &str) -> Result<bool, String> {
+                self.inner.secret_present(n)
+            }
+            fn state_linked(&self) -> Result<bool, String> {
+                self.inner.state_linked()
+            }
+        }
+        impl Runtime for RetryPrefetchRt {
+            fn config(&self, k: &str) -> Result<Option<String>, String> {
+                self.inner.config(k)
+            }
+            fn secret(&self, k: &str) -> Result<Option<String>, String> {
+                self.inner.secret(k)
+            }
+            fn random(&self) -> Result<[u8; 32], String> {
+                self.inner.random()
+            }
+            fn now(&self) -> u64 {
+                self.inner.now()
+            }
+            fn checks(&self, l: bool) -> Result<Value, String> {
+                self.inner.checks(l)
+            }
+            fn versions(&self) -> Result<Value, String> {
+                self.inner.versions()
+            }
+            fn compute_service_id(&self) -> Option<String> {
+                self.inner.compute_service_id()
+            }
+            fn compute_service_version(&self) -> Option<String> {
+                self.inner.compute_service_version()
+            }
+            fn admin_get(&self, key: &str) -> Result<Option<Record>, String> {
+                self.inner.admin_get(key)
+            }
+            fn admin_cas(&self, k: &str, g: Option<&str>, v: &Value) -> Result<bool, String> {
+                self.inner.admin_cas(k, g, v)
+            }
+            fn admin_wait(&self, _: u64) {}
+            fn admin_remaining_calls(&self) -> u32 {
+                self.inner.admin_remaining_calls()
+            }
+            fn admin_fos_concurrent(&self) -> bool {
+                true
+            }
+            fn heap_mib(&self) -> Option<u32> {
+                Some(16)
+            }
+            fn admin_fos(&self, request: FosRequest<'_>) -> Result<FosResponse, String> {
+                let key = request.key.trim_start_matches('/').to_owned();
+                let count = {
+                    let mut map = self.attempts.borrow_mut();
+                    let next = map.get(&key).copied().unwrap_or(0) + 1;
+                    map.insert(key, next);
+                    next
+                };
+                if count == 1 {
+                    return Ok(FosResponse {
+                        status: 503,
+                        body: Vec::new(),
+                        cdn_cache: None,
+                        retry_after: None,
+                    });
+                }
+                self.inner.admin_fos(request)
+            }
+        }
+
+        let svc = test_service();
+        let k1 = "processed/_catalog/day-1.json".to_owned();
+        let k2 = "processed/_catalog/day-2.json".to_owned();
+        let rt = RetryPrefetchRt {
+            inner: MockRt {
+                kv: RefCell::new(BTreeMap::new()),
+                objects: RefCell::new(BTreeMap::from([
+                    (k1.clone(), b"{\"day\":1}".to_vec()),
+                    (k2.clone(), b"{\"day\":2}".to_vec()),
+                ])),
+                remaining: Cell::new(32),
+                gets: Cell::new(0),
+            },
+            attempts: RefCell::new(BTreeMap::new()),
+        };
+        let store = Store {
+            runtime: &rt,
+            service: &svc,
+            access_key: "ak".into(),
+            secret_key: "sk".into(),
+            started: Instant::now(),
+            vcpu_start: 0,
+        };
+        let mut prefetched = Prefetched::new();
+        let first =
+            fetch_batched_reserving(&store, &mut prefetched, &k1, MANIFEST_LIMIT, 8, 3, || {
+                vec![(k2.clone(), MANIFEST_LIMIT)]
+            })
+            .expect("primary transient 503 must recover on direct retry");
+        assert_eq!(first.as_deref(), Some(b"{\"day\":1}".as_slice()));
+        assert!(
+            !prefetched.contains_key(&k2),
+            "transient 503 from speculative prefetch must not be cached"
+        );
+        let second =
+            fetch_batched_reserving(&store, &mut prefetched, &k2, MANIFEST_LIMIT, 8, 3, Vec::new)
+                .expect("prefetched transient 503 must recover when requested");
+        assert_eq!(second.as_deref(), Some(b"{\"day\":2}".as_slice()));
     }
 }

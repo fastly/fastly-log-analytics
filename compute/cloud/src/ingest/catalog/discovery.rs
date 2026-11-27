@@ -5,7 +5,13 @@ use super::{
     MANIFEST_LIMIT, VERSION,
 };
 use crate::{
-    ingest::{api::FILES_PAGE, rfc3339, storage::Store, worker::Output, WATERMARK_KEY},
+    ingest::{
+        api::FILES_PAGE,
+        rfc3339,
+        storage::{Retry, Store, WALL_STOP},
+        worker::Output,
+        WATERMARK_KEY,
+    },
     shell::Runtime,
 };
 use serde::{Deserialize, Serialize};
@@ -680,7 +686,7 @@ fn walk<R: Runtime>(
             "{}processed/_catalog/cursor-{digest}.json",
             crate::ingest::scope(store.service)
         );
-        store.put_verified(&key, body)?;
+        put_cursor_verified(store, &key, body)?;
         Some(key)
     };
     let open_hour = state
@@ -723,6 +729,24 @@ pub enum Start {
     },
 }
 
+fn put_cursor_verified<R: Runtime>(
+    store: &Store<'_, R>,
+    key: &str,
+    body: Vec<u8>,
+) -> Result<String, String> {
+    let spare = if store.within_wall() {
+        store
+            .runtime
+            .admin_remaining_calls()
+            .saturating_sub(1)
+            .min(2)
+    } else {
+        0
+    };
+    let retry = Retry::new(spare, WALL_STOP);
+    store.put_verified_retrying(key, body, Some(&retry))
+}
+
 /// Splits the walk of `[from, to)` into chains that never share an hour, so a client can page
 /// them concurrently. Each chain is a whole-day or within-day run of hours of one pinned head;
 /// every per-hour and per-day walk state starts fresh at an hour or day, so walking the chains
@@ -735,7 +759,7 @@ pub fn forked_page<R: Runtime>(
     include_summaries: bool,
     summary_bounds: (i64, i64),
 ) -> Result<Start, String> {
-    let base = fresh(store, None, from, to, summary, summary_bounds)?;
+    let mut base = fresh(store, None, from, to, summary, summary_bounds)?;
     if to.saturating_sub(from) <= FORK_MIN_SECONDS {
         return walk(
             store,
@@ -747,6 +771,14 @@ pub fn forked_page<R: Runtime>(
         )
         .map(Start::Page);
     }
+    let keep_from = day_start(from.saturating_sub(3600));
+    let keep_to = to.saturating_add(86_400);
+    base.hour_bundles
+        .retain(|hour, _| *hour >= keep_from && *hour < keep_to);
+    base.open_bundles
+        .retain(|hour, _| *hour >= keep_from && *hour < keep_to);
+    base.day_bundles
+        .retain(|day, _| *day >= keep_from && *day < keep_to);
     let mut prefetched = Prefetched::new();
     let mut shards = Vec::new();
     if base.days.len() > FORK_DAY_INDEXES {
@@ -851,6 +883,7 @@ pub fn forked_page<R: Runtime>(
                 let held = |hour: &i64| hours.iter().any(|(h, _)| h == hour);
                 shard.hour_bundles.retain(|hour, _| held(hour));
                 shard.open_bundles.retain(|hour, _| held(hour));
+                shard.summary_counts.retain(|hour, _| held(hour));
                 shard.day_bundles.clear();
                 shards.push(shard);
             }
@@ -884,7 +917,7 @@ pub fn forked_page<R: Runtime>(
         "{}processed/_catalog/forks-{digest}.json",
         crate::ingest::scope(store.service)
     );
-    store.put_verified(&key, body)?;
+    put_cursor_verified(store, &key, body)?;
     Ok(Start::Forks {
         tokens: (0..shards.len()).map(|i| format!("{key}#{i}")).collect(),
         generation,
@@ -2090,6 +2123,224 @@ mod tests {
                 expected_err,
                 "iter39 ({label}): discovery::forked_page Day validation mismatch"
             );
+        }
+    }
+
+    #[test]
+    fn opt33_forked_page_retries_transient_put_503_and_trims_shard_state() {
+        use std::cell::Cell;
+
+        struct TransientPutRt {
+            inner: MockRt,
+            remaining: Cell<u32>,
+            fork_puts: Cell<u32>,
+        }
+        impl SetupStores for TransientPutRt {
+            fn config_present(&self, n: &str) -> Result<bool, String> {
+                self.inner.config_present(n)
+            }
+            fn secret_present(&self, n: &str) -> Result<bool, String> {
+                self.inner.secret_present(n)
+            }
+            fn state_linked(&self) -> Result<bool, String> {
+                self.inner.state_linked()
+            }
+        }
+        impl Runtime for TransientPutRt {
+            fn config(&self, k: &str) -> Result<Option<String>, String> {
+                self.inner.config(k)
+            }
+            fn secret(&self, k: &str) -> Result<Option<String>, String> {
+                self.inner.secret(k)
+            }
+            fn random(&self) -> Result<[u8; 32], String> {
+                self.inner.random()
+            }
+            fn now(&self) -> u64 {
+                self.inner.now()
+            }
+            fn checks(&self, l: bool) -> Result<Value, String> {
+                self.inner.checks(l)
+            }
+            fn versions(&self) -> Result<Value, String> {
+                self.inner.versions()
+            }
+            fn compute_service_id(&self) -> Option<String> {
+                self.inner.compute_service_id()
+            }
+            fn compute_service_version(&self) -> Option<String> {
+                self.inner.compute_service_version()
+            }
+            fn admin_get(&self, key: &str) -> Result<Option<Record>, String> {
+                self.inner.admin_get(key)
+            }
+            fn admin_cas(&self, k: &str, g: Option<&str>, v: &Value) -> Result<bool, String> {
+                self.inner.admin_cas(k, g, v)
+            }
+            fn admin_wait(&self, _: u64) {}
+            fn admin_remaining_calls(&self) -> u32 {
+                self.remaining.get()
+            }
+            fn admin_fos(&self, request: FosRequest<'_>) -> Result<FosResponse, String> {
+                let rem = self.remaining.get();
+                if rem == 0 {
+                    return Err("backend_budget_exhausted".into());
+                }
+                self.remaining.set(rem - 1);
+                if request.method == "PUT" && request.key.contains("processed/_catalog/forks-") {
+                    let n = self.fork_puts.get() + 1;
+                    self.fork_puts.set(n);
+                    if n == 1 {
+                        return Ok(FosResponse {
+                            status: 503,
+                            body: Vec::new(),
+                            cdn_cache: None,
+                            retry_after: None,
+                        });
+                    }
+                }
+                self.inner.admin_fos(request)
+            }
+            fn admin_fos_etag(
+                &self,
+                request: FosRequest<'_>,
+            ) -> Result<(FosResponse, Option<String>), String> {
+                use md5::{Digest as _, Md5};
+                let etag =
+                    (request.method == "PUT").then(|| hex::encode(Md5::digest(&request.body)));
+                self.admin_fos(request).map(|resp| (resp, etag))
+            }
+        }
+
+        let svc = test_service();
+        let day = day_start(BASE);
+        let stale_day = day - 5 * 86_400;
+        let day_key = "processed/_catalog/day-opt33.json".to_owned();
+        let mut hours = BTreeMap::new();
+        let mut summary_counts = BTreeMap::new();
+        let mut hour_bundles = BTreeMap::new();
+        for h in 0..24i64 {
+            let hour = day + h * 3600;
+            hours.insert(
+                hour,
+                Reference {
+                    key: format!("processed/_catalog/blk-{h}.json"),
+                    generation: 1,
+                },
+            );
+            summary_counts.insert(hour, 10 + h as u64);
+            hour_bundles.insert(
+                hour,
+                Reference {
+                    key: format!("processed/_catalog/hb-{h}.json"),
+                    generation: 1,
+                },
+            );
+        }
+        // Out-of-range bundles must be trimmed before cloning shards.
+        hour_bundles.insert(
+            stale_day,
+            Reference {
+                key: "processed/_catalog/hb-stale.json".into(),
+                generation: 1,
+            },
+        );
+        let open_bundles = BTreeMap::from([
+            (
+                stale_day,
+                Reference {
+                    key: "processed/_catalog/ob-stale.json".into(),
+                    generation: 1,
+                },
+            ),
+            (
+                day,
+                Reference {
+                    key: "processed/_catalog/ob-inrange.json".into(),
+                    generation: 1,
+                },
+            ),
+        ]);
+        let day_bundles = BTreeMap::from([(
+            stale_day,
+            Reference {
+                key: "processed/_catalog/db-stale.json".into(),
+                generation: 1,
+            },
+        )]);
+        let day_index = Day {
+            version: VERSION,
+            service_id: Some(svc.service_id.clone()),
+            hours,
+            summary_counts,
+            ..Default::default()
+        };
+        let head = Head {
+            version: VERSION,
+            generation: 1,
+            recent: vec![super::super::Event {
+                cursor: "1".into(),
+                generation: 1,
+                committed_at: None,
+                manifest: None,
+            }],
+            days: BTreeMap::from([(day, day_key.clone())]),
+            hour_bundles,
+            open_bundles,
+            day_bundles,
+            ..Default::default()
+        };
+        let rt = TransientPutRt {
+            inner: MockRt {
+                now: (day + 25 * 3600) as u64,
+                kv: RefCell::new(BTreeMap::from([(
+                    WATERMARK_KEY.into(),
+                    json!({ "catalog": head }),
+                )])),
+                objects: RefCell::new(BTreeMap::from([(
+                    day_key,
+                    serde_json::to_vec(&day_index).unwrap(),
+                )])),
+            },
+            remaining: Cell::new(32),
+            fork_puts: Cell::new(0),
+        };
+        let store = Store {
+            runtime: &rt,
+            service: &svc,
+            access_key: "ak".into(),
+            secret_key: "sk".into(),
+            started: Instant::now(),
+            vcpu_start: 0,
+        };
+        let start = forked_page(
+            &store,
+            day,
+            day + 24 * 3600,
+            true,
+            false,
+            (day, day + 24 * 3600),
+        )
+        .expect("forked_page must retry transient 503 on forks PUT and succeed");
+        assert_eq!(rt.fork_puts.get(), 2);
+        let Start::Forks { tokens, .. } = start else {
+            panic!("expected Start::Forks for 24-hour range");
+        };
+        assert!(tokens.len() > 1);
+        let forks_key = tokens[0].split('#').next().unwrap();
+        let forks_bytes = rt.inner.objects.borrow().get(forks_key).unwrap().clone();
+        let shards: Vec<State> = serde_json::from_slice(&forks_bytes).unwrap();
+        for shard in &shards {
+            let held: BTreeSet<i64> = shard.hours.iter().map(|(h, _)| *h).collect();
+            assert!(
+                shard.summary_counts.keys().all(|h| held.contains(h)),
+                "shard summary_counts must only retain held hours"
+            );
+            assert!(shard.hour_bundles.keys().all(|h| held.contains(h)));
+            assert!(shard.open_bundles.keys().all(|h| held.contains(h)));
+            assert!(!shard.hour_bundles.contains_key(&stale_day));
+            assert!(!shard.open_bundles.contains_key(&stale_day));
+            assert!(shard.day_bundles.is_empty());
         }
     }
 }

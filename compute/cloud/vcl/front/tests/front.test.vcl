@@ -1110,3 +1110,66 @@ sub sec22_edge_deliver_strips_internal_headers_and_surrogate_key {
   assert.is_notset(resp.http.x-flp-log-dropped);
   assert.is_notset(resp.http.x-compress-hint);
 }
+
+
+// @scope: deliver
+sub idempotent_read_api_deliver_restarts_once_on_5xx_only {
+  set req.method = "GET";
+  unset req.http.x-flp-fos-service;
+  set req.url = "/api/files?from=a&to=b&view=summary&fork=1";
+  set resp.status = 503;
+  testing.call_subroutine("vcl_deliver");
+  assert.state(restart);
+
+  set req.method = "HEAD";
+  set req.url = "/api/sync-status";
+  set resp.status = 502;
+  testing.call_subroutine("vcl_deliver");
+  assert.state(restart);
+
+  set req.method = "GET";
+  set req.url = "/api/files?from=a&to=b&view=summary&fork=1";
+  set resp.status = 200;
+  testing.call_subroutine("vcl_deliver");
+  assert.state(deliver);
+
+  set req.method = "POST";
+  set req.url = "/api/files";
+  set resp.status = 503;
+  testing.call_subroutine("vcl_deliver");
+  assert.state(deliver);
+
+  set req.method = "GET";
+  set req.url = "/api/admin/jobs/1/step";
+  set resp.status = 503;
+  testing.call_subroutine("vcl_deliver");
+  assert.state(deliver);
+}
+
+
+// @scope: error
+sub idempotent_read_api_error_restarts_once_on_5xx_excluding_620 {
+  set req.method = "GET";
+  unset req.http.x-flp-fos-service;
+  set req.url = "/api/files?from=a&to=b&view=summary&fork=1";
+  set obj.status = 503;
+  testing.call_subroutine("vcl_error");
+  assert.state(restart);
+
+  set req.method = "POST";
+  set obj.status = 503;
+  testing.call_subroutine("vcl_error");
+  assert.not_restart();
+
+  set req.method = "GET";
+  set req.url = "/api/admin/jobs/1/step";
+  set obj.status = 503;
+  testing.call_subroutine("vcl_error");
+  assert.not_restart();
+
+  set req.url = "/api/files";
+  set obj.status = 620;
+  testing.call_subroutine("vcl_error");
+  assert.equal(obj.status, 503);
+  assert.not_restart();
+}

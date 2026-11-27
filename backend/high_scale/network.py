@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextvars
+import math
 import os
 import sys
 from collections import defaultdict
@@ -339,6 +340,27 @@ def _network_time_sample_clause(
             return _pk_range_or_clause(windows) if windows else ""
         if span_s <= 86400:
             return f" AND line_ordinal % {stride} = 0"
+        if n_buckets <= 1000 and (pk_stride := math.gcd(bucket_seconds, stride)) > 1:
+            win_s = bucket_seconds // pk_stride
+            ord_stride = stride // pk_stride
+            slots: list[str] = []
+            for idx in range(n_buckets):
+                b_lo = max(start_ts, first_b + idx * bucket_seconds)
+                b_hi = min(end_ts, first_b + (idx + 1) * bucket_seconds)
+                aligned_lo = ((b_lo + win_s - 1) // win_s) * win_s
+                n_slots = (b_hi - aligned_lo) // win_s
+                if n_slots >= 1:
+                    slot_ts = aligned_lo + ((idx * 13) % n_slots) * win_s
+                elif b_hi > b_lo:
+                    slot_ts = (b_lo // win_s) * win_s
+                else:
+                    continue
+                slots.append(f"toDateTime({slot_ts}, 'UTC')")
+            if slots:
+                ord_sql = f" AND line_ordinal % {ord_stride} = 0" if ord_stride > 1 else ""
+                return (
+                    f" AND toStartOfInterval(event_timestamp, INTERVAL {win_s} SECOND) IN ({', '.join(slots)}){ord_sql}"
+                )
 
     target_sampled_s = max(1, span_s // stride)
     n_windows = min(16, max(1, target_sampled_s // 120)) if target_sampled_s >= 120 else 1
@@ -1747,40 +1769,66 @@ def get_pop_health(
                     trace.run("pop_health", lambda: None, source="projection" if rollup_by_pop else "fact")
                 elif shared_rollup is not None:
                     rollup_by_pop = shared_rollup
-                    fact_rows = trace.run(
-                        "pop_health",
-                        lambda: service.client.execute(light_sql, params),
-                        source="fact",
-                    )
-                    if pop_fact_cache_key is not None and fact_rows:
-                        _pop_fact_cache[pop_fact_cache_key] = (fact_rows, pop_stride)
+                    if pop_fact_cache_key is not None:
+
+                        def _fetch_pop_fact() -> list[dict[str, Any]]:
+                            if (cached := _pop_fact_cache.get(pop_fact_cache_key)) is not None:
+                                return cached[0]
+                            rows = trace.run(
+                                "pop_health",
+                                lambda: service.client.execute(light_sql, params),
+                                source="fact",
+                            )
+                            if rows:
+                                _pop_fact_cache[pop_fact_cache_key] = (rows, pop_stride)
+                            return rows
+
+                        fact_rows, is_leader = coalesce(f"hs_pop_fact:{pop_fact_cache_key}", _fetch_pop_fact)
+                        if not is_leader:
+                            trace.run("pop_health", lambda: None, source="fact")
+                    else:
+                        fact_rows = trace.run(
+                            "pop_health",
+                            lambda: service.client.execute(light_sql, params),
+                            source="fact",
+                        )
                 elif shared_fact is not None:
                     fact_rows, pop_stride = shared_fact
                     fence = visible_publication_fence_sql(
                         "network_dimensions", client=service.client, service_id=service.service_id
                     )
                     rollup_sql = _pop_rollup_sql(dim_sample, dim_scale, fence)
-                    rollup_rows = trace.run(
-                        "pop_health",
-                        lambda: service.client.execute(rollup_sql, params),
-                        source="projection",
-                    )
-                    if dim_sample and not rollup_rows:
-                        rollup_rows = trace.run(
-                            "pop_health_rollup_fallback",
-                            lambda: service.client.execute(_pop_rollup_sql("", 1, fence), params),
+
+                    def _fetch_pop_rollup() -> dict[str, tuple[int, int, Any, Any]]:
+                        if (cached := _pop_rollup_cache.get(pop_rollup_cache_key)) is not None:
+                            return cached
+                        r_rows = trace.run(
+                            "pop_health",
+                            lambda: service.client.execute(rollup_sql, params),
                             source="projection",
                         )
-                    for rr in rollup_rows:
-                        if rr.get("pop"):
-                            rollup_by_pop[str(rr["pop"])] = (
-                                int(rr.get("req_count") or 0),
-                                int(rr.get("errors") or 0),
-                                rr.get("p50_rtt_us"),
-                                rr.get("p95_ttfb_ms"),
+                        if dim_sample and not r_rows:
+                            r_rows = trace.run(
+                                "pop_health_rollup_fallback",
+                                lambda: service.client.execute(_pop_rollup_sql("", 1, fence), params),
+                                source="projection",
                             )
-                    if rollup_by_pop:
-                        _pop_rollup_cache[pop_rollup_cache_key] = rollup_by_pop
+                        loaded: dict[str, tuple[int, int, Any, Any]] = {}
+                        for rr in r_rows:
+                            if rr.get("pop"):
+                                loaded[str(rr["pop"])] = (
+                                    int(rr.get("req_count") or 0),
+                                    int(rr.get("errors") or 0),
+                                    rr.get("p50_rtt_us"),
+                                    rr.get("p95_ttfb_ms"),
+                                )
+                        if loaded:
+                            _pop_rollup_cache[pop_rollup_cache_key] = loaded
+                        return loaded
+
+                    rollup_by_pop, is_leader = coalesce(f"hs_pop_rollup:{pop_rollup_cache_key}", _fetch_pop_rollup)
+                    if not is_leader:
+                        trace.run("pop_health", lambda: None, source="projection")
                 else:
                     fence = visible_publication_fence_sql(
                         "network_dimensions", client=service.client, service_id=service.service_id
@@ -1814,41 +1862,63 @@ def get_pop_health(
                         f"FROM request_facts PREWHERE {base_where}{hash_clause} AND custom_fields['pop'] != '' "
                         "GROUP BY pop"
                     )
-                    combined_rows = trace.run(
-                        "pop_health",
-                        lambda: service.client.execute(combined_sql, params),
-                        source="fact",
-                    )
-                    fact_rows = []
-                    for cr in combined_rows:
-                        if cr.get("kind") == "rollup":
-                            if cr.get("pop"):
-                                rollup_by_pop[str(cr["pop"])] = (
-                                    int(cr.get("req_count") or 0),
-                                    int(cr.get("errors") or 0),
-                                    cr.get("p50_rtt_us"),
-                                    cr.get("p95_ttfb_ms"),
-                                )
-                        else:
-                            fact_rows.append({**cr, "requests": cr.get("req_count", cr.get("requests"))})
-                    if dim_sample and fact_rows and not rollup_by_pop:
-                        fb_rollup_rows = trace.run(
-                            "pop_health_rollup_fallback",
-                            lambda: service.client.execute(_pop_rollup_sql("", 1, fence), params),
-                            source="projection",
+
+                    def _run_combined() -> tuple[dict[str, tuple[int, int, Any, Any]], list[dict[str, Any]]]:
+                        combined_rows = trace.run(
+                            "pop_health",
+                            lambda: service.client.execute(combined_sql, params),
+                            source="fact",
                         )
-                        for rr in fb_rollup_rows:
-                            if rr.get("pop"):
-                                rollup_by_pop[str(rr["pop"])] = (
-                                    int(rr.get("req_count") or 0),
-                                    int(rr.get("errors") or 0),
-                                    rr.get("p50_rtt_us"),
-                                    rr.get("p95_ttfb_ms"),
-                                )
-                    if rollup_by_pop:
-                        _pop_rollup_cache[pop_rollup_cache_key] = rollup_by_pop
-                    if pop_fact_cache_key is not None and fact_rows:
-                        _pop_fact_cache[pop_fact_cache_key] = (fact_rows, pop_stride)
+                        loaded_rollup: dict[str, tuple[int, int, Any, Any]] = {}
+                        loaded_facts: list[dict[str, Any]] = []
+                        for cr in combined_rows:
+                            if cr.get("kind") == "rollup":
+                                if cr.get("pop"):
+                                    loaded_rollup[str(cr["pop"])] = (
+                                        int(cr.get("req_count") or 0),
+                                        int(cr.get("errors") or 0),
+                                        cr.get("p50_rtt_us"),
+                                        cr.get("p95_ttfb_ms"),
+                                    )
+                            else:
+                                loaded_facts.append({**cr, "requests": cr.get("req_count", cr.get("requests"))})
+                        if dim_sample and loaded_facts and not loaded_rollup:
+                            fb_rollup_rows = trace.run(
+                                "pop_health_rollup_fallback",
+                                lambda: service.client.execute(_pop_rollup_sql("", 1, fence), params),
+                                source="projection",
+                            )
+                            for rr in fb_rollup_rows:
+                                if rr.get("pop"):
+                                    loaded_rollup[str(rr["pop"])] = (
+                                        int(rr.get("req_count") or 0),
+                                        int(rr.get("errors") or 0),
+                                        rr.get("p50_rtt_us"),
+                                        rr.get("p95_ttfb_ms"),
+                                    )
+                        if loaded_rollup:
+                            _pop_rollup_cache[pop_rollup_cache_key] = loaded_rollup
+                        if pop_fact_cache_key is not None and loaded_facts:
+                            _pop_fact_cache[pop_fact_cache_key] = (loaded_facts, pop_stride)
+                        return loaded_rollup, loaded_facts
+
+                    if pop_fact_cache_key is not None:
+
+                        def _fetch_pop_combined() -> tuple[dict[str, tuple[int, int, Any, Any]], list[dict[str, Any]]]:
+                            cached_r = _pop_rollup_cache.get(pop_rollup_cache_key)
+                            cached_f = _pop_fact_cache.get(pop_fact_cache_key)
+                            if cached_r is not None and cached_f is not None:
+                                return cached_r, cached_f[0]
+                            return _run_combined()
+
+                        (rollup_by_pop, fact_rows), is_leader = coalesce(
+                            f"hs_pop_combined:{pop_rollup_cache_key}:{pop_fact_cache_key}",
+                            _fetch_pop_combined,
+                        )
+                        if not is_leader:
+                            trace.run("pop_health", lambda: None, source="fact")
+                    else:
+                        rollup_by_pop, fact_rows = _run_combined()
                 if (not fact_rows and (shared_fact is None or pop_stride > 1)) or (
                     not rollup_by_pop and pop_stride == 1 and shared_fact is None
                 ):

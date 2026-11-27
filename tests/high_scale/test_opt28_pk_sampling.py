@@ -38,8 +38,8 @@ def test_network_time_sample_clause_restores_modulo_for_dense_buckets_and_caps_p
     assert dense_24h == " AND line_ordinal % 20 = 0"
 
     dense_30d = _network_time_sample_clause(1000, bucket_seconds=3600, start=start_30d, end=end)
-    assert 1 <= len(_parse_windows(dense_30d)) <= 16
-    assert "line_ordinal" not in dense_30d
+    assert "toStartOfInterval(event_timestamp, INTERVAL 18 SECOND) IN (" in dense_30d
+    assert dense_30d.endswith(" AND line_ordinal % 5 = 0")
 
     # Sparse bucketed timeseries (<= 24 buckets) keeps monotonic PK range clauses.
     sparse_24h = _network_time_sample_clause(20, bucket_seconds=3600, start=start_24h, end=end)
