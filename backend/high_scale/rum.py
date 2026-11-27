@@ -51,6 +51,61 @@ def _is_opt27_ch(client: Any) -> bool:
     )
 
 
+def _rum_sample_stride(span_s: float) -> int:
+    if span_s >= 1_728_000:
+        return 16
+    if span_s >= 1_209_600:
+        return 8
+    if span_s >= 604_800:
+        return 4
+    return 1
+
+
+def _rum_pk_sample_clauses(
+    stride: int,
+    *,
+    start: datetime,
+    end: datetime,
+    req_margin_s: int = 600,
+) -> tuple[str, str]:
+    if stride <= 1 or end <= start:
+        return "1", "1"
+    s_utc = start.astimezone(UTC)
+    e_utc = end.astimezone(UTC)
+    rum_windows: list[tuple[int, int]] = []
+    req_raw: list[tuple[int, int]] = []
+    day_cur = s_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    while day_cur < e_utc:
+        seg_start = max(s_utc, day_cur)
+        seg_end = min(e_utc, day_cur + timedelta(days=1))
+        seg_s = (seg_end - seg_start).total_seconds()
+        if seg_s > 0:
+            win_s = min(int(seg_s), max(60, round(seg_s / stride)))
+            w_start = int(seg_start.timestamp())
+            w_end = w_start + win_s
+            if w_end > w_start:
+                rum_windows.append((w_start, w_end))
+                req_raw.append((w_start - req_margin_s, w_end + req_margin_s))
+        day_cur += timedelta(days=1)
+    if not rum_windows:
+        return "1", "1"
+    req_merged: list[tuple[int, int]] = []
+    for rs, re in req_raw:
+        if req_merged and rs <= req_merged[-1][1]:
+            req_merged[-1] = (req_merged[-1][0], max(req_merged[-1][1], re))
+        else:
+            req_merged.append((rs, re))
+
+    def _fmt(windows: list[tuple[int, int]]) -> str:
+        parts = [
+            f"(event_timestamp >= toDateTime({ws}, 'UTC') AND event_timestamp < toDateTime({we}, 'UTC'))"
+            for ws, we in windows
+        ]
+        return f"({' OR '.join(parts)})"
+
+    return _fmt(rum_windows), _fmt(req_merged)
+
+
 def _decode_pct(value: Any) -> str:
     text = str(value or "")
     return unquote(text) if "%" in text else text
@@ -290,9 +345,15 @@ def _rum_analytics_compute(
     *,
     prewhere_filters: list[str] | None = None,
     where_filters: list[str] | None = None,
+    allow_sampling: bool = True,
 ) -> dict[str, Any]:
     params = {"service_id": service.service_id, "start": start, "end": end, **filter_params}
     opt27 = _is_opt27_ch(service.client)
+    span_s = max(0.0, (end - start).total_seconds())
+    rum_stride = _rum_sample_stride(span_s) if (opt27 and allow_sampling) else 1
+    rum_pk_clause, req_pk_clause = _rum_pk_sample_clauses(rum_stride, start=start, end=end)
+    row_weight_expr = f"(({_ROW_WEIGHT}) * {rum_stride})" if rum_stride > 1 else _ROW_WEIGHT
+    q_exact = "quantileTDigest" if rum_stride > 1 else "quantileExactInclusive"
 
     def prewhere_scope(domain: str, *extra: str) -> str:
         return " AND ".join(
@@ -310,9 +371,10 @@ def _rum_analytics_compute(
     rem_sql = " AND ".join(rem_flt)
 
     if opt27:
-        vitals_prewhere = prewhere_scope("rum_vitals", _PAGE_VITALS, *pre_flt)
-        ttlb_prewhere = prewhere_scope("rum_vitals", "metric_name = 'ttlb'", *pre_flt)
-        errors_prewhere = prewhere_scope("rum_errors", *pre_flt)
+        pk_extra = [rum_pk_clause] if rum_pk_clause != "1" else []
+        vitals_prewhere = prewhere_scope("rum_vitals", _PAGE_VITALS, *pk_extra, *pre_flt)
+        ttlb_prewhere = prewhere_scope("rum_vitals", "metric_name = 'ttlb'", *pk_extra, *pre_flt)
+        errors_prewhere = prewhere_scope("rum_errors", *pk_extra, *pre_flt)
         vitals_where_clause = f" WHERE {rem_sql}" if rem_sql else ""
         errors_where_clause = f" WHERE {rem_sql}" if rem_sql else ""
         ttlb_req_where_clause = f" WHERE {rem_sql} AND req_id != ''" if rem_sql else " WHERE req_id != ''"
@@ -327,11 +389,13 @@ def _rum_analytics_compute(
         ttlb_req_where_clause = f" WHERE {ttlb_where} AND req_id != ''"
 
     req_edge_scope = " AND ".join(visible_fact_clauses("request"))
+    req_edge_pk = f"AND {req_pk_clause} " if (opt27 and req_pk_clause != "1") else ""
     req_edge_cte = (
         f"req_edge AS (SELECT _cf_rid AS rid, any(toFloat64OrNull(nullIf(_cf_elapsed, ''))) / 1000.0 AS edge_ms, "
         f"any(_cf_asn) AS req_asn FROM request_facts PREWHERE {req_edge_scope} "
         "AND event_timestamp >= ({start:DateTime64(3, 'UTC')} - INTERVAL 10 MINUTE) "
         "AND event_timestamp < ({end:DateTime64(3, 'UTC')} + INTERVAL 10 MINUTE) "
+        f"{req_edge_pk}"
         "AND _cf_rid != '' "
         f"AND _cf_rid IN (SELECT req_id FROM rum_vitals_facts PREWHERE {ttlb_prewhere}"
         f"{ttlb_req_where_clause}) "
@@ -340,14 +404,14 @@ def _rum_analytics_compute(
     slowest_agg_select = (
         "toUInt64(round(sum(w))) AS requests, "
         "avg(metric_value) AS avg_ms, "
-        "quantileExactInclusive(0.5)(metric_value) AS p50_ms, "
-        "quantileExactInclusive(0.95)(metric_value) AS p95_ms, "
-        "quantileExactInclusive(0.99)(metric_value) AS p99_ms, "
+        f"{q_exact}(0.5)(metric_value) AS p50_ms, "
+        f"{q_exact}(0.95)(metric_value) AS p95_ms, "
+        f"{q_exact}(0.99)(metric_value) AS p99_ms, "
         "toUInt64(round(sumIf(w, edge_ms IS NOT NULL))) AS matched_requests, "
         "avgOrNullIf(edge_ms, edge_ms IS NOT NULL) AS edge_avg_ms, "
-        "quantileExactInclusiveOrNullIf(0.5)(edge_ms, edge_ms IS NOT NULL) AS edge_p50_ms, "
-        "quantileExactInclusiveOrNullIf(0.95)(edge_ms, edge_ms IS NOT NULL) AS edge_p95_ms, "
-        "quantileExactInclusiveOrNullIf(0.99)(edge_ms, edge_ms IS NOT NULL) AS edge_p99_ms"
+        f"{q_exact}OrNullIf(0.5)(edge_ms, edge_ms IS NOT NULL) AS edge_p50_ms, "
+        f"{q_exact}OrNullIf(0.95)(edge_ms, edge_ms IS NOT NULL) AS edge_p95_ms, "
+        f"{q_exact}OrNullIf(0.99)(edge_ms, edge_ms IS NOT NULL) AS edge_p99_ms"
     )
     identity = _BEACON_IDENTITY
     beacon_expr = f"cityHash64({identity})" if opt27 else identity
@@ -385,24 +449,24 @@ def _rum_analytics_compute(
     )
     vitals_sql = (
         f"/* rum_analytics_vitals */ SELECT lower(metric_name) AS metric_name, "
-        f"quantileExactInclusiveOrNull(0.75)(metric_value) as p75, sum({_ROW_WEIGHT}) as total, "
-        f"sumIf({_ROW_WEIGHT}, {vitals_good}) as good, "
-        f"sumIf({_ROW_WEIGHT}, {vitals_ni}) as ni, "
-        f"sumIf({_ROW_WEIGHT}, {vitals_poor}) as poor "
+        f"{q_exact}OrNull(0.75)(metric_value) as p75, sum({row_weight_expr}) as total, "
+        f"sumIf({row_weight_expr}, {vitals_good}) as good, "
+        f"sumIf({row_weight_expr}, {vitals_ni}) as ni, "
+        f"sumIf({row_weight_expr}, {vitals_poor}) as poor "
         f"FROM rum_vitals_facts PREWHERE {vitals_prewhere}{vitals_where_clause} GROUP BY metric_name"
     )
     env_identity = f"cityHash64({identity})" if opt27 else identity
     environments_sql = (
         f"/* rum_analytics_environments */ SELECT if(browser = '', 'Unknown', browser) AS env_browser, "
         f"if(os = '', 'Unknown', os) AS env_os, if(device = '', 'Unknown', device) AS env_device, "
-        f"{_weighted_beacons(identity=env_identity, weight=_ROW_WEIGHT)} AS beacons, "
+        f"{_weighted_beacons(identity=env_identity, weight=row_weight_expr)} AS beacons, "
         f"grouping(browser) AS g_browser, grouping(os) AS g_os, "
         f"grouping(device) AS g_device FROM rum_vitals_facts PREWHERE {vitals_prewhere}"
         f"{vitals_where_clause} GROUP BY GROUPING SETS ((browser), (os), (device))"
     )
     exceptions_sql = (
         f"/* rum_analytics_exceptions */ SELECT error_message, error_file, error_line, error_col, "
-        f"toUInt64(round(sum({_ROW_WEIGHT}))) AS count "
+        f"toUInt64(round(sum({row_weight_expr}))) AS count "
         f"FROM rum_error_facts PREWHERE {errors_prewhere}{errors_where_clause} "
         f"GROUP BY error_message, error_file, error_line, error_col "
         f"ORDER BY count DESC, error_message, error_file, error_line, error_col LIMIT 3"
@@ -410,7 +474,7 @@ def _rum_analytics_compute(
     ttlb_where_clause = f" WHERE {rem_sql}" if opt27 and rem_sql else ("" if opt27 else f" WHERE {ttlb_where}")
     slowest_sql = (
         f"/* rum_analytics_slowest */ WITH ttlb_rows AS ("
-        f"SELECT req_id, resource_url, asn, metric_value, {_ROW_WEIGHT} AS w "
+        f"SELECT req_id, resource_url, asn, metric_value, {row_weight_expr} AS w "
         f"FROM rum_vitals_facts PREWHERE {ttlb_prewhere}{ttlb_where_clause}), "
         f"{req_edge_cte}, "
         f"ttlb_joined AS ("
@@ -432,11 +496,11 @@ def _rum_analytics_compute(
         events_folded = (
             f"WITH events AS ("
             f"SELECT {bucket_sql} AS bucket_col, {beacon_expr} AS {beacon_col}, 'vitals' AS src, "
-            f"metric_name, metric_value, pathname, {_ROW_WEIGHT} AS w "
+            f"metric_name, metric_value, pathname, {row_weight_expr} AS w "
             f"FROM rum_vitals_facts PREWHERE {vitals_prewhere}{vitals_where_clause} "
             f"UNION ALL "
             f"SELECT {bucket_sql} AS bucket_col, {beacon_expr} AS {beacon_col}, 'errors' AS src, "
-            f"'' AS metric_name, CAST(NULL AS Nullable(Float64)) AS metric_value, pathname, {_ROW_WEIGHT} AS w "
+            f"'' AS metric_name, CAST(NULL AS Nullable(Float64)) AS metric_value, pathname, {row_weight_expr} AS w "
             f"FROM rum_error_facts PREWHERE {errors_prewhere}{errors_where_clause}) "
         )
         counts_trends_pages_sql = (
@@ -459,10 +523,10 @@ def _rum_analytics_compute(
             f"{_weighted_beacons(is_error, identity=beacon_col)} AS errors, "
             "countIf(w > 1) > 0 AS sampled, "
             "avgOrNullIf(metric_value, metric_name = 'page_load') AS avg_load, "
-            "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'lcp') AS lcp, "
-            "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'cls') AS cls, "
-            "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'fcp') AS fcp, "
-            "quantileExactInclusiveOrNullIf(0.75)(metric_value, lower(metric_name) = 'ttfb') AS ttfb "
+            f"{q_exact}OrNullIf(0.75)(metric_value, lower(metric_name) = 'lcp') AS lcp, "
+            f"{q_exact}OrNullIf(0.75)(metric_value, lower(metric_name) = 'cls') AS cls, "
+            f"{q_exact}OrNullIf(0.75)(metric_value, lower(metric_name) = 'fcp') AS fcp, "
+            f"{q_exact}OrNullIf(0.75)(metric_value, lower(metric_name) = 'ttfb') AS ttfb "
             "FROM events GROUP BY GROUPING SETS ((bucket_col), (pathname), ())) "
             "WHERE g_p = 1 OR views > 0) "
             "WHERE kind != 'page' OR page_rn <= 5 "
@@ -489,6 +553,17 @@ def _rum_analytics_compute(
             if count_rows
             else {"beacons": 0, "pageviews": 0, "interactions": 0, "errors": 0, "sampled": 0}
         )
+        if rum_stride > 1 and not counts["beacons"]:
+            return _rum_analytics_compute(
+                service,
+                start,
+                end,
+                filter_clauses,
+                filter_params,
+                prewhere_filters=prewhere_filters,
+                where_filters=where_filters,
+                allow_sampling=False,
+            )
     else:
         events = (
             f"WITH events AS ("

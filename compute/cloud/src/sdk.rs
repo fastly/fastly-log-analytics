@@ -825,58 +825,73 @@ impl Runtime for FastlyRuntime {
                 return Ok(cached);
             }
         }
-        self.budget.charge()?;
-        self.kv_ops.set(self.kv_ops.get().saturating_add(1));
         let kv = self.kv.as_ref().ok_or("kv_store_unavailable")?;
-        match kv.lookup(key) {
-            Ok(mut response) => {
-                let mut generation = response.current_generation().to_string();
-                let mut value = bounded_json_with_limit(response.take_body(), KV_VALUE_MAX_BYTES)?;
-                if Self::is_coordinated_kv_key(key) {
-                    if let Some(mut coord) = self.kv_coord_get(key) {
-                        let (eff_gen, eff_val, mutated, needs_fresh) =
-                            coord.reconcile_local_lookup(&generation, &value);
-                        if mutated {
-                            self.kv_coord_put(key, &coord);
-                        }
-                        generation = eff_gen;
-                        value = eff_val;
-                        let cur_is_dead = coord.is_dead(&generation);
-                        if needs_fresh && self.budget.remaining() > 2 {
-                            if let Some(token) = self.kv_rest_token() {
-                                if let Ok(Some(fresh)) = self.admin_get_fresh(key, &token) {
-                                    if crate::admin::transport::should_adopt_fresh_record(
-                                        &generation,
-                                        cur_is_dead,
-                                        &value,
-                                        &fresh,
-                                        Some(&coord),
-                                    ) {
-                                        return Ok(Some(fresh));
+        for attempt in 0..2 {
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            self.budget.charge()?;
+            self.kv_ops.set(self.kv_ops.get().saturating_add(1));
+            match kv.lookup(key) {
+                Ok(mut response) => {
+                    let mut generation = response.current_generation().to_string();
+                    let mut value =
+                        bounded_json_with_limit(response.take_body(), KV_VALUE_MAX_BYTES)?;
+                    if Self::is_coordinated_kv_key(key) {
+                        if let Some(mut coord) = self.kv_coord_get(key) {
+                            let (eff_gen, eff_val, mutated, needs_fresh) =
+                                coord.reconcile_local_lookup(&generation, &value);
+                            if mutated {
+                                self.kv_coord_put(key, &coord);
+                            }
+                            generation = eff_gen;
+                            value = eff_val;
+                            let cur_is_dead = coord.is_dead(&generation);
+                            if needs_fresh && self.budget.remaining() > 2 {
+                                if let Some(token) = self.kv_rest_token() {
+                                    if let Ok(Some(fresh)) = self.admin_get_fresh(key, &token) {
+                                        if crate::admin::transport::should_adopt_fresh_record(
+                                            &generation,
+                                            cur_is_dead,
+                                            &value,
+                                            &fresh,
+                                            Some(&coord),
+                                        ) {
+                                            return Ok(Some(fresh));
+                                        }
                                     }
                                 }
                             }
                         }
                     }
+                    let record = crate::admin::Record { generation, value };
+                    if cacheable {
+                        self.kv_cache
+                            .borrow_mut()
+                            .insert(key.into(), Some(record.clone()));
+                        self.kv_core_cache_put(key, Some(&record));
+                    }
+                    return Ok(Some(record));
                 }
-                let record = crate::admin::Record { generation, value };
-                if cacheable {
-                    self.kv_cache
-                        .borrow_mut()
-                        .insert(key.into(), Some(record.clone()));
-                    self.kv_core_cache_put(key, Some(&record));
+                Err(fastly::kv_store::KVStoreError::ItemNotFound) => {
+                    if cacheable {
+                        self.kv_cache.borrow_mut().insert(key.into(), None);
+                        self.kv_core_cache_put(key, None);
+                    }
+                    return Ok(None);
                 }
-                Ok(Some(record))
+                Err(_) if attempt == 0 && self.budget.remaining() > 0 => continue,
+                Err(_) => break,
             }
-            Err(fastly::kv_store::KVStoreError::ItemNotFound) => {
-                if cacheable {
-                    self.kv_cache.borrow_mut().insert(key.into(), None);
-                    self.kv_core_cache_put(key, None);
-                }
-                Ok(None)
-            }
-            Err(_) => Err("admin_state_lookup_failed".into()),
         }
+        if Self::is_coordinated_kv_key(key) && self.budget.remaining() > 1 {
+            if let Some(token) = self.kv_rest_token() {
+                if let Ok(record) = self.admin_get_fresh(key, &token) {
+                    return Ok(record);
+                }
+            }
+        }
+        Err("admin_state_lookup_failed".into())
     }
     fn admin_cas(
         &self,
