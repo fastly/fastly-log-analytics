@@ -522,8 +522,12 @@ export function duckdbAssetUrls(origin: string, version: string) {
 
 /** Pinned in package.json; lets the worker start before the SDK module loads. */
 export const DUCKDB_WASM_VERSION = "1.33.1-dev57.0";
+export const DUCKDB_INIT_TIMEOUT_MS = 15_000;
 
-export async function createBrowserBackend(): Promise<DuckDBBackend> {
+export async function createBrowserBackend(options?: {
+  initTimeoutMs?: number;
+}): Promise<DuckDBBackend> {
+  const initTimeoutMs = options?.initTimeoutMs ?? DUCKDB_INIT_TIMEOUT_MS;
   const origin =
     typeof self !== "undefined" && self.location ? self.location.origin : "";
   const assets = duckdbAssetUrls(origin, DUCKDB_WASM_VERSION);
@@ -552,6 +556,12 @@ export async function createBrowserBackend(): Promise<DuckDBBackend> {
   const onWorkerError = (event: Event) => {
     workerFailed(new Error(`DuckDB worker failed: ${(event as ErrorEvent).message || "script error"}`));
   };
+  let initTimer: ReturnType<typeof setTimeout> | undefined;
+  const initTimeout = new Promise<never>((_, reject) => {
+    initTimer = setTimeout(() => {
+      reject(new Error("DuckDB worker initialization timed out"));
+    }, initTimeoutMs);
+  });
   worker.addEventListener("error", onWorkerError);
   try {
     conn = await Promise.race([(async () => {
@@ -571,12 +581,13 @@ export async function createBrowserBackend(): Promise<DuckDBBackend> {
         `SET custom_extension_repository = ${sqlString(assets.extensions)}`,
       );
       return connection;
-    })(), workerFailure]);
+    })(), workerFailure, initTimeout]);
   } catch (error) {
     try { await boundedDuckDBCleanup(() => db.terminate()); }
     catch (cleanupError) { throw new DuckDBBackendInitializationError(error, false, cleanupError); }
     throw new DuckDBBackendInitializationError(error, true);
   } finally {
+    if (initTimer !== undefined) clearTimeout(initTimer);
     worker.removeEventListener("error", onWorkerError);
   }
   // One pending query per connection: serialize so cancelSent() only ever

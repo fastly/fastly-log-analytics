@@ -254,9 +254,22 @@ def _evaluate(
     coverage_start, coverage_end = baseline_hours_span(baseline_start, window_start)
     coverage_params = {**params, "coverage_start": coverage_start, "coverage_end": coverage_end}
 
+    cov_settings: Mapping[str, str] | None = (
+        {**(query_settings or {}), "max_threads": "6", "optimize_aggregation_in_order": "1"}
+        if (
+            (accepts_settings or (is_real_ch and not os.getenv("PYTEST_CURRENT_TEST")))
+            and "settings" in inspect.signature(service.client.execute).parameters
+        )
+        else None
+    )
+
     def read_coverage(cache_key: tuple[Any, ...]) -> list[dict[str, Any]]:
         try:
-            rows = _exec(coverage_sql(), coverage_params)
+            rows = (
+                service.client.execute(coverage_sql(), coverage_params, settings=cov_settings)
+                if cov_settings is not None
+                else _exec(coverage_sql(), coverage_params)
+            )
         except Exception as exc:
             logger.warning("insights rollup coverage unavailable for %s: %s", service.service_id, exc)
             return []
@@ -378,7 +391,12 @@ def _evaluate(
         source: Literal["fact", "mixed"] = "fact"
         if shape and span:
             sql = rollup_base_sql(
-                detection, definition.id, shape, baseline_hours=baseline_hours, window_hours=window_hours
+                detection,
+                definition.id,
+                shape,
+                baseline_hours=baseline_hours,
+                window_hours=window_hours,
+                rollup_span=span,
             )
             query_params = {**params, "rollup_start": span[0], "rollup_end": span[1]}
             source = "mixed"
