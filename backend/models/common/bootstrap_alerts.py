@@ -195,6 +195,18 @@ class OpsOverviewResponse(WireSafeModel):
     log_accounting: LogAccountingResponse | None = None
 
 
+class BootstrapCapabilities(BaseModel):
+    edition: Literal["high_scale", "cloud"]
+    auth_mode: Literal["share_passcode_oauth", "passkey"]
+    alerts: bool
+    operational_logs: bool
+    postgres_metadata_storage: bool
+    ngwaf_workspaces: bool
+    sqlite_debug_profiler: bool
+    fos_multi_service_restore: bool
+    heartbeat_required: bool
+
+
 class BootstrapResponse(BaseResponse):
     active_service_id: str | None
     services: list[BootstrapService]
@@ -283,6 +295,7 @@ class BootstrapResponse(BaseResponse):
     # analyst). Shape mirrors the endpoint: ``{labels: [...], counts: {...}}``.
     # ADMIN ONLY.
     scoring_labels: ScoringLabelsListResponse | None = None
+    capabilities: BootstrapCapabilities | None = None
     # section_timings is inherited from BaseResponse.
 
 

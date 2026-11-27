@@ -29,7 +29,8 @@ import { Input } from '@/components/ui/input'
 import type { ColumnDef } from '@/lib/table'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import type { components } from '@/types/api.generated'
-import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
+import { useCapabilities } from '@/hooks/useBootstrap'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { clearManifestCache } from '@/lib/cloud-engine/dashboard/manifest'
 import { clearDashboardBrowserCaches, getStoreStats } from '@/lib/cloud-engine/dashboard/sources'
 import { clearOpsCaches } from '@/lib/cloud-engine/telemetry/sources'
@@ -44,65 +45,69 @@ const hasStats = (col: SchemaColumn) => col.null_percentage !== undefined
 const populatedPct = (col: SchemaColumn) =>
   col.null_percentage != null ? Math.max(0, 100 - col.null_percentage) : null
 
-const SCHEMA_COLUMNS: ColumnDef<SchemaColumn>[] = [
-  {
-    id: 'name',
-    header: 'Column Name',
-    accessorFn: (c) => c.name,
-    size: 220,
-    cell: ({ row }) => <span className="font-mono text-xs font-bold">{row.original.name}</span>,
-  },
-  {
-    id: 'type',
-    header: IS_CLOUD_MODE ? 'Parquet / Arrow Type' : 'ClickHouse Type',
-    accessorFn: (c) => c.type,
-    size: 160,
-    cell: ({ row }) => <span className="font-mono text-xs text-muted-foreground">{row.original.type}</span>,
-  },
-  {
-    id: 'populated',
-    header: 'Populated %',
-    accessorFn: (c) => populatedPct(c) ?? -1,
-    size: 130,
-    cell: ({ row }) => {
-      const pct = populatedPct(row.original)
-      const text = pct != null ? pct.toFixed(1) : '—'
-      return (
-        <span className="block font-mono text-xs text-right tabular-nums">
-          {hasStats(row.original) ? (
-            <span className={text === '0.0' ? 'text-muted-foreground/30' : ''}>{text}%</span>
-          ) : (
-            '—'
-          )}
-        </span>
-      )
+const SYNC_TASK_NAMES = new Set(['log_discovery', 'request_ingest', 'rum_ingest', 'cloud_ingest_clock'])
+
+function buildSchemaColumns(cloudMode: boolean): ColumnDef<SchemaColumn>[] {
+  return [
+    {
+      id: 'name',
+      header: 'Column Name',
+      accessorFn: (c) => c.name,
+      size: 220,
+      cell: ({ row }) => <span className="font-mono text-xs font-bold">{row.original.name}</span>,
     },
-  },
-  {
-    id: 'approx_unique',
-    header: 'Approx Unique',
-    accessorFn: (c) => c.approx_unique ?? -1,
-    size: 140,
-    cell: ({ row }) => (
-      <span className="block font-mono text-xs text-right text-muted-foreground tabular-nums">
-        {hasStats(row.original) ? formatCountMaybe(row.original.approx_unique) ?? '—' : '—'}
-      </span>
-    ),
-  },
-  ...(['min', 'max'] as const).map(
-    (field): ColumnDef<SchemaColumn> => ({
-      id: field,
-      header: field === 'min' ? 'Min Value' : 'Max Value',
-      accessorFn: (c) => c[field] ?? '',
-      size: 200,
+    {
+      id: 'type',
+      header: cloudMode ? 'Parquet / Arrow Type' : 'ClickHouse Type',
+      accessorFn: (c) => c.type,
+      size: 160,
+      cell: ({ row }) => <span className="font-mono text-xs text-muted-foreground">{row.original.type}</span>,
+    },
+    {
+      id: 'populated',
+      header: 'Populated %',
+      accessorFn: (c) => populatedPct(c) ?? -1,
+      size: 130,
+      cell: ({ row }) => {
+        const pct = populatedPct(row.original)
+        const text = pct != null ? pct.toFixed(1) : '—'
+        return (
+          <span className="block font-mono text-xs text-right tabular-nums">
+            {hasStats(row.original) ? (
+              <span className={text === '0.0' ? 'text-muted-foreground/30' : ''}>{text}%</span>
+            ) : (
+              '—'
+            )}
+          </span>
+        )
+      },
+    },
+    {
+      id: 'approx_unique',
+      header: 'Approx Unique',
+      accessorFn: (c) => c.approx_unique ?? -1,
+      size: 140,
       cell: ({ row }) => (
-        <span className="font-mono text-xs text-muted-foreground" title={row.original[field] ?? undefined}>
-          {hasStats(row.original) ? row.original[field] ?? '—' : '—'}
+        <span className="block font-mono text-xs text-right text-muted-foreground tabular-nums">
+          {hasStats(row.original) ? formatCountMaybe(row.original.approx_unique) ?? '—' : '—'}
         </span>
       ),
-    }),
-  ),
-]
+    },
+    ...(['min', 'max'] as const).map(
+      (field): ColumnDef<SchemaColumn> => ({
+        id: field,
+        header: field === 'min' ? 'Min Value' : 'Max Value',
+        accessorFn: (c) => c[field] ?? '',
+        size: 200,
+        cell: ({ row }) => (
+          <span className="font-mono text-xs text-muted-foreground" title={row.original[field] ?? undefined}>
+            {hasStats(row.original) ? row.original[field] ?? '—' : '—'}
+          </span>
+        ),
+      }),
+    ),
+  ]
+}
 
 export function SchemaTab({
   schemaData,
@@ -111,6 +116,9 @@ export function SchemaTab({
   schemaData: components['schemas']['SchemaResponse'] | undefined
   isLoadingSchema: boolean
 }) {
+  const capabilities = useCapabilities()
+  const cloudMode = capabilities.edition === 'cloud' || isCloudMode()
+  const schemaColumns = React.useMemo(() => buildSchemaColumns(cloudMode), [cloudMode])
   const [clearingCache, setClearingCache] = useState(false)
   const handleClearBrowserCache = async () => {
     setClearingCache(true)
@@ -127,11 +135,11 @@ export function SchemaTab({
       <div className="p-4 border-b flex justify-between items-center">
         <div>
           <h3 className="text-sm font-medium">
-            {IS_CLOUD_MODE ? 'Parquet Schema & Statistics' : 'ClickHouse Table Schema & Statistics'}
+            {cloudMode ? 'Parquet Schema & Statistics' : 'ClickHouse Table Schema & Statistics'}
           </h3>
           <p className="text-xs text-muted-foreground mt-1">Based on a fast statistical sample of your logs.</p>
         </div>
-        {IS_CLOUD_MODE && (
+        {cloudMode && (
           <Button
             variant="outline"
             size="sm"
@@ -144,12 +152,12 @@ export function SchemaTab({
         )}
       </div>
       <DataTableReadonly
-        columns={SCHEMA_COLUMNS}
+        columns={schemaColumns}
         data={schemaData?.schema ?? []}
         isLoading={isLoadingSchema}
         hideToolbar
         showPagination={false}
-        tableCaption={IS_CLOUD_MODE ? 'Parquet Table Schema and Statistics' : 'ClickHouse Table Schema and Statistics'}
+        tableCaption={cloudMode ? 'Parquet Table Schema and Statistics' : 'ClickHouse Table Schema and Statistics'}
       />
     </>
   )
@@ -296,8 +304,8 @@ export function QuickActionsBar({
         className="h-8 text-xs bg-background"
         onClick={() => {
           const latestSync =
-            recentCrons?.entries?.find((e) => e.task === 'log_discovery') ||
-            cronLogs?.entries?.find((e) => e.task === 'log_discovery')
+            recentCrons?.entries?.find((e) => SYNC_TASK_NAMES.has(e.task)) ||
+            cronLogs?.entries?.find((e) => SYNC_TASK_NAMES.has(e.task))
           if (latestSync) {
             setDisplayedJobs((prev) =>
               prev.some((j) => j.id === latestSync.id) ? prev : [...prev, { ...latestSync, status: latestSync.status }],
@@ -345,6 +353,8 @@ function Node({ node, prefix, level, type, forceExpand }: TreeProps & { node: Tr
   const [isOpen, setIsOpen] = useState(false)
   const { full, abbr, relative } = useDateFormat()
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
+  const capabilities = useCapabilities()
+  const cloudMode = capabilities.edition === 'cloud' || isCloudMode()
   const [seenForceExpand, setSeenForceExpand] = useState<boolean | undefined>(undefined)
 
   if (forceExpand !== seenForceExpand) {
@@ -387,7 +397,7 @@ function Node({ node, prefix, level, type, forceExpand }: TreeProps & { node: Tr
                 variant="ghost"
                 size="icon"
                 aria-label="Download folder as ZIP"
-                hidden={IS_CLOUD_MODE}
+                hidden={cloudMode}
                 title="Download folder as ZIP"
                 className="h-6 w-6 text-muted-foreground transition-opacity"
                 onClick={(e) => {
@@ -470,7 +480,7 @@ function Node({ node, prefix, level, type, forceExpand }: TreeProps & { node: Tr
               <Cloud className="w-3 h-3 mr-1" /> Cloud
             </Badge>
           )}
-          {node.key && (!IS_CLOUD_MODE || type === 'storage') && (
+          {node.key && (!cloudMode || type === 'storage') && (
             <Button
               variant="ghost"
               size="icon"
@@ -479,7 +489,7 @@ function Node({ node, prefix, level, type, forceExpand }: TreeProps & { node: Tr
               className="h-6 w-6 text-muted-foreground transition-opacity"
               onClick={(e) => {
                 e.stopPropagation()
-                window.open(IS_CLOUD_MODE
+                window.open(cloudMode
                   ? `/api/file?service_id=${encodeURIComponent(activeServiceId ?? '')}&key=${encodeURIComponent(node.key as string)}`
                   : `/api/download?service=${encodeURIComponent(activeServiceId ?? '')}&key=${encodeURIComponent(node.key as string)}`, '_blank', 'noopener,noreferrer')
               }}

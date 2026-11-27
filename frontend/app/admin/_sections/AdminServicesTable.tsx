@@ -7,11 +7,11 @@ import { AlertCircle, Bot, ChevronDown, Eraser, ExternalLink, Eye, KeyRound, Pla
 import type { ColumnDef } from '@/lib/table'
 import type { ServiceConfig } from '@/types/api'
 import { client, extractApiError, unwrapClient, queryKeys } from '@/lib/api'
-import { IS_CLOUD_MODE, isCloudMode } from '@/lib/cloud-engine/mode'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { cn, formatCount, panelDialogContent, panelDialogFooter, panelDialogHeaderSolid } from '@/lib/utils'
 import { formatDuration } from '@/lib/format'
 import { SERVICE_DEFAULTS } from '@/lib/serviceDefaults'
-import { useMounted } from '@/hooks/useBootstrap'
+import { useCapabilities, useMounted } from '@/hooks/useBootstrap'
 import { cronCacheBust } from '@/hooks/useSSE'
 import { useServiceStore } from '@/stores/filterStore'
 import { DataTableReadonly as DataTable } from '@/components/DataTable'
@@ -33,6 +33,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 
 interface ServiceColumnDeps {
   activeServiceId: string | null; switchToService: (id: string) => void; servicesLength: number
+  cloudMode: boolean; ngwafWorkspacesEnabled: boolean
   setCronService: (s: ServiceConfig) => void; setSettingsService: (s: ServiceConfig) => void
   setDeleteDataService: (s: ServiceConfig) => void; setTeardownService: (s: ServiceConfig) => void
   openNgwaf: (s: ServiceConfig) => void
@@ -51,7 +52,7 @@ function MonoExternalCell({ text, href, title }: { text: string; href: string; t
 }
 
 function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceConfig>[] {
-  const { activeServiceId, switchToService, servicesLength, setCronService, setSettingsService, setDeleteDataService, setTeardownService, openNgwaf, openRum, openCredentials } = deps
+  const { activeServiceId, switchToService, servicesLength, cloudMode, ngwafWorkspacesEnabled, setCronService, setSettingsService, setDeleteDataService, setTeardownService, openNgwaf, openRum, openCredentials } = deps
   return [
     {
       accessorKey: 'name', header: 'Service Name', size: 200,
@@ -76,17 +77,17 @@ function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceConfig>[
         const rows = row.original.log_row_count || 0
         return (
           <div className="flex flex-col gap-0.5">
-            <span className="text-xs font-medium text-foreground">{IS_CLOUD_MODE ? 'FOS Parquet' : 'ClickHouse'}</span>
-            {!IS_CLOUD_MODE && <span className="text-[10px] text-muted-foreground tabular-nums">{formatCount(rows)} rows</span>}
+            <span className="text-xs font-medium text-foreground">{cloudMode ? 'FOS Parquet' : 'ClickHouse'}</span>
+            {!cloudMode && <span className="text-[10px] text-muted-foreground tabular-nums">{formatCount(rows)} rows</span>}
           </div>
         )
       },
     },
     {
-      id: 'status', accessorFn: (row) => (row.cron_sync?.enabled ? 1 : 0), header: IS_CLOUD_MODE ? 'Edge Clock' : 'Cron Sync', size: 140,
+      id: 'status', accessorFn: (row) => (row.cron_sync?.enabled ? 1 : 0), header: cloudMode ? 'Edge Clock' : 'Cron Sync', size: 140,
       cell: ({ row: { original: service } }) => (
         <div className="flex items-center gap-2">
-          {IS_CLOUD_MODE ? (
+          {cloudMode ? (
             <Badge variant="success" className="shadow-none px-1.5 py-0 uppercase text-[10px] font-bold" title="Ingest runs once per log period">
               {formatDuration(Number(service.log_period) || SERVICE_DEFAULTS.logPeriodSeconds)} Tick
             </Badge>
@@ -111,8 +112,8 @@ function buildServiceColumns(deps: ServiceColumnDeps): ColumnDef<ServiceConfig>[
                 {isActive && <DropdownMenuItem disabled><Play className="mr-2 h-4 w-4" /> Active Service</DropdownMenuItem>}
                 <DropdownMenuItem onClick={() => setSettingsService(service)}><Settings2 className="mr-2 h-4 w-4" /> Log Settings</DropdownMenuItem>
                 {openRum && <DropdownMenuItem onClick={() => openRum(service)}><Eye className="mr-2 h-4 w-4" /> RUM Configuration</DropdownMenuItem>}
-                {!IS_CLOUD_MODE && <DropdownMenuItem onClick={() => openNgwaf(service)}><Bot className="mr-2 h-4 w-4" /> NGWAF Config</DropdownMenuItem>}
-                {!IS_CLOUD_MODE && <DropdownMenuItem onClick={() => openCredentials(service)}><KeyRound className="mr-2 h-4 w-4" /> Rotate Key</DropdownMenuItem>}
+                {ngwafWorkspacesEnabled && <DropdownMenuItem onClick={() => openNgwaf(service)}><Bot className="mr-2 h-4 w-4" /> NGWAF Config</DropdownMenuItem>}
+                {!cloudMode && <DropdownMenuItem onClick={() => openCredentials(service)}><KeyRound className="mr-2 h-4 w-4" /> Rotate Key</DropdownMenuItem>}
                 <DropdownMenuSeparator />
                 <DropdownMenuItem className="text-destructive focus:text-destructive focus:bg-destructive/10" onClick={() => setDeleteDataService(service)}><Eraser className="mr-2 h-4 w-4" /> Delete Data</DropdownMenuItem>
                 <DropdownMenuItem className="text-destructive focus:text-destructive focus:bg-destructive/10" onClick={() => setTeardownService(service)}><Trash2 className="mr-2 h-4 w-4" /> Teardown Service</DropdownMenuItem>
@@ -293,7 +294,8 @@ export function ServicesTable() {
   const [wizardOpen, setWizardOpen] = useState(false)
   const [restoreOpen, setRestoreOpen] = useState(false)
   const [ngwafService, setNgwafService] = useState<ServiceConfig | null>(null)
-  const cloudMode = IS_CLOUD_MODE || isCloudMode()
+  const capabilities = useCapabilities()
+  const cloudMode = capabilities.edition === 'cloud' || isCloudMode()
 
   const openCredentials = React.useCallback((service: ServiceConfig) => setCredentialsService(service), [])
   const switchToService = React.useCallback((id: string) => {
@@ -316,8 +318,9 @@ export function ServicesTable() {
 
   const columns = React.useMemo(() => buildServiceColumns({
     activeServiceId, switchToService, servicesLength: services?.services?.length || 0,
+    cloudMode, ngwafWorkspacesEnabled: capabilities.ngwaf_workspaces,
     setCronService, setSettingsService, setDeleteDataService, setTeardownService, openNgwaf: setNgwafService, openRum, openCredentials,
-  }), [activeServiceId, switchToService, services?.services?.length, openRum, openCredentials])
+  }), [activeServiceId, switchToService, services?.services?.length, cloudMode, capabilities.ngwaf_workspaces, openRum, openCredentials])
 
   return (
     <>

@@ -5,17 +5,19 @@ import { useQuery, keepPreviousData } from '@tanstack/react-query'
 import { Database, AlertTriangle, Loader2 } from 'lucide-react'
 import { client, extractApiError } from '@/lib/api'
 import { formatCount, CHART_COLORS } from '@/lib/utils'
-import { useMounted } from '@/hooks/useBootstrap'
+import { useCapabilities, useMounted } from '@/hooks/useBootstrap'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { AnalyticsCard, TimeSeriesChart, type AnalyticsCardError } from '@/components/AnalyticsCard'
-import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 
-const LOG_ACCOUNTING_PRESETS = IS_CLOUD_MODE ? [
+const CLOUD_LOG_ACCOUNTING_PRESETS = [
   { label: 'Last full day', hours: 24, by: 'day' as const },
   { label: 'Last 7d', hours: 168, by: 'day' as const },
   { label: 'Last 30d', hours: 720, by: 'day' as const },
-] : [
+]
+
+const HIGH_SCALE_LOG_ACCOUNTING_PRESETS = [
   { label: 'Last 1h', hours: 1, by: 'hour' as const },
   { label: 'Last 24h', hours: 24, by: 'hour' as const },
   { label: 'Last 7d', hours: 168, by: 'day' as const },
@@ -24,8 +26,12 @@ const LOG_ACCOUNTING_PRESETS = IS_CLOUD_MODE ? [
 
 export function LogAccountingPanel() {
   const mounted = useMounted()
-  const [presetIdx, setPresetIdx] = useState(IS_CLOUD_MODE ? 0 : 1)
-  const preset = LOG_ACCOUNTING_PRESETS[presetIdx]
+  const capabilities = useCapabilities()
+  const cloudMode = capabilities.edition === 'cloud' || isCloudMode()
+  const presets = cloudMode ? CLOUD_LOG_ACCOUNTING_PRESETS : HIGH_SCALE_LOG_ACCOUNTING_PRESETS
+  const [presetIdx, setPresetIdx] = useState(() => (isCloudMode() ? 0 : 1))
+  const safePresetIdx = Math.min(presetIdx, presets.length - 1)
+  const preset = presets[safePresetIdx]
   const { data, isLoading, isFetching, error } = useQuery({
     queryKey: ['log-accounting', preset.hours, preset.by],
     queryFn: async ({ signal }) => {
@@ -135,7 +141,7 @@ export function LogAccountingPanel() {
   return (
     <AnalyticsCard
       title="Ingest Accounting"
-      description={IS_CLOUD_MODE
+      description={cloudMode
         ? 'Completed UTC days: sample-adjusted Fastly request counters versus measured processed rows. Native accounting has daily precision.'
         : "Fastly's authoritative Platform Metrics request counter vs our locally-ingested rows, per bucket. Requests sit 1:1 with our rows, so a positive gap means requests Fastly served that never landed in our table."}
       icon={<Database className="h-4 w-4" />}
@@ -147,7 +153,7 @@ export function LogAccountingPanel() {
             {isFetching && <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />}
           </div>
           <Select
-            value={String(presetIdx)}
+            value={String(safePresetIdx)}
             onValueChange={(v) => {
               if (v) setPresetIdx(parseInt(v))
             }}
@@ -156,7 +162,7 @@ export function LogAccountingPanel() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {LOG_ACCOUNTING_PRESETS.map((p, i) => (
+              {presets.map((p, i) => (
                 <SelectItem key={p.label} value={String(i)}>
                   {p.label}
                 </SelectItem>

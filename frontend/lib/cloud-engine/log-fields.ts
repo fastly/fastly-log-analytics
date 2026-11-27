@@ -1,8 +1,19 @@
 import type { components } from "@/types/api.generated";
+import { isIpFamilyField } from "@/lib/utils";
 import { parquetColumns } from "./schema";
 
 type Catalog = components["schemas"]["LogFieldsCatalogResponse"];
 type Field = NonNullable<Catalog["fields"]>[number];
+
+function isPiiSchemaColumn(name: string): boolean {
+  const raw = name.trim().toLowerCase();
+  if (!raw) return false;
+  if (isIpFamilyField(raw)) return true;
+  let stripped = raw.replace(/^(?:xfilter_|filter_|_cf_)/, "").replace(/_\d+$/, "");
+  if (isIpFamilyField(stripped)) return true;
+  stripped = stripped.replace(/[^\w]/g, "");
+  return isIpFamilyField(stripped);
+}
 
 export function cloudLogFieldsCatalog(
   catalog: Catalog,
@@ -49,11 +60,13 @@ export function cloudLogFieldsCatalog(
 export function cloudSchema(
   catalog: Catalog,
   activeFieldIds?: ReadonlySet<string>,
+  maskIps = false,
 ) {
   const physical = (catalog.fields ?? []).filter(
     (field) =>
       field.group !== "METRICS" &&
-      (!activeFieldIds || field.id === "timestamp" || activeFieldIds.has(field.id)),
+      (!activeFieldIds || field.id === "timestamp" || activeFieldIds.has(field.id)) &&
+      (!maskIps || !isPiiSchemaColumn(field.id)),
   );
   const columns = parquetColumns({
     fields: physical.map((field) => ({

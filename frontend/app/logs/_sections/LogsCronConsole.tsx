@@ -5,7 +5,8 @@ import { Database, RefreshCw, Loader2, ChevronDown, X } from 'lucide-react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { cn } from '@/lib/utils'
 import { useSSE, useDateFormat } from '@/hooks/useSSE'
-import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
+import { useCapabilities } from '@/hooks/useBootstrap'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import type { CronRun } from './useLogsPageState'
 
 type ConsoleLine = { _id?: string; type: string; message?: string; file_name?: string; [key: string]: unknown }
@@ -102,7 +103,9 @@ export function CronLiveLog({
   startedAt?: string
   onDone?: () => void
 }) {
-  const isPersistedCloudRun = IS_CLOUD_MODE && runId !== undefined && runId !== 'cloud-tick'
+  const capabilities = useCapabilities()
+  const cloudMode = capabilities.edition === 'cloud' || isCloudMode()
+  const isPersistedCloudRun = cloudMode && runId !== undefined && runId !== 'cloud-tick'
   const { lines: sseLines, status: sseStatus, start, stop } = useSSE()
   const startedForRunId = useRef<number | string | undefined>(undefined)
   const doneFiredForRunId = useRef<number | string | undefined>(undefined)

@@ -136,6 +136,19 @@ function decodePart(raw: string): string {
   }
 }
 
+function validationErrorResponse(errors: string[]): Response {
+  return Response.json(
+    {
+      detail: {
+        error: "validation_error",
+        messages: errors,
+        errors,
+      },
+    },
+    { status: 422 },
+  );
+}
+
 export async function cloudCustomFields(request: Request): Promise<Response | null> {
   const url = new URL(request.url);
   const match = url.pathname.match(ROUTE);
@@ -296,7 +309,7 @@ export async function cloudCustomFields(request: Request): Promise<Response | nu
       imported += 1;
     }
     if (errors.length > 0 && imported === 0) {
-      return Response.json({ detail: { errors } }, { status: 422 });
+      return validationErrorResponse(errors);
     }
     const patched = await patchCustomFields(
       serviceId,
@@ -323,12 +336,11 @@ export async function cloudCustomFields(request: Request): Promise<Response | nu
       return failure("invalid_json", 400);
     }
     const name = typeof field?.name === "string" ? field.name : "";
-    if (!name) return Response.json({ detail: { errors: ["Field name is required"] } }, { status: 422 });
+    if (!name) return validationErrorResponse(["Field name is required"]);
     if (isSystemCustomField(name)) {
-      return Response.json(
-        { detail: { errors: [`Field '${name}' is system-managed and cannot be created manually.`] } },
-        { status: 422 },
-      );
+      return validationErrorResponse([
+        `Field '${name}' is system-managed and cannot be created manually.`,
+      ]);
     }
     const read = await readService(serviceId, signal);
     if (read.response) return read.response;
@@ -347,7 +359,7 @@ export async function cloudCustomFields(request: Request): Promise<Response | nu
     });
     const check = await validateCustomFieldRemote(candidate, existingNames, signal);
     if (!check.valid) {
-      return Response.json({ detail: { errors: check.errors } }, { status: 422 });
+      return validationErrorResponse(check.errors);
     }
     const nextAll = [...existingAll, candidate];
     const patched = await patchCustomFields(
@@ -367,10 +379,9 @@ export async function cloudCustomFields(request: Request): Promise<Response | nu
 
   if (sub && method === "PATCH") {
     if (isSystemCustomField(sub)) {
-      return Response.json(
-        { detail: { errors: [`Field '${sub}' is system-managed and cannot be edited.`] } },
-        { status: 422 },
-      );
+      return validationErrorResponse([
+        `Field '${sub}' is system-managed and cannot be edited.`,
+      ]);
     }
     let updates: Record<string, unknown>;
     try {
@@ -401,7 +412,7 @@ export async function cloudCustomFields(request: Request): Promise<Response | nu
       .filter(Boolean);
     const check = await validateCustomFieldRemote(updated, otherNames, signal);
     if (!check.valid) {
-      return Response.json({ detail: { errors: check.errors } }, { status: 422 });
+      return validationErrorResponse(check.errors);
     }
     const nextAll = [...existingAll];
     nextAll[idx] = updated;
@@ -422,10 +433,9 @@ export async function cloudCustomFields(request: Request): Promise<Response | nu
 
   if (sub && method === "DELETE") {
     if (isSystemCustomField(sub)) {
-      return Response.json(
-        { detail: { errors: [`Field '${sub}' is system-managed and cannot be deleted.`] } },
-        { status: 422 },
-      );
+      return validationErrorResponse([
+        `Field '${sub}' is system-managed and cannot be deleted.`,
+      ]);
     }
     const read = await readService(serviceId, signal);
     if (read.response) return read.response;

@@ -188,14 +188,18 @@ export const SERVICE_NAVIGATION: ServiceNavItem[] = [
   { name: 'Usage & Cost', href: '/usage', icon: Activity, analystVisible: false, shareAnalystVisible: IS_CLOUD_MODE },
   { name: 'Query', href: '/query', icon: Search, analystVisible: true },
   { name: 'Alerts', href: '/alerts', icon: Bell, analystVisible: false },
-  { name: 'Data Management', href: '/logs', icon: Database, analystVisible: true, shareAnalystVisible: IS_CLOUD_MODE },
+  { name: 'Data Management', href: '/logs', icon: Database, analystVisible: true, shareAnalystVisible: false },
 ]
 
-export const SYSTEM_NAVIGATION = [
-  ...(IS_CLOUD_MODE ? [{ name: 'Browser Cache', href: '/cache', icon: HardDrive }] : []),
-  { name: 'Admin', href: '/admin', icon: Settings },
-  { name: 'How it works', href: '/how-it-works', icon: BookOpen },
-]
+export function getSystemNavigation(cloudMode: boolean) {
+  return [
+    ...(cloudMode ? [{ name: 'Browser Cache', href: '/cache', icon: HardDrive }] : []),
+    { name: 'Admin', href: '/admin', icon: Settings },
+    { name: 'How it works', href: '/how-it-works', icon: BookOpen },
+  ]
+}
+
+export const SYSTEM_NAVIGATION = getSystemNavigation(IS_CLOUD_MODE)
 export const IS_CLOUD_RUNTIME = IS_CLOUD_MODE
 
 export const CLOUD_PRUNED_NAV_HREFS = new Set<string>([

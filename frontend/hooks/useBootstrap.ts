@@ -1,8 +1,8 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
+import { useCallback, useContext, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { useSearchParams } from 'next/navigation'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { QueryClientContext, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useShallow } from 'zustand/react/shallow'
 import { client, unwrapClient, queryKeys, seedBootstrapDependentCaches } from "@/lib/api";
 import { DEBUG_RESPONSES_COOKIE } from "@/lib/utils";
@@ -75,8 +75,47 @@ export function useDebouncedFilterPayload(includeEdgeOnly = false): FiltersPaylo
 
 const subscribeNever = () => () => {}
 
+export interface BootstrapCapabilities {
+  edition: 'high_scale' | 'cloud'
+  auth_mode: 'share_passcode_oauth' | 'passkey'
+  alerts: boolean
+  operational_logs: boolean
+  postgres_metadata_storage: boolean
+  ngwaf_workspaces: boolean
+  sqlite_debug_profiler: boolean
+  fos_multi_service_restore: boolean
+  heartbeat_required: boolean
+}
+
+const HIGH_SCALE_CAPABILITIES: BootstrapCapabilities = {
+  edition: 'high_scale',
+  auth_mode: 'share_passcode_oauth',
+  alerts: true,
+  operational_logs: true,
+  postgres_metadata_storage: true,
+  ngwaf_workspaces: true,
+  sqlite_debug_profiler: true,
+  fos_multi_service_restore: true,
+  heartbeat_required: true,
+}
+
+const CLOUD_CAPABILITIES: BootstrapCapabilities = {
+  edition: 'cloud',
+  auth_mode: 'passkey',
+  alerts: false,
+  operational_logs: false,
+  postgres_metadata_storage: false,
+  ngwaf_workspaces: true,
+  sqlite_debug_profiler: false,
+  fos_multi_service_restore: false,
+  heartbeat_required: false,
+}
+
 function applyBootstrapRuntimeMode(data: unknown): void {
-  if ((data as { runtime_mode?: string } | undefined)?.runtime_mode === 'cloud') {
+  const payload = data as
+    | { runtime_mode?: string; capabilities?: { edition?: string } }
+    | undefined
+  if (payload?.runtime_mode === 'cloud' || payload?.capabilities?.edition === 'cloud') {
     setCloudModeRuntime(true)
   }
 }
@@ -101,15 +140,50 @@ export function useBootstrapCacheSelector<T>(
   selector: (data: Record<string, unknown> | undefined) => T,
   serverFallback: T,
 ): T {
-  const queryClient = useQueryClient()
+  const queryClient = useContext(QueryClientContext)
   return useSyncExternalStore(
-    (onChange) => queryClient.getQueryCache().subscribe(onChange),
+    (onChange) => (queryClient ? queryClient.getQueryCache().subscribe(onChange) : () => {}),
     () => {
-      const data = queryClient.getQueryData<Record<string, unknown>>(queryKeys.bootstrap())
+      const data = queryClient?.getQueryData<Record<string, unknown>>(queryKeys.bootstrap())
       applyBootstrapRuntimeMode(data)
       return selector(data)
     },
     () => serverFallback,
+  )
+}
+
+export function useCapabilities(bootstrapDataOverride?: unknown): BootstrapCapabilities {
+  const cachedCaps = useBootstrapCacheSelector(
+    (data) => (data?.capabilities as Partial<BootstrapCapabilities> | undefined) ?? null,
+    null,
+  )
+  const cachedCloud = useBootstrapCacheSelector(
+    (data) =>
+      data?.runtime_mode === 'cloud' ||
+      (data?.capabilities as { edition?: string } | undefined)?.edition === 'cloud' ||
+      isCloudMode(),
+    IS_CLOUD_MODE,
+  )
+  const overrideRecord =
+    bootstrapDataOverride && typeof bootstrapDataOverride === 'object'
+      ? (bootstrapDataOverride as {
+          runtime_mode?: string
+          capabilities?: Partial<BootstrapCapabilities> | null
+        })
+      : undefined
+  const rawCaps = overrideRecord?.capabilities ?? cachedCaps
+  const cloud =
+    overrideRecord?.runtime_mode === 'cloud' ||
+    overrideRecord?.capabilities?.edition === 'cloud' ||
+    cachedCloud ||
+    isCloudMode()
+
+  return useMemo(
+    () => ({
+      ...(cloud ? CLOUD_CAPABILITIES : HIGH_SCALE_CAPABILITIES),
+      ...(rawCaps ?? {}),
+    }),
+    [cloud, rawCaps],
   )
 }
 

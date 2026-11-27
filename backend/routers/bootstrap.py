@@ -70,6 +70,19 @@ _CacheRegistry.register("routers.bootstrap._header_badge_cache", _header_badge_c
 # registry rather than importing this router keeps them import-independent.
 
 
+_HIGH_SCALE_CAPABILITIES = {
+    "edition": "high_scale",
+    "auth_mode": "share_passcode_oauth",
+    "alerts": True,
+    "operational_logs": True,
+    "postgres_metadata_storage": True,
+    "ngwaf_workspaces": True,
+    "sqlite_debug_profiler": True,
+    "fos_multi_service_restore": True,
+    "heartbeat_required": True,
+}
+
+
 def _startup_stub_response(request: Request) -> BootstrapResponse:
     """Minimal response served while the per-service background warm-up
     (``backend.main._background_startup``) is still draining.
@@ -89,6 +102,7 @@ def _startup_stub_response(request: Request) -> BootstrapResponse:
             "needs_login": False,
             "web_vitals_enabled": _web_vitals_enabled(),
         },
+        capabilities=_HIGH_SCALE_CAPABILITIES,
     )
 
 
@@ -231,6 +245,7 @@ def _bootstrap_sync(
                 # collection flag so it stays silent unless explicitly enabled.
                 "web_vitals_enabled": _web_vitals_enabled(),
             },
+            capabilities=_HIGH_SCALE_CAPABILITIES,
         )
 
     services = timer.call("get_enriched_services", lambda: get_enriched_services(service_id))
@@ -759,6 +774,7 @@ def _bootstrap_sync(
         cron_runs_first_page=cron_runs_first_page_payload,
         last_sync=last_sync_payload,
         scoring_labels=scoring_labels_payload,
+        capabilities=_HIGH_SCALE_CAPABILITIES,
         section_timings=section_timings,
     )
 

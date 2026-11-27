@@ -26,7 +26,8 @@ import {
   PopoverTrigger,
 } from '@/components/ui/popover'
 import { useServiceStore, useTimezoneStore } from '@/stores/filterStore'
-import { useIsAnalyst, useBootstrap, useMounted } from '@/hooks/useBootstrap'
+import { useIsAnalyst, useBootstrap, useCapabilities, useMounted } from '@/hooks/useBootstrap'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import {
   useAdminEventStream,
   useElapsedTime,
@@ -354,6 +355,8 @@ function SyncStatusBadgeInner() {
   const { data: lastSync } = useLastSync()
 
   const isAnalyst = useIsAnalyst()
+  const capabilities = useCapabilities()
+  const cloudMode = capabilities.edition === 'cloud' || isCloudMode()
 
   // /share-login is the anonymous landing for unauthenticated remote
   // visitors. The header still mounts during the redirect window, but
@@ -376,7 +379,7 @@ function SyncStatusBadgeInner() {
   // Mounted in the always-present header so the channels stay open across
   // navigation; /logs + /admin read from the warm cache for free.
   // The analyst path keeps its own single projected stream (log-extents).
-  useHeaderBadgeStream(streamsEnabled && isAnalyst)
+  useHeaderBadgeStream(streamsEnabled && (isAnalyst || cloudMode))
 
   // system-metrics only feeds the admin-overview cards (SystemHealthCard,
   // OperationsOverview teasers, MetadataStorageCard, SystemStatus) — add it

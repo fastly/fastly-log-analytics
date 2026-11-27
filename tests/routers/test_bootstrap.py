@@ -2142,3 +2142,66 @@ def test_correlate_filters_to_4xx_5xx_error_cohort_in_standard_and_high_scale():
     assert "toInt32OrZero(custom_fields['status']) BETWEEN 400 AND 599" in top_sql
     assert "high_scale_batch_publications FINAL" in top_sql and "publication_state='visible'" in top_sql
     assert top_params["service_id"] == MOCK_SERVICE_ID and top_params["limit"] == 10
+
+
+def test_bootstrap_exposes_high_scale_capabilities_across_modes(client, tmp_path, monkeypatch):
+    _seed_active_service(monkeypatch, tmp_path)
+    expected_caps = {
+        "edition": "high_scale",
+        "auth_mode": "share_passcode_oauth",
+        "alerts": True,
+        "operational_logs": True,
+        "postgres_metadata_storage": True,
+        "ngwaf_workspaces": True,
+        "sqlite_debug_profiler": True,
+        "fos_multi_service_restore": True,
+        "heartbeat_required": True,
+    }
+    resp = _get(client)
+    assert resp.status_code == 200
+    assert resp.json()["capabilities"] == expected_caps
+
+    fake_request = MagicMock()
+    fake_request.state.is_remote = False
+    stub_payload = _startup_stub_response(fake_request).model_dump(by_alias=True)
+    assert stub_payload["capabilities"] == expected_caps
+
+    try:
+        analyst_body = _login_analyst_and_bootstrap(client, tmp_path, monkeypatch, pii_policy=None)
+        assert analyst_body["capabilities"] == expected_caps
+    finally:
+        share_db.close_all_connections()
+        tunnel.reset_for_tests()
+
+
+@pytest.mark.no_postgres
+def test_bootstrap_capabilities_model_and_stub_no_postgres():
+    from backend.models.common.bootstrap_alerts import BootstrapCapabilities
+
+    expected_caps = {
+        "edition": "high_scale",
+        "auth_mode": "share_passcode_oauth",
+        "alerts": True,
+        "operational_logs": True,
+        "postgres_metadata_storage": True,
+        "ngwaf_workspaces": True,
+        "sqlite_debug_profiler": True,
+        "fos_multi_service_restore": True,
+        "heartbeat_required": True,
+    }
+    caps = BootstrapCapabilities(**expected_caps)
+    assert caps.model_dump() == expected_caps
+
+    fake_request = MagicMock()
+    fake_request.state.is_remote = False
+    stub_payload = _startup_stub_response(fake_request).model_dump(by_alias=True)
+    assert stub_payload["capabilities"] == expected_caps
+
+    remote_req = MagicMock()
+    remote_req.state.is_remote = True
+    remote_req.state.analyst_session = None
+    remote_req.cookies = {}
+    remote_req.headers = {}
+    remote_req.client = None
+    remote_payload = _bootstrap_sync(remote_req, None).model_dump(by_alias=True)
+    assert remote_payload["capabilities"] == expected_caps

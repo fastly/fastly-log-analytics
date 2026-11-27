@@ -8,14 +8,14 @@ import { PageHeader } from '@/components/ui/confirm-dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Database, HardDrive, History, FileCode, Archive, ClipboardList } from 'lucide-react'
 import { NoServiceSelected } from '@/components/ReportLayout'
-import { useBootstrap, useBootstrapResolved } from '@/hooks/useBootstrap'
+import { useBootstrap, useBootstrapResolved, useCapabilities } from '@/hooks/useBootstrap'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { BackfillRangeModal } from '@/components/SyncStatusBadge/SyncStatusBadge'
 import { ingestedFilesColumns } from '@/components/DataTable'
 import Loading from '../loading'
 import { ControlledSSEModal as SSEModal } from '@/components/SSEModal'
 import { MetadataStorageCard } from '@/components/SessionScoring/StoragePanels'
-import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { useLogsPageState, type CronRun, type CatalogMaps } from './useLogsPageState'
 import {
   CRON_EXPLANATIONS,
@@ -49,20 +49,25 @@ export {
 }
 export type { CronRun, CatalogMaps }
 
-const LOG_TABS = [
-  { value: 'cron', label: 'Cron Runs', icon: History },
-  { value: 'service_history', label: 'Service History', icon: ClipboardList },
-  { value: 'ingestion', label: 'Ingestion History', icon: Database },
-  { value: 'storage', label: 'Archive Storage', icon: Archive },
-  { value: 'metadata_storage', label: 'Metadata Storage', icon: HardDrive },
-  { value: 'raw', label: 'Available Logs', icon: FileCode },
-  { value: 'schema', label: IS_CLOUD_MODE ? 'Parquet Schema' : 'ClickHouse Schema', icon: FileCode },
-] as const
+function buildLogTabs(cloudMode: boolean) {
+  return [
+    { value: 'cron', label: 'Cron Runs', icon: History },
+    { value: 'service_history', label: 'Service History', icon: ClipboardList },
+    { value: 'ingestion', label: 'Ingestion History', icon: Database },
+    { value: 'storage', label: 'Archive Storage', icon: Archive },
+    { value: 'metadata_storage', label: 'Metadata Storage', icon: HardDrive },
+    { value: 'raw', label: 'Available Logs', icon: FileCode },
+    { value: 'schema', label: cloudMode ? 'Parquet Schema' : 'ClickHouse Schema', icon: FileCode },
+  ] as const
+}
 
 export default function LogsClient({ initialTab }: { initialTab?: string } = {}) {
   const s = useLogsPageState(initialTab)
   const queryClient = useQueryClient()
   const { data: bootstrap } = useBootstrap()
+  const capabilities = useCapabilities(bootstrap)
+  const cloudMode = capabilities.edition === 'cloud' || isCloudMode()
+  const logTabs = React.useMemo(() => buildLogTabs(cloudMode), [cloudMode])
   const bootstrapResolved = useBootstrapResolved()
   const auditColumns = useAuditColumns(s.catalogMaps)
   const cronColumns = useCronColumns()
@@ -111,7 +116,7 @@ export default function LogsClient({ initialTab }: { initialTab?: string } = {})
       <Tabs value={s.activeTab} onValueChange={s.handleTabChange} className="w-full">
         <ScrollArea className="w-full max-w-full overflow-hidden">
           <TabsList className="w-full flex">
-            {LOG_TABS.map(({ value, label, icon: Icon }) => (
+            {logTabs.map(({ value, label, icon: Icon }) => (
               <TabsTrigger key={value} value={value} className="flex-1 flex items-center justify-center gap-2 text-xs">
                 <Icon className="h-4 w-4" /> {label}
               </TabsTrigger>

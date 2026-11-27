@@ -4,7 +4,8 @@ import React from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { RefreshCw, HelpCircle, Trash2 } from 'lucide-react'
 import { queryKeys } from '@/lib/api'
-import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
+import { useCapabilities } from '@/hooks/useBootstrap'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { cn } from '@/lib/utils'
 import type { SyncStatus } from '@/hooks/useSSE'
 import { Button, buttonVariants } from '@/components/ui/button'
@@ -92,6 +93,8 @@ export function CronTab({
   clock?: CronClock | null
 }) {
   const queryClient = useQueryClient()
+  const capabilities = useCapabilities()
+  const cloudMode = capabilities.edition === 'cloud' || isCloudMode()
   const [isHelpOpen, setIsHelpOpen] = React.useState(false)
   const tableData = React.useMemo(() => (cronLogs?.entries || []).filter((e) => e.status !== 'running'), [cronLogs?.entries])
   const handleOpenConsole = React.useCallback(
@@ -250,7 +253,7 @@ export function CronTab({
                   className="h-8 text-xs"
                   disabled={isFetchingCron}
                   onClick={async () => {
-                    if (IS_CLOUD_MODE) {
+                    if (cloudMode) {
                       const [{ resetCronWireCache }, { resetOpsReadCache }] = await Promise.all([
                         import('@/lib/cloud-engine/admin-wire'),
                         import('@/lib/cloud-engine/telemetry/client'),
