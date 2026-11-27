@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
+import threading
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -83,12 +85,17 @@ def test_network_time_sample_clause_30d_dense_buckets_uses_pk_ranges_and_24h_den
     end = datetime(2026, 11, 26, 12, 0, tzinfo=UTC)
     start_30d = end - timedelta(days=30)
 
-    for bs in (3600, 300):
+    for bs, expected_win_s, expected_slots in ((3600, 18, 720), (14400, 72, 180)):
         clause = hs_network._network_time_sample_clause(1000, bucket_seconds=bs, start=start_30d, end=end)
-        windows = [(int(a), int(b)) for a, b in _RANGE_RE.findall(clause)]
-        assert 1 <= len(windows) <= 16
-        assert "line_ordinal" not in clause
-        assert "intDiv" not in clause
+        assert f"toStartOfInterval(event_timestamp, INTERVAL {expected_win_s} SECOND) IN (" in clause
+        assert clause.count("toDateTime(") == expected_slots
+        assert clause.endswith(" AND line_ordinal % 5 = 0")
+
+    dense_30d_300 = hs_network._network_time_sample_clause(1000, bucket_seconds=300, start=start_30d, end=end)
+    windows = [(int(a), int(b)) for a, b in _RANGE_RE.findall(dense_30d_300)]
+    assert 1 <= len(windows) <= 16
+    assert "line_ordinal" not in dense_30d_300
+    assert "intDiv" not in dense_30d_300
 
     # Non-hour-aligned 24h window produces 25 hour buckets and stays on monotonic PK windows.
     end_unaligned = datetime(2026, 11, 26, 12, 17, tzinfo=UTC)
@@ -253,7 +260,9 @@ def test_cmcd_24h_samples_sessions_by_4_and_leaves_sub_24h_unsampled(
     assert hs_cmcd._cmcd_sample_stride(604800) == 8
     assert hs_cmcd._cmcd_sample_stride(1209599) == 8
     assert hs_cmcd._cmcd_sample_stride(1209600) == 10
-    assert hs_cmcd._cmcd_sample_stride(2592000) == 10
+    assert hs_cmcd._cmcd_sample_stride(1727999) == 10
+    assert hs_cmcd._cmcd_sample_stride(1728000) == 20
+    assert hs_cmcd._cmcd_sample_stride(2592000) == 20
 
     end = datetime(2026, 11, 26, 0, 0, tzinfo=UTC)
     start_24h = end - timedelta(hours=24)
@@ -362,6 +371,8 @@ def test_cmcd_24h_samples_sessions_by_4_and_leaves_sub_24h_unsampled(
     assert client.calls
     for sql, _, _ in client.calls:
         assert "cityHash64(cmcd['sid']) % 4 = 0" in sql
+        assert "lower(cmcd['bs'])" not in sql
+        assert "lower(cmcd['su'])" not in sql
     assert res_24h["overview"]["active_sessions"] == 40
     assert res_24h["overview"]["peak_viewers"] == 20
     assert res_24h["session_duration_dist"][0]["session_count"] == 40
@@ -506,3 +517,68 @@ def test_security_24h_sampling_and_bot_efficiency_pk_sampling(
         assert "toDateTime(" not in q
     assert res_6h["bot_efficiency"][0]["request_count"] == 25
     assert res_6h["bot_efficiency"][0]["referrals"] == 5
+
+
+def test_get_pop_health_coalesces_concurrent_cold_requests() -> None:
+    _clear_all_caches()
+    end = datetime(2026, 11, 26, 12, 0, tzinfo=UTC)
+    start_6h = end - timedelta(hours=6)
+
+    execute_calls = 0
+    call_lock = threading.Lock()
+    entered_ch = threading.Event()
+    release_ch = threading.Event()
+    barrier = threading.Barrier(2, timeout=2.0)
+
+    def _pop_handler(sql: str, _params: dict[str, Any]) -> list[dict[str, Any]]:
+        nonlocal execute_calls
+        with call_lock:
+            execute_calls += 1
+        entered_ch.set()
+        release_ch.wait(timeout=2.0)
+        if "UNION ALL" in sql:
+            return [
+                {
+                    "kind": "rollup",
+                    "pop": "SJC",
+                    "req_count": 500,
+                    "errors": 2,
+                    "p50_rtt_us": 15000.0,
+                    "p95_ttfb_ms": 40.0,
+                    "cache_hits": 0,
+                    "bandwidth_bytes": 0,
+                },
+                {
+                    "kind": "fact",
+                    "pop": "SJC",
+                    "req_count": 500,
+                    "errors": None,
+                    "p50_rtt_us": None,
+                    "p95_ttfb_ms": None,
+                    "cache_hits": 400,
+                    "bandwidth_bytes": 204800,
+                },
+            ]
+        return []
+
+    client = _FakeRealCHClient(_pop_handler)
+    svc_a = _service(client, "svc-opt32-pop-coalesce")
+    svc_b = _service(client, "svc-opt32-pop-coalesce")
+
+    def _worker(svc: HighScaleService) -> Any:
+        barrier.wait()
+        return hs_network.get_pop_health(svc, start_6h, end)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fut_a = pool.submit(_worker, svc_a)
+        fut_b = pool.submit(_worker, svc_b)
+        assert entered_ch.wait(timeout=2.0)
+        release_ch.set()
+        res_a = fut_a.result(timeout=3.0)
+        res_b = fut_b.result(timeout=3.0)
+
+    assert execute_calls == 1
+    assert len(client.calls) == 1
+    assert res_a.data[0].pop == "SJC"
+    assert res_b.data[0].pop == "SJC"
+    assert res_a.data[0].requests == res_b.data[0].requests == 500

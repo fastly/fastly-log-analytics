@@ -93,7 +93,9 @@ def test_cmcd_sample_stride_tiers() -> None:
     assert hs_cmcd._cmcd_sample_stride(604800) == 8
     assert hs_cmcd._cmcd_sample_stride(1209599) == 8
     assert hs_cmcd._cmcd_sample_stride(1209600) == 10
-    assert hs_cmcd._cmcd_sample_stride(2592000) == 10
+    assert hs_cmcd._cmcd_sample_stride(1727999) == 10
+    assert hs_cmcd._cmcd_sample_stride(1728000) == 20
+    assert hs_cmcd._cmcd_sample_stride(2592000) == 20
 
 
 def test_cmcd_cold_streaming_folds_probe_into_timeseries_and_reduces_queries(
@@ -434,32 +436,32 @@ def test_cmcd_30d_samples_sessions_scales_counts_and_falls_back_when_empty(
     )
 
     for sql, _, _ in client.calls:
-        assert "cityHash64(cmcd['sid']) % 10 = 0" in sql
+        assert "cityHash64(cmcd['sid']) % 20 = 0" in sql
 
-    assert res["overview"]["active_sessions"] == 120
-    assert res["overview"]["peak_viewers"] == 70
+    assert res["overview"]["active_sessions"] == 240
+    assert res["overview"]["peak_viewers"] == 140
     assert res["overview"]["rebuffer_rate"] == 25.0
     assert res["overview"]["avg_session_duration"] == 150
     last_ts = next(p for p in res["sessions_ts"] if p["concurrent_sessions"] > 0)
-    assert last_ts["concurrent_sessions"] == 70
-    assert last_ts["new_sessions"] == 40
-    assert res["session_duration_dist"][0]["session_count"] == 120
-    assert res["top_content"][0]["session_count"] == 60
-    assert res["rebuffer_by_country"][0]["session_count"] == 80
-    assert res["rebuffer_by_asn"][0]["session_count"] == 50
-    assert res["object_type_dist"][0]["request_count"] == 400
-    assert res["streaming_format_dist"][0]["session_count"] == 120
-    assert res["bitrate_ladder"][0]["request_count"] == 250
-    assert res["bitrate_ladder"][0]["session_count"] == 60
-    assert res["stream_type_dist"][0]["session_count"] == 120
-    assert res["stream_type_dist"][0]["request_count"] == 500
+    assert last_ts["concurrent_sessions"] == 140
+    assert last_ts["new_sessions"] == 80
+    assert res["session_duration_dist"][0]["session_count"] == 240
+    assert res["top_content"][0]["session_count"] == 120
+    assert res["rebuffer_by_country"][0]["session_count"] == 160
+    assert res["rebuffer_by_asn"][0]["session_count"] == 100
+    assert res["object_type_dist"][0]["request_count"] == 800
+    assert res["streaming_format_dist"][0]["session_count"] == 240
+    assert res["bitrate_ladder"][0]["request_count"] == 500
+    assert res["bitrate_ladder"][0]["session_count"] == 120
+    assert res["stream_type_dist"][0]["session_count"] == 240
+    assert res["stream_type_dist"][0]["request_count"] == 1000
 
     # Sparse-window fallback: if sampled run finds 0 events, falls back once to unsampled (stride=1).
     hs_cmcd._memo.cache.clear()
     seen_sampled: list[bool] = []
 
     def _handler_sparse(sql: str, p: dict[str, Any]) -> list[dict[str, Any]]:
-        is_sampled = "% 10 = 0" in sql
+        is_sampled = "% 20 = 0" in sql
         seen_sampled.append(is_sampled)
         if is_sampled:
             return []

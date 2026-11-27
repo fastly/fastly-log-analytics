@@ -107,8 +107,8 @@ _EVENT_COL_EXPRS: dict[str, str] = {
     "br": "toFloat64OrNull(cmcd['br']) AS br",
     "mtp": "toFloat64OrNull(cmcd['mtp']) AS mtp",
     "tb": "toFloat64OrNull(cmcd['tb']) AS tb",
-    "bs": "if(cmcd['bs'] = '', NULL, lower(cmcd['bs']) IN ('true', '1')) AS bs",
-    "su": "if(cmcd['su'] = '', NULL, lower(cmcd['su']) IN ('true', '1')) AS su",
+    "bs": "if(cmcd['bs'] = '', NULL, cmcd['bs'] IN ('true', '1', 'True', 'TRUE')) AS bs",
+    "su": "if(cmcd['su'] = '', NULL, cmcd['su'] IN ('true', '1', 'True', 'TRUE')) AS su",
 }
 
 
@@ -121,6 +121,8 @@ def _is_opt27_ch(client: Any) -> bool:
 
 
 def _cmcd_sample_stride(span_s: float) -> int:
+    if span_s >= 1_728_000:
+        return 20
     if span_s >= 1209600:
         return 10
     if span_s >= 604800:
@@ -164,8 +166,8 @@ _EVENTS_BASE = """
            toFloat64OrNull(cmcd['br']) AS br,
            toFloat64OrNull(cmcd['mtp']) AS mtp,
            toFloat64OrNull(cmcd['tb']) AS tb,
-           if(cmcd['bs'] = '', NULL, lower(cmcd['bs']) IN ('true', '1')) AS bs,
-           if(cmcd['su'] = '', NULL, lower(cmcd['su']) IN ('true', '1')) AS su
+           if(cmcd['bs'] = '', NULL, cmcd['bs'] IN ('true', '1', 'True', 'TRUE')) AS bs,
+           if(cmcd['su'] = '', NULL, cmcd['su'] IN ('true', '1', 'True', 'TRUE')) AS su
     FROM {from_table}{prewhere_clause}
     WHERE {where}
 """
