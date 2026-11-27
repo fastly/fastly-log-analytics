@@ -173,19 +173,21 @@ impl Response {
         }
     }
 
-    /// Headers every Compute response carries. The CSP applies to scripts and workers too:
-    /// a dedicated worker is governed by its own script response's policy.
+    /// Headers every Compute response carries. Inline script hashes are attached only to
+    /// HTML/script responses so JSON `/api/*` responses stay compact under HTTP header limits.
+    /// A dedicated worker is governed by its own script response's policy.
     pub fn secured(self) -> Self {
-        self.header(
-            "content-security-policy",
-            crate::csp::policy(crate::INLINE_SCRIPT_HASHES),
-        )
-        .header(
-            "strict-transport-security",
-            "max-age=31536000; includeSubDomains",
-        )
-        .header("x-content-type-options", "nosniff")
-        .header("referrer-policy", "same-origin")
+        let csp = csp_header(
+            self.headers.get("content-type").map(String::as_str),
+            crate::INLINE_SCRIPT_HASHES,
+        );
+        self.header("content-security-policy", csp)
+            .header(
+                "strict-transport-security",
+                "max-age=31536000; includeSubDomains",
+            )
+            .header("x-content-type-options", "nosniff")
+            .header("referrer-policy", "same-origin")
     }
 
     pub fn redirect(location: &str) -> Self {
@@ -193,6 +195,20 @@ impl Response {
             .header("location", location)
             .private()
     }
+}
+
+fn csp_header(content_type: Option<&str>, script_hashes: &[&str]) -> String {
+    let needs_inline_hashes = content_type.is_some_and(|ct| {
+        let mime = ct.split(';').next().unwrap_or("").trim();
+        mime.eq_ignore_ascii_case("text/html")
+            || mime.eq_ignore_ascii_case("application/javascript")
+            || mime.eq_ignore_ascii_case("text/javascript")
+    });
+    crate::csp::policy(if needs_inline_hashes {
+        script_hashes
+    } else {
+        &[]
+    })
 }
 
 #[cfg(test)]
@@ -253,6 +269,42 @@ mod tests {
         );
         assert_eq!(response.headers["x-content-type-options"], "nosniff");
         assert_eq!(response.headers["referrer-policy"], "same-origin");
+    }
+
+    #[test]
+    fn non_html_non_script_responses_omit_inline_script_hashes_from_csp() {
+        let hashes = &["sha256-inlineScriptHashForTest="];
+        let json_csp = csp_header(Some("application/json"), hashes);
+        assert_eq!(json_csp, crate::csp::policy(&[]));
+        assert!(!json_csp.contains("sha256-inlineScriptHashForTest="));
+
+        let none_csp = csp_header(None, hashes);
+        assert_eq!(none_csp, crate::csp::policy(&[]));
+
+        for content_type in [
+            "text/html",
+            "text/html; charset=utf-8",
+            "application/javascript",
+            "text/javascript",
+        ] {
+            let ct_csp = csp_header(Some(content_type), hashes);
+            assert_eq!(ct_csp, crate::csp::policy(hashes));
+            assert!(ct_csp.contains("sha256-inlineScriptHashForTest="));
+        }
+
+        let json_response = Response::json(200, &serde_json::json!({"ok": true})).secured();
+        assert_eq!(
+            json_response.headers["content-security-policy"],
+            crate::csp::policy(&[])
+        );
+
+        let js_response = Response::new(200, "console.log(1)")
+            .header("content-type", "application/javascript")
+            .secured();
+        assert_eq!(
+            js_response.headers["content-security-policy"],
+            crate::csp::policy(crate::INLINE_SCRIPT_HASHES)
+        );
     }
 
     #[test]

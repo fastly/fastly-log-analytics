@@ -72,7 +72,7 @@ cloud-browser-test:
 
 cloud-e2e:
 	cd frontend && node e2e/cloud/native-servers.mjs --build-only
-	cd frontend && FLP_SKIP_NEXT_BUILD=1 FLP_E2E_NATIVE=1 PROJECTS=chromium PLAYWRIGHT_WORKERS=1 npx playwright test --project=chromium --output=test-results/cloud
+	cd frontend && NODE_OPTIONS="--max-http-header-size=65536" FLP_SKIP_NEXT_BUILD=1 FLP_E2E_NATIVE=1 PROJECTS=chromium PLAYWRIGHT_WORKERS=1 npx playwright test --project=chromium --output=test-results/cloud
 
 # Mirrors the Cloud Compute & Browser Engine job, including dedicated native
 # browser acceptance. Excluding Cloud specs from Standard must not drop coverage.

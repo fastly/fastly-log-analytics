@@ -14,6 +14,16 @@ const STAGES = {
   files: { title: "Preparing local analysis", detail: "Starting the query and checking reusable data in your browser.", step: 3 },
 };
 
+function detailWordTokens(text: string): { key: string; text: string }[] {
+  const counts = new Map<string, number>();
+  const words = text.split(" ");
+  return words.map((word, idx) => {
+    const seen = (counts.get(word) ?? 0) + 1;
+    counts.set(word, seen);
+    return { key: `${word}:${seen}`, text: idx < words.length - 1 ? `${word} ` : word };
+  });
+}
+
 export function LoadingProgress({
   stage, progress = null, refreshing = false,
 }: {
@@ -48,8 +58,8 @@ export function LoadingProgress({
         <div role="status" aria-live="polite" aria-atomic="true">
           <p className="text-xs font-semibold leading-tight">{title}</p>
           <p data-testid="loading-progress-detail" className="mt-1 text-[11px] leading-tight text-muted-foreground">
-            {detail.split(" ").map((word, idx, arr) => (
-              <span key={idx}>{word}{idx < arr.length - 1 ? " " : ""}</span>
+            {detailWordTokens(detail).map((token) => (
+              <span key={token.key}>{token.text}</span>
             ))}
           </p>
         </div>

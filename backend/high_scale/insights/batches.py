@@ -1840,14 +1840,24 @@ def _build_fingerprint_spread_candidates(
     present: set[str],
     rollup_span: tuple[datetime, datetime] | None,
     filter_clause: str,
+    window_hours: float = 0.0,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
 ) -> str:
     fp = _fp_col(present) or "ja4"
     has_fp = bool(active & {"botnet_grouping", "residential_fingerprint_dispersion"})
     has_cipher = "cipher_spread" in active
+    w_stride = _window_sample_stride(window_hours) if window_hours >= 168.0 else 1
     branches: list[str] = []
     if has_fp:
         fp_col = COLUMNS[fp]
-        fp_win_from = _window_from(filter_clause=filter_clause, row_filter=f"{fp_col} != '' AND client_ip != ''")
+        fp_win_from = _window_from(
+            filter_clause=filter_clause,
+            row_filter=f"{fp_col} != '' AND client_ip != ''",
+            sample_stride=w_stride,
+            window_start=window_start,
+            window_end=window_end,
+        )
         branches.append(
             f"SELECT 'fp' AS kind, {fp_col} AS k {fp_win_from} "
             f"GROUP BY {fp_col} HAVING uniqCombined(client_ip) >= 5 LIMIT {_FP_SPREAD_CANDIDATE_LIMIT + 1}"
@@ -1855,7 +1865,11 @@ def _build_fingerprint_spread_candidates(
     if has_cipher:
         cipher_col = COLUMNS["tls_ciphers_sha"]
         cipher_win_from = _window_from(
-            filter_clause=filter_clause, row_filter=f"{cipher_col} != '' AND client_ip != ''"
+            filter_clause=filter_clause,
+            row_filter=f"{cipher_col} != '' AND client_ip != ''",
+            sample_stride=w_stride,
+            window_start=window_start,
+            window_end=window_end,
         )
         branches.append(
             f"SELECT 'cipher' AS kind, {cipher_col} AS k {cipher_win_from} "
@@ -1889,8 +1903,13 @@ def _build_fingerprint_spread(
     present: set[str],
     rollup_span: tuple[datetime, datetime] | None,
     filter_clause: str,
+    baseline_hours: float = 0.0,
+    window_hours: float = 0.0,
     candidates: dict[str, list[str] | None] | None = None,
     candidate_params: dict[str, Any] | None = None,
+    baseline_start: datetime | None = None,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
 ) -> tuple[str, QuerySource]:
     fp = _fp_col(present) or "ja4"
     has_fp = bool(active & {"botnet_grouping", "residential_fingerprint_dispersion"})
@@ -1900,6 +1919,9 @@ def _build_fingerprint_spread(
             has_fp = False
         if has_cipher and candidates.get("cipher") == []:
             has_cipher = False
+    b_stride = _baseline_sample_stride(baseline_hours)
+    w_stride = _window_sample_stride(window_hours) if window_hours >= 168.0 else 1
+    w_scale = f" * {w_stride}" if w_stride > 1 else ""
     proj: list[tuple[str, str]] = [("ip_h", "cityHash64(client_ip)")]
     if has_fp:
         proj.append((fp, COLUMNS[fp]))
@@ -1916,7 +1938,13 @@ def _build_fingerprint_spread(
         if isinstance(fp_cands, list) and fp_cands:
             prewhere_preds.append(f"({_candidate_in_clause(fp_col, fp_cands, 'cand_fp', candidate_params)})")
         else:
-            fp_win_from = _window_from(filter_clause=filter_clause, row_filter=f"{fp_col} != '' AND client_ip != ''")
+            fp_win_from = _window_from(
+                filter_clause=filter_clause,
+                row_filter=f"{fp_col} != '' AND client_ip != ''",
+                sample_stride=w_stride,
+                window_start=window_start,
+                window_end=window_end,
+            )
             win_fps = f"SELECT {fp_col} {fp_win_from} GROUP BY {fp_col} HAVING uniqCombined(client_ip) >= 4"
             where_preds.append(f"({fp_col} != '' AND {fp_col} IN ({win_fps}))")
     if has_cipher:
@@ -1928,7 +1956,11 @@ def _build_fingerprint_spread(
             )
         else:
             cipher_win_from = _window_from(
-                filter_clause=filter_clause, row_filter=f"{cipher_col} != '' AND client_ip != ''"
+                filter_clause=filter_clause,
+                row_filter=f"{cipher_col} != '' AND client_ip != ''",
+                sample_stride=w_stride,
+                window_start=window_start,
+                window_end=window_end,
             )
             win_ciphers = (
                 f"SELECT {cipher_col} {cipher_win_from} GROUP BY {cipher_col} HAVING uniqCombined(client_ip) >= 4"
@@ -1947,6 +1979,11 @@ def _build_fingerprint_spread(
         row_filter=row_filter,
         prewhere_clause=prewhere_clause,
         filter_clause=filter_clause,
+        baseline_sample_stride=b_stride,
+        window_sample_stride=w_stride,
+        baseline_start=baseline_start,
+        window_start=window_start,
+        window_end=window_end,
     )
     use_sets = has_fp and has_cipher
     g_fp = f"grouping({fp})" if use_sets else ("toUInt8(0)" if has_fp else "toUInt8(1)")
@@ -1962,7 +1999,7 @@ def _build_fingerprint_spread(
         f"{fp} AS fp_val" if has_fp else "'' AS fp_val",
         "tls_ciphers_sha" if has_cipher else "'' AS tls_ciphers_sha",
         "uniqCombinedIf(ip_h, is_w) AS w_ips",
-        "countIf(is_w) AS w_reqs",
+        f"countIf(is_w){w_scale} AS w_reqs",
         "uniqCombinedIf(ip_h, is_b) AS b_ips",
     ]
     having: list[str] = []
@@ -1981,7 +2018,7 @@ def _build_fingerprint_spread(
             [
                 "uniqCombinedIf(ip_h, is_w AND p_type != 'hosting') AS res_w_ips",
                 "uniqCombinedIf(asn, is_w AND p_type != 'hosting') AS res_w_asns",
-                "countIf(is_w AND p_type != 'hosting') AS res_w_reqs",
+                f"countIf(is_w AND p_type != 'hosting'){w_scale} AS res_w_reqs",
                 "uniqCombinedIf(ip_h, is_b AND p_type != 'hosting') AS res_b_ips",
                 "uniqCombinedIf(asn, is_b AND p_type != 'hosting') AS res_b_asns",
             ]

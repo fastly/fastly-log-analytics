@@ -795,6 +795,7 @@ DETECTIONS: dict[str, Detection] = {
         ),
         row_filter="ip != '' AND url != '' AND match(url, {probe_regex:String})",
         prewhere=_PROBE_PREWHERE,
+        baseline_sampled=True,
     ),
     "credential_enumeration": Detection(
         ("ip", "url", "status"),
