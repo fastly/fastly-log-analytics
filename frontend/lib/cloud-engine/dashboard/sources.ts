@@ -576,7 +576,7 @@ const DERIVED_BYTES_HEADER = "x-flp-derived-bytes";
 const DERIVED_META_HEADER = "x-flp-derived-meta";
 
 const DIRECT_CDN_PARQUET_KEY =
-  /^[A-Za-z0-9._=-]+(?:\/[A-Za-z0-9._=-]+)*\/processed\/(?:request|rum|ops|summary|summary_bundle)\/[A-Za-z0-9._=/-]*year=\d{4}\/[A-Za-z0-9._=/-]+\.parquet$/;
+  /^(?:[A-Za-z0-9._=-]+\/)*processed\/(?:request|rum|ops|summary|summary_bundle)\/[A-Za-z0-9._=/-]*year=\d{4}\/[A-Za-z0-9._=/-]+\.parquet$/;
 
 export function isDirectCdnParquetKey(key: string): boolean {
   return (

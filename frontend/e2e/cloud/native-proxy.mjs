@@ -61,6 +61,7 @@ createServer(credentials, (incoming, outgoing) => {
     "x-flp-front-rl": frontRateLimit,
     "fastly-client-ip": incoming.headers["fastly-client-ip"] || "127.0.0.1",
     "x-forwarded-proto": "https",
+    connection: "close",
   };
   if (!omitFrontKey) {
     headers["x-flp-front-key"] = frontKey;
@@ -68,12 +69,15 @@ createServer(credentials, (incoming, outgoing) => {
   const upstream = request(
     backend,
     {
+      agent: false,
       path: incoming.url,
       method: incoming.method,
       headers,
     },
     (response) => {
-      outgoing.writeHead(response.statusCode || 502, response.headers);
+      const { connection: _conn, "keep-alive": _ka, ...resHeaders } =
+        response.headers;
+      outgoing.writeHead(response.statusCode || 502, resHeaders);
       response.pipe(outgoing);
     },
   );

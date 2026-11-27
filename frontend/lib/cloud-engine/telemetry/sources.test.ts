@@ -158,8 +158,10 @@ describe("browserOpsSource fetchFile deduplication", () => {
             { status: 200, headers: { "content-type": "application/json" } },
           );
         }
-        if (url.pathname === "/api/file") {
-          const key = url.searchParams.get("key")!;
+        if (url.pathname === "/api/file" || url.pathname.startsWith("/fos/")) {
+          const key = url.pathname.startsWith("/fos/")
+            ? decodeURIComponent(url.pathname.slice(5))
+            : url.searchParams.get("key")!;
           fileFetchUrls.push(key);
           await new Promise((r) => setTimeout(r, 15));
           return new Response(bytesByKey[key], { status: 200 });

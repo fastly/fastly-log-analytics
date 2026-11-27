@@ -8,11 +8,11 @@ import {
   spyOnConsoleError, stubResizeObserver, stubPointerCaptureAndScroll,
   createUseSSEMock, partial, type ReportLayoutChildArgs, type InteractiveDataTableMockProps,
 } from '../helpers/page-smoke'
-import SecurityClient, {
-  BotsSection,
+import SecurityClient, { BotsSection } from '@/app/security/_sections/SecurityClient'
+import {
   HeaderAnomaliesSection,
   NetworkSection,
-} from '@/app/security/_sections/SecurityClient'
+} from '@/app/security/_sections/ThreatIntelSection'
 import { ProxyWatchdogSection } from '@/app/security/_sections/ProxyWatchdogSection'
 import { botColumns, SECURITY_INFO, type WellknownBot } from '@/app/security/_sections/botsSectionConfig'
 import { setCloudModeRuntime } from '@/lib/cloud-engine/mode'

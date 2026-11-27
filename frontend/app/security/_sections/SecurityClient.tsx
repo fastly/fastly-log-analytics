@@ -17,7 +17,21 @@ import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { hasFilterValues } from '@/lib/cloud-engine/rollup-sections'
 import type { components, operations } from '@/types/api.generated'
 import { BotsSection, type SecurityData, type SummaryQueryState } from './BotsSection'
-import { ThreatIntelPanel, HeaderAnomaliesSection, NetworkSection } from './ThreatIntelSection'
+
+const ThreatIntelPanel = dynamic(
+  () => import('./ThreatIntelSection').then((m) => m.ThreatIntelPanel),
+  { ssr: false, loading: () => <Skeleton className="w-full h-[360px] rounded-xl" /> },
+)
+
+const HeaderAnomaliesSection = dynamic(
+  () => import('./ThreatIntelSection').then((m) => m.HeaderAnomaliesSection),
+  { ssr: false, loading: () => <Skeleton className="w-full h-[320px] rounded-xl" /> },
+)
+
+const NetworkSection = dynamic(
+  () => import('./ThreatIntelSection').then((m) => m.NetworkSection),
+  { ssr: false, loading: () => <Skeleton className="w-full h-[320px] rounded-xl" /> },
+)
 
 const ProxyWatchdogSection = dynamic(
   () => import('./ProxyWatchdogSection').then((m) => m.ProxyWatchdogSection),
@@ -25,7 +39,7 @@ const ProxyWatchdogSection = dynamic(
 )
 
 export { BotsSection } from './BotsSection'
-export { ThreatIntelPanel, HeaderAnomaliesSection, NetworkSection } from './ThreatIntelSection'
+export { ThreatIntelPanel, HeaderAnomaliesSection, NetworkSection }
 
 const SECURITY_TABS = ['waf-activity', 'threat-intel', 'proxy-watchdog'] as const
 const securityTabParser = parseAsStringLiteral(SECURITY_TABS).withDefault('waf-activity')

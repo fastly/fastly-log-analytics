@@ -1,5 +1,9 @@
+import { Suspense } from 'react'
+
+import Loading from './loading'
+import UsageClient from './_sections/UsageClient'
+
 export {
-  default,
   UsageClient,
   UsagePage,
   UsagePageContent,
@@ -12,3 +16,11 @@ export {
   type LogActivityData,
   type RumBreakdownData,
 } from './_sections/UsageClient'
+
+export default function UsagePageShell() {
+  return (
+    <Suspense fallback={<Loading />}>
+      <UsageClient />
+    </Suspense>
+  )
+}

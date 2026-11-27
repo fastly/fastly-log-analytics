@@ -14,6 +14,8 @@ import {
   clearRequestLogCaches,
   dashboardCacheIdentity,
   dashboardCacheScope,
+  fileRequestPath,
+  isDirectCdnParquetKey,
   keyFromFileUrl,
   pruneRequestCache,
   rollupCacheVersion,
@@ -1539,6 +1541,30 @@ describe("persistent Parquet store", () => {
     ]);
   });
 
+  it("routes prefixless processed Parquet keys through /fos/<key> while rejecting unsafe or non-year keys", () => {
+    const prefixlessCompact =
+      "processed/request/year=2026/month=11/day=26/hour=21/compact=1.parquet";
+    const prefixlessBundle =
+      "processed/summary_bundle/request/year=2026/month=11/day=26/day_bundle=1.parquet";
+    expect(isDirectCdnParquetKey(prefixlessCompact)).toBe(true);
+    expect(fileRequestPath(prefixlessCompact)).toBe(`/fos/${prefixlessCompact}`);
+    expect(isDirectCdnParquetKey(prefixlessBundle)).toBe(true);
+    expect(fileRequestPath(prefixlessBundle)).toBe(`/fos/${prefixlessBundle}`);
+
+    for (const rejected of [
+      "pq/initial.parquet",
+      "raw/request/year=2026/a.gz",
+      "processed/request/../year=2026/a.parquet",
+      "processed/request//year=2026/a.parquet",
+      "processed/request/a.parquet",
+    ]) {
+      expect(isDirectCdnParquetKey(rejected), rejected).toBe(false);
+      expect(fileRequestPath(rejected), rejected).toBe(
+        `/api/file?${new URLSearchParams({ key: rejected })}`,
+      );
+    }
+  });
+
   it("wipes range-loader singleton memoryFiles on logout/identity switch and forwards x-service-id on whole-file reads", async () => {
     const ls = new Map<string, string>();
     vi.stubGlobal("localStorage", {
@@ -1602,7 +1628,7 @@ describe("persistent Parquet store", () => {
             catalog_generation: 1,
           });
         }
-        if (url.pathname === "/api/file") {
+        if (url.pathname === "/api/file" || url.pathname.startsWith("/fos/")) {
           const range = headers.get("range");
           if (range) {
             const m = /^bytes=(\d+)-(\d+)$/.exec(range)!;
@@ -1746,7 +1772,7 @@ describe("persistent Parquet store", () => {
             catalog_generation: 1,
           });
         }
-        if (url.pathname === "/api/file") {
+        if (url.pathname === "/api/file" || url.pathname.startsWith("/fos/")) {
           const range = headers.get("range");
           if (range) {
             const m = /^bytes=(\d+)-(\d+)$/.exec(range)!;

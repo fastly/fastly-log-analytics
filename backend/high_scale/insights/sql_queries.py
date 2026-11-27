@@ -93,6 +93,10 @@ class Detection:
 
 def baseline_sample_stride(baseline_hours: float) -> int:
     """Granule-skipping 5-minute time-block stride for raw-fact baseline portions (>= 24h)."""
+    if baseline_hours >= 480:
+        return 48
+    if baseline_hours >= 336:
+        return 24
     if baseline_hours >= 168:
         return 8
     if baseline_hours >= 48:
@@ -104,6 +108,12 @@ def baseline_sample_stride(baseline_hours: float) -> int:
 
 def window_sample_stride(window_hours: float) -> int:
     """Granule-skipping 5-minute time-block stride for raw-fact window portions (>= 24h)."""
+    if window_hours >= 480:
+        return 40
+    if window_hours >= 336:
+        return 24
+    if window_hours >= 168:
+        return 12
     if window_hours >= 48:
         return 6
     if window_hours >= 24:
@@ -532,7 +542,7 @@ _STALE_CHROME_WIN_FILTER = (
 _STALE_CHROME_IN_WINDOW = (
     r"chrome_version IN (SELECT extract(custom_fields['ua'], 'Chrome/([0-9]+)\.') FROM request_facts "
     f"PREWHERE {_CRAWLER_WIN_SCOPE} AND event_timestamp >= {{window_start:DateTime64(3)}} "
-    f"AND event_timestamp < {{window_end:DateTime64(3)}} WHERE {_STALE_CHROME_WIN_FILTER} GROUP BY 1 HAVING count() >= 500)"
+    f"AND event_timestamp < {{window_end:DateTime64(3)}}__W_SAMPLE__ WHERE {_STALE_CHROME_WIN_FILTER} GROUP BY 1 HAVING count()__W_SCALE__ >= 500)"
 )
 _SHIELD_IN_WINDOW = (
     "(SELECT count() FROM (SELECT 1 FROM request_facts "
@@ -904,7 +914,7 @@ DETECTIONS: dict[str, Detection] = {
     ),
     "stale_browser_version": Detection(
         ("ip", "ua", "chrome_version"),
-        """ , win AS (SELECT chrome_version, countIf(is_w) AS w_reqs, uniqCombinedIf(ip, is_w) AS w_ips, countIf(is_b)__B_SCALE__ AS b_reqs FROM base GROUP BY chrome_version HAVING w_reqs >= 500)
+        """ , win AS (SELECT chrome_version, countIf(is_w)__W_SCALE__ AS w_reqs, uniqCombinedIf(ip, is_w) AS w_ips, countIf(is_b)__B_SCALE__ AS b_reqs FROM base GROUP BY chrome_version HAVING w_reqs >= 500)
     SELECT concat('Chrome ', chrome_version) AS label, w_reqs, w_ips,
         w_reqs * 1.0 / greatest(b_reqs / greatest({baseline_hours:Float64}, 1.0) * {window_hours:Float64}, 1.0) AS surge_ratio
     FROM win WHERE w_reqs > b_reqs / greatest({baseline_hours:Float64}, 1.0) * {window_hours:Float64} * 2.5 ORDER BY surge_ratio DESC LIMIT 10 """,
@@ -915,6 +925,7 @@ DETECTIONS: dict[str, Detection] = {
             f"AND {_STALE_CHROME_IN_WINDOW}"
         ),
         baseline_sampled=True,
+        window_sampled=True,
     ),
     "orphaned_deep_crawl": Detection(
         ("ip", "url", "referer"),
@@ -966,7 +977,7 @@ DETECTIONS: dict[str, Detection] = {
     with_bots AS (SELECT g_ref, ref_stem, replaceRegexpAll(ref_stem, '[aeiou]', '') AS ref_cons,
             is_w, is_b, ip_state,
             groupArrayIf((bot_stem, replaceRegexpAll(bot_stem, '[aeiou]', ''), raw_tok, ua_dom, w_cnt, b_cnt, w_b, b_b), g_bot = 0 AND bot_stem != '' AND w_cnt >= 50) OVER () AS bots,
-            greatest((SELECT sum(toInt64OrZero(custom_fields['resp_bytes'])) FROM request_facts PREWHERE {_CRAWLER_WIN_SCOPE} AND event_timestamp >= {{window_start:DateTime64(3)}} AND event_timestamp < {{window_end:DateTime64(3)}}), 1) AS site_resp_total
+            greatest((SELECT sum(toInt64OrZero(custom_fields['resp_bytes'])) FROM request_facts PREWHERE {_CRAWLER_WIN_SCOPE} AND event_timestamp >= {{window_start:DateTime64(3)}} AND event_timestamp < {{window_end:DateTime64(3)}}__W_SAMPLE__)__W_SCALE__, 1) AS site_resp_total
         FROM gs),
     expanded AS (SELECT g_ref, ref_stem, ref_cons, is_w, is_b, ip_state, site_resp_total,
             b.1 AS bot_stem, b.2 AS bot_cons, b.3 AS raw_tok, b.4 AS ua_dom,
@@ -1031,6 +1042,16 @@ def _base_sql(
     b_scale = f" * {b_stride}" if b_stride > 1 else ""
     w_stride = window_sample_stride(window_hours) if detection.window_sampled else 1
     w_scale = f" * {w_stride}" if w_stride > 1 else ""
+    w_only_sample = (
+        build_pk_time_sample_clause(
+            w_stride=w_stride,
+            window_only=True,
+            window_start=window_start,
+            window_end=window_end,
+        )
+        if w_stride > 1
+        else ""
+    )
     time_sample = build_pk_time_sample_clause(
         b_stride=b_stride,
         w_stride=w_stride,
@@ -1051,13 +1072,13 @@ def _base_sql(
             f"FROM request_facts PREWHERE {scope} AND event_timestamp >= {lower} "
             f"AND event_timestamp < {{window_end:DateTime64(3)}}{time_sample}{where_clause}"
         )
-    det_sql = detection.sql.replace("__B_SCALE__", b_scale).replace("__W_SCALE__", w_scale)
     sql = (
         f"/* insight:{insight_id} */ WITH base AS (SELECT {projection}, "
         "event_timestamp < {window_start:DateTime64(3)} AS is_b, "
         "event_timestamp >= {window_start:DateTime64(3)} AS is_w "
-        f"{from_clause}) {det_sql}"
+        f"{from_clause}) {detection.sql}"
     )
+    sql = sql.replace("__B_SCALE__", b_scale).replace("__W_SCALE__", w_scale).replace("__W_SAMPLE__", w_only_sample)
     crawler_mod = f" AND intDiv(toUnixTimestamp(event_timestamp), 300) % {_CRAWLER_WINDOW_SAMPLE_STRIDE} = 0"
     if window_start is not None and window_end is not None and crawler_mod in sql:
         cw_sample = build_pk_time_sample_clause(
