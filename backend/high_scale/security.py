@@ -1026,6 +1026,7 @@ def security_aggregates(
                 res.update(val)
             else:
                 res[k] = val
+        res["rdns_verification_available"] = True
         res["section_timings"] = trace.timings()
         _security_memo.put(memo_key, dict(res))
         return res

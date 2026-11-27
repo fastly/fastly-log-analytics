@@ -20,6 +20,8 @@ import {
   FINGERPRINT_COLUMN_IDS,
   fingerprintColumns,
   FingerprintCoverageHint,
+  getSecurityInfo,
+  makeBotColumns,
   NGWAF_BOT_COLUMN_IDS,
   ngwafBotColumns,
   SECURITY_INFO,
@@ -94,6 +96,10 @@ export function BotsSection({
       | { ngwaf_configured?: boolean }
       | undefined
   )?.ngwaf_configured
+  const rdnsAvailable =
+    (data as (SecurityData & { rdns_verification_available?: boolean }) | undefined)?.rdns_verification_available ?? true
+  const resolvedBotColumns = React.useMemo(() => makeBotColumns(rdnsAvailable), [rdnsAvailable])
+  const resolvedSecurityInfo = React.useMemo(() => getSecurityInfo(rdnsAvailable), [rdnsAvailable])
   const ngwafConfigured = data?.ngwaf_configured ?? bootstrapNgwafConfigured
   const labeledColumns = React.useCallback(
     (ids: readonly string[]) => ids.map((id) => ({ id, label: getFieldLabel(id) })),
@@ -213,11 +219,11 @@ export function BotsSection({
           error={cardErr}
           className="h-[360px] [contain-intrinsic-size:360px] [content-visibility:auto]"
           contentClassName="p-0"
-          helpTitle={SECURITY_INFO.wellknown_bots.title}
-          helpContent={SECURITY_INFO.wellknown_bots.body}
+          helpTitle={resolvedSecurityInfo.wellknown_bots.title}
+          helpContent={resolvedSecurityInfo.wellknown_bots.body}
         >
           <DataTable
-            columns={botColumns}
+            columns={resolvedBotColumns}
             data={data?.wellknown_bots || []}
             emptyMessage={isLoading ? '' : 'No known bots detected. Ensure bot sources are cached in Admin settings.'}
             hideToolbar

@@ -65,7 +65,11 @@ COLUMNS: dict[str, str] = {
     "tcp_rtt": "toFloat64OrNull(custom_fields['tcp_rtt'])",
     "chrome_version": r"extract(custom_fields['ua'], 'Chrome/([0-9]+)\\.')",
     "signal": (
-        "arrayJoin(arrayFilter(s -> s != '' AND s != 'BOT-ANALYSIS', "
+        "arrayJoin(arrayFilter(s -> s != '' AND upper(s) != 'BOT-ANALYSIS' "
+        "AND NOT startsWith(upper(s), 'VERIFIED-BOT') "
+        "AND NOT startsWith(upper(s), 'SUSPECTED-') "
+        "AND NOT startsWith(upper(s), 'SITE.') "
+        "AND upper(s) NOT IN ('DATACENTER', 'SITE-FLAGGED-IP', 'TOR-EXIT', 'CORPORATE-PROXY', 'RESIDENTIAL-PROXY', 'PUBLIC-PROXY', 'VPN'), "
         "arrayMap(s -> trim(BOTH ' ' FROM s), splitByChar(',', custom_fields['waf_sig']))))"
     ),
 }

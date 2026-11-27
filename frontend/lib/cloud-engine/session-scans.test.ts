@@ -76,19 +76,19 @@ describe("Cloud session scans against actual Parquet", () => {
         const mid = (rtts.length - 1) / 2;
         const reqs4xx = session.filter((row) => row.status != null && row.status >= 400 && row.status < 500).length;
         return {
-          ip: session[0].ip, ja4: session[0].ja4,
+          ip: session[0].ip, ja4: session[0].ja4 ?? "",
           session_start: new Date(session[0].ts).toISOString(),
           session_end: new Date(session[session.length - 1].ts).toISOString(),
           req_count: session.length,
           streaming_reqs: session.filter((row) => row.cmcd_sid != null && row.cmcd_sid !== "").length,
-          edge_sid: session.map((row) => row.edge_sid).filter((sid) => sid != null).sort().pop() ?? null,
+          edge_sid: session.map((row) => row.edge_sid).filter((sid) => sid != null).sort().pop() ?? "",
           edge_count: session.filter((row) => row.edge === true).length,
           shield_count: session.filter((row) => row.edge === false).length,
-          asn: minOf(session.map((row) => row.asn)), country: minOf(session.map((row) => row.country)),
+          asn: minOf(session.map((row) => row.asn)), country: minOf(session.map((row) => row.country)) ?? "",
           reqs_4xx: reqs4xx, reqs_5xx: session.filter((row) => row.status != null && row.status >= 500).length,
           total_bytes: session.reduce((sum, row) => sum + (row.resp_bytes ?? 0), 0),
           median_rtt_ms: rtts.length ? (rtts[Math.floor(mid)] + rtts[Math.ceil(mid)]) / 2 / 1000 : null,
-          ua: minOf(session.map((row) => row.ua)),
+          ua: minOf(session.map((row) => row.ua)) ?? "",
           unique_urls: new Set(session.map((row) => row.url).filter((url) => url != null)).size,
           flagged: session.length >= 40 || reqs4xx * 100 / session.length >= 25,
         };
@@ -184,7 +184,7 @@ describe("Cloud session scans against actual Parquet", () => {
     // Sessionizing raw rows exhausted this scaled-down limit, as a busy day exhausted the page's 256MB.
     await engine.executeSql("SET memory_limit = '64MB'");
     try {
-      const list = await handleSessionsList({ start_time: start, end_time: end, limit: 500 }, context);
+      const list = await handleSessionsList({ start_time: start, end_time: end, sort_by: "req_count", limit: 500 }, context);
       if (!("sessions" in list.body)) throw new Error("Session scan failed");
       const reference = referenceSessions(rows);
       expect(list.body.sessions).toHaveLength(Math.min(500, reference.length));

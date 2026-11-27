@@ -23,7 +23,6 @@ import { useEffectiveServiceId } from '@/hooks/useBootstrap'
 import { useDateFormat } from '@/hooks/useSSE'
 import { useTimezone } from '@/hooks/usePersistentPreferences'
 import { client, queryKeys, unwrapClient } from '@/lib/api'
-import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { insightsReportQueryKey } from '@/lib/report-query-key'
 import {
   groupInsightsBySection,
@@ -223,7 +222,7 @@ function InsightsBody({
   // A queued evaluation with no cards yet keeps the availability skeleton grid.
   const showSkeletons = isLoading || (isPending && (allInsights?.length ?? 0) === 0)
   const refreshError = data?.refresh_error
-  const reserveStatusSlot = !isCloudMode() || isEvaluating(data) || !!refreshError
+  const reserveStatusSlot = true
 
   // Skeleton cards rendered while /api/insights is in flight come from the
   // /api/insight-availability response (titles + descriptions per available
@@ -352,11 +351,11 @@ function InsightsBody({
           onTabChange={setActiveTab}
           isLoading={isPending}
           isCounted={(insight) => !isPendingPlaceholder(insight)}
-          emptyMessage={isCloudMode() ? ({ section }) => {
+          emptyMessage={availability ? ({ section }) => {
             const supported = availableInsights.some((entry) => section.key === 'all' || entry.category === section.key)
             return supported && statusFilter !== 'all'
               ? { title: 'No insights match this status', description: 'Change the status filter to see the evaluated detectors.' }
-              : { title: 'No detectors available in this category', description: 'No analysis was performed here. Check the Cloud algorithm and log-field availability below.' }
+              : { title: 'No detectors available in this category', description: 'No analysis was performed here. Check algorithm and log-field availability below.' }
           } : undefined}
           renderCards={({ cards }) => (
             <div
@@ -439,10 +438,10 @@ function InsightsBody({
             </AlertTitle>
             <AlertDescription className="text-xs text-muted-foreground mt-1 flex flex-wrap items-center justify-between gap-2">
               <span>
-                {isCloudMode() ? (
+                {unsupportedInsights.length > 0 ? (
                   <>
-                    Cloud evaluates {availableInsights.length} detectors using local Parquet data.
-                    {unsupportedInsights.length > 0 && ` ${unsupportedInsights.length} detector algorithms are not implemented in Cloud; enabling log fields will not enable them.`}
+                    Evaluated {availableInsights.length} detectors using local Parquet data.
+                    {` ${unsupportedInsights.length} detector algorithms are not implemented in Cloud; enabling log fields will not enable them.`}
                     {missingFieldCount > 0 && ` ${missingFieldCount} additional detectors need log fields that are missing from the loaded data.`}
                     {' '}Detectors without enough baseline history are marked as not evaluated, not clean.
                   </>
@@ -450,7 +449,7 @@ function InsightsBody({
                   <>{availability.unavailable.length} {availability.unavailable.length === 1 ? 'detector requires' : 'detectors require'} optional log fields to be enabled. Check service configuration.</>
                 )}
               </span>
-              {(!isCloudMode() || missingFieldCount > 0) && <Link
+              {(unsupportedInsights.length === 0 || missingFieldCount > 0) && <Link
                 href={activeServiceId ? `/admin?service=${activeServiceId}` : '/admin'}
                 className="inline-flex items-center text-xs font-semibold text-primary underline underline-offset-4 hover:text-primary/80"
               >

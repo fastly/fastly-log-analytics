@@ -134,10 +134,8 @@ function SecurityBody({
     return data
   }
 
-  // On Cloud, defer the `proxies` section (10 geo/RTT columns) until the Proxy Watchdog tab is active.
-  const mainSections = cloudMode
-    ? (rollupFirst ? WAF_ACTIVITY_RAW_SECTIONS : WAF_ACTIVITY_SECTIONS)
-    : SECURITY_SECTIONS
+  // Defer the `proxies` section (geo/RTT columns) until the Proxy Watchdog tab is active.
+  const mainSections = rollupFirst ? WAF_ACTIVITY_RAW_SECTIONS : WAF_ACTIVITY_SECTIONS
 
   const securityQuery = useAnalyticsReportQuery<SecurityData | undefined>({
     namespace: ['security', 'aggregates'],
@@ -154,7 +152,7 @@ function SecurityBody({
     filterPayload,
     range,
     keyParts: [bucketSeconds],
-    queryOptions: { enabled: cloudMode && activeTab === 'proxy-watchdog' },
+    queryOptions: { enabled: activeTab === 'proxy-watchdog' },
     queryFn: ({ rangeBody, signal }) => fetchSecurity(PROXIES_SECTIONS, rangeBody, signal),
   })
 
@@ -245,14 +243,14 @@ function SecurityBody({
       <TabsContent value="proxy-watchdog">
         <RollupDataThroughSlot
           reserve={rollupFirst}
-          meta={cloudMode ? readRollupMeta(proxiesQuery.data) : rowRollup}
+          meta={readRollupMeta(proxiesQuery.data)}
           className="mb-6"
         />
         <ProxyWatchdogSection
-          data={cloudMode ? proxiesQuery.data : securityQuery.data}
-          rollup={cloudMode ? readRollupMeta(proxiesQuery.data) : rowRollup}
-          isLoading={cloudMode ? proxiesQuery.isLoading : securityQuery.isLoading}
-          error={cloudMode ? (proxiesQuery.error ?? null) : (securityQuery.error ?? null)}
+          data={proxiesQuery.data}
+          rollup={readRollupMeta(proxiesQuery.data)}
+          isLoading={proxiesQuery.isLoading}
+          error={proxiesQuery.error ?? null}
           startTime={startTime}
           endTime={endTime}
           activeServiceId={activeServiceId}

@@ -704,7 +704,7 @@ def sessions_endpoint(
             svc_cfg = None
         if svc_cfg is not None:
             active_fields = set(svcconfig.active_log_field_ids(svc_cfg))
-            has_rtt = "tcp_rtt" in active_fields
+            has_rtt = ("tcp_rtt" in active_fields) or ("client_rtt_us" in active_fields)
             has_ja4 = "ja4" in active_fields
             has_edge = "edge" in active_fields
             has_edge_sid = "edge_sid" in active_fields

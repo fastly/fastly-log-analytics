@@ -14,7 +14,7 @@ import {
   ShieldOff,
 } from 'lucide-react'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
-import { SSEModal } from '@/components/SSEModal'
+import { ControlledSSEModal, SSEModal } from '@/components/SSEModal'
 import { Badge } from '@/components/ui/badge'
 import { Button, buttonVariants } from '@/components/ui/button'
 import {
@@ -28,8 +28,8 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { useSSE } from '@/hooks/useSSE'
 import { client } from '@/lib/api'
-import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { invalidateCloudConfigMetadata } from '@/lib/cloud-engine/metadata-cache'
 import { invalidateLogFieldQueries, queryKeys } from '@/lib/api'
 import { formatLocalDateTime } from '@/lib/utils'
@@ -152,192 +152,94 @@ function AucField({ evalData }: { evalData: ScoringEvaluation }) {
   )
 }
 
-type CloudJobAction = 'enable' | 'disable' | 'teardown'
-
-function CloudScoringJobButton({
+function TeardownScoringButton({
   serviceId,
-  action,
-  title,
-  description,
   generation,
-  trigger,
   onComplete,
 }: {
   serviceId: string
-  action: CloudJobAction
-  title: string
-  description: React.ReactNode
   generation?: string
-  trigger: React.ReactNode
   onComplete: () => void
 }) {
-  const queryClient = useQueryClient()
-  const [open, setOpen] = React.useState(false)
-  const [running, setRunning] = React.useState(false)
-  const [stepText, setStepText] = React.useState('')
-  const [errorText, setErrorText] = React.useState('')
-  const [needsToken, setNeedsToken] = React.useState(false)
-  const [token, setToken] = React.useState('')
+  const [confirmOpen, setConfirmOpen] = React.useState(false)
+  const [sseOpen, setSseOpen] = React.useState(false)
   const [confirmSid, setConfirmSid] = React.useState('')
+  const { lines, status, error, start, stop, reset } = useSSE()
 
-  const invalidateScoringAndMetadata = () => {
-    if (isCloudMode()) invalidateCloudConfigMetadata()
-    invalidateLogFieldQueries(queryClient, serviceId)
-    void queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap() })
-    void queryClient.invalidateQueries({ queryKey: queryKeys.services() })
-    invalidateServiceScoringQueries(queryClient, serviceId)
-  }
-
-  const runCloudJob = async () => {
-    setRunning(true)
-    setErrorText('')
-    setStepText('Starting job...')
-    try {
-      const payload: Record<string, unknown> = {}
-      if (token.trim()) payload.token = token.trim()
-      if (action === 'teardown') {
-        payload.confirm_service_id = confirmSid.trim()
-        if (generation) payload.generation = generation
-      }
-      const res = await fetch(`/api/services/${encodeURIComponent(serviceId)}/scoring/${action}`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(payload),
-      })
-      const startBody = (await res.json()) as {
-        job?: { id: string; status: string; step: string; error?: string | null; retry?: { at?: number } | null }
-        error?: string
-        detail?: { error?: string }
-      }
-      if (!res.ok) {
-        const err = startBody.detail?.error || startBody.error || `Request failed (${res.status})`
-        if (err === 'fastly_token_scope_insufficient') setNeedsToken(true)
-        setErrorText(err)
-        setRunning(false)
-        return
-      }
-      let job = startBody.job
-      let transientErrors = 0
-      const TRANSIENT_STATUSES = new Set([409, 429, 502, 503, 504])
-      for (let iter = 0; iter < 180 && job && job.status !== 'complete' && job.status !== 'failed'; iter++) {
-        if (iter > 0) {
-          const delayMs = job.retry?.at ? 1000 : 250
-          await new Promise((r) => setTimeout(r, delayMs))
-        }
-        setStepText(`Running step: ${job.step}...`)
-        let stepRes: Response
-        try {
-          stepRes = await fetch(`/api/admin/jobs/${encodeURIComponent(job.id)}/step`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: '{}',
-          })
-        } catch (netErr) {
-          transientErrors += 1
-          if (transientErrors > 5) throw netErr
-          await new Promise((r) => setTimeout(r, 400 * transientErrors))
-          continue
-        }
-        const stepBody = (await stepRes.json().catch(() => ({}))) as {
-          job?: { id: string; status: string; step: string; error?: string | null; retry?: { at?: number } | null }
-          error?: string
-          detail?: { error?: string }
-        }
-        if (!stepRes.ok) {
-          const errCode = stepBody.detail?.error || stepBody.error || ''
-          const isTransient = TRANSIENT_STATUSES.has(stepRes.status) || errCode === 'job_leased' || errCode === 'backend_budget'
-          if (isTransient && transientErrors < 5) {
-            transientErrors += 1
-            await new Promise((r) => setTimeout(r, 400 * transientErrors))
-            continue
-          }
-          setErrorText(errCode || `Step failed (${stepRes.status})`)
-          setRunning(false)
-          return
-        }
-        transientErrors = 0
-        job = stepBody.job
-      }
-      if (job?.status === 'failed') {
-        const err = job.error || 'Job failed'
-        if (err === 'fastly_token_scope_insufficient') setNeedsToken(true)
-        setErrorText(err)
-        setRunning(false)
-        return
-      }
-      if (job && job.status !== 'complete') {
-        setErrorText('Job did not finish within step limit')
-        setRunning(false)
-        return
-      }
-      setStepText('Complete')
-      setRunning(false)
-      setOpen(false)
-      onComplete()
-    } catch (e) {
-      setErrorText(e instanceof Error ? e.message : String(e))
-      setRunning(false)
-    } finally {
-      invalidateScoringAndMetadata()
-    }
+  const handleStartTeardown = () => {
+    reset()
+    setConfirmOpen(false)
+    setSseOpen(true)
+    start(`/api/services/${encodeURIComponent(serviceId)}/scoring/teardown`, {
+      confirm_service_id: confirmSid.trim(),
+      ...(generation ? { generation } : {}),
+    })
   }
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger render={trigger as React.ReactElement} />
-      <DialogContent className="max-w-lg">
-        <DialogHeader>
-          <DialogTitle>{title}</DialogTitle>
-          <div className="text-sm text-muted-foreground">{description}</div>
-        </DialogHeader>
-        <div className="space-y-3 py-2 text-xs">
-          {action === 'teardown' && (
-            <div className="space-y-1">
-              <Label htmlFor="scoring-confirm-sid" className="text-xs">
-                Type <code>{serviceId}</code> to confirm teardown
-              </Label>
-              <Input
-                id="scoring-confirm-sid"
-                value={confirmSid}
-                onChange={(e) => setConfirmSid(e.target.value)}
-                placeholder={serviceId}
-                disabled={running}
-              />
-            </div>
-          )}
-          {needsToken && (
-            <div className="space-y-1">
-              <Label htmlFor="scoring-token-override" className="text-xs">
-                One-time scoped Fastly API token (stored in Secret Store, never in browser)
-              </Label>
-              <Input
-                id="scoring-token-override"
-                type="password"
-                value={token}
-                onChange={(e) => setToken(e.target.value)}
-                placeholder="Fastly API token"
-                disabled={running}
-              />
-            </div>
-          )}
-          {stepText && <div className="font-mono text-muted-foreground">{stepText}</div>}
-          {errorText && <div className="text-rose-600 font-medium">{errorText}</div>}
-        </div>
-        <DialogFooter>
-          <Button variant="outline" size="sm" onClick={() => setOpen(false)} disabled={running}>
-            Cancel
-          </Button>
-          <Button
-            variant={action === 'disable' || action === 'teardown' ? 'destructive' : 'default'}
-            size="sm"
-            onClick={runCloudJob}
-            disabled={running || (action === 'teardown' && confirmSid.trim() !== serviceId)}
-          >
-            {running ? 'Running...' : title}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <>
+      <Dialog
+        open={confirmOpen}
+        onOpenChange={(next) => {
+          setConfirmOpen(next)
+          if (!next) setConfirmSid('')
+        }}
+      >
+        <DialogTrigger
+          render={
+            <Button variant="destructive" size="sm" data-testid="admin-session-scoring-teardown-btn">
+              Teardown
+            </Button>
+          }
+        />
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Teardown Scorer</DialogTitle>
+            <DialogDescription>
+              Strips scoring VCL snippets and session_scorer backend first, then deletes the Compute
+              scorer, stores, and FOS scoring artifacts.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-1 py-2 text-xs">
+            <Label htmlFor="scoring-confirm-sid" className="text-xs">
+              Type <code>{serviceId}</code> to confirm teardown
+            </Label>
+            <Input
+              id="scoring-confirm-sid"
+              value={confirmSid}
+              onChange={(e) => setConfirmSid(e.target.value)}
+              placeholder={serviceId}
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" size="sm" onClick={() => setConfirmOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={handleStartTeardown}
+              disabled={confirmSid.trim() !== serviceId}
+            >
+              Teardown Scorer
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <ControlledSSEModal
+        isSSEModalOpen={sseOpen}
+        setIsSSEModalOpen={(open) => {
+          setSseOpen(open)
+          if (!open) onComplete()
+        }}
+        sseStatus={status}
+        sseTitle="Teardown Scorer"
+        sseError={error}
+        sseDescription="Removing session scoring resources..."
+        lines={lines}
+        stop={stop}
+      />
+    </>
   )
 }
 
@@ -359,6 +261,10 @@ export function StatusPanel({ serviceId, waitForEvaluation = false }: StatusPane
   if (data?.preflight_pragmas_ready === true && pragmaModalOpen) setPragmaModalOpen(false)
 
   const refreshScoring = React.useCallback(() => {
+    invalidateCloudConfigMetadata()
+    invalidateLogFieldQueries(queryClient, serviceId)
+    void queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap() })
+    void queryClient.invalidateQueries({ queryKey: queryKeys.services() })
     refetch()
     invalidateServiceScoringQueries(queryClient, serviceId)
   }, [queryClient, refetch, serviceId])
@@ -374,6 +280,7 @@ export function StatusPanel({ serviceId, waitForEvaluation = false }: StatusPane
 
   const extLinkCls =
     'text-muted-foreground hover:text-foreground opacity-50 hover:opacity-100 transition-opacity'
+  const cloudGeneration = (data as { generation?: string } | undefined)?.generation
 
   return (
     <div data-testid="admin-session-scoring-status-card">
@@ -389,7 +296,7 @@ export function StatusPanel({ serviceId, waitForEvaluation = false }: StatusPane
         helpTitle="About Session Scoring"
         className="min-h-[236px]"
         headerAction={
-          isCloudMode() && isAttached ? (
+          isAttached ? (
             <Link
               href={`/admin?service=${encodeURIComponent(serviceId)}`}
               className={buttonVariants({
@@ -400,110 +307,6 @@ export function StatusPanel({ serviceId, waitForEvaluation = false }: StatusPane
             >
               Configure Log Fields
             </Link>
-          ) : isCloudMode() ? (
-            enabled ? (
-              <div className="flex items-center gap-2">
-                <CloudScoringJobButton
-                  serviceId={serviceId}
-                  action="enable"
-                  title="Redeploy Scorer"
-                  description={
-                    <StepListDescription
-                      intro="Push the latest scorer build to the edge for"
-                      serviceId={serviceId}
-                      steps={REDEPLOY_STEPS}
-                    />
-                  }
-                  onComplete={refreshScoring}
-                  trigger={
-                    <Button
-                      variant={data?.scorer_drift ? 'default' : 'outline'}
-                      size="sm"
-                      data-testid="admin-session-scoring-redeploy-btn"
-                    >
-                      <RefreshCw className="h-3.5 w-3.5 mr-1" /> Redeploy
-                    </Button>
-                  }
-                />
-                <CloudScoringJobButton
-                  serviceId={serviceId}
-                  action="disable"
-                  title="Disable Session Scoring"
-                  description={
-                    <StepListDescription
-                      intro="This will strip scoring VCL first and then delete scorer resources on"
-                      serviceId={serviceId}
-                      steps={DISABLE_STEPS}
-                    />
-                  }
-                  onComplete={refreshScoring}
-                  trigger={
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="text-rose-700 border-rose-300 hover:bg-rose-50"
-                      data-testid="admin-session-scoring-disable-btn"
-                    >
-                      <PowerOff className="h-3.5 w-3.5 mr-1" /> Disable
-                    </Button>
-                  }
-                />
-                <CloudScoringJobButton
-                  serviceId={serviceId}
-                  action="teardown"
-                  title="Teardown Scorer"
-                  generation={(data as { generation?: string } | undefined)?.generation}
-                  description="Strips scoring VCL snippets and session_scorer backend first, then deletes the Compute scorer, stores, and FOS scoring artifacts."
-                  onComplete={refreshScoring}
-                  trigger={
-                    <Button
-                      variant="destructive"
-                      size="sm"
-                      data-testid="admin-session-scoring-teardown-btn"
-                    >
-                      Teardown
-                    </Button>
-                  }
-                />
-              </div>
-            ) : pragmasMissing ? (
-              <>
-                <Button
-                  variant="default"
-                  size="sm"
-                  data-testid="admin-session-scoring-enable-btn"
-                  onClick={() => setPragmaModalOpen(true)}
-                >
-                  <Power className="h-3.5 w-3.5 mr-1" /> Enable
-                </Button>
-                <PragmaMissingDialog
-                  serviceId={serviceId}
-                  open={pragmaModalOpen}
-                  onOpenChange={setPragmaModalOpen}
-                  isFetching={isFetching}
-                  onRecheck={() => refetch()}
-                />
-              </>
-            ) : (
-              <CloudScoringJobButton
-                serviceId={serviceId}
-                action="enable"
-                title="Enable Session Scoring"
-                description={
-                  <StepListDescription
-                    intro="This will enable session scoring on"
-                    serviceId={serviceId}
-                    steps={ENABLE_STEPS}
-                  />
-                }
-                onComplete={refreshScoring}
-                trigger={
-                  <Button variant="default" size="sm" data-testid="admin-session-scoring-enable-btn">
-                    <Power className="h-3.5 w-3.5 mr-1" /> Enable
-                  </Button>
-                }
-              />
-            )
           ) : enabled ? (
             <div className="flex items-center gap-2">
               <SSEModal
@@ -551,6 +354,13 @@ export function StatusPanel({ serviceId, waitForEvaluation = false }: StatusPane
                   </Button>
                 }
               />
+              {cloudGeneration && (
+                <TeardownScoringButton
+                  serviceId={serviceId}
+                  generation={cloudGeneration}
+                  onComplete={refreshScoring}
+                />
+              )}
             </div>
           ) : pragmasMissing ? (
             <>

@@ -6,7 +6,6 @@ import {
   CLOUD_INSIGHT_DETECTORS, insightScanColumns, queryCloudCacheCollapse, queryCloudInsights,
 } from "./insight-scans";
 import { handleInsightAvailability, INSIGHT_DEFINITIONS } from "./insights";
-import { INSIGHTS_DEFERRED } from "./insights-rollup";
 import { escapeSqlLiteral } from "./sql-validator";
 
 const tableRows = (table: unknown) => (table as { toArray(): Record<string, unknown>[] }).toArray();
@@ -118,12 +117,14 @@ describe("local Parquet insight scans", () => {
   it("masks all IP evidence and queries real cache-collapse detail", async () => {
     await seedRichHistory();
     const masked = await queryCloudInsights(body, { ...options, maskIps: true });
-    expect(masked.insights.find((card) => card.id === "credential_enumeration")?.items[0].label).toBe("0.0.0.0");
-    expect(JSON.stringify(masked)).not.toContain("192.0.2.");
+    expect(masked.insights.find((card) => card.id === "credential_enumeration")?.items[0].label).toBe("192.0.2.xxx");
+    expect(JSON.stringify(masked)).not.toContain("192.0.2.2");
     const detail = await queryCloudCacheCollapse({ ...body, url: "/login" }, { signal, maskIps: true });
-    expect(detail).toMatchObject({ window_hit_rate: 0, baseline_hit_rate: 100, has_data: true });
+    expect(detail).toMatchObject({ window_hit_rate: 0, baseline_hit_rate: 100, has_data: true, clusters: [] });
+    expect(detail.timeline.length).toBeGreaterThanOrEqual(2);
+    expect(detail.timeline.every((pt) => pt.hit_rate >= 0 && pt.hit_rate <= 1)).toBe(true);
     expect(detail.recent_misses).toHaveLength(50);
-    expect(detail.recent_misses.every((row) => row.ip === "0.0.0.0")).toBe(true);
+    expect(detail.recent_misses.every((row) => row.ip === "192.0.2.xxx")).toBe(true);
   });
 
   it("runs current-window detectors without a baseline and keeps concurrent scopes isolated", async () => {

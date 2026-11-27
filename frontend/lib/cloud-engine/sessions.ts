@@ -10,6 +10,7 @@ import { cloudActiveLogFieldIds } from "./active-log-fields";
 import { requireSafeIdent } from "./sql-validator";
 import { CloudBudgetError } from "./range-loader";
 import { redactQueryRowsForPii } from "./query";
+import { maskIp } from "./pii-mask";
 import { compileFiltersToSql, duckSqlString, type DuckDBColumnType } from "./dashboard/duckdb";
 import {
   buildSessionsEnrichSql,
@@ -132,47 +133,281 @@ export interface SessionTokenPayload {
   svc: string;
 }
 
-const SESSION_TOKEN_STORE_MAX = 4096;
-const _sessionTokenStore = new Map<string, SessionTokenPayload>();
+const SESSION_HMAC_KEY_STORAGE = "fla.cloud-session-hmac-key.v1";
+const SESSION_TOKEN_TTL_SECONDS = 7 * 86_400;
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
 
-function generateOpaqueSessionToken(): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return `fls_${crypto.randomUUID().replace(/-/g, "")}`;
+function generatePrimes(count: number): number[] {
+  const primes: number[] = [];
+  for (let n = 2; primes.length < count; n++) {
+    let prime = true;
+    for (let i = 0; i < primes.length && primes[i] * primes[i] <= n; i++) {
+      if (n % primes[i] === 0) {
+        prime = false;
+        break;
+      }
+    }
+    if (prime) primes.push(n);
   }
-  const bytes = new Uint8Array(16);
+  return primes;
+}
+
+const SHA256_PRIMES = generatePrimes(64);
+const SHA256_IV = Uint32Array.from(
+  SHA256_PRIMES.slice(0, 8),
+  (p) => Math.floor((Math.sqrt(p) % 1) * 0x100000000) >>> 0,
+);
+const SHA256_K = Uint32Array.from(
+  SHA256_PRIMES,
+  (p) => Math.floor((Math.cbrt(p) % 1) * 0x100000000) >>> 0,
+);
+
+function rotr32(x: number, n: number): number {
+  return (x >>> n) | (x << (32 - n));
+}
+
+function sha256Bytes(data: Uint8Array): Uint8Array {
+  const bitLen = data.length * 8;
+  const paddedLen = Math.ceil((data.length + 9) / 64) * 64;
+  const padded = new Uint8Array(paddedLen);
+  padded.set(data);
+  padded[data.length] = 0x80;
+  const view = new DataView(padded.buffer);
+  view.setUint32(paddedLen - 8, Math.floor(bitLen / 0x100000000), false);
+  view.setUint32(paddedLen - 4, bitLen >>> 0, false);
+
+  const h = new Uint32Array(SHA256_IV);
+  const w = new Uint32Array(64);
+  for (let offset = 0; offset < paddedLen; offset += 64) {
+    for (let i = 0; i < 16; i++) w[i] = view.getUint32(offset + i * 4, false);
+    for (let i = 16; i < 64; i++) {
+      const s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+      const s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+    }
+    let [a, b, c, d, e, f, g, hh] = h;
+    for (let i = 0; i < 64; i++) {
+      const S1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+      const ch = (e & f) ^ (~e & g);
+      const temp1 = (hh + S1 + ch + SHA256_K[i] + w[i]) >>> 0;
+      const S0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const temp2 = (S0 + maj) >>> 0;
+      hh = g;
+      g = f;
+      f = e;
+      e = (d + temp1) >>> 0;
+      d = c;
+      c = b;
+      b = a;
+      a = (temp1 + temp2) >>> 0;
+    }
+    h[0] = (h[0] + a) >>> 0;
+    h[1] = (h[1] + b) >>> 0;
+    h[2] = (h[2] + c) >>> 0;
+    h[3] = (h[3] + d) >>> 0;
+    h[4] = (h[4] + e) >>> 0;
+    h[5] = (h[5] + f) >>> 0;
+    h[6] = (h[6] + g) >>> 0;
+    h[7] = (h[7] + hh) >>> 0;
+  }
+
+  const out = new Uint8Array(32);
+  const outView = new DataView(out.buffer);
+  for (let i = 0; i < 8; i++) outView.setUint32(i * 4, h[i], false);
+  return out;
+}
+
+function concatBytes(...parts: Uint8Array[]): Uint8Array {
+  let total = 0;
+  for (const part of parts) total += part.length;
+  const out = new Uint8Array(total);
+  let pos = 0;
+  for (const part of parts) {
+    out.set(part, pos);
+    pos += part.length;
+  }
+  return out;
+}
+
+function hmacSha256(key: Uint8Array, message: Uint8Array): Uint8Array {
+  const k = key.length > 64 ? sha256Bytes(key) : key;
+  const ipad = new Uint8Array(64);
+  const opad = new Uint8Array(64);
+  for (let i = 0; i < 64; i++) {
+    const b = i < k.length ? k[i] : 0;
+    ipad[i] = b ^ 0x36;
+    opad[i] = b ^ 0x5c;
+  }
+  return sha256Bytes(concatBytes(opad, sha256Bytes(concatBytes(ipad, message))));
+}
+
+function xorCtr(encKey: Uint8Array, iv: Uint8Array, input: Uint8Array): Uint8Array {
+  const out = new Uint8Array(input.length);
+  const counterBlock = new Uint8Array(encKey.length + iv.length + 4);
+  counterBlock.set(encKey, 0);
+  counterBlock.set(iv, encKey.length);
+  const counterView = new DataView(counterBlock.buffer);
+  for (let offset = 0, block = 0; offset < input.length; offset += 32, block++) {
+    counterView.setUint32(encKey.length + iv.length, block, false);
+    const pad = sha256Bytes(counterBlock);
+    const end = Math.min(32, input.length - offset);
+    for (let i = 0; i < end; i++) out[offset + i] = input[offset + i] ^ pad[i];
+  }
+  return out;
+}
+
+function toBase64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function fromBase64Url(input: string): Uint8Array | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(input)) return null;
+  const padLen = (4 - (input.length % 4)) % 4;
+  const b64 = input.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat(padLen);
+  try {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  } catch {
+    return null;
+  }
+}
+
+function randomBytes(length: number): Uint8Array {
+  const bytes = new Uint8Array(length);
   if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
     crypto.getRandomValues(bytes);
   } else {
-    for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+    for (let i = 0; i < length; i++) bytes[i] = Math.floor(Math.random() * 256);
   }
-  return `fls_${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}`;
+  return bytes;
+}
+
+let _cachedSessionSecret: Uint8Array | null = null;
+
+function readStorageKey(storage: Storage | undefined): Uint8Array | null {
+  if (!storage) return null;
+  try {
+    const raw = storage.getItem(SESSION_HMAC_KEY_STORAGE);
+    if (!raw) return null;
+    const decoded = fromBase64Url(raw);
+    return decoded && decoded.length === 32 ? decoded : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStorageKey(storage: Storage | undefined, encoded: string): boolean {
+  if (!storage) return false;
+  try {
+    storage.setItem(SESSION_HMAC_KEY_STORAGE, encoded);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function getSessionSecret(): Uint8Array {
+  if (_cachedSessionSecret) return _cachedSessionSecret;
+  const local = typeof globalThis !== "undefined" ? (globalThis as { localStorage?: Storage }).localStorage : undefined;
+  const session = typeof globalThis !== "undefined" ? (globalThis as { sessionStorage?: Storage }).sessionStorage : undefined;
+  const existing = readStorageKey(local) ?? readStorageKey(session);
+  if (existing) {
+    _cachedSessionSecret = existing;
+    return existing;
+  }
+  const secret = randomBytes(32);
+  const encoded = toBase64Url(secret);
+  if (!writeStorageKey(local, encoded)) {
+    writeStorageKey(session, encoded);
+  }
+  _cachedSessionSecret = secret;
+  return secret;
+}
+
+export function clearCloudSessionKeys(): void {
+  _cachedSessionSecret = null;
+  try {
+    (globalThis as { localStorage?: Storage }).localStorage?.removeItem(SESSION_HMAC_KEY_STORAGE);
+  } catch {
+    // ignore storage errors
+  }
+  try {
+    (globalThis as { sessionStorage?: Storage }).sessionStorage?.removeItem(SESSION_HMAC_KEY_STORAGE);
+  } catch {
+    // ignore storage errors
+  }
 }
 
 export function clearSessionTokens(): void {
-  _sessionTokenStore.clear();
+  clearCloudSessionKeys();
 }
 
+const SESSION_ENC_DOMAIN = textEncoder.encode("fla.session.enc.v1");
+const SESSION_MAC_DOMAIN = textEncoder.encode("fla.session.mac.v1");
+
 export function sealSessionToken(payload: SessionTokenPayload): string {
-  const token = generateOpaqueSessionToken();
-  if (_sessionTokenStore.size >= SESSION_TOKEN_STORE_MAX) {
-    const oldest = _sessionTokenStore.keys().next().value;
-    if (oldest !== undefined) _sessionTokenStore.delete(oldest);
-  }
-  _sessionTokenStore.set(token, {
+  const secret = getSessionSecret();
+  const encKey = hmacSha256(secret, SESSION_ENC_DOMAIN);
+  const iv = randomBytes(16);
+  const exp = Math.floor(Date.now() / 1000) + SESSION_TOKEN_TTL_SECONDS;
+  const wirePayload = {
+    v: 1,
+    svc: typeof payload.svc === "string" ? payload.svc : "",
     ip: payload.ip,
     ja4: typeof payload.ja4 === "string" ? payload.ja4 : null,
     s: payload.s,
     e: payload.e,
-    svc: typeof payload.svc === "string" ? payload.svc : "",
-  });
-  return token;
+    exp,
+  };
+  const plainBytes = textEncoder.encode(JSON.stringify(wirePayload));
+  const ciphertext = xorCtr(encKey, iv, plainBytes);
+  const mac = hmacSha256(secret, concatBytes(SESSION_MAC_DOMAIN, iv, ciphertext));
+  return `fls_${toBase64Url(concatBytes(iv, ciphertext, mac))}`;
 }
 
 export function openSessionToken(token: string): SessionTokenPayload | null {
   if (typeof token !== "string" || !token.startsWith("fls_")) return null;
-  const entry = _sessionTokenStore.get(token);
-  if (!entry) return null;
-  return { ...entry };
+  const raw = fromBase64Url(token.slice(4));
+  if (!raw || raw.length < 16 + 2 + 32) return null;
+  const secret = getSessionSecret();
+  const iv = raw.subarray(0, 16);
+  const ciphertext = raw.subarray(16, raw.length - 32);
+  const givenMac = raw.subarray(raw.length - 32);
+  const expectedMac = hmacSha256(secret, concatBytes(SESSION_MAC_DOMAIN, iv, ciphertext));
+  let diff = 0;
+  for (let i = 0; i < 32; i++) diff |= givenMac[i] ^ expectedMac[i];
+  if (diff !== 0) return null;
+
+  const encKey = hmacSha256(secret, SESSION_ENC_DOMAIN);
+  const plainBytes = xorCtr(encKey, iv, ciphertext);
+  try {
+    const parsed = JSON.parse(textDecoder.decode(plainBytes)) as Record<string, unknown>;
+    if (
+      parsed.v !== 1 ||
+      typeof parsed.ip !== "string" ||
+      typeof parsed.s !== "string" ||
+      typeof parsed.e !== "string" ||
+      typeof parsed.exp !== "number" ||
+      parsed.exp <= Math.floor(Date.now() / 1000)
+    ) {
+      return null;
+    }
+    return {
+      ip: parsed.ip,
+      ja4: typeof parsed.ja4 === "string" ? parsed.ja4 : null,
+      s: parsed.s,
+      e: parsed.e,
+      svc: typeof parsed.svc === "string" ? parsed.svc : "",
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** Every request column the /api/sessions list reads, over both passes. */
@@ -288,7 +523,7 @@ export function buildSessionsCteSql(options: {
   );
   const sortCol = SESSIONS_SORTABLE_COLUMNS.has(options.sortBy ?? "")
     ? (options.sortBy as string)
-    : "req_count";
+    : "session_start";
   const sortDir = options.sortDir === "asc" ? "ASC" : "DESC";
   const limit = Math.max(1, Math.min(Number(options.limit ?? 50), 500));
   const offset = Math.max(0, Number(options.offset ?? 0));
@@ -659,7 +894,7 @@ export async function handleSessionsList(
 
   const sessions: SessionSummaryRow[] = rawRows.map((r) => {
     const rawIp = String(r.ip ?? "");
-    const rawJa4 = r.ja4 != null ? String(r.ja4) : null;
+    const rawJa4 = r.ja4 != null ? String(r.ja4) : "";
     const sessionStart = typeof r.session_start === "number"
       ? new Date(r.session_start).toISOString()
       : String(r.session_start ?? body.start_time);
@@ -678,14 +913,14 @@ export async function handleSessionsList(
     // Seal token BEFORE masking IP so analyst-no-pii can still drill into `/api/sessions/detail`
     const token = sealSessionToken({
       ip: rawIp,
-      ja4: rawJa4,
+      ja4: rawJa4 || null,
       s: sessionStart,
       e: sessionEnd,
       svc: serviceId,
     });
 
     return {
-      ip: maskIps ? "0.0.0.0" : rawIp,
+      ip: maskIps ? maskIp(rawIp) : rawIp,
       ja4: rawJa4,
       session_start: sessionStart,
       session_end: sessionEnd,
@@ -696,17 +931,17 @@ export async function handleSessionsList(
         ? "[redacted]"
         : r.edge_sid != null
           ? String(r.edge_sid)
-          : null,
+          : "",
       edge_count: Number(r.edge_count ?? 0),
       shield_count: Number(r.shield_count ?? 0),
       asn: r.asn != null ? Number(r.asn) : null,
-      country: r.country != null ? String(r.country) : null,
+      country: r.country != null ? String(r.country) : "",
       reqs_4xx: reqs4xx,
       reqs_5xx: reqs5xx,
       total_bytes: Number(r.total_bytes ?? 0),
       median_rtt_ms:
         r.median_rtt_ms != null ? Number(r.median_rtt_ms) : null,
-      ua: r.ua != null ? String(r.ua) : null,
+      ua: r.ua != null ? String(r.ua) : "",
       unique_urls: Number(r.unique_urls ?? 0),
       flagged,
       session_token: token,
@@ -741,7 +976,7 @@ export async function handleSessionsList(
       has_ja4: activeFields.has("ja4"),
       has_edge: activeFields.has("edge"),
       has_edge_sid: activeFields.has("edge_sid"),
-      has_cmcd: activeFields.has("cmcd_sid"),
+      has_cmcd: Array.from(activeFields).some((f) => f === "cmcd_sid" || f.startsWith("cmcd_")),
       min_reqs_flag: minReqsFlag,
       min_4xx_pct_flag: min4xxPctFlag,
       asn_names: asnNames,
@@ -766,7 +1001,7 @@ export async function handleSessionsDetail(
   let endTime = body.end_time ?? "";
 
   if (body.session_token) {
-    if (maskIps && body.ip && body.ip !== "0.0.0.0") {
+    if (maskIps && body.ip && body.ip !== "0.0.0.0" && body.ip !== "[redacted]") {
       return {
         status: 403,
         body: {
@@ -783,7 +1018,7 @@ export async function handleSessionsDetail(
         status: 400,
         body: {
           detail: {
-            error: "invalid_session_token",
+            error: "session_token_invalid",
             message: "Invalid or corrupted session_token.",
           },
         },
@@ -794,7 +1029,7 @@ export async function handleSessionsDetail(
     startTime = opened.s;
     endTime = opened.e;
   } else if (maskIps) {
-    if (targetIp && targetIp !== "0.0.0.0") {
+    if (targetIp && targetIp !== "0.0.0.0" && targetIp !== "[redacted]") {
       return {
         status: 403,
         body: {
@@ -819,7 +1054,7 @@ export async function handleSessionsDetail(
   }
 
   const tableName = requireSafeIdent(ctx.tableName ?? "requests", "tableName");
-  const useJa4Only = maskIps && !body.session_token && (!targetIp || targetIp === "0.0.0.0") && Boolean(targetJa4);
+  const useJa4Only = maskIps && !body.session_token && (!targetIp || targetIp === "0.0.0.0" || targetIp === "[redacted]") && Boolean(targetJa4);
   const ja4Clause =
     targetJa4 != null && targetJa4 !== ""
       ? `${useJa4Only ? "" : " AND "}"ja4" = ${duckSqlString(targetJa4)}`
@@ -880,14 +1115,27 @@ export function buildScoringSourceSql(
 ): string {
   const tbl = requireSafeIdent(tableName, "tableName");
   if (!availableColumns) return tbl;
+  const hasCompliance = availableColumns.has("edge_cookie_compliance");
   const missingSelects: string[] = [];
   for (const [col, sqlType] of Object.entries(SCORING_OPTIONAL_COLUMNS)) {
     if (!availableColumns.has(col)) {
       missingSelects.push(`CAST(NULL AS ${sqlType}) AS "${col}"`);
     }
   }
-  if (missingSelects.length === 0) return tbl;
-  return `(SELECT *, ${missingSelects.join(", ")} FROM ${tbl})`;
+  const complianceExpr = hasCompliance
+    ? `CASE lower(trim(CAST("edge_cookie_compliance" AS VARCHAR)))
+      WHEN '' THEN CAST(NULL AS VARCHAR)
+      WHEN 'missin' THEN 'missing'
+      WHEN 'unknow' THEN 'unknown'
+      WHEN 'tamper' THEN 'tampered'
+      WHEN 'expire' THEN 'expired'
+      ELSE lower(trim(CAST("edge_cookie_compliance" AS VARCHAR)))
+    END AS "edge_cookie_compliance"`
+    : null;
+  if (!complianceExpr && missingSelects.length === 0) return tbl;
+  const baseSelect = complianceExpr ? `* REPLACE (${complianceExpr})` : "*";
+  const suffix = missingSelects.length > 0 ? `, ${missingSelects.join(", ")}` : "";
+  return `(SELECT ${baseSelect}${suffix} FROM ${tbl})`;
 }
 
 export const TOP_FLAGGED_SQL = `
@@ -931,311 +1179,3 @@ export const COMPLIANCE_BREAKDOWN_SQL = `
   GROUP BY 1
   ORDER BY requests DESC
 `;
-
-export interface ScoringLabelRecord {
-  id: string;
-  sid: string;
-  label: "good" | "bad" | "neutral";
-  notes?: string;
-  created_at: string;
-}
-
-export interface ScoringServiceState {
-  enabled: boolean;
-  threshold: number;
-  enforce_threshold: number;
-  l2_enforce: boolean;
-  exclude_regex: string;
-  enforce_status_code: number;
-  labels: Record<string, ScoringLabelRecord>;
-}
-
-const scoringStateByService = new Map<string, ScoringServiceState>();
-
-function getOrCreateScoringState(serviceId: string): ScoringServiceState {
-  let st = scoringStateByService.get(serviceId);
-  if (!st) {
-    st = {
-      enabled: false,
-      threshold: 70,
-      enforce_threshold: 90,
-      l2_enforce: false,
-      exclude_regex: "",
-      enforce_status_code: 429,
-      labels: {},
-    };
-    scoringStateByService.set(serviceId, st);
-  }
-  return st;
-}
-
-export async function handleSessionScoringRoute(
-  method: string,
-  serviceId: string,
-  subPath: string,
-  body: Record<string, unknown> = {},
-  ctx: CloudSessionsContext = {},
-): Promise<CloudHttpResult> {
-  const m = method.toUpperCase();
-  const cleanSub = subPath.replace(/^\/+|\/+$/g, "");
-  const st = getOrCreateScoringState(serviceId);
-
-  const buildStatus = () => ({
-    enabled: st.enabled,
-    scorer_drift: false,
-    drift_detail: null,
-    drift_known: true,
-    service_id: serviceId,
-  });
-
-  const buildConfig = () => ({
-    status: buildStatus(),
-    threshold: { threshold: st.threshold, enforce_threshold: st.enforce_threshold },
-    exclude_regex: { pattern: st.exclude_regex },
-    enforce_status_code: { status_code: st.enforce_status_code },
-    l2_enforce: { enabled: st.l2_enforce },
-  });
-
-  const buildHealth = () => ({
-    since_hours: 24,
-    total_edge_rows: 0,
-    scored_rows: 0,
-    fire_rate_pct: 0,
-    distinct_sids: 0,
-    avg_score: null,
-    p50_score: null,
-    p95_score: null,
-    max_score: null,
-    scorer_errors: 0,
-    fail_open_rate_pct: 0,
-    top_reasons: [],
-    fail_open_breakdown: [],
-    latency: {
-      avg_rtt_ms: null,
-      p95_rtt_ms: null,
-      avg_exec_us: null,
-      p95_exec_us: null,
-    },
-    matrix_staleness: {
-      version: 1,
-      updated_at: null,
-      stale: false,
-    },
-    l2_enforce: st.l2_enforce,
-  });
-
-  const buildEvaluation = () => {
-    const labels = Object.values(st.labels);
-    const good = labels.filter((l) => l.label === "good").length;
-    const bad = labels.filter((l) => l.label === "bad").length;
-    const neutral = labels.filter((l) => l.label === "neutral").length;
-    return {
-      ready: good >= 20 && bad >= 20,
-      min_per_class: 20,
-      counts: { good, bad, neutral },
-      auc_roc: null,
-      auc_pr: null,
-      f1: null,
-      precision: null,
-      recall: null,
-    };
-  };
-
-  const buildAnalytics = () => ({
-    top_flagged: { since_hours: 24, count: 0, rows: [] },
-    score_distribution: { since_hours: 24, count: 0, rows: [] },
-    compliance_breakdown: { since_hours: 24, count: 0, rows: [] },
-    latency_timeseries: {
-      since_hours: 24,
-      count: 0,
-      rows: [],
-      has_latency: false,
-      granularity: "1h",
-    },
-    health: buildHealth(),
-    evaluation: buildEvaluation(),
-    evaluation_per_reason: { rows: [] },
-  });
-
-  if (cleanSub === "status" && m === "GET") {
-    return { status: 200, body: buildStatus() };
-  }
-  if (cleanSub === "enable" && m === "POST") {
-    st.enabled = true;
-    return { status: 200, body: buildStatus() };
-  }
-  if (cleanSub === "disable" && m === "POST") {
-    st.enabled = false;
-    return { status: 200, body: buildStatus() };
-  }
-  if ((cleanSub === "redeploy" || cleanSub === "rescore") && m === "POST") {
-    return { status: 200, body: { ok: true, status: buildStatus() } };
-  }
-  if (cleanSub === "config" && m === "GET") {
-    return { status: 200, body: buildConfig() };
-  }
-  if (cleanSub === "health" && m === "GET") {
-    return { status: 200, body: buildHealth() };
-  }
-  if (cleanSub === "analytics" && m === "GET") {
-    return { status: 200, body: buildAnalytics() };
-  }
-  if (cleanSub === "dashboard" && m === "GET") {
-    return {
-      status: 200,
-      body: {
-        ...buildConfig(),
-        ...buildAnalytics(),
-        curves: { roc: [], pr: [] },
-        threshold_preview: {
-          threshold: st.threshold,
-          since_hours: 24,
-          total_scored_sessions: 0,
-          flagged: { total: 0, good: 0, bad: 0, unlabeled: 0 },
-          passed: { good: 0, bad: 0, unlabeled: 0 },
-          precision: null,
-          recall: null,
-        },
-      },
-    };
-  }
-  if (cleanSub === "top-flagged" && m === "GET") {
-    const source = buildScoringSourceSql(
-      ctx.tableName ?? "requests",
-      ctx.availableColumns,
-    );
-    const rows = ctx.runSql
-      ? await ctx.runSql(TOP_FLAGGED_SQL.replace("{source}", source))
-      : [];
-    return { status: 200, body: { since_hours: 24, count: rows.length, rows } };
-  }
-  if (cleanSub === "score-distribution" && m === "GET") {
-    return { status: 200, body: { since_hours: 24, count: 0, rows: [] } };
-  }
-  if (cleanSub === "compliance-breakdown" && m === "GET") {
-    return { status: 200, body: { since_hours: 24, count: 0, rows: [] } };
-  }
-  if (cleanSub === "latency-timeseries" && m === "GET") {
-    return {
-      status: 200,
-      body: {
-        since_hours: 24,
-        count: 0,
-        rows: [],
-        has_latency: false,
-        granularity: "1h",
-      },
-    };
-  }
-  if (cleanSub === "threshold-preview" && m === "GET") {
-    return {
-      status: 200,
-      body: {
-        threshold: st.threshold,
-        since_hours: 24,
-        total_scored_sessions: 0,
-        flagged: { total: 0, good: 0, bad: 0, unlabeled: 0 },
-        passed: { good: 0, bad: 0, unlabeled: 0 },
-        precision: null,
-        recall: null,
-      },
-    };
-  }
-  if (cleanSub === "evaluation" && m === "GET") {
-    return { status: 200, body: buildEvaluation() };
-  }
-  if (cleanSub === "evaluation/per-reason" && m === "GET") {
-    return { status: 200, body: { rows: [] } };
-  }
-  if (cleanSub === "curves" && m === "GET") {
-    return { status: 200, body: { roc: [], pr: [] } };
-  }
-  if (cleanSub === "labels" && m === "GET") {
-    const list = Object.values(st.labels);
-    return {
-      status: 200,
-      body: {
-        labels: list,
-        counts: buildEvaluation().counts,
-      },
-    };
-  }
-  if (cleanSub === "labels" && m === "POST") {
-    const sid = String(body.sid ?? "");
-    const label = (body.label as "good" | "bad" | "neutral") ?? "neutral";
-    const id = `lbl-${Object.keys(st.labels).length + 1}`;
-    const record: ScoringLabelRecord = {
-      id,
-      sid,
-      label,
-      notes: typeof body.notes === "string" ? body.notes : undefined,
-      created_at: new Date().toISOString(),
-    };
-    st.labels[id] = record;
-    return { status: 200, body: record };
-  }
-  if (cleanSub.startsWith("labels/") && m === "DELETE") {
-    const labelId = cleanSub.slice("labels/".length);
-    delete st.labels[labelId];
-    return { status: 200, body: { deleted: true, id: labelId } };
-  }
-  if (cleanSub === "threshold") {
-    if (m === "PUT") {
-      if (typeof body.threshold === "number") st.threshold = body.threshold;
-      if (typeof body.enforce_threshold === "number") {
-        st.enforce_threshold = body.enforce_threshold;
-      }
-    }
-    return {
-      status: 200,
-      body: {
-        threshold: st.threshold,
-        enforce_threshold: st.enforce_threshold,
-      },
-    };
-  }
-  if (cleanSub === "enforce-threshold") {
-    if (m === "PUT" && typeof body.enforce_threshold === "number") {
-      st.enforce_threshold = body.enforce_threshold;
-    }
-    return { status: 200, body: { enforce_threshold: st.enforce_threshold } };
-  }
-  if (cleanSub === "l2-enforce") {
-    if (m === "PUT" && typeof body.enabled === "boolean") {
-      st.l2_enforce = body.enabled;
-    }
-    return { status: 200, body: { enabled: st.l2_enforce } };
-  }
-  if (cleanSub === "exclude-regex") {
-    if (m === "PUT" && typeof body.pattern === "string") {
-      st.exclude_regex = body.pattern;
-    }
-    return { status: 200, body: { pattern: st.exclude_regex } };
-  }
-  if (cleanSub === "exclude-regex/validate" && m === "POST") {
-    const pat = typeof body.pattern === "string" ? body.pattern : "";
-    try {
-      new RegExp(pat);
-      return { status: 200, body: { valid: true, pattern: pat } };
-    } catch (err) {
-      return {
-        status: 400,
-        body: {
-          valid: false,
-          error: err instanceof Error ? err.message : String(err),
-        },
-      };
-    }
-  }
-  if (cleanSub === "enforce-status-code") {
-    if (m === "PUT" && typeof body.status_code === "number") {
-      st.enforce_status_code = body.status_code;
-    }
-    return { status: 200, body: { status_code: st.enforce_status_code } };
-  }
-
-  return {
-    status: 200,
-    body: { ok: true, service_id: serviceId, route: `/api/services/${serviceId}/scoring/${cleanSub}` },
-  };
-}

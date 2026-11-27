@@ -483,6 +483,7 @@ pub fn query_range<R: Runtime>(
         .map(|(name, count)| {
             json!({
                 "bot_name": name,
+                "name": name,
                 "wellknown_bot_name": Value::Null,
                 "category": bot_cats.get(name).cloned(),
                 "request_count": count,
@@ -502,6 +503,7 @@ pub fn query_range<R: Runtime>(
         .map(|row| {
             json!({
                 "bot_name": row["bot_name"],
+                "name": row["bot_name"],
                 "category": row["category"],
                 "request_count": row["request_count"],
             })
@@ -948,5 +950,39 @@ mod tests {
         let st = rt.state();
         assert_eq!(st.next_cursor, None);
         assert_eq!(st.last_ts.as_deref(), Some("2026-11-27T17:10:00Z"));
+    }
+
+    #[test]
+    fn query_range_emits_name_alongside_bot_name_on_ngwaf_bots() {
+        let now = 1_795_800_000;
+        let rt = MockRt::new(now, vec![]);
+        let svc = test_service();
+        let store = make_store(&rt, &svc);
+        let mut summary = DaySummary {
+            version: 1,
+            day: "2026-11-27".into(),
+            ..Default::default()
+        };
+        merge_records(
+            &mut summary,
+            &[BotRecord {
+                waf_req_id: "req-1".into(),
+                bot_name: "Googlebot".into(),
+                category: Some("SEARCH-ENGINE".into()),
+                user_agent: None,
+                timestamp_s: 1_795_799_700,
+                timestamp_iso: "2026-11-27T17:15:00Z".into(),
+            }],
+        );
+        rt.fos.borrow_mut().insert(
+            day_key(store.service, &summary.day),
+            serde_json::to_vec(&summary).expect("serialize day"),
+        );
+
+        let out = query_range(&store, 1_795_799_000, 1_795_800_000, 300).expect("query_range");
+        assert_eq!(out["ngwaf_verified_bots"][0]["bot_name"], "Googlebot");
+        assert_eq!(out["ngwaf_verified_bots"][0]["name"], "Googlebot");
+        assert_eq!(out["ngwaf_bots"][0]["bot_name"], "Googlebot");
+        assert_eq!(out["ngwaf_bots"][0]["name"], "Googlebot");
     }
 }

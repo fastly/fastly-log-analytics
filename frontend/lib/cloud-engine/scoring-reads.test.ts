@@ -61,30 +61,56 @@ describe("Cloud scoring reads", () => {
     const preview = await queryCloudScoring(request("threshold-preview?threshold=50"), "threshold-preview");
     expect(preview).toMatchObject({
       threshold: 50,
-      total_scored: 2,
-      flagged_count: 1,
-      flagged_pct: 50,
+      since_hours: 24,
       total_scored_sessions: 2,
-      flagged: { count: 1, pct: 50 },
-      passed: { count: 1, pct: 50 },
+      flagged: { total: 1, good: 0, bad: 0, unlabeled: 1 },
+      passed: { good: 0, bad: 0, unlabeled: 1 },
+      precision: null,
+      recall: null,
     });
+    const zeroThresh = await queryCloudScoring(request("threshold-preview?threshold=0"), "threshold-preview");
+    expect(zeroThresh).toMatchObject({ threshold: 0, total_scored_sessions: 2, flagged: { total: 2 } });
+    const defaultThresh = await queryCloudScoring(request("threshold-preview"), "threshold-preview");
+    expect(defaultThresh).toMatchObject({ threshold: 75 });
   });
 
-  it("reports scoring off when the service's log field settings leave edge_score off, whatever the files hold", async () => {
+  it("reports scoring off with valid empty OpenAPI shapes when edge_score is off", async () => {
     settings.ids = new Set(["status"]);
     await engine.syncWindow([{ key: "scored", bytes: scoringFixture() }]);
-    expect(await queryCloudScoring(request("analytics"), "analytics")).toEqual({
-      supported: false, available: false, reason: "scoring_fields_not_present",
+    expect(await queryCloudScoring(request("analytics"), "analytics")).toMatchObject({
+      supported: false,
+      available: false,
+      reason: "scoring_fields_not_present",
+      top_flagged: { rows: [] },
+      score_distribution: { rows: [] },
+      compliance_breakdown: { rows: [] },
+      latency_timeseries: { rows: [], has_latency: false },
+      evaluation: { min_per_class: 3, has_min_samples: false },
+      evaluation_per_reason: { buckets: [], min_per_class: 3, has_min_samples_overall: false },
     });
-    expect(settings.asked).toEqual(["fixture-service"]);
+    expect(await queryCloudScoring(request("curves"), "curves")).toMatchObject({
+      supported: false,
+      available: false,
+      reason: "scoring_fields_not_present",
+      roc: [],
+      pr: [],
+      min_per_class: 3,
+      has_min_samples: false,
+    });
+    expect(settings.asked).toEqual(["fixture-service", "fixture-service"]);
   });
 
-  it("does not turn enabled scoring with no scored rows yet into successful empty analytics", async () => {
+  it("returns valid empty OpenAPI shapes when scoring is enabled with no scored rows yet", async () => {
     await engine.syncWindow([{ key: "unscored", bytes: parquetFixture([
       { timestamp: at, status: 200, cache: "HIT", resp_bytes: 100 },
     ]) }]);
-    expect(await queryCloudScoring(request("analytics"), "analytics")).toEqual({
-      supported: true, available: false, reason: "no_scored_rows",
+    expect(await queryCloudScoring(request("analytics"), "analytics")).toMatchObject({
+      supported: true,
+      available: false,
+      reason: "no_scored_rows",
+      top_flagged: { rows: [] },
+      score_distribution: { rows: [] },
+      evaluation_per_reason: { buckets: [], min_per_class: 3 },
     });
   });
 
@@ -106,7 +132,14 @@ describe("Cloud scoring reads", () => {
     expect(escaped).toMatchObject({ event_count: 0 });
     const maskedRequest = new Request(request("top-flagged"), { headers: { "x-mask-ips": "1" } });
     expect(await queryCloudScoring(maskedRequest, "top-flagged")).toMatchObject({
-      rows: [{ ip: "0.0.0.0" }, { ip: "0.0.0.0" }],
+      rows: [{ ip: "192.0.2.xxx" }, { ip: "192.0.2.xxx" }],
+    });
+    const blockedEvents = await cloudScoringRead(
+      new Request(request("sessions/sid-a/events?since_days=1"), { headers: { "x-mask-ips": "1" } }),
+    );
+    expect(blockedEvents?.status).toBe(403);
+    expect(await blockedEvents?.json()).toMatchObject({
+      detail: { error: "pii_policy_violation", field: "sid" },
     });
   });
 
@@ -204,7 +237,7 @@ describe("Cloud scoring reads", () => {
       },
     });
 
-    // Masked request omits ip from pass-2 projection and returns 0.0.0.0.
+    // Masked request omits ip from pass-2 projection and masks missing/unloaded IP to [redacted].
     await engine.reset();
     await engine.syncWindow([{ key: "narrow", bytes: narrowBytes }]);
     loads.length = 0;
@@ -217,8 +250,8 @@ describe("Cloud scoring reads", () => {
     expect(loads[0].columns).not.toContain("ip");
     expect(masked).toMatchObject({
       rows: [
-        { edge_sid: "sid-a", ip: "0.0.0.0", url: "/login" },
-        { edge_sid: "sid-b", ip: "0.0.0.0", url: "/home" },
+        { edge_sid: "sid-a", ip: "[redacted]", url: "/login" },
+        { edge_sid: "sid-b", ip: "[redacted]", url: "/home" },
       ],
     });
 
@@ -253,14 +286,82 @@ describe("Cloud scoring reads", () => {
     });
   });
 
-  it("includes evaluation and evaluation_per_reason in analytics when labels are fetched", async () => {
-    await engine.syncWindow([{ key: "scored", bytes: scoringFixture() }]);
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ labels: [] })));
+  it("includes evaluation, evaluation_per_reason buckets, curves, and labeled threshold-preview", async () => {
+    const labeledBytes = parquetWriteBuffer({
+      columnData: [
+        { name: "timestamp", type: "TIMESTAMP", data: Array.from({ length: 6 }, (_, i) => new Date(at - i * 1000)) },
+        { name: "edge", type: "BOOLEAN", data: [true, true, true, true, true, true] },
+        { name: "edge_score", type: "INT32", data: [10, 20, 30, 80, 90, 95] },
+        { name: "edge_sid", type: "STRING", data: ["g1", "g2", "g3", "b1", "b2", "b3"] },
+        {
+          name: "edge_score_reason",
+          type: "STRING",
+          data: [
+            "cookie-missing",
+            "cookie-missing",
+            "cookie-missing",
+            "cookie-missing,impossibly-fast",
+            "cookie-missing",
+            "cookie-missing",
+          ],
+        },
+      ],
+    });
+    await engine.syncWindow([{ key: "labeled", bytes: labeledBytes }]);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({
+          labels: [
+            { sid: "g1", label: "good" },
+            { sid: "g2", label: "good" },
+            { sid: "g3", label: "good" },
+            { sid: "b1", label: "bad" },
+            { sid: "b2", label: "bad" },
+            { sid: "b3", label: "bad" },
+          ],
+        }),
+      ),
+    );
     const result = await queryCloudScoring(request("analytics"), "analytics");
     expect(result).toMatchObject({
       available: true,
-      evaluation: { n_good: 0, n_bad: 0, min_per_class: 5, has_min_samples: false, auc: null, passed: false },
-      evaluation_per_reason: { rows: [], n_good: 0, n_bad: 0, has_min_samples: false },
+      evaluation: { n_good: 3, n_bad: 3, min_per_class: 3, has_min_samples: true, auc: 1, passed: true },
+      evaluation_per_reason: {
+        n_good: 3,
+        n_bad: 3,
+        min_per_class: 3,
+        has_min_samples_overall: true,
+      },
+    });
+    const perReason = await queryCloudScoring(request("evaluation/per-reason"), "evaluation/per-reason") as {
+      buckets: Array<{ reason: string; n_good: number; n_bad: number; has_min_samples: boolean; auc?: number }>;
+      has_min_samples_overall: boolean;
+    };
+    expect(perReason.has_min_samples_overall).toBe(true);
+    const cookieMissing = perReason.buckets.find((b) => b.reason === "cookie-missing");
+    expect(cookieMissing).toMatchObject({ n_good: 3, n_bad: 3, has_min_samples: true, auc: 1 });
+
+    const curves = await queryCloudScoring(request("curves"), "curves") as {
+      has_min_samples: boolean;
+      min_per_class: number;
+      auc: number;
+      average_precision: number;
+      roc: unknown[];
+      pr: unknown[];
+    };
+    expect(curves).toMatchObject({ has_min_samples: true, min_per_class: 3, auc: 1, average_precision: 1 });
+    expect(curves.roc).toHaveLength(101);
+    expect(curves.pr).toHaveLength(101);
+
+    const preview = await queryCloudScoring(request("threshold-preview?threshold=75"), "threshold-preview");
+    expect(preview).toMatchObject({
+      threshold: 75,
+      total_scored_sessions: 6,
+      flagged: { total: 3, good: 0, bad: 3, unlabeled: 0 },
+      passed: { good: 3, bad: 0, unlabeled: 0 },
+      precision: 1,
+      recall: 1,
     });
   });
 });

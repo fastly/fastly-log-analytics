@@ -1,7 +1,6 @@
 'use client'
 
 import React from 'react'
-import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { useQueryClient } from '@tanstack/react-query'
 import { Loader2, Pencil, Trash2 } from 'lucide-react'
 import type { ColumnDef } from '@/lib/table'

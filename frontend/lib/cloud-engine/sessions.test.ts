@@ -10,7 +10,8 @@ import {
   buildScoringSourceSql,
   buildSessionsCteSql,
   buildSessionsRollupStitchSql,
-  handleSessionScoringRoute,
+  clearCloudSessionKeys,
+  clearSessionTokens,
   handleSessionsDetail,
   handleSessionsList,
   openSessionToken,
@@ -134,7 +135,7 @@ describe("cloud-engine sessions & session scoring module", () => {
     });
   });
 
-  it("seals session_token before masking IP to 0.0.0.0 for analyst-no-pii", async () => {
+  it("seals session_token before masking IP to a.b.c.xxx for analyst-no-pii", async () => {
     const listRes = await handleSessionsList(
       {
         service_id: "svc-1",
@@ -161,7 +162,7 @@ describe("cloud-engine sessions & session scoring module", () => {
     expect(listRes.status).toBe(200);
     if ("sessions" in listRes.body) {
       const row = listRes.body.sessions[0];
-      expect(row.ip).toBe("0.0.0.0");
+      expect(row.ip).toBe("198.51.100.xxx");
       expect(row.edge_sid).toBe("[redacted]");
       expect(row.flagged).toBe(true);
 
@@ -211,37 +212,24 @@ describe("cloud-engine sessions & session scoring module", () => {
     });
   });
 
-  it("synthesizes missing edge_score columns and serves /scoring/* routes", async () => {
-    const sourceSql = buildScoringSourceSql(
+  it("synthesizes missing edge_score columns and normalizes truncated edge_cookie_compliance", async () => {
+    const missingSql = buildScoringSourceSql(
       "requests",
       new Set(["timestamp", "ip", "url"]),
     );
-    expect(sourceSql).toContain('CAST(NULL AS DOUBLE) AS "edge_score"');
+    expect(missingSql).toContain('CAST(NULL AS DOUBLE) AS "edge_score"');
 
-    const statusRes = await handleSessionScoringRoute(
-      "GET",
-      "svc-1",
-      "status",
+    const normalizedSql = buildScoringSourceSql(
+      "requests",
+      new Set(["timestamp", "edge_score", "edge_cookie_compliance"]),
     );
-    expect(statusRes.status).toBe(200);
-
-    const enableRes = await handleSessionScoringRoute(
-      "POST",
-      "svc-1",
-      "enable",
-    );
-    expect(enableRes.body).toMatchObject({ enabled: true });
-
-    const threshRes = await handleSessionScoringRoute(
-      "PUT",
-      "svc-1",
-      "threshold",
-      { threshold: 85, enforce_threshold: 95 },
-    );
-    expect(threshRes.body).toEqual({ threshold: 85, enforce_threshold: 95 });
+    expect(normalizedSql).toContain("'missin' THEN 'missing'");
+    expect(normalizedSql).toContain("'unknow' THEN 'unknown'");
+    expect(normalizedSql).toContain("'tamper' THEN 'tampered'");
+    expect(normalizedSql).toContain("'expire' THEN 'expired'");
   });
 
-  it("round-trips session tokens cleanly", () => {
+  it("round-trips session tokens cleanly", async () => {
     const token = sealSessionToken({
       ip: "203.0.113.9",
       ja4: null,
@@ -256,7 +244,53 @@ describe("cloud-engine sessions & session scoring module", () => {
       e: "2026-11-04T00:10:00Z",
       svc: "svc-test",
     });
-    expect(openSessionToken("not-valid-base64-json")).toBeNull();
+    const opened = openSessionToken("not-valid-base64-json");
+    expect(opened).toBeNull();
+
+    const badTokenRes = await handleSessionsDetail({ session_token: "not-valid-token" }, {});
+    expect(badTokenRes.status).toBe(400);
+    expect(badTokenRes.body).toMatchObject({ detail: { error: "session_token_invalid" } });
+
+    clearCloudSessionKeys();
+    expect(openSessionToken(token)).toBeNull();
+    clearSessionTokens();
+  });
+
+  it("defaults sort_by to session_start and falls back missing country/ua/edge_sid/ja4 to empty string", async () => {
+    const res = await handleSessionsList(
+      {
+        start_time: "2026-11-21T00:00:00Z",
+        end_time: "2026-11-22T00:00:00Z",
+      },
+      {
+        availableColumns: new Set(["timestamp", "ts_ms", "ip"]),
+        loadedFromMs: 0,
+        runSql: async (sql) => {
+          expect(sql).toContain("session_start DESC");
+          return [
+            {
+              ip: "198.51.100.1",
+              ja4: null,
+              country: null,
+              ua: null,
+              edge_sid: null,
+              session_start: "2026-11-21T10:00:00Z",
+              session_end: "2026-11-21T10:05:00Z",
+              req_count: 5,
+            },
+          ];
+        },
+      },
+    );
+    expect(res.status).toBe(200);
+    if ("sessions" in res.body) {
+      expect(res.body.sessions[0]).toMatchObject({
+        country: "",
+        ua: "",
+        edge_sid: "",
+        ja4: "",
+      });
+    }
   });
 
   it("clamps Pass 2 enriched unique_urls to Pass 1 req_count when late shards arrive mid-query", async () => {

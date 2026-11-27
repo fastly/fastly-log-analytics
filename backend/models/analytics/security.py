@@ -151,6 +151,7 @@ class SecurityAggregatesResponse(_SecurityBotsPairMixin):
     ngwaf_verified_bots_ts: list[NgwafVerifiedBotsTsRow] = []
     wellknown_bots: list[WellknownBotRow] = []
     bot_efficiency: list[BotEfficiencyRow] = []
+    rdns_verification_available: bool = True
 
 
 class SecurityTopBotsResponse(_SecurityBotsPairMixin):

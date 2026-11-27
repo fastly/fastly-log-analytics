@@ -118,17 +118,17 @@ it.each([
   expect(screen.queryByRole('link', { name: isStreaming ? 'Session Details' : 'Stream Details' })).not.toBeInTheDocument()
 })
 
-it('keeps the Cloud token out of the link but resolves it in the tab that opened it', async () => {
+it('uses the durable token link directly across tabs in Cloud mode without sessionStorage ref indirection', async () => {
   setCloudModeRuntime(true)
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  const token = 'cloud-token-containing-client-identifiers'
+  const token = 'fls_durable_cloud_token'
   post.mockResolvedValue({ data: { columns: ['status'], data: [request(12, 200)] } })
   const modal = render(
     <QueryClientProvider client={client}>
       <NuqsTestingAdapter>
         <SessionDetailModal
           selectedSession={{
-            ip: '192.0.2.1', session_token: token, session_start: request(12, 200).timestamp,
+            ip: '192.0.2.xxx', session_token: token, session_start: request(12, 200).timestamp,
             session_end: request(12, 200).timestamp, is_streaming: false, req_count: 1, flagged: false,
           }}
           activeServiceId="selected-service" setSelectedSession={vi.fn()} data={undefined}
@@ -139,10 +139,8 @@ it('keeps the Cloud token out of the link but resolves it in the tab that opened
   )
   const link = screen.getByRole('link', { name: 'Session Details' })
   const href = link.getAttribute('href') ?? ''
-  expect(href).toMatch(/^\/sessions\/detail\?ref=[a-f0-9-]+&service=selected-service$/)
-  expect(href).not.toContain(token)
-  link.parentElement?.addEventListener('click', (event) => event.preventDefault())
-  fireEvent.click(link)
+  expect(href).toBe(`/sessions/detail?token=${encodeURIComponent(token)}&service=selected-service`)
+  expect(href).not.toContain('192.0.2')
   modal.unmount()
   post.mockClear()
   search = href.split('?')[1]
@@ -151,11 +149,10 @@ it('keeps the Cloud token out of the link but resolves it in the tab that opened
   expect(post).toHaveBeenCalledWith('/api/sessions/detail', expect.objectContaining({ body: { session_token: token } }))
 })
 
-it('shows session link unavailable immediately without hanging on retries for a missing ?ref', async () => {
+it('does not request data when a stale ?ref parameter is passed without ?token', () => {
   search = 'ref=00000000-0000-4000-8000-000000000000&service=selected-service'
-  // Use default QueryClient (retry: 3 unless query opts out with retry: false).
   const client = new QueryClient()
   render(<QueryClientProvider client={client}><SessionDetailPage /></QueryClientProvider>)
-  expect(await screen.findByText('Could not load session details', {}, { timeout: 500 })).toBeInTheDocument()
+  expect(screen.getByRole('status')).toHaveTextContent('No session token')
   expect(post).not.toHaveBeenCalled()
 })

@@ -250,7 +250,11 @@ describe("security cloud-engine module (F20)", () => {
         body: JSON.stringify({ sections: ["wellknown_bots", "bot_efficiency"] }),
       }),
     );
-    expect(await response!.json()).toEqual({ wellknown_bots: [], bot_efficiency: [] });
+    expect(await response!.json()).toEqual({
+      wellknown_bots: [],
+      bot_efficiency: [],
+      rdns_verification_available: false,
+    });
     expect(query).not.toHaveBeenCalled();
   });
 
@@ -475,7 +479,9 @@ describe("security cloud-engine module (F20)", () => {
 
   it("formats fastly-acl CSV (ip,comment) and plain exports and masks IPs when requested", () => {
     expect(maskIpValue("198.51.100.42", true)).toBe("198.51.100.xxx");
-    expect(maskIpValue("2001:db8:85a3::8a2e:370:7334", true)).toBe("2001:db8::xxxx");
+    expect(maskIpValue("2001:db8:85a3::8a2e:370:7334", true)).toBe("2001:db8:85a3::");
+    expect(maskIpValue("", true)).toBe("[redacted]");
+    expect(maskIpValue("invalid-ip", true)).toBe("[redacted]");
 
     const clients = [
       { ip: "198.51.100.1", risk_level: "High" as const, impossible_distance: true },
@@ -576,5 +582,48 @@ describe("security cloud-engine module (F20)", () => {
       "timestamp", "ts_ms", "p_type", "country",
     ]);
     expect(securityScanColumns(undefined)).toEqual([...SECURITY_SCAN_COLUMNS]);
+  });
+
+  it("decodes PROXY_TYPE_ENCODE codes, validates /proxies/export case-insensitively with 400 ErrorEnvelope, and sets rdns_verification_available=false", async () => {
+    setSecurityEngineClient({
+      getAvailableColumns: vi.fn().mockResolvedValue(new Set(["timestamp", "p_type", "ip"])),
+      query: vi.fn().mockResolvedValue([
+        { type: "H", count: 12 },
+        { type: "hosting", count: 3 },
+        { type: "A", count: 5 },
+      ]),
+    });
+
+    const aggRes = await handleSecurityRequest(
+      new Request("https://example.test/api/security/aggregates?start_time=2026-06-15T00:00:00Z&end_time=2026-06-15T01:00:00Z", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sections: ["proxy_dist", "wellknown_bots"] }),
+      }),
+    );
+    expect(aggRes?.status).toBe(200);
+    const aggJson = await aggRes!.json();
+    expect(aggJson.rdns_verification_available).toBe(false);
+    expect(aggJson.proxy_dist).toEqual([
+      { type: "hosting", count: 15 },
+      { type: "anonymous", count: 5 },
+    ]);
+
+    const lowerExport = await handleSecurityRequest(
+      new Request("https://example.test/api/security/proxies/export?start_time=2026-06-15T00:00:00Z&end_time=2026-06-15T01:00:00Z&threshold=high&format=TXT"),
+    );
+    expect(lowerExport?.status).toBe(200);
+
+    const badThreshold = await handleSecurityRequest(
+      new Request("https://example.test/api/security/proxies/export?start_time=2026-06-15T00:00:00Z&end_time=2026-06-15T01:00:00Z&threshold=extreme"),
+    );
+    expect(badThreshold?.status).toBe(400);
+    expect(await badThreshold!.json()).toMatchObject({ detail: { error: "bad_request" } });
+
+    const badFormat = await handleSecurityRequest(
+      new Request("https://example.test/api/security/proxies/export?start_time=2026-06-15T00:00:00Z&end_time=2026-06-15T01:00:00Z&format=xml"),
+    );
+    expect(badFormat?.status).toBe(400);
+    expect(await badFormat!.json()).toMatchObject({ detail: { error: "bad_request" } });
   });
 });

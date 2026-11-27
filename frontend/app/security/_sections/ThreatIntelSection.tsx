@@ -20,7 +20,6 @@ import type { PlotlyLayout, PlotlyTrace } from '@/types/api'
 import type { components } from '@/types/api.generated'
 import { SECURITY_INFO, type SecurityData, type SummaryQueryState } from './BotsSection'
 import { approxMark, boundMark, RawWindowNote, readRawWindow, readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
-import { isCloudMode } from '@/lib/cloud-engine/mode'
 
 type TopIpHeader = components['schemas']['TopIpHeaderRow']
 type ThreatIntelItem = components['schemas']['ThreatIntelItem']
@@ -187,7 +186,7 @@ export function ThreatIntelPanel({
 
   return (
     <>
-      <RollupDataThroughSlot reserve={isCloudMode()} meta={rollup} className="mb-6" />
+      <RollupDataThroughSlot reserve={Boolean(rollup)} meta={rollup} className="mb-6" />
       <RawWindowNote window={readRawWindow(response)} className="mb-6" />
       <Card className="col-span-12 border-muted/40 shadow-sm bg-card p-0">
         <DataTable
