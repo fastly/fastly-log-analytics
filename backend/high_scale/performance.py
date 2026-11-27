@@ -385,6 +385,8 @@ def _waterfall(
         )
     rows = service.client.execute(sql, params)
     row = rows[0] if rows else {}
+    if not row or row.get("n_components") == 0 or row.get("component_count") == 0:
+        return {"avg": None}
     return shape_waterfall_avg(row)
 
 

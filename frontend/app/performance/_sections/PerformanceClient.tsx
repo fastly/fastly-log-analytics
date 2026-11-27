@@ -15,7 +15,7 @@ import { ReportLayout } from '@/components/ReportLayout'
 import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCard'
 import { approxMark, boundMark, RawWindowNote, readRawWindow, readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
-import { hasFilterValues, PERFORMANCE_ROLLUP_SECTIONS } from '@/lib/cloud-engine/rollup-sections'
+import { hasFilterValues } from '@/lib/cloud-engine/rollup-sections'
 import { CHART_COLORS, type RangeWire } from '@/lib/utils'
 import type { components, FiltersPayload, PlotlyTrace } from '@/types/api'
 import {
@@ -76,8 +76,6 @@ function PerformanceBody({
   onAsnVisChange,
 }: PerformanceBodyProps) {
   const [sortBy] = useQueryState('sort_by', parseAsStringLiteral(PERF_SORT_BY).withDefault('p99'))
-  // Cloud answers every section from summaries only when unfiltered, so then the raw read never runs.
-  const rollupFirst = isCloudMode() && !hasFilterValues(filterPayload)
   const range = { relativeRange, isAutoRange, startTime, endTime, anchor }
   const postPerformance = (sections: PerformanceSection[] | undefined, rangeBody: RangeWire['rangeBody'], signal: AbortSignal | undefined) =>
     unwrapClient(
@@ -92,29 +90,17 @@ function PerformanceBody({
       }),
     )
 
-  const performanceQuery = useAnalyticsReportQuery({
+  const distQuery = useAnalyticsReportQuery({
     namespace: ['performance', 'aggregates'],
     serviceId: activeServiceId,
     filterPayload,
     range,
     keyParts: [sortBy],
-    queryOptions: { enabled: !rollupFirst },
     queryFn: ({ rangeBody, signal }) => postPerformance(undefined, rangeBody, signal),
   })
 
-  const rollupQuery = useAnalyticsReportQuery({
-    namespace: ['performance', 'aggregates', 'rollup'],
-    serviceId: activeServiceId,
-    filterPayload,
-    range,
-    keyParts: [sortBy],
-    queryOptions: { enabled: rollupFirst },
-    queryFn: ({ rangeBody, signal }) => postPerformance([...PERFORMANCE_ROLLUP_SECTIONS], rangeBody, signal),
-  })
-
-  const distQuery = rollupFirst ? rollupQuery : performanceQuery
   const distData = distQuery.data
-  const rollup = rollupFirst ? readRollupMeta(distData) : undefined
+  const rollup = readRollupMeta(distData)
 
   const ttlDist = distData?.ttl_dist
   const ttlDistData = React.useMemo((): PlotlyTrace[] => {
@@ -168,7 +154,7 @@ function PerformanceBody({
 
   return (
     <>
-      <RollupDataThroughSlot reserve={rollupFirst} meta={rollup} className="mb-4" />
+      <RollupDataThroughSlot reserve={isCloudMode() && !hasFilterValues(filterPayload)} meta={rollup} className="mb-4" />
       <RawWindowNote window={readRawWindow(distData)} className="mb-4" />
       <div className="mb-6">
         <AnalyticsCard

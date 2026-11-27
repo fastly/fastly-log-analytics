@@ -295,14 +295,23 @@ describe("performanceFromRollup", () => {
       .not.toBeNull();
   });
 
-  it("leaves filtered reads, unknown sections, unnamed sections and other routes to the raw scan", async () => {
+  it("treats omitted or empty sections as PERFORMANCE_ROLLUP_SECTIONS", async () => {
+    const expected = performanceAggregatesFromRollup(
+      await rollupOf(WINDOWS),
+      body({ sections: ["ttl_dist", "waterfall", ...TOPS, "scatter"] }),
+    );
+    for (const sections of [undefined, []]) {
+      expect(performanceRollupEligible("/api/performance/aggregates", body({ sections }))).toBe(true);
+      expect(await performanceFromRollup("/api/performance/aggregates", body({ sections }), source())).toEqual(expected);
+    }
+  });
+
+  it("leaves filtered reads, unknown sections, missing start_time and other routes to the raw scan", async () => {
     for (const params of [
       body({ filters: { pop: { values: ["IAD"], mode: "include" } } }),
       body({ filters: { pop: ["IAD"] } }),
       body({ sections: ["waterfall", "nope"] }),
       body({ filters: { pop: { values: ["IAD"], mode: "include" } }, sections: ["scatter"] }),
-      body({ sections: undefined }),
-      body({ sections: [] }),
       body({ start_time: undefined }),
     ]) {
       expect(performanceRollupEligible("/api/performance/aggregates", params) &&

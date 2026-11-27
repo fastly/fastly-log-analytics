@@ -23,7 +23,7 @@ import {
 } from '@/hooks/useReportPageState'
 import { useActiveLogFields } from '@/hooks/useBootstrap'
 import { ReportLayout, type ReportLayoutRenderProps } from '@/components/ReportLayout'
-import { approxMark, boundMark, RawWindowNote, readRawWindow, readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
+import { RawWindowNote, readRawWindow, readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { hasFilterValues, originRollupSections } from '@/lib/cloud-engine/rollup-sections'
 import {
@@ -167,47 +167,31 @@ function OriginReportContent({
   const rollup = rollupSections.length > 0 ? readRollupMeta(rollupQuery.data) : undefined
 
   const sourceOf = (section: OriginSection) => (rollupSections.includes(section) ? rollupQuery : bundle)
-  const approxNote = (section: string, field: string) =>
-    approxMark(rollup, `${section}.${field}`) === ''
-      ? null
-      : boundMark(rollup, `${section}.requests`) === ''
-        ? 'Percentiles are estimated from summary histograms (≈). Counts are exact.'
-        : 'Percentiles are estimated from summary histograms (≈). Request counts are lower bounds (≥): summaries keep only their busiest values.'
   const summarySource = sourceOf('summary')
-  const summaryData = summarySource.data?.summary
-  const summaryNote = approxNote('summary', 'ottfb_p50_ms')
-  const summary = React.useMemo(() => ({
-    data: summaryNote && summaryData ? { ...summaryData, _approx: true, _approx_note: summaryNote } : summaryData,
-    isLoading: summarySource.isLoading, isFetching: summarySource.isFetching, error: summarySource.error,
-  }), [summaryData, summaryNote, summarySource.isLoading, summarySource.isFetching, summarySource.error])
+  const summary = React.useMemo(
+    () => ({ data: summarySource.data?.summary, isLoading: summarySource.isLoading, isFetching: summarySource.isFetching, error: summarySource.error }),
+    [summarySource.data?.summary, summarySource.isLoading, summarySource.isFetching, summarySource.error],
+  )
   const tsSource = sourceOf('timeseries')
-  const tsData = tsSource.data?.timeseries
-  const tsApprox = approxMark(rollup, 'timeseries.value') !== ''
-  const originTs = React.useMemo(() => ({
-    data: tsApprox && tsData
-      ? { ...tsData, _approx: true, _approx_note: 'Percentiles are estimated from summary histograms (≈). Miss counts are exact.' }
-      : tsData,
-    isLoading: tsSource.isLoading, isFetching: tsSource.isFetching, error: tsSource.error,
-  }), [tsData, tsApprox, tsSource.isLoading, tsSource.isFetching, tsSource.error])
+  const originTs = React.useMemo(
+    () => ({ data: tsSource.data?.timeseries, isLoading: tsSource.isLoading, isFetching: tsSource.isFetching, error: tsSource.error }),
+    [tsSource.data?.timeseries, tsSource.isLoading, tsSource.isFetching, tsSource.error],
+  )
   const slowSource = sourceOf('slow_urls')
-  const slowData = slowSource.data?.slow_urls
-  const slowNote = approxNote('slow_urls', 'p95_ms')
-  const slowUrls = React.useMemo(() => ({
-    data: slowNote && slowData ? { ...slowData, _approx: true, _approx_note: slowNote } : slowData,
-    isLoading: slowSource.isLoading, isFetching: slowSource.isFetching, error: slowSource.error,
-  }), [slowData, slowNote, slowSource.isLoading, slowSource.isFetching, slowSource.error])
+  const slowUrls = React.useMemo(
+    () => ({ data: slowSource.data?.slow_urls, isLoading: slowSource.isLoading, isFetching: slowSource.isFetching, error: slowSource.error }),
+    [slowSource.data?.slow_urls, slowSource.isLoading, slowSource.isFetching, slowSource.error],
+  )
   const statusSource = sourceOf('status_codes')
   const statusCodes = React.useMemo(
     () => ({ data: statusSource.data?.status_codes, isLoading: statusSource.isLoading, isFetching: statusSource.isFetching, error: statusSource.error }),
     [statusSource.data?.status_codes, statusSource.isLoading, statusSource.isFetching, statusSource.error],
   )
   const popSource = sourceOf('pop_latency')
-  const popData = popSource.data?.pop_latency
-  const popNote = approxNote('pop_latency', 'p95_ms')
-  const popLatency = React.useMemo(() => ({
-    data: popNote && popData ? { ...popData, _approx: true, _approx_note: popNote } : popData,
-    isLoading: popSource.isLoading, isFetching: popSource.isFetching, error: popSource.error,
-  }), [popData, popNote, popSource.isLoading, popSource.isFetching, popSource.error])
+  const popLatency = React.useMemo(
+    () => ({ data: popSource.data?.pop_latency, isLoading: popSource.isLoading, isFetching: popSource.isFetching, error: popSource.error }),
+    [popSource.data?.pop_latency, popSource.isLoading, popSource.isFetching, popSource.error],
+  )
   const ipSource = sourceOf('ip_health')
   const ipHealth = React.useMemo(
     () => ({ data: ipSource.data?.ip_health, isLoading: ipSource.isLoading, isFetching: ipSource.isFetching, error: ipSource.error }),

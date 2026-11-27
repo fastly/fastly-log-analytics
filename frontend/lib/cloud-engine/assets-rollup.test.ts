@@ -172,7 +172,7 @@ describe("assetsAggregatesFromRollup", () => {
       total_requests: 0, total_bytes: 0, overall_hit_ratio: 0, overall_hit_ratio_pct: 0, avg_ttfb_ms: 0, avg_origin_ms: 0,
     });
     expect(Object.keys(out).sort())
-      .toEqual(["asset_type_breakdown", "cache_performance", "compression_performance", "rollup", "summary"]);
+      .toEqual(["asset_type_breakdown", "cache_performance", "compression_performance", "missing_fields", "rollup", "summary"]);
   });
 });
 

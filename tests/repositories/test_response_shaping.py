@@ -230,6 +230,19 @@ def test_latency_and_percentile_normalization() -> None:
             "client_download": 0.0,
         }
     }
+    assert rs.shape_waterfall_avg(None, None, None, None) == {"avg": None}
+    assert rs.shape_waterfall_avg(
+        {"edge_processing": None, "origin_wait": None, "origin_download": None, "client_download": None}
+    ) == {"avg": None}
+
+    summary = rs.compute_summary_from_dims(
+        [
+            ("JavaScript/CSS", "HIT", "zstd", 1, 1, 6, 600),
+            ("JavaScript/CSS", "ERROR", "uncompressed", 0, 1, 4, 400),
+        ]
+    )
+    assert summary["asset_type_breakdown"][0]["cache_hit_ratio"] == pytest.approx(0.6)
+    assert summary["asset_type_breakdown"][0]["compression_rate"] == pytest.approx(0.6)
 
     score = rs.compute_network_health_score(100_000_000, 10_000, 0.0, 5_000, 0.0)
     assert 90.0 <= score <= 100.0

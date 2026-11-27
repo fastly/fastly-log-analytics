@@ -71,7 +71,7 @@ function FastlyValueBody({ startTime, endTime, activeServiceId, filterPayload }:
       return [fromRollup, sections.filter((section) => !fromRollup.includes(section))]
     }
     if (filteredRollup && sections.includes('overview')) {
-      return [['overview'] as ValueSection[], sections.filter((section) => section !== 'overview')]
+      return [['overview'] as ValueSection[], sections]
     }
     return [[], sections]
   }, [rollupFirst, filteredRollup, activeTab, sections])

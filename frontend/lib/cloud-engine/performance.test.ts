@@ -66,7 +66,8 @@ describe("performance cloud-engine module (F19)", () => {
       expect(data.top_urls[0]).toMatchObject({
         url: "/a", requests: 12, avg: 100, p50: 100, p95: 100, p99: 100,
       });
-      expect(data.top_asns[0]).toMatchObject({ requests: 12, avg: 100 });
+      expect(data.top_asns[0]).toMatchObject({ asn: 15169, requests: 12, avg: 100 });
+      expect(data._approx).toBe(false);
       expect(data.waterfall.avg).toMatchObject({ edge_processing: 20, client_download: 80 });
       expect(data.scatter[0]).toEqual({ origin: 20, edge: 80, cache: "HIT" });
     } finally {
@@ -190,7 +191,7 @@ describe("performance cloud-engine module (F19)", () => {
     const asns = shapePerformanceAsnRows([
       { asn: 15169, req_count: 120, avg_ms: 8.2, p50_ms: 6.1, p95_ms: 19.4, p99_ms: 35.0 },
     ]);
-    expect(asns[0]?.asn).toBe("15169");
+    expect(asns[0]?.asn).toBe(15169);
     expect(asns[0]?.label).toContain("Google");
 
     const ttl = shapePerfTtlDistRows([
@@ -262,7 +263,7 @@ describe("performance cloud-engine module (F19)", () => {
     });
     expect(agg._approx).toBe(true);
     expect(agg.top_urls?.[0]?.url).toBe("/fast");
-    expect(agg.top_asns?.[0]?.asn).toBe("13335");
+    expect(agg.top_asns?.[0]?.asn).toBe(13335);
     expect(agg.ttl_dist?.[0]?.bucket).toBe("1m - 1h");
     expect(agg.waterfall?.avg?.origin_wait).toBe(10);
 

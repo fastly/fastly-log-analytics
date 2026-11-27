@@ -203,6 +203,7 @@ export async function queryValueSummary(params: ValueQueryParams = {}): Promise<
       `COUNT(*) FILTER (WHERE starts_with(cache_state, 'MISS')) AS misses`,
       `COUNT(*) FILTER (WHERE starts_with(cache_state, 'PASS')) AS passes`,
       `COUNT(*) FILTER (WHERE starts_with(cache_state, 'SYNTH')) AS synths`,
+      `COUNT(*) FILTER (WHERE cache_state = 'ERROR') AS errors`,
     );
   }
   if (needBytes) {
@@ -286,7 +287,7 @@ export async function queryValueSummary(params: ValueQueryParams = {}): Promise<
     );
   }
 
-  const interval = CHART_INTERVAL_SECONDS[params.chart_interval ?? "1 day"] ?? 86400;
+  const interval = Math.max(60, CHART_INTERVAL_SECONDS[params.chart_interval ?? "1 day"] ?? 86400);
   const mainSql = needBuckets
     ? `SELECT time_bucket(INTERVAL '${interval} seconds', "timestamp") AS bucket, ${aggCols.join(", ")} FROM normalized GROUP BY bucket ORDER BY bucket`
     : `SELECT ${aggCols.join(", ")} FROM normalized`;
@@ -316,11 +317,11 @@ export async function queryValueSummary(params: ValueQueryParams = {}): Promise<
     origin_offload_pct: offload, cache_acceleration_factor: acceleration,
     threats_blocked: hasWaf ? sumKey("blocked") : null,
     edge_hit_requests: hasCache ? hits : null,
-    origin_requests: hasCache ? sumKey("misses") + sumKey("passes") : null,
+    origin_requests: hasCache ? sumKey("misses") + sumKey("passes") + sumKey("synths") + sumKey("errors") : null,
   };
   const shieldRequests = sumKey("shield_requests");
   result.caching = {
-    total_requests: total, hit_requests: hasCache ? hits : null,
+    total_requests: total, hit_requests: hasCache ? hits : 0,
     miss_requests: hasCache ? sumKey("misses") : null,
     pass_requests: hasCache ? sumKey("passes") : null,
     synth_requests: hasCache ? sumKey("synths") : null,
@@ -409,8 +410,8 @@ export async function queryValueSummary(params: ValueQueryParams = {}): Promise<
     }
   }
   if (want("bots")) {
-    const namedBots = (await query(`SELECT bot_name, COUNT(*) AS count FROM normalized
-      WHERE bot_name IS NOT NULL GROUP BY bot_name ORDER BY count DESC LIMIT 20`))
+    const namedBots = (await query(`SELECT TRIM(bot_name) AS bot_name, COUNT(*) AS count FROM normalized
+      WHERE NULLIF(TRIM(bot_name), '') IS NOT NULL GROUP BY 1 ORDER BY count DESC, 1 ASC LIMIT 10`))
       .map((row) => ({ name: String(row.bot_name), count: count(row, "count") }));
     if (namedBots.length > 0) {
       result.bots.top_bots = namedBots;
@@ -419,15 +420,15 @@ export async function queryValueSummary(params: ValueQueryParams = {}): Promise<
         WHERE ua_norm IS NOT NULL GROUP BY ua_norm ORDER BY count DESC, ua_norm ASC LIMIT ${BOT_UA_CLASSIFY_LIMIT}`))
         .map((row) => [String(row.ua), count(row, "count")] as const);
       const allBots = await loadWellKnownBots();
-      const classified = classifyUserAgentCountsSync(uaRows, 20, allBots);
+      const classified = classifyUserAgentCountsSync(uaRows, 10, allBots);
       result.bots.bot_requests = classified.matchedRequests;
       result.bots.top_bots = classified.top.map((b) => ({ name: b.name, count: b.request_count }));
     }
   }
   if (want("security")) {
-    result.security.top_waf_signals = (await query(`SELECT signal, COUNT(*) AS count
+    result.security.top_waf_signals = (await query(`SELECT TRIM(signal) AS signal, COUNT(*) AS count
       FROM (SELECT UNNEST(string_split(waf_signals, ',')) AS signal FROM normalized)
-      WHERE signal IS NOT NULL AND signal != '' GROUP BY signal ORDER BY count DESC LIMIT 20`))
+      WHERE NULLIF(TRIM(signal), '') IS NOT NULL GROUP BY 1 ORDER BY count DESC, 1 ASC LIMIT 10`))
       .map((row) => ({ signal: String(row.signal), count: count(row, "count") }));
   }
   if (want("io")) {

@@ -73,11 +73,28 @@ describe("Feature F22 — Assets & Shielding cloud-engine", () => {
           ('native', 1700000002000, '/app.js?v=2', 'HIT', 100, 'gzip, br', NULL)`);
       const data = await queryAssetsAggregates({ engine, filters: {} });
       expect(data.asset_type_breakdown).toEqual([
-        expect.objectContaining({ asset_type: "API/Dynamic", requests: 3, cache_hit_ratio: expect.closeTo(1 / 3), compression_rate: 0 }),
+        expect.objectContaining({ asset_type: "API/Dynamic", requests: 2, cache_hit_ratio: 0, compression_rate: 0 }),
+        expect.objectContaining({ asset_type: "JavaScript/CSS", requests: 1, cache_hit_ratio: 1, compression_rate: 0 }),
       ]);
       expect(data.cache_performance.map((row) => row.cache_status).sort()).toEqual(["HIT", "MISS", "PASS"]);
       expect(data.compression_performance.map((row) => [row.content_encoding, row.requests]).sort())
         .toEqual([["br", 1], ["uncompressed", 2]]);
+      expect(emptyAssetsAggregates().missing_fields).toEqual([]);
+    } finally {
+      await engine.reset();
+    }
+  });
+
+  it("includes zstd in is_compressed on compressible assets", async () => {
+    const engine = new DuckDBAnalyticalEngine();
+    try {
+      await engine.executeSql(`INSERT INTO requests
+        (scoped_key, ts_ms, url, cache, resp_bytes, resp_header_content_encoding)
+        VALUES ('zstd', 1700000000000, '/bundle.js?hash=1', 'HIT', 1000, 'zstd')`);
+      const data = await queryAssetsAggregates({ engine, filters: {} });
+      expect(data.asset_type_breakdown).toEqual([
+        expect.objectContaining({ asset_type: "JavaScript/CSS", compression_rate: 1 }),
+      ]);
     } finally {
       await engine.reset();
     }

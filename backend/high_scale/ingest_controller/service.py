@@ -702,66 +702,32 @@ _memo = ResponseMemo(ttl=30.0, maxsize=128)
 _response_cache = _memo.cache
 _CacheRegistry.register("high_scale.assets._response_cache", _response_cache)
 _ASSET_TYPE_CASE = """CASE
-    WHEN url_lower LIKE '%.png' OR url_lower LIKE '%.jpg' OR url_lower LIKE '%.jpeg' OR url_lower LIKE '%.gif' OR url_lower LIKE '%.svg' OR url_lower LIKE '%.webp' OR url_lower LIKE '%.ico' THEN 'Images'
-    WHEN url_lower LIKE '%.pdf' OR url_lower LIKE '%.doc' OR url_lower LIKE '%.docx' OR url_lower LIKE '%.xls' OR url_lower LIKE '%.xlsx' OR url_lower LIKE '%.ppt' OR url_lower LIKE '%.pptx' OR url_lower LIKE '%.txt' OR url_lower LIKE '%.csv' OR url_lower LIKE '%.zip' OR url_lower LIKE '%.tar' OR url_lower LIKE '%.gz' OR url_lower LIKE '%.tgz' OR url_lower LIKE '%.rar' OR url_lower LIKE '%.7z' THEN 'Documents'
-    WHEN url_lower LIKE '%.js' OR url_lower LIKE '%.mjs' OR url_lower LIKE '%.css' THEN 'JavaScript/CSS'
-    WHEN url_lower LIKE '%.woff' OR url_lower LIKE '%.woff2' OR url_lower LIKE '%.ttf' OR url_lower LIKE '%.otf' OR url_lower LIKE '%.eot' THEN 'Fonts'
-    WHEN url_lower LIKE '%.m3u8' OR url_lower LIKE '%.ts' OR url_lower LIKE '%.mp4' OR url_lower LIKE '%.m4s' OR url_lower LIKE '%.webm' THEN 'Video'
+    WHEN path_lower LIKE '%.png' OR path_lower LIKE '%.jpg' OR path_lower LIKE '%.jpeg' OR path_lower LIKE '%.gif' OR path_lower LIKE '%.svg' OR path_lower LIKE '%.webp' OR path_lower LIKE '%.ico' THEN 'Images'
+    WHEN path_lower LIKE '%.pdf' OR path_lower LIKE '%.doc' OR path_lower LIKE '%.docx' OR path_lower LIKE '%.xls' OR path_lower LIKE '%.xlsx' OR path_lower LIKE '%.ppt' OR path_lower LIKE '%.pptx' OR path_lower LIKE '%.txt' OR path_lower LIKE '%.csv' OR path_lower LIKE '%.zip' OR path_lower LIKE '%.tar' OR path_lower LIKE '%.gz' OR path_lower LIKE '%.tgz' OR path_lower LIKE '%.rar' OR path_lower LIKE '%.7z' THEN 'Documents'
+    WHEN path_lower LIKE '%.js' OR path_lower LIKE '%.mjs' OR path_lower LIKE '%.css' THEN 'JavaScript/CSS'
+    WHEN path_lower LIKE '%.woff' OR path_lower LIKE '%.woff2' OR path_lower LIKE '%.ttf' OR path_lower LIKE '%.otf' OR path_lower LIKE '%.eot' THEN 'Fonts'
+    WHEN path_lower LIKE '%.m3u8' OR path_lower LIKE '%.ts' OR path_lower LIKE '%.mp4' OR path_lower LIKE '%.m4s' OR path_lower LIKE '%.webm' THEN 'Video'
     ELSE 'API/Dynamic'
 END"""
 
+from backend.repositories.utils.response_shaping.domains import compute_summary_from_dims  # noqa: E402
 
-def compute_summary_from_dims(
-    dim_rows: list[tuple[str, str, str, int, int, int, int]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Compute breakdown, cache_performance, and compression_performance from grouped dimension rows."""
-    by_type_reqs: dict[str, int] = defaultdict(int)
-    by_type_bytes: dict[str, int] = defaultdict(int)
-    by_type_hit_reqs: dict[str, int] = defaultdict(int)
-    by_type_cache_denom: dict[str, int] = defaultdict(int)
-    by_type_comp_num: dict[str, int] = defaultdict(int)
-    by_type_comp_denom: dict[str, int] = defaultdict(int)
-    by_cache: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
-    by_comp: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
-    for asset_type, cache_status, encoding_norm, is_compressed, is_compressible, reqs, sum_bytes in dim_rows:
-        r, b = int(reqs or 0), int(sum_bytes or 0)
-        by_type_reqs[asset_type] += r
-        by_type_bytes[asset_type] += b
-        if cache_status.startswith("HIT"):
-            by_type_hit_reqs[asset_type] += r
-        if cache_status.startswith(("HIT", "MISS", "PASS")) or cache_status in ("BYPASS", "ERROR"):
-            by_type_cache_denom[asset_type] += r
-        if is_compressible == 1:
-            by_type_comp_denom[asset_type] += r
-            if is_compressed == 1:
-                by_type_comp_num[asset_type] += r
-        by_cache[(asset_type, cache_status)][0] += r
-        by_cache[(asset_type, cache_status)][1] += b
-        by_comp[(asset_type, encoding_norm)][0] += r
-        by_comp[(asset_type, encoding_norm)][1] += b
-    asset_type_breakdown = [
-        {
-            "asset_type": at,
-            "requests": by_type_reqs[at],
-            "egress_bytes": by_type_bytes[at],
-            "cache_hit_ratio": (
-                float(by_type_hit_reqs[at]) / float(by_type_cache_denom[at]) if by_type_cache_denom[at] > 0 else 0.0
-            ),
-            "compression_rate": (
-                float(by_type_comp_num[at]) / float(by_type_comp_denom[at]) if by_type_comp_denom[at] > 0 else 0.0
-            ),
-        }
-        for at in sorted(by_type_reqs.keys(), key=lambda k: (-by_type_reqs[k], k))
-    ]
-    cache_performance = [
-        {"asset_type": at, "cache_status": cs, "requests": vals[0], "bytes": vals[1]}
-        for (at, cs), vals in sorted(by_cache.items(), key=lambda item: (item[0][0], -item[1][0], item[0][1]))
-    ]
-    compression_performance = [
-        {"asset_type": at, "content_encoding": ce, "requests": vals[0], "bytes": vals[1]}
-        for (at, ce), vals in sorted(by_comp.items(), key=lambda item: (item[0][0], -item[1][0], item[0][1]))
-    ]
-    return asset_type_breakdown, cache_performance, compression_performance
+
+def _with_assets_settings(service_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Report required asset log fields missing from service settings without memo staleness."""
+    from backend import config as svcconfig
+
+    try:
+        cfg = svcconfig.load_config(service_id) or {}
+    except Exception:
+        cfg = {}
+    enabled = set(svcconfig.active_log_field_ids(cfg))
+    missing: list[str] = []
+    if "ttl" not in enabled:
+        missing.append("ttl")
+    if "resp_header_content_encoding" not in enabled and "content_encoding" not in enabled:
+        missing.append("resp_header_content_encoding")
+    return {**payload, "missing_fields": missing}
 
 
 def assets_aggregates(
@@ -828,9 +794,9 @@ def assets_aggregates(
             assets_enriched AS (
                 SELECT url, path_lower, cache, content_encoding, status, req_cnt, sum_bytes, sum_ttl, cnt_ttl,
                        {_ASSET_TYPE_CASE} AS asset_type,
-                       if(enc_lower IN ('gzip', 'br', 'deflate'), 1, 0) AS is_compressed,
-                       if(url_lower LIKE '%.js' OR url_lower LIKE '%.mjs' OR url_lower LIKE '%.css'
-                          OR url_lower LIKE '%.svg' OR url_lower LIKE '%.html' OR url_lower LIKE '%.json', 1, 0) AS is_compressible
+                       if(enc_lower IN ('gzip', 'br', 'deflate', 'zstd'), 1, 0) AS is_compressed,
+                       if(path_lower LIKE '%.js' OR path_lower LIKE '%.mjs' OR path_lower LIKE '%.css'
+                          OR path_lower LIKE '%.svg' OR path_lower LIKE '%.html' OR path_lower LIKE '%.json', 1, 0) AS is_compressible
                 FROM grouped_base
             )"""
         dims_sql = f"""
@@ -839,6 +805,7 @@ def assets_aggregates(
             SELECT asset_type, cache AS cache_status,
                    CASE WHEN lower(content_encoding) LIKE '%br%' THEN 'br'
                         WHEN lower(content_encoding) LIKE '%gzip%' THEN 'gzip'
+                        WHEN lower(content_encoding) LIKE '%zstd%' THEN 'zstd'
                         WHEN content_encoding != '' THEN content_encoding
                         ELSE 'uncompressed' END AS content_encoding_norm,
                    is_compressed, is_compressible,
@@ -926,5 +893,7 @@ def assets_aggregates(
         return payload
 
     if is_real_ch:
-        return AssetsAggregatesResponse.with_telemetry(**_memo.coalesce(f"hs_assets_agg:{cache_key}", _compute_assets))
-    return AssetsAggregatesResponse.with_telemetry(**_compute_assets())
+        return AssetsAggregatesResponse.with_telemetry(
+            **_with_assets_settings(service.service_id, _memo.coalesce(f"hs_assets_agg:{cache_key}", _compute_assets))
+        )
+    return AssetsAggregatesResponse.with_telemetry(**_with_assets_settings(service.service_id, _compute_assets()))

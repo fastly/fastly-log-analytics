@@ -300,6 +300,33 @@ export function asnTrendFromBuckets(
   return { health_score_1h_ago: hs1h, health_score_1w_ago: hs1w, trend };
 }
 
+export function computeGlobalHealthScoreFromLeaderboard(
+  leaderboard: ReadonlyArray<{
+    total_reqs?: number;
+    reqs?: number;
+    health_score_now?: number | null;
+    health_score?: number | null;
+  }>,
+  fallbackScore: number | null,
+): number {
+  let weightedSum = 0;
+  let totalWeight = 0;
+  const scores: number[] = [];
+  for (const row of leaderboard) {
+    const score = row.health_score_now ?? row.health_score;
+    if (typeof score !== "number" || !Number.isFinite(score)) continue;
+    scores.push(score);
+    const weight = Math.max(0, Number(row.total_reqs ?? row.reqs ?? 0));
+    if (weight > 0) {
+      weightedSum += score * weight;
+      totalWeight += weight;
+    }
+  }
+  if (totalWeight > 0) return roundTo(weightedSum / totalWeight, 1);
+  if (scores.length > 0) return roundTo(scores.reduce((sum, s) => sum + s, 0) / scores.length, 1);
+  return fallbackScore ?? 0;
+}
+
 export function emptyNetworkHealth(missingTcpFields: string[] = []) {
   return {
     available: true,
@@ -312,12 +339,13 @@ export function emptyNetworkHealth(missingTcpFields: string[] = []) {
     has_metro: false,
     summary: {
       total_requests: 0,
+      total_reqs: 0,
       avg_rtt_ms: 0,
       median_rtt_ms: 0,
       p95_rtt_ms: 0,
       avg_ploss_pct: 0,
       health_score: null as number | null,
-      global_health_score: null as number | null,
+      global_health_score: 0,
     },
     timeseries: [] as Record<string, unknown>[],
     by_country: [] as Record<string, unknown>[],
@@ -328,9 +356,13 @@ export function emptyNetworkHealth(missingTcpFields: string[] = []) {
   };
 }
 
-export function emptyNetworkQuality(missingTcpFields: string[] = []) {
+export function emptyNetworkQuality(missingTcpFields: string[] = [], regionCountry = "US") {
   return {
     available: false,
+    by_country: [] as Record<string, unknown>[],
+    by_pop: [] as Record<string, unknown>[],
+    countries: [] as string[],
+    region_country: regionCountry,
     summary: {
       total_requests: 0,
       avg_throughput_mbps: 0,
@@ -362,11 +394,35 @@ export function emptyPopHealth() {
   };
 }
 
-export function emptyNetworkBundle(missingTcpFields: string[] = []) {
+export function emptyNetworkTransport(missingFields: string[] = []) {
   return {
-    network_health: emptyNetworkHealth(missingTcpFields),
-    network_quality: emptyNetworkQuality(missingTcpFields),
-    pop_health: emptyPopHealth(),
+    has_transport_data: false,
+    tcp_rtt_p50_ms: null as number | null,
+    tcp_rtt_p90_ms: null as number | null,
+    tcp_rtt_p95_ms: null as number | null,
+    tcp_rtt_p99_ms: null as number | null,
+    retrans_rate_pct: null as number | null,
+    packet_loss_pct: null as number | null,
+    delivery_rate_mbps: null as number | null,
+    bandwidth_bytes: 0,
+    total_requests: 0,
+    protocol_distribution: normalizeProtocolDistribution([], 0),
+    missing_fields: missingFields,
+  };
+}
+
+export function emptyNetworkBundle(missingTcpFields: string[] = []) {
+  const health = emptyNetworkHealth(missingTcpFields);
+  const quality = emptyNetworkQuality(missingTcpFields);
+  const transport = emptyNetworkTransport(missingTcpFields);
+  return {
+    available: false,
+    health,
+    quality,
+    transport,
+    network_health: health,
+    network_quality: quality,
+    pop_health: [] as Record<string, unknown>[],
     missing_tcp_fields: missingTcpFields,
   };
 }
@@ -406,7 +462,7 @@ function qualityParts(value: unknown): QualityPart[] | null {
 
 export type NetworkQualityParts = {
   throughput?: { avg_throughput_mbps: number | null };
-  region?: { value: string; rtt_ms: number | null; reqs: number; label: string }[];
+  region?: { value: string; rtt_ms: number; reqs: number; label: string }[];
   asn_client?: { asn: number; avg_rttvar_us: number | null; avg_ploss: number | null }[];
 };
 
@@ -816,21 +872,24 @@ export async function queryNetworkHealth(params: NetworkQueryParams = {}) {
   const worstAsn = pickWorstSignificant(by_asn, totalRequests);
   const worstCountry = pickWorstSignificant(by_country, totalRequests);
 
+  const leaderboard = by_asn.slice(0, Math.max(1, Math.min(100, params.top_n ?? 30))).map((row) => ({
+    ...row, label: row.as_name, total_reqs: row.reqs,
+    health_score_now: row.health_score,
+    ...asnTrendFromBuckets(heatmapByAsn.get(row.asn), bucketData.buckets.length, bucketSeconds, row.health_score),
+  }));
+  const globalHealthScore = computeGlobalHealthScoreFromLeaderboard(leaderboard, healthScore);
+
   return {
     available: true,
     has_data: true,
     ...bucketData,
     shielding_analysis: shielding,
     has_metro: metro_leaderboard.length > 0,
-    leaderboard: by_asn.slice(0, Math.max(1, Math.min(100, params.top_n ?? 30))).map((row) => ({
-      ...row, label: row.as_name, total_reqs: row.reqs,
-      health_score_now: row.health_score,
-      ...asnTrendFromBuckets(heatmapByAsn.get(row.asn), bucketData.buckets.length, bucketSeconds, row.health_score),
-    })),
+    leaderboard,
     summary: {
       total_requests: totalRequests,
       total_reqs: totalRequests,
-      global_health_score: healthScore,
+      global_health_score: globalHealthScore,
       worst_asn: worstAsn ? { label: worstAsn.as_name, score: worstAsn.health_score } : null,
       worst_country: worstCountry ? { label: resolveCountryName(worstCountry.country), score: worstCountry.health_score } : null,
       avg_rtt_ms: roundTo(Number(s.avg_rtt_us ?? 0) / 1000, 2),
@@ -874,10 +933,14 @@ async function queryNetworkQualityParts(
         COUNT(*)::BIGINT AS reqs
       FROM requests WHERE ${where} AND COALESCE(geo_country, country) = ${regionCountrySql}
       GROUP BY 1 ORDER BY reqs DESC`, [], params.signal);
-    out.region = rows.map((row) => ({
-      value: String(row.value), rtt_ms: row.rtt_ms == null ? null : Number(row.rtt_ms),
-      reqs: Number(row.reqs), label: String(row.value),
-    }));
+    out.region = rows
+      .filter((row) => row.rtt_ms != null)
+      .map((row) => ({
+        value: String(row.value),
+        rtt_ms: roundTo(Number(row.rtt_ms), 2),
+        reqs: Number(row.reqs),
+        label: String(row.value),
+      }));
   }
   if (parts.includes("asn_client")) {
     const asns = (params.quality_asns ?? []).map(Number).filter(Number.isFinite).map(Math.floor);
@@ -959,7 +1022,7 @@ export async function queryNetworkQuality(params: NetworkQueryParams = {}) {
 
   const totalRequests = Number(summaryRow?.requests ?? 0);
   if (totalRequests === 0) {
-    return { ...emptyNetworkQuality(missingTcpFields), available: hasRtt };
+    return { ...emptyNetworkQuality(missingTcpFields, String(params.region_country ?? "US")), available: hasRtt };
   }
 
   await asnNamesReady;
@@ -993,9 +1056,9 @@ export async function queryNetworkQuality(params: NetworkQueryParams = {}) {
   });
 
   const scatter = await engine.executeSql<Record<string, unknown>>(`SELECT
-    COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt) / 1000.0 AS rtt_ms,
-    COALESCE(ttfb_ms, ttfb * 1000.0) AS ttfb_ms,
-    COALESCE(cache_status, cache) AS cache FROM requests
+    ROUND(COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt) / 1000.0, 2) AS rtt_ms,
+    ROUND(COALESCE(ttfb_ms, ttfb * 1000.0), 2) AS ttfb_ms,
+    COALESCE(NULLIF(TRIM(COALESCE(cache_status, cache, '')), ''), 'UNKNOWN') AS cache FROM requests
     WHERE ${where} AND COALESCE(client_rtt_us, client_tcpi_rtt, tcp_rtt, tcpi_rtt) IS NOT NULL
       AND COALESCE(ttfb_ms, ttfb * 1000.0) IS NOT NULL LIMIT 2000`, [], params.signal);
 
@@ -1039,8 +1102,12 @@ export async function queryNetworkQuality(params: NetworkQueryParams = {}) {
   const bar = (value: string, label: string, row: { avg_rtt_ms: number; requests: number }) => ({
     value, label, rtt_ms: row.avg_rtt_ms, reqs: row.requests,
   });
-  const byPopRows = qualitySet("pop").map((row) => ({ pop: row.pop_key, rtt_ms: row.rtt_ms, reqs: row.reqs }));
-  const regionRows = qualitySet("region_country").map((row) => ({ value: row.region_key, rtt_ms: row.rtt_ms, reqs: row.reqs }));
+  const byPopRows = qualitySet("pop")
+    .filter((row) => row.rtt_ms != null)
+    .map((row) => ({ pop: row.pop_key, rtt_ms: roundTo(Number(row.rtt_ms), 2), reqs: row.reqs }));
+  const regionRows = qualitySet("region_country")
+    .filter((row) => row.rtt_ms != null)
+    .map((row) => ({ value: row.region_key, rtt_ms: roundTo(Number(row.rtt_ms), 2), reqs: row.reqs }));
   return {
     available: hasRtt,
     by_country: by_region.map((row) => bar(row.region, resolveCountryName(row.region), row)),
@@ -1173,10 +1240,19 @@ async function queryNetworkTransport(params: NetworkQueryParams) {
   const protocols = rows.filter((entry) => entry.is_protocol)
     .map((entry) => ({ protocol: entry.protocol_key, requests: entry.total_requests }));
   const total = Number(row.total_requests ?? 0);
+  const transportFields = ["tcp_rtt", "retrans", "ploss", "delivery_rate"] as const;
+  const missingFields = Array.isArray(params.active_log_field_ids)
+    ? (() => {
+        const enabled = new Set(params.active_log_field_ids);
+        return transportFields.filter((f) => !enabled.has(f));
+      })()
+    : (row.tcp_rtt_p50_ms == null ? ["tcp_rtt"] : []);
   return {
     ...row,
-    has_transport_data: total > 0,
-    missing_fields: row.tcp_rtt_p50_ms == null ? ["tcp_rtt"] : [],
+    has_transport_data: Array.isArray(params.active_log_field_ids)
+      ? missingFields.length < transportFields.length
+      : total > 0,
+    missing_fields: missingFields,
     protocol_distribution: normalizeProtocolDistribution(protocols, total),
   };
 }
@@ -1184,6 +1260,11 @@ async function queryNetworkTransport(params: NetworkQueryParams) {
 export function networkBundle<H extends object | null, Q, P, T>(
   network_health: H, network_quality: Q, pop_health: P, transport: T,
 ) {
+  const popRows = Array.isArray(pop_health)
+    ? pop_health
+    : pop_health && typeof pop_health === "object" && "data" in pop_health && Array.isArray((pop_health as { data?: unknown }).data)
+      ? (pop_health as { data: unknown[] }).data
+      : null;
   return {
     available: true,
     health: network_health,
@@ -1191,7 +1272,7 @@ export function networkBundle<H extends object | null, Q, P, T>(
     transport,
     network_health,
     network_quality,
-    pop_health,
+    pop_health: popRows,
     missing_tcp_fields: network_health && "missing_tcp_fields" in network_health
       ? network_health.missing_tcp_fields as string[] : undefined,
   };

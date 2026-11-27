@@ -4,6 +4,7 @@ import React, { useState } from 'react'
 import dynamic from 'next/dynamic'
 import { approxMark, RawWindowNote, readRawWindow, readRollupMeta, RollupDataThroughSlot } from '@/components/network/rollupLabels'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
+import { hasFilterValues } from '@/lib/cloud-engine/rollup-sections'
 import { client, unwrapClient } from '@/lib/api'
 import type { components, PlotlyTrace } from '@/types/api'
 import {
@@ -137,7 +138,7 @@ function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: Rep
   const range = { relativeRange, isAutoRange, startTime, endTime, anchor }
   // Cloud answers these sections from summaries only when unfiltered; the map needs raw rows, so it is
   // read apart rather than holding the summary-served core behind a raw scan.
-  const rollupFirst = isCloudMode() && Object.keys(filterPayload ?? {}).length === 0
+  const rollupFirst = isCloudMode() && !hasFilterValues(filterPayload)
   // When filtered on Cloud, consolidate health + shielding + quality + transport into one bundle scan so
   // the raw Parquet files are projected and loaded once instead of evicted and re-fetched four times.
   const cloudFiltered = isCloudMode() && !rollupFirst

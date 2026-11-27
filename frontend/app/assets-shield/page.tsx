@@ -1,6 +1,8 @@
 import { Suspense } from 'react'
 import { HydrationBoundary } from '@tanstack/react-query'
 
+import { analyticsReportQueryKey } from '@/lib/report-query-key'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import {
   fetchAssetsServerSide,
   resolveReportPageParams,
@@ -31,10 +33,16 @@ async function AssetsHydratedSection({
 }) {
   const { serviceId, isDefaultView } = await resolveReportPageParams(searchParams)
   const now = new Date()
-  const seed = isDefaultView ? await fetchAssetsServerSide(serviceId, now) : null
+  const seed = isDefaultView && !isCloudMode() ? await fetchAssetsServerSide(serviceId, now) : null
   const dehydratedState = seed
     ? seedDehydratedState(
-        ['assets', 'aggregates', serviceId, seed.rangeToken, seed.anchor, {}],
+        analyticsReportQueryKey({
+          namespace: ['assets', 'aggregates'],
+          serviceId,
+          rangeToken: seed.rangeToken,
+          anchor: seed.anchor,
+          filterPayload: {},
+        }),
         seed.data,
       )
     : null

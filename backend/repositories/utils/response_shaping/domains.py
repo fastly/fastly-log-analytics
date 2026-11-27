@@ -187,8 +187,12 @@ def shape_waterfall_avg(
     """Shape the performance waterfall average breakdown from a mapping or 4 positional values."""
     if isinstance(edge_processing, Mapping):
         row = edge_processing
+        if all(row.get(k, row.get(alias)) is None for k, alias in _WATERFALL_ALIAS_MAP):
+            return _WaterfallDict({"avg": None})
         shaped = {k: max(0.0, float_or_zero(row.get(k, row.get(alias)))) for k, alias in _WATERFALL_ALIAS_MAP}
         return _WaterfallDict({"avg": shaped})
+    if edge_processing is None and origin_wait is None and origin_download is None and client_download is None:
+        return _WaterfallDict({"avg": None})
     shaped = {
         "edge_processing": max(0.0, float_or_zero(edge_processing)),
         "origin_wait": max(0.0, float_or_zero(origin_wait)),
@@ -1345,9 +1349,9 @@ def compute_summary_from_dims(
 
         by_type_reqs[asset_type] = by_type_reqs.get(asset_type, 0) + reqs
         by_type_bytes[asset_type] = by_type_bytes.get(asset_type, 0) + sum_bytes
-        if cache_status in ("HIT", "HIT-SYNTHETIC", "HIT-STALE", "HIT-CLUSTER"):
+        if cache_status.startswith("HIT"):
             by_type_hit_reqs[asset_type] = by_type_hit_reqs.get(asset_type, 0) + reqs
-        if cache_status in ("HIT", "HIT-SYNTHETIC", "HIT-STALE", "HIT-CLUSTER", "MISS", "PASS", "BYPASS"):
+        if cache_status.startswith(("HIT", "MISS", "PASS")) or cache_status in ("BYPASS", "ERROR"):
             by_type_cache_denom[asset_type] = by_type_cache_denom.get(asset_type, 0) + reqs
         if is_compressible == 1:
             by_type_comp_denom[asset_type] = by_type_comp_denom.get(asset_type, 0) + reqs

@@ -5,6 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.models.analytics._common import (
+    AnalyticsCompletenessMixin,
     _move_fields,
     _UrlRequestsWireBase,
 )
@@ -66,7 +67,7 @@ class PerformanceWaterfall(WireSafeModel):
     avg: PerformanceWaterfallAvg | None = None
 
 
-class PerformanceAggregatesResponse(BaseResponse):
+class PerformanceAggregatesResponse(AnalyticsCompletenessMixin, BaseResponse):
     model_config = ConfigDict(populate_by_name=True)
 
     top_urls: list[PerformanceUrlRow] = []
@@ -115,7 +116,7 @@ class LowTtlAssetRow(_UrlRequestsBase):
     asset_type: str
 
 
-class AssetsAggregatesResponse(BaseResponse):
+class AssetsAggregatesResponse(AnalyticsCompletenessMixin, BaseResponse):
     asset_type_breakdown: list[AssetTypeBreakdownRow] = []
     cache_performance: list[CachePerformanceRow] = []
     compression_performance: list[CompressionPerformanceRow] = []
@@ -125,4 +126,4 @@ class AssetsAggregatesResponse(BaseResponse):
 
 
 class AssetsRequest(RangeKeyedRequest):
-    pass
+    sections: list[str] | None = None

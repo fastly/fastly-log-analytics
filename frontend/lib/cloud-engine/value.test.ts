@@ -331,4 +331,37 @@ describe("Feature F22 — Fastly Value cloud-engine", () => {
       await engine.reset();
     }
   });
+
+  it("includes SYNTH and ERROR in origin_requests, clamps bucket_sec >= 60, and trims/limits top_bots and top_waf_signals to 10", async () => {
+    const engine = new DuckDBAnalyticalEngine();
+    const queries = vi.spyOn(engine, "executeSql");
+    try {
+      const botRows = Array.from({ length: 12 }, (_, i) =>
+        `('v2', ${1700000000000 + i * 1000}, epoch_ms(${1700000000000 + i * 1000}), 'MISS', ' bot-${i} ', ' sig-${i} ')`
+      );
+      await engine.executeSql(`
+        INSERT INTO requests (scoped_key, ts_ms, "timestamp", cache, _bot_name, waf_sig)
+        VALUES
+          ${botRows.join(",\n          ")},
+          ('v2', 1700000012000, epoch_ms(1700000012000), 'SYNTH', NULL, NULL),
+          ('v2', 1700000013000, epoch_ms(1700000013000), 'ERROR', NULL, NULL)
+      `);
+      const res = await queryValueSummary({
+        engine,
+        start_time: "2023-11-14T22:00:00Z",
+        end_time: "2023-11-14T23:00:00Z",
+        chart_interval: "1 second",
+      });
+      expect(res.overview?.origin_requests).toBe(14);
+      expect(res.bots?.top_bots).toHaveLength(10);
+      expect(res.bots?.top_bots?.[0]?.name).not.toMatch(/^\s|\s$/);
+      expect(res.security?.top_waf_signals).toHaveLength(10);
+      expect(res.security?.top_waf_signals?.[0]?.signal).not.toMatch(/^\s|\s$/);
+      const bucketSql = queries.mock.calls.find(([sql]) => sql.includes("time_bucket("))?.[0] ?? "";
+      expect(bucketSql).toContain("INTERVAL '60 seconds'");
+    } finally {
+      queries.mockRestore();
+      await engine.reset();
+    }
+  });
 });

@@ -210,10 +210,10 @@ describe("network rollup vs raw DuckDB over the same rows", () => {
     near(health.summary.median_rtt_ms, rawHealth.summary.median_rtt_ms);
     expect(health.by_asn.map((r) => [r.asn, r.reqs, r.error_pct]).toSorted())
       .toEqual(rawHealth.by_asn.map((r) => [r.asn, r.reqs, r.error_pct]).toSorted());
-    const pops = served.pop_health as typeof rawPops;
-    const rawBundlePops = rawBundle.pop_health as typeof rawPops;
-    expect(pops.data.map((r) => [r.pop, r.requests, r.errors, r.bandwidth_bytes]).toSorted())
-      .toEqual(rawBundlePops.data.map((r) => [r.pop, r.requests, r.errors, r.bandwidth_bytes]).toSorted());
+    const pops = served.pop_health as typeof rawPops.data;
+    const rawBundlePops = rawBundle.pop_health as typeof rawPops.data;
+    expect(pops.map((r) => [r.pop, r.requests, r.errors, r.bandwidth_bytes]).toSorted())
+      .toEqual(rawBundlePops.map((r) => [r.pop, r.requests, r.errors, r.bandwidth_bytes]).toSorted());
   });
 
   it("answers the map alone from a map-only raw pass exactly as the full pass does", async () => {

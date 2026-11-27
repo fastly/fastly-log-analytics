@@ -1508,3 +1508,75 @@ def test_rum_enable_done_event_reports_the_shared_resolution(final_cfg, expected
 def test_config_to_source_omits_legacy_mode_keys():
     source = svcconfig.config_to_source({"service_id": "svc", "raw_layout_version": 3})
     assert "ingest_mode" not in source and "serving_mode" not in source
+
+
+@pytest.mark.no_postgres
+def test_analytics_completeness_schema_and_assets_sections():
+    from backend.models.analytics.dashboard import ValueSummaryResponse
+    from backend.models.analytics.network import (
+        NetworkBundleResponse,
+        NetworkHealthResponse,
+        NetworkQualityResponse,
+        PopHealthListResponse,
+    )
+    from backend.models.analytics.origin import (
+        OriginAggregatesResponse,
+        OriginDrilldownResponse,
+        OriginIpHealthResponse,
+        OriginPathBreakdownResponse,
+        OriginPopLatencyResponse,
+        OriginShieldingAnalysisResponse,
+        OriginSlowUrlsResponse,
+        OriginStatusCodesResponse,
+        OriginSummaryResponse,
+        OriginTimeseriesResponse,
+    )
+    from backend.models.analytics.performance import (
+        AssetsAggregatesResponse,
+        AssetsRequest,
+        PerformanceAggregatesResponse,
+    )
+
+    req = AssetsRequest(sections=["summary"])
+    assert req.sections == ["summary"]
+    assert AssetsRequest().sections is None
+
+    completeness = {
+        "rollup": {"data_from": "2026-11-27T00:00:00Z", "data_through": "2026-11-27T01:00:00Z"},
+        "raw_window": {"data_from": "2026-11-27T00:30:00Z", "data_through": "2026-11-27T01:00:00Z"},
+        "_approx": True,
+        "_approx_note": "Percentiles estimated from histograms.",
+    }
+    models_and_required: list[tuple[type, dict[str, Any]]] = [
+        (NetworkHealthResponse, {"available": True}),
+        (NetworkQualityResponse, {"available": True}),
+        (PopHealthListResponse, {"data": []}),
+        (NetworkBundleResponse, {}),
+        (OriginAggregatesResponse, {}),
+        (OriginSummaryResponse, {}),
+        (OriginTimeseriesResponse, {}),
+        (OriginSlowUrlsResponse, {}),
+        (OriginStatusCodesResponse, {}),
+        (OriginPathBreakdownResponse, {}),
+        (OriginPopLatencyResponse, {}),
+        (OriginIpHealthResponse, {}),
+        (OriginShieldingAnalysisResponse, {}),
+        (OriginDrilldownResponse, {}),
+        (PerformanceAggregatesResponse, {}),
+        (AssetsAggregatesResponse, {}),
+        (ValueSummaryResponse, {}),
+    ]
+    for cls, required in models_and_required:
+        empty_dumped = cls.model_validate(required).model_dump(by_alias=True)
+        assert "rollup" not in empty_dumped, cls.__name__
+        assert "raw_window" not in empty_dumped, cls.__name__
+        assert "_approx_note" not in empty_dumped, cls.__name__
+        if cls is not PerformanceAggregatesResponse:
+            assert "_approx" not in empty_dumped, cls.__name__
+
+        populated = cls.model_validate({**required, **completeness})
+        dumped = populated.model_dump(by_alias=True)
+        assert dumped["rollup"] == completeness["rollup"], cls.__name__
+        assert dumped["raw_window"] == completeness["raw_window"], cls.__name__
+        assert dumped["_approx"] is True, cls.__name__
+        assert dumped["_approx_note"] == completeness["_approx_note"], cls.__name__
