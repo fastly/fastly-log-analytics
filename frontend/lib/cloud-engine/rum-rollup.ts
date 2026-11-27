@@ -659,7 +659,7 @@ export function rumWireFromSummary(summary: RumSummary, params: RumQueryParams) 
   const shapeCwv = (name: "LCP" | "CLS" | "INP" | "FCP" | "TTFB") => {
     const agg = summary.metrics.get(name);
     if (!agg || agg.count <= 0) {
-      return { p75: null, distribution: { good: 0, needs_improvement: 0, poor: 0 } };
+      return { p75: null, distribution: data.no_data ? null : { good: 0, needs_improvement: 0, poor: 0 } };
     }
     const scale = name === "CLS" ? 1_000_000 : 1_000;
     const rawP75 = histQuantileScaled(agg.hist, scale);
@@ -793,12 +793,13 @@ export function rumWireFromSummary(summary: RumSummary, params: RumQueryParams) 
       };
     })
     .sort((a, b) => {
-      if (a.lcp_p75 === null && b.lcp_p75 !== null) return 1;
-      if (a.lcp_p75 !== null && b.lcp_p75 === null) return -1;
-      if (a.lcp_p75 !== null && b.lcp_p75 !== null && b.lcp_p75 !== a.lcp_p75) {
-        return b.lcp_p75 - a.lcp_p75;
+      if (b.error_rate !== a.error_rate) return b.error_rate - a.error_rate;
+      if (a.avg_load_time === null && b.avg_load_time !== null) return 1;
+      if (a.avg_load_time !== null && b.avg_load_time === null) return -1;
+      if (a.avg_load_time !== null && b.avg_load_time !== null && a.avg_load_time !== b.avg_load_time) {
+        return b.avg_load_time - a.avg_load_time;
       }
-      return b.views - a.views || a.path.localeCompare(b.path);
+      return a.path.localeCompare(b.path);
     })
     .slice(0, 5);
 
@@ -814,7 +815,7 @@ export function rumWireFromSummary(summary: RumSummary, params: RumQueryParams) 
     .slice(0, 3)
     .map((e) => ({
       message: e.message,
-      file: e.source,
+      file: e.source || "unknown.js",
       line: e.minLine ?? 0,
       col: e.minCol ?? 0,
       count: e.count,
@@ -824,6 +825,7 @@ export function rumWireFromSummary(summary: RumSummary, params: RumQueryParams) 
 
   return {
     ...data,
+    ...(data.no_data ? { message: "Waiting for real-time RUM user events..." } : {}),
     is_mock: false,
     estimated: false,
     beacon_count: beaconCount,

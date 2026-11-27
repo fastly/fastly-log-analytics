@@ -297,7 +297,14 @@ describe('observed Platform usage', () => {
     expect(grid.className).toContain('[contain-intrinsic-size:1128px]')
 
     const { container: statsContainer } = render(
-      <UsageStatCards {...statProps} loadingStorage={true} cloudMode={true} />,
+      <UsageStatCards
+        {...statProps}
+        loadingStorage={true}
+        compute={{
+          source: 'unavailable',
+          reason: 'stats_unavailable',
+        }}
+      />,
     )
     const statsGrid = statsContainer.firstElementChild as HTMLElement
     expect(statsGrid.className).toContain('min-h-[420px]')

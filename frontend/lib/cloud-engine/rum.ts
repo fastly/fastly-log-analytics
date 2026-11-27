@@ -7,7 +7,6 @@ import {
 } from "./dashboard/duckdb";
 import type { FiltersPayload } from "@/types/api";
 import { parseEpochMs, roundTo } from "./engine-utils";
-import { fetchCloudMetadata } from "./metadata-cache";
 import { queryRumFromRollup, rumRollupEligible, type RumRollupSource } from "./rum-rollup";
 import { dashboardFiltersToSql, rangeServiceSql } from "./query-params";
 
@@ -33,6 +32,7 @@ export interface RumQueryParams {
   filters?: FiltersPayload | string;
   engine?: Pick<DuckDBAnalyticalEngine, "executeSql" | "getPresentColumns">;
   rollupSource?: RumRollupSource;
+  maskIps?: boolean;
   signal?: AbortSignal;
 }
 
@@ -518,11 +518,11 @@ export async function queryRumAnalytics(params: RumQueryParams = {}) {
 export async function queryRumLiveEvents(params: RumQueryParams = {}) {
   const engine = params.engine ?? getDuckDBEngine().readContext();
   const sinceMs = parseEpochMs(params.since) ?? 0;
-  const limit = Math.min(200, Math.max(1, Number(params.limit ?? 100)));
+  const limit = Math.min(200, Math.max(1, Number(params.limit ?? 50)));
 
   const vitals = await engine.executeSql<Record<string, unknown>>(
     `SELECT
-      CASE WHEN metric_name = 'ttlb' THEN 'resource' ELSE 'vital' END AS event_type,
+      CASE WHEN metric_name = 'ttlb' THEN 'resource' ELSE 'pageview' END AS event_type,
       ts_ms,
       metric_name,
       metric_value,
@@ -586,73 +586,40 @@ export async function queryRumLiveEvents(params: RumQueryParams = {}) {
 
 export async function queryRumBeaconHealth(params: RumQueryParams = {}) {
   const engine = params.engine ?? getDuckDBEngine().readContext();
+  const cutoffMs = Date.now() - 15 * 60_000;
+  const clauses = [`ts_ms >= ${Math.floor(cutoffMs)}`];
+  if (params.service_id && params.service_id !== "default") {
+    clauses.push(`(service_id = ${duckSqlString(String(params.service_id))} OR service_id IS NULL)`);
+  }
+  const where = clauses.join(" AND ");
   const rows = await engine.executeSql<{
-    total_beacons: number;
-    s2xx: number;
-    s4xx: number;
-    s5xx: number;
-    avg_latency_ms: number | null;
+    c: number;
+    last_ts: number | null;
   }>(
-    `SELECT
-      COUNT(*)::BIGINT AS total_beacons,
-      (COUNT(*) FILTER (WHERE status >= 200 AND status < 300))::BIGINT AS s2xx,
-      (COUNT(*) FILTER (WHERE status >= 400 AND status < 500))::BIGINT AS s4xx,
-      (COUNT(*) FILTER (WHERE status >= 500 AND status < 600))::BIGINT AS s5xx,
-      AVG(COALESCE(ttfb_ms, time_elapsed_usec / 1000.0, 0.0))::DOUBLE AS avg_latency_ms
-    FROM requests
-    WHERE COALESCE(url, path, '') LIKE '/__fla_rum%'`,
+    `SELECT COUNT(*)::BIGINT AS c, MAX(ts_ms)::BIGINT AS last_ts FROM (
+      SELECT ts_ms FROM client_vitals WHERE ${where}
+      UNION ALL
+      SELECT ts_ms FROM client_errors WHERE ${where}
+    ) t`,
     [],
     params.signal,
   );
 
   const r = rows[0];
-  const total = Number(r?.total_beacons ?? 0);
-  const s2xx = Number(r?.s2xx ?? 0);
+  const beacons = Number(r?.c ?? 0);
+  const hasData = beacons > 0;
+  const rawLastTs = hasData && r?.last_ts != null ? Number(r.last_ts) : null;
+  const lastBeaconTime =
+    rawLastTs != null && Number.isFinite(rawLastTs) ? new Date(rawLastTs).toISOString() : null;
   return {
-    total_beacons: total,
-    status_2xx: s2xx,
-    status_4xx: Number(r?.s4xx ?? 0),
-    status_5xx: Number(r?.s5xx ?? 0),
-    success_rate_pct: total > 0 ? roundTo((s2xx * 100) / total, 2) : 100,
-    avg_latency_ms: roundTo(Number(r?.avg_latency_ms ?? 0), 2),
-    recent_errors: [] as Record<string, unknown>[],
-  };
-}
-
-export async function queryRumStatus(serviceId = "default", signal?: AbortSignal) {
-  const response = await fetchCloudMetadata("/api/services", signal ?? new AbortController().signal);
-  if (!response.ok) throw new Error(`Cloud services listing failed (${response.status})`);
-  const { services = [] } = (await response.json()) as {
-    services?: Array<{
-      service_id?: string;
-      rum_enabled?: boolean;
-      faro_version?: string;
-      rum?: {
-        enabled?: boolean;
-        faro_version?: string;
-        sample_rate?: number;
-        endpoint_name?: string;
-      };
-    }>;
-  };
-  const service =
-    serviceId === "default"
-      ? services[0]
-      : services.find((item) => item.service_id === serviceId);
-  return {
-    service_id: service?.service_id ?? serviceId,
-    enabled: service?.rum?.enabled === true || service?.rum_enabled === true,
-    version: service?.rum?.faro_version ?? service?.faro_version ?? "1.0.0",
-    sample_rate: typeof service?.rum?.sample_rate === "number" ? service.rum.sample_rate : 1.0,
-    endpoint: service?.rum?.endpoint_name ?? "/__fla_rum",
-  };
-}
-
-export async function queryRumVersions() {
-  return {
-    current_version: "1.0.0",
-    latest_version: "1.0.0",
-    up_to_date: true,
+    enabled: true,
+    beacon_fire_rate: beacons,
+    recent_beacons: beacons,
+    last_beacon_time: lastBeaconTime,
+    setup_complete: hasData,
+    message: hasData
+      ? `RUM is working! Received ${beacons} beacon(s) in the last 15 minutes.`
+      : "No beacons received in the last 15 minutes. Ensure the RUM script is installed and your site is receiving traffic.",
   };
 }
 
@@ -683,9 +650,6 @@ export async function handleRumRequest(
   if (path.includes("rum/beacon-health")) {
     return queryRumBeaconHealth(params);
   }
-  if (path.includes("rum/versions")) {
-    return queryRumVersions();
-  }
   if (path.includes("rum/settings")) {
     return updateRumSettings(params.service_id ?? "default");
   }
@@ -695,9 +659,6 @@ export async function handleRumRequest(
     path.includes("rum/upgrade")
   ) {
     return { status: "complete", service_id: params.service_id ?? "default" };
-  }
-  if (path.includes("rum/status")) {
-    return queryRumStatus(params.service_id ?? "default", params.signal);
   }
   return queryRumAnalytics(params);
 }

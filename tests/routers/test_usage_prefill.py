@@ -226,3 +226,48 @@ def test_prefill_rates_auto_derives_billing_zone_from_fos_region(
     assert rates.fos_region == fos_region
     assert rates.billing_zone == expected_zone
     assert rates.cdn_egress_rate_per_gb == pytest.approx(expected_rate)
+
+
+@pytest.mark.no_postgres
+def test_usage_compute_endpoint_and_optional_cloud_models():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from backend.core.request_context import get_source, require_admin
+    from backend.models.admin.operations import (
+        CloudMeasuredEstimate,
+        CurrentStorageResponse,
+        IncurredCostSummary,
+        PrefillResponse,
+        UsageComputeResponse,
+    )
+
+    app = FastAPI()
+    app.include_router(usage.usage_router)
+    app.dependency_overrides[require_admin] = lambda: None
+    app.dependency_overrides[get_source] = lambda: {"name": "svc", "service_id": "svc"}
+
+    client = TestClient(app)
+    resp = client.get(
+        "/api/usage/compute", params={"start_time": "2026-01-01T00:00:00Z", "end_time": "2026-01-01T01:00:00Z"}
+    )
+    assert resp.status_code == 200
+    parsed = UsageComputeResponse.model_validate(resp.json())
+    assert parsed.source == "not_applicable"
+    assert parsed.data == []
+
+    storage = CurrentStorageResponse(
+        live_bytes=0,
+        live_files=0,
+        deleted_bytes=0,
+        total_billed_bytes=0,
+        total_files=0,
+        total_bytes=0,
+        start="2026-01-01T00:00:00Z",
+        end="2026-01-01T01:00:00Z",
+        incurred=IncurredCostSummary(total=1.25, lines=[]),
+    )
+    assert storage.incurred is not None and storage.incurred.total == pytest.approx(1.25)
+
+    prefill = PrefillResponse(cloud_measured=CloudMeasuredEstimate(inputs={"requestsPerDay": 100}))
+    assert prefill.cloud_measured is not None

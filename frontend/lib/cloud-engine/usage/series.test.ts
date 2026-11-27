@@ -64,15 +64,16 @@ describe("bucketUsage", () => {
     expect(series.find((p) => p.t === day)!.classA).toBe(dayClassA);
   });
 
-  it("counts compute requests from api telemetry", () => {
-    const requests = series.reduce((sum, p) => sum + p.requests, 0);
+  it("keeps internal compute_api and cron execution counts out of customer CDN requests", () => {
+    const computeRequests = series.reduce((sum, p) => sum + p.computeRequests, 0);
     const expected = fixtureUsageInput.rows.api_telemetry.filter(
       (r) => r.source === "compute_api" && r.timestamp >= from,
     ).length;
-    expect(requests).toBe(expected);
+    expect(computeRequests).toBe(expected);
+    expect(series.reduce((sum, p) => sum + p.requests, 0)).toBe(0);
   });
 
-  it("counts a folded file-read row as the requests it stands for", () => {
+  it("counts a folded file-read row as computeRequests rather than CDN requests", () => {
     const folded = bucketUsage(
       {
         ...fixtureUsageInput.rows,
@@ -88,7 +89,22 @@ describe("bucketUsage", () => {
       },
       { from, to: FIXTURE_NOW, by: "day" },
     );
-    expect(folded.reduce((sum, p) => sum + p.requests, 0)).toBe(7);
+    expect(folded.reduce((sum, p) => sum + p.computeRequests, 0)).toBe(7);
+    expect(folded.reduce((sum, p) => sum + p.requests, 0)).toBe(0);
+  });
+
+  it("populates customer CDN requests only from cdnRequestsByHour when provided", () => {
+    const day = Date.UTC(2026, 9, 29);
+    const withCdnReqs = bucketUsage(
+      fixtureUsageInput.rows,
+      { from, to: FIXTURE_NOW, by: "day" },
+      undefined,
+      undefined,
+      undefined,
+      [{ t: day + 3_600_000, requests: 12_500 }],
+    );
+    expect(withCdnReqs.find((p) => p.t === day)?.requests).toBe(12_500);
+    expect(withCdnReqs.find((p) => p.t !== day)?.requests).toBe(0);
   });
 
   it("sums ingested log rows from request_ingest cron_runs into each bucket", () => {
@@ -176,7 +192,8 @@ describe("bucketUsage", () => {
     expect(point?.classB).toBe(4);
     expect(point?.bytesOut).toBeGreaterThan(160_000);
     expect(point?.usd).toBeGreaterThan(0);
-    expect(point?.requests).toBe(1 + 1 + 5);
+    expect(point?.requests).toBe(0);
+    expect(point?.computeRequests).toBe(1 + 1 + 5);
     expect(point?.ingestedRows).toBe(2_000);
   });
 });

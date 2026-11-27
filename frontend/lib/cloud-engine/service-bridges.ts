@@ -1,6 +1,14 @@
 import { fetchCloudMetadata } from "./metadata-cache";
 
-export async function cloudServiceStatus(request: Request): Promise<Response | null> {
+export interface CloudServiceStatusOptions {
+  role?: "admin" | "analyst" | "analyst-no-pii";
+  isAnalyst?: boolean;
+}
+
+export async function cloudServiceStatus(
+  request: Request,
+  options?: CloudServiceStatusOptions,
+): Promise<Response | null> {
   const path = new URL(request.url).pathname;
   const match = path.match(/^\/api\/services\/([^/]+)\/(rum|cmcd)\/(status|versions)$/);
   if (!match || request.method !== "GET") return null;
@@ -37,8 +45,26 @@ export async function cloudServiceStatus(request: Request): Promise<Response | n
     });
   }
   const config = service[match[2] as "rum" | "cmcd"];
+  const enabled = config?.enabled === true || match[2] === "rum" && service.rum_enabled === true;
+  if (match[2] === "rum") {
+    const role = options?.role ?? request.headers.get("x-analyst-role") ?? undefined;
+    const isAnalyst = Boolean(options?.isAnalyst || role === "analyst" || role === "analyst-no-pii");
+    const enabledAt = (config?.enabled_at as string | null | undefined) ?? null;
+    if (isAnalyst) {
+      return Response.json({
+        enabled,
+        enabled_at: enabledAt,
+      });
+    }
+    return Response.json({
+      ...config,
+      enabled,
+      enabled_at: enabledAt,
+      supports_storage_purge: false,
+    });
+  }
   return Response.json({
     ...config,
-    enabled: config?.enabled === true || match[2] === "rum" && service.rum_enabled === true,
+    enabled,
   });
 }

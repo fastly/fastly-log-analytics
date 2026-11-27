@@ -2991,7 +2991,7 @@ _CMCD_CANNED: dict[str, list[dict[str, Any]]] = {
     ],
     "cmcd:timeseries": [
         {
-            "bucket": "2026-09-14 10:05:00",
+            "bucket": "2026-09-14T10:05:00Z",
             "concurrent_sessions": 3,
             "rebuffer_session_pct": 33.333,
             "p50_buffer": 10.0,
@@ -3005,7 +3005,7 @@ _CMCD_CANNED: dict[str, list[dict[str, Any]]] = {
             "startup_ratio": 2.5,
         }
     ],
-    "cmcd:new_sessions": [{"bucket": "2026-09-14 10:05:00", "new_sessions": 2}],
+    "cmcd:new_sessions": [{"bucket": "2026-09-14T10:05:00Z", "new_sessions": 2}],
     "cmcd:top_content": [
         {"content_id": "movie-1", "session_count": 3, "rebuffer_rate": 33.33, "avg_br": 3000.0, "avg_bl": 9.5}
     ],
@@ -3020,7 +3020,7 @@ _CMCD_CANNED: dict[str, list[dict[str, Any]]] = {
     "cmcd:sessions": [
         {
             "kind": "new_sessions",
-            "k": "2026-09-14 10:05:00",
+            "k": "2026-09-14T10:05:00Z",
             "session_count": 2,
             "positive_duration_sum": 0.0,
             "positive_duration_count": 0,
@@ -3222,32 +3222,32 @@ def test_time_series_are_padded_to_every_bucket_in_the_window() -> None:
     result = _run(_Client_cmcd())
     buckets = [point["bucket"] for point in result["sessions_ts"]]
     assert buckets == [
-        "2026-09-14 10:00:00",
-        "2026-09-14 10:05:00",
-        "2026-09-14 10:10:00",
+        "2026-09-14T10:00:00Z",
+        "2026-09-14T10:05:00Z",
+        "2026-09-14T10:10:00Z",
     ]
     assert result["sessions_ts"][1] == {
-        "bucket": "2026-09-14 10:05:00",
+        "bucket": "2026-09-14T10:05:00Z",
         "concurrent_sessions": 3,
         "rebuffer_session_pct": 33.33,
         "new_sessions": 2,
     }
     assert result["sessions_ts"][0] == {
-        "bucket": "2026-09-14 10:00:00",
+        "bucket": "2026-09-14T10:00:00Z",
         "concurrent_sessions": 0,
         "rebuffer_session_pct": None,
         "new_sessions": 0,
     }
     assert result["buffer_health_ts"][1] == {
-        "bucket": "2026-09-14 10:05:00",
+        "bucket": "2026-09-14T10:05:00Z",
         "p50_buffer": 10.0,
         "p95_buffer": 20.0,
         "starvation_rate": 5.0,
     }
     assert result["bitrate_ts"][1]["utilization_ratio"] == 0.51
-    assert result["throughput_ts"][1] == {"bucket": "2026-09-14 10:05:00", "p50": 7000.0, "p95": 9000.0, "p99": 9500.0}
-    assert result["startup_ts"][1] == {"bucket": "2026-09-14 10:05:00", "startup_ratio": 2.5}
-    assert result["startup_ts"][0] == {"bucket": "2026-09-14 10:00:00", "startup_ratio": None}
+    assert result["throughput_ts"][1] == {"bucket": "2026-09-14T10:05:00Z", "p50": 7000.0, "p95": 9000.0, "p99": 9500.0}
+    assert result["startup_ts"][1] == {"bucket": "2026-09-14T10:05:00Z", "startup_ratio": 2.5}
+    assert result["startup_ts"][0] == {"bucket": "2026-09-14T10:00:00Z", "startup_ratio": None}
 
 
 @pytest.mark.usefixtures("_asn_names")

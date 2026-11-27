@@ -22,6 +22,7 @@ import {
   FIELD_DUCKDB_TYPES,
   RUM_ERRORS_COLUMNS,
   RUM_VITALS_COLUMNS,
+  getDuckDBEngine,
   type DuckDBColumnType,
 } from "./dashboard/duckdb";
 import type { Schema } from "@/types/api";
@@ -43,15 +44,24 @@ export interface PresetQueryItem {
 
 export interface QuerySchemaColumn {
   column: string;
+  name?: string;
   type: string;
 }
 
 export interface QuerySchemaResponse {
   source: string;
   table_name: string;
+  service_id?: string;
   schema: QuerySchemaColumn[];
+  columns: QuerySchemaColumn[];
   debug_queries: unknown[];
   debug_calls: unknown[];
+}
+
+export interface GetQuerySchemaOptions {
+  customColumns?: readonly QuerySchemaColumn[];
+  activeFieldIds?: Iterable<string>;
+  customColumnTypes?: ReadonlyMap<string, DuckDBColumnType> | Readonly<Record<string, DuckDBColumnType>>;
 }
 
 export interface QueryRequest {
@@ -158,8 +168,8 @@ export function getQueryPresets(
     },
     {
       name: "Column stats",
-      description: "Non-null counts and unique values per column",
-      sql: `SUMMARIZE ${tbl}`,
+      description: "Summary row, IP, URL, and timestamp bounds",
+      sql: `SELECT count(*) AS total_rows, count(DISTINCT ip) AS unique_ips, count(DISTINCT url) AS unique_urls, min(timestamp) AS earliest_ts, max(timestamp) AS latest_ts FROM ${tbl}`,
       category: "Traffic",
     },
     {
@@ -176,21 +186,21 @@ export function getQueryPresets(
     },
     // Performance (4)
     {
-      name: "Slowest endpoints by P95 latency",
-      description: "URLs with highest P95 edge response time in milliseconds",
-      sql: `SELECT url, count(*) AS requests, round(percentile_cont(0.95) WITHIN GROUP (ORDER BY elapsed) / 1000.0, 2) AS p95_ms FROM ${tbl} GROUP BY url HAVING count(*) >= 10 ORDER BY p95_ms DESC LIMIT 25`,
+      name: "Slowest endpoints by latency",
+      description: "URLs with highest average and max edge response time in milliseconds",
+      sql: `SELECT url, count(*) AS requests, round(avg(elapsed) / 1000.0, 2) AS avg_ms, round(max(elapsed) / 1000.0, 2) AS max_ms FROM ${tbl} GROUP BY url HAVING count(*) >= 10 ORDER BY avg_ms DESC LIMIT 25`,
       category: "Performance",
     },
     {
-      name: "Latency percentiles by PoP",
-      description: "P50, P95, and P99 response times across Fastly edge PoPs",
-      sql: `SELECT pop, count(*) AS requests, round(percentile_cont(0.50) WITHIN GROUP (ORDER BY elapsed) / 1000.0, 2) AS p50_ms, round(percentile_cont(0.95) WITHIN GROUP (ORDER BY elapsed) / 1000.0, 2) AS p95_ms, round(percentile_cont(0.99) WITHIN GROUP (ORDER BY elapsed) / 1000.0, 2) AS p99_ms FROM ${tbl} GROUP BY pop ORDER BY requests DESC LIMIT 50`,
+      name: "Latency stats by PoP",
+      description: "Min, average, and max response times across Fastly edge PoPs",
+      sql: `SELECT pop, count(*) AS requests, round(min(elapsed) / 1000.0, 2) AS min_ms, round(avg(elapsed) / 1000.0, 2) AS avg_ms, round(max(elapsed) / 1000.0, 2) AS max_ms FROM ${tbl} GROUP BY pop ORDER BY requests DESC LIMIT 50`,
       category: "Performance",
     },
     {
-      name: "Tail latency outliers (P99 vs P50)",
-      description: "Endpoints where P99 latency exceeds 5x median latency",
-      sql: `SELECT url, count(*) AS requests, round(percentile_cont(0.50) WITHIN GROUP (ORDER BY elapsed) / 1000.0, 2) AS p50_ms, round(percentile_cont(0.99) WITHIN GROUP (ORDER BY elapsed) / 1000.0, 2) AS p99_ms FROM ${tbl} GROUP BY url HAVING count(*) >= 20 ORDER BY p99_ms DESC LIMIT 25`,
+      name: "High-latency outliers (max vs avg)",
+      description: "Endpoints with the highest maximum response times",
+      sql: `SELECT url, count(*) AS requests, round(avg(elapsed) / 1000.0, 2) AS avg_ms, round(max(elapsed) / 1000.0, 2) AS max_ms FROM ${tbl} GROUP BY url HAVING count(*) >= 20 ORDER BY max_ms DESC LIMIT 25`,
       category: "Performance",
     },
     {
@@ -209,19 +219,19 @@ export function getQueryPresets(
     {
       name: "Top cache misses by URL",
       description: "URLs generating the most cache MISS responses",
-      sql: `SELECT url, count(*) AS misses, sum(resp_bytes) AS miss_bytes FROM ${tbl} WHERE starts_with(cache, 'MISS') GROUP BY url ORDER BY misses DESC LIMIT 25`,
+      sql: `SELECT url, count(*) AS misses, sum(resp_bytes) AS miss_bytes FROM ${tbl} WHERE cache LIKE 'MISS%' GROUP BY url ORDER BY misses DESC LIMIT 25`,
       category: "Cache",
     },
     {
       name: "Uncacheable PASS endpoints",
       description: "Endpoints bypassing cache via PASS",
-      sql: `SELECT url, count(*) AS pass_requests FROM ${tbl} WHERE starts_with(cache, 'PASS') GROUP BY url ORDER BY pass_requests DESC LIMIT 25`,
+      sql: `SELECT url, count(*) AS pass_requests FROM ${tbl} WHERE cache LIKE 'PASS%' GROUP BY url ORDER BY pass_requests DESC LIMIT 25`,
       category: "Cache",
     },
     {
       name: "Low-TTL cached objects",
       description: "Cached HIT responses with short TTLs under 60 seconds",
-      sql: `SELECT url, count(*) AS hits, round(avg(ttl), 1) AS avg_ttl_s, round(avg(age), 1) AS avg_age_s FROM ${tbl} WHERE starts_with(cache, 'HIT') AND ttl < 60 GROUP BY url ORDER BY hits DESC LIMIT 25`,
+      sql: `SELECT url, count(*) AS hits, round(avg(ttl), 1) AS avg_ttl_s, round(avg(age), 1) AS avg_age_s FROM ${tbl} WHERE cache LIKE 'HIT%' AND ttl < 60 GROUP BY url ORDER BY hits DESC LIMIT 25`,
       category: "Cache",
     },
     // Origin (4)
@@ -239,8 +249,8 @@ export function getQueryPresets(
     },
     {
       name: "Slowest origin backends",
-      description: "Average and P95 latency grouped by backend",
-      sql: `SELECT backend, count(*) AS requests, round(avg(elapsed) / 1000.0, 2) AS avg_ms, round(percentile_cont(0.95) WITHIN GROUP (ORDER BY elapsed) / 1000.0, 2) AS p95_ms FROM ${tbl} WHERE backend IS NOT NULL GROUP BY backend ORDER BY p95_ms DESC`,
+      description: "Average and max latency grouped by backend",
+      sql: `SELECT backend, count(*) AS requests, round(avg(elapsed) / 1000.0, 2) AS avg_ms, round(max(elapsed) / 1000.0, 2) AS max_ms FROM ${tbl} WHERE backend IS NOT NULL GROUP BY backend ORDER BY avg_ms DESC`,
       category: "Origin",
     },
     {
@@ -313,26 +323,71 @@ function isPiiSchemaColumn(rawName: string): boolean {
   return IP_PII_COLUMNS.has(norm) || SESSION_PII_COLUMNS.has(norm);
 }
 
+function resolveCustomTypeEntries(
+  customColumnTypes?: GetQuerySchemaOptions["customColumnTypes"],
+): Array<[string, DuckDBColumnType]> {
+  if (customColumnTypes instanceof Map) return [...customColumnTypes.entries()];
+  if (customColumnTypes && typeof customColumnTypes === "object") {
+    return Object.entries(customColumnTypes) as Array<[string, DuckDBColumnType]>;
+  }
+  try {
+    return [...getDuckDBEngine().getCustomColumnTypes().entries()];
+  } catch {
+    return [];
+  }
+}
+
 export function getQuerySchema(
   serviceId: string,
   maskIps = false,
-  customColumns?: readonly QuerySchemaColumn[],
+  customColumnsOrOptions?: readonly QuerySchemaColumn[] | GetQuerySchemaOptions,
+  extraOptions?: Omit<GetQuerySchemaOptions, "customColumns">,
 ): QuerySchemaResponse {
-  const base = customColumns && customColumns.length > 0
-    ? [...customColumns]
-    : [...DEFAULT_SCHEMA_COLUMNS];
+  const opts: GetQuerySchemaOptions = Array.isArray(customColumnsOrOptions)
+    ? { customColumns: customColumnsOrOptions, ...extraOptions }
+    : (customColumnsOrOptions as GetQuerySchemaOptions | undefined) ?? { ...extraOptions };
+
+  const customTypeEntries = resolveCustomTypeEntries(opts.customColumnTypes);
+  const customTypeMap = new Map<string, DuckDBColumnType>(customTypeEntries);
+
+  let base: QuerySchemaColumn[];
+  if (opts.customColumns && opts.customColumns.length > 0) {
+    base = [...opts.customColumns];
+  } else if (opts.activeFieldIds) {
+    const byName = new Map<string, QuerySchemaColumn>();
+    byName.set("timestamp", { column: "timestamp", type: "TIMESTAMPTZ" });
+    for (const rawId of opts.activeFieldIds) {
+      const id = String(rawId).trim();
+      if (!id || byName.has(id)) continue;
+      const dtype = FIELD_DUCKDB_TYPES[id] ?? customTypeMap.get(id) ?? "VARCHAR";
+      byName.set(id, { column: id, type: dtype });
+    }
+    for (const [col, dtype] of customTypeEntries) {
+      if (!byName.has(col)) byName.set(col, { column: col, type: dtype });
+    }
+    base = [...byName.values()];
+  } else {
+    const byName = new Map<string, QuerySchemaColumn>();
+    for (const col of DEFAULT_SCHEMA_COLUMNS) byName.set(col.column, col);
+    for (const [col, dtype] of customTypeEntries) {
+      if (!byName.has(col)) byName.set(col, { column: col, type: dtype });
+    }
+    base = [...byName.values()];
+  }
+
+  const normalized = base.map((col) => {
+    const colName = String(col.column ?? col.name ?? "");
+    return { column: colName, name: colName, type: col.type };
+  });
   const schema = maskIps
-    ? base.filter((col) => {
-        const name = String(
-          col.column ?? (col as unknown as { name?: string }).name ?? "",
-        );
-        return !isPiiSchemaColumn(name);
-      })
-    : base;
+    ? normalized.filter((col) => !isPiiSchemaColumn(col.column))
+    : normalized;
   return {
     source: serviceId || "logs",
     table_name: "logs",
+    ...(serviceId ? { service_id: serviceId } : {}),
     schema,
+    columns: schema,
     debug_queries: [],
     debug_calls: [],
   };
@@ -653,13 +708,13 @@ function rewriteSqlTableRefs(
 
 /**
  * Rewrite `FROM logs` / `JOIN logs` (or service safe table name) to the
- * in-browser DuckDB table name (default `requests`), and append `LIMIT 1000`
+ * in-browser DuckDB table name (default `requests`), and append `LIMIT 500`
  * if no top-level `LIMIT` is present on a SELECT statement.
  */
 export function rewriteCloudQuerySql(
   sql: string,
   targetTable = "requests",
-  defaultLimit = 1000,
+  defaultLimit = 500,
   allowedTables?: Iterable<string>,
 ): { rewrittenSql: string; hasExplicitLimit: boolean } {
   const cleaned = stripSqlComments(sql).trim().replace(/;\s*$/, "");
@@ -1023,15 +1078,17 @@ function mergeLeadingCtes(
 export async function executeCloudQuery(
   req: QueryRequest,
   ctx: CloudQueryContext = {},
-): Promise<CloudHttpResult<QueryResponse | { detail: { error: string; message: string } }>> {
+): Promise<CloudHttpResult<QueryResponse | { detail: { error: string; message: string; messages: string[] } }>> {
   const rawSql = typeof req?.sql === "string" ? req.sql.trim() : "";
   if (!rawSql) {
+    const message = "No SQL provided";
     return {
       status: 400,
       body: {
         detail: {
           error: "empty_sql",
-          message: "No SQL provided",
+          message,
+          messages: [message],
         },
       },
     };
@@ -1048,6 +1105,7 @@ export async function executeCloudQuery(
         detail: {
           error: "sql_not_permitted",
           message,
+          messages: [message],
         },
       },
     };
@@ -1056,7 +1114,7 @@ export async function executeCloudQuery(
   const t0 = typeof performance !== "undefined" ? performance.now() : Date.now();
   const maxRows = Math.max(
     1,
-    Math.min(Number(req.max_rows ?? 1000), MAX_QUERY_ROWS),
+    Math.min(Number(req.max_rows ?? 500), MAX_QUERY_ROWS),
   );
   const targetTable = ctx.tableName ?? "requests";
   const maskIps = Boolean(ctx.maskIps || ctx.role === "analyst-no-pii");
@@ -1082,6 +1140,7 @@ export async function executeCloudQuery(
         detail: {
           error: "sql_not_permitted",
           message,
+          messages: [message],
         },
       },
     };
@@ -1098,12 +1157,14 @@ export async function executeCloudQuery(
     ]);
     for (const cteName of userCteAliases) {
       if (reservedCteNames.has(cteName)) {
+        const message = `CTE alias '${cteName}' collides with a protected table name.`;
         return {
           status: 403,
           body: {
             detail: {
               error: "sql_not_permitted",
-              message: `CTE alias '${cteName}' collides with a protected table name.`,
+              message,
+              messages: [message],
             },
           },
         };
@@ -1288,10 +1349,9 @@ export async function executeCloudQuery(
     const elapsedMs = Math.max(
       0,
       Math.round(
-        ((typeof performance !== "undefined" ? performance.now() : Date.now()) -
-          t0) *
-          100,
-      ) / 100,
+        (typeof performance !== "undefined" ? performance.now() : Date.now()) -
+          t0,
+      ),
     );
 
     const debugEntry = {
@@ -1325,6 +1385,7 @@ export async function executeCloudQuery(
         detail: {
           error: "query_failed",
           message,
+          messages: [message],
         },
       },
     };
@@ -1543,7 +1604,7 @@ export async function planCloudQueryScan(
     // The query is refused before it reads anything; the smallest load lets it say so.
     return { columns: ["timestamp"], newestFirst: { table: targetTable, ordered: false, limit: null } };
   }
-  const maxRows = Math.max(1, Math.min(Number(req.max_rows ?? 1000), MAX_QUERY_ROWS));
+  const maxRows = Math.max(1, Math.min(Number(req.max_rows ?? 500), MAX_QUERY_ROWS));
   const { rewrittenSql, hasExplicitLimit } = rewriteCloudQuerySql(rawSql, targetTable, maxRows);
   let tokens: SqlToken[];
   try {

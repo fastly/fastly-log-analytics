@@ -15,7 +15,10 @@ export interface UsagePoint {
   kvClassB: number;
   kvUsd: number;
   bytesOut: number;
+  /** Customer CDN requests from cdnRequestsByHour; zero when unavailable. */
   requests: number;
+  /** Internal Compute API / cron invocation count (never plotted as customer CDN requests). */
+  computeRequests: number;
   ingestedRows: number;
 }
 
@@ -47,6 +50,7 @@ export function bucketUsage(
     classAPerMillion: LIST_RATES.kv_class_a_rate_per_million,
     classBPerMillion: LIST_RATES.kv_class_b_rate_per_million,
   },
+  cdnRequestsByHour?: Array<{ t: number; requests: number }>,
 ): UsagePoint[] {
   const points = new Map<number, UsagePoint>(
     bucketStarts(range.from, range.to, range.by).map((t) => [
@@ -61,6 +65,7 @@ export function bucketUsage(
         kvUsd: 0,
         bytesOut: 0,
         requests: 0,
+        computeRequests: 0,
         ingestedRows: 0,
       },
     ]),
@@ -98,10 +103,17 @@ export function bucketUsage(
       }
     }
   }
+  if (cdnRequestsByHour) {
+    for (const bucket of cdnRequestsByHour) {
+      if (bucket.t < range.from) continue;
+      const point = points.get(floorTo(bucket.t, range.by));
+      if (point) point.requests += bucket.requests;
+    }
+  }
   for (const row of rows.api_telemetry) {
     if (row.source !== "compute_api" || row.timestamp < range.from) continue;
     const point = points.get(floorTo(row.timestamp, range.by));
-    if (point) point.requests += row.files_fetched || 1;
+    if (point) point.computeRequests += row.files_fetched || 1;
   }
   const deriveRequestsFromCrons = rows.api_telemetry.length === 0;
   for (const run of rows.cron_runs ?? []) {
@@ -110,7 +122,7 @@ export function bucketUsage(
     if (point) {
       point.ingestedRows += run.rows_written ?? 0;
       if (deriveRequestsFromCrons) {
-        point.requests +=
+        point.computeRequests +=
           1 + (run.worker_executions ?? 0) + (run.idle_ticks ?? 0);
       }
     }

@@ -431,6 +431,7 @@ class PresetQuery(WireSafeModel):
     name: str
     description: str
     sql: str
+    category: str | None = None
 
 
 class QuerySchemaResponse(BaseResponse):

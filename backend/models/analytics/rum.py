@@ -21,6 +21,7 @@ class RumStatusResponse(WireSafeModel):
     error_sample_rate: float | None = None
     resource_sample_rate: float | None = None
     custom_condition: str | None = None
+    supports_storage_purge: bool = True
 
 
 class RumSettingsUpdateResponse(_OkWireSafeBase):

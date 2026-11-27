@@ -8,12 +8,14 @@ import { fetchLanes } from "./fetch-lanes";
 import { queryRumWireFromRollup, type RumRollupSource } from "./rum-rollup";
 import { DuckDBAnalyticalEngine, getDuckDBEngine } from "./dashboard/test-fixtures";
 import { redactQueryRowsForPii } from "./query";
-import { cloudRumAnalytics, cloudRumLiveEvents, cloudRumRequestLog } from "./rum-wire";
+import { cloudRumAnalytics, cloudRumLiveEvents, cloudRumRequestLog, cloudRumUsage } from "./rum-wire";
+import * as rumModule from "./rum";
 import {
   classifyCwvRating,
   emptyRumAnalytics,
   handleRumRequest,
   queryRumAnalytics,
+  queryRumBeaconHealth,
   queryRumLiveEvents,
   shapeRumEnvironments,
 } from "./rum";
@@ -116,16 +118,17 @@ describe("Feature F23 — RUM & Web Vitals cloud-engine", () => {
     }
   });
 
-  it("keeps CWV wire distributions zero and percentiles null with no beacons", async () => {
+  it("sets no_data message and null CWV distributions when no beacons exist", async () => {
     const engine = getDuckDBEngine();
     try {
       const data = await cloudRumAnalytics({});
       expect(data.no_data).toBe(true);
       expect(data.beacon_count).toBe(0);
+      expect(data).toHaveProperty("message", "Waiting for real-time RUM user events...");
       for (const name of ["lcp", "cls", "inp"] as const) {
         expect(data.vitals[name]).toEqual({
           p75: null,
-          distribution: { good: 0, needs_improvement: 0, poor: 0 },
+          distribution: null,
         });
       }
     } finally {
@@ -885,6 +888,94 @@ describe("Feature F23 — RUM & Web Vitals cloud-engine", () => {
       const maskedRow = redactQueryRowsForPii([unmasked.request!], true)[0];
       expect(maskedRow.client_ip).toBe("0.0.0.0");
       expect(JSON.stringify(maskedRow)).not.toContain("203.0.113.9");
+    } finally {
+      await engine.reset();
+    }
+  });
+
+  it("enforces RUM parity: live-events maskIps/ttfb/pageview/limit, beacon-health contract, removed stubs, errors[].file fallback, and worst_pages sort", async () => {
+    expect("queryRumStatus" in rumModule).toBe(false);
+    expect("queryRumVersions" in rumModule).toBe(false);
+
+    const engine = new DuckDBAnalyticalEngine();
+    try {
+      const nowMs = Date.now();
+      await engine.executeSql(`INSERT INTO client_vitals
+        (scoped_key, ts_ms, metric_name, metric_value, page_url, client_id, session_id, ttfb)
+        VALUES
+          ('v1', ${nowMs - 10_000}, 'LCP', 2100, '/checkout?ip=203.0.113.9', 'cid-secret-1', 'sess-secret-1', 0.123),
+          ('v2', ${nowMs - 20_000}, 'page_load', 1200, '/fast', 'cid-2', 'sess-2', 45),
+          ('v3', ${nowMs - 30_000}, 'page_load', 3400, '/slow', 'cid-3', 'sess-3', 80)`);
+      await engine.executeSql(`INSERT INTO client_errors
+        (scoped_key, ts_ms, error_message, filename, page_url, session_id)
+        VALUES ('e1', ${nowMs - 5_000}, 'ReferenceError', '', '/checkout?ip=203.0.113.9', 'sess-secret-1')`);
+
+      const maskedLive = await cloudRumLiveEvents({ engine, maskIps: true });
+      expect(maskedLive.length).toBeGreaterThan(0);
+      expect(maskedLive.every((ev) => ev.type !== "vital")).toBe(true);
+      const vitalEv = maskedLive.find((ev) => ev.metric_name === "LCP");
+      expect(vitalEv?.type).toBe("pageview");
+      expect(vitalEv?.raw_log.ttfb).toBe(123);
+      expect(JSON.stringify(maskedLive)).not.toContain("203.0.113.9");
+      expect(JSON.stringify(maskedLive)).not.toContain("sess-secret-1");
+      expect(JSON.stringify(maskedLive)).not.toContain("cid-secret-1");
+
+      const analytics = await cloudRumAnalytics({ engine });
+      expect(analytics.errors[0].file).toBe("unknown.js");
+      expect(analytics.worst_pages.map((p) => p.path)).toEqual([
+        "/checkout?ip=203.0.113.9",
+        "/slow",
+        "/fast",
+      ]);
+
+      const health = await queryRumBeaconHealth({ engine });
+      expect(health).toMatchObject({
+        enabled: true,
+        beacon_fire_rate: 4,
+        recent_beacons: 4,
+        setup_complete: true,
+      });
+      expect(typeof health.last_beacon_time).toBe("string");
+      expect(health.message).toContain("4 beacon");
+      expect("status_2xx" in health).toBe(false);
+    } finally {
+      await engine.reset();
+    }
+  });
+
+  it("counts physical unweighted distinct beacons for RUM Class A usage billing and rounds cost and daily average", async () => {
+    const engine = new DuckDBAnalyticalEngine();
+    try {
+      await engine.executeSql(`INSERT INTO client_vitals
+        (scoped_key, ts_ms, metric_name, metric_value, page_url, client_id, request_event_id, sample_rate)
+        VALUES
+          ('v1', 1767229200000, 'LCP', 1200, '/a', 'beacon-1', 'req-1', 0.25),
+          ('v2', 1767232800000, 'CLS', 0.05, '/a', 'beacon-1', 'req-1', 0.25),
+          ('v3', 1767236400000, 'LCP', 900, '/b', 'beacon-2', 'req-2', 0.25)`);
+      await engine.executeSql(`INSERT INTO client_errors
+        (scoped_key, ts_ms, error_message, page_url, client_id, request_event_id, sample_rate)
+        VALUES ('e1', 1767240000000, 'Boom', '/b', 'beacon-2', 'req-2', 0.25)`);
+
+      const usage = await cloudRumUsage(
+        {
+          engine,
+          start_time: "2026-01-01T00:00:00Z",
+          end_time: "2026-01-04T00:00:00Z",
+        },
+        0.0025,
+      );
+      expect(usage.data).toEqual([
+        {
+          date: "2026-01-01",
+          beacon_count: 2,
+          estimated_class_a_ops: 2,
+          estimated_cost_usd: 0.000005,
+        },
+      ]);
+      expect(usage.total_beacons).toBe(2);
+      expect(usage.total_estimated_class_a).toBe(2);
+      expect(usage.total_estimated_cost_usd).toBe(0.000005);
+      expect(usage.average_beacons_per_day).toBe(0.67);
     } finally {
       await engine.reset();
     }

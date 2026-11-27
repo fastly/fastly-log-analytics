@@ -36,20 +36,167 @@ def _get_presets(src: dict | None) -> list[dict]:
         return []
     table_name = _safe_table_name(src["name"])
     return [
+        # Traffic (5)
         {
             "name": "Sample rows",
             "description": "Preview 100 raw log rows",
             "sql": f"SELECT * FROM {table_name} LIMIT 100",
+            "category": "Traffic",
         },
         {
             "name": "Row count",
             "description": "Total number of rows",
             "sql": f"SELECT count(*) AS total_rows FROM {table_name}",
+            "category": "Traffic",
+        },
+        {
+            "name": "Column stats",
+            "description": "Summary row, IP, URL, and timestamp bounds",
+            "sql": f"SELECT count(*) AS total_rows, count(DISTINCT ip) AS unique_ips, count(DISTINCT url) AS unique_urls, min(timestamp) AS earliest_ts, max(timestamp) AS latest_ts FROM {table_name}",
+            "category": "Traffic",
         },
         {
             "name": "Status breakdown",
             "description": "Request count by HTTP status code",
             "sql": f"SELECT status, count(*) AS requests FROM {table_name} GROUP BY status ORDER BY requests DESC",
+            "category": "Traffic",
+        },
+        {
+            "name": "Top requested URLs",
+            "description": "Most frequently requested URL paths and total egress bytes",
+            "sql": f"SELECT url, count(*) AS requests, sum(resp_bytes) AS total_bytes FROM {table_name} GROUP BY url ORDER BY requests DESC LIMIT 50",
+            "category": "Traffic",
+        },
+        # Performance (4)
+        {
+            "name": "Slowest endpoints by latency",
+            "description": "URLs with highest average and max edge response time in milliseconds",
+            "sql": f"SELECT url, count(*) AS requests, round(avg(elapsed) / 1000.0, 2) AS avg_ms, round(max(elapsed) / 1000.0, 2) AS max_ms FROM {table_name} GROUP BY url HAVING count(*) >= 10 ORDER BY avg_ms DESC LIMIT 25",
+            "category": "Performance",
+        },
+        {
+            "name": "Latency stats by PoP",
+            "description": "Min, average, and max response times across Fastly edge PoPs",
+            "sql": f"SELECT pop, count(*) AS requests, round(min(elapsed) / 1000.0, 2) AS min_ms, round(avg(elapsed) / 1000.0, 2) AS avg_ms, round(max(elapsed) / 1000.0, 2) AS max_ms FROM {table_name} GROUP BY pop ORDER BY requests DESC LIMIT 50",
+            "category": "Performance",
+        },
+        {
+            "name": "High-latency outliers (max vs avg)",
+            "description": "Endpoints with the highest maximum response times",
+            "sql": f"SELECT url, count(*) AS requests, round(avg(elapsed) / 1000.0, 2) AS avg_ms, round(max(elapsed) / 1000.0, 2) AS max_ms FROM {table_name} GROUP BY url HAVING count(*) >= 20 ORDER BY max_ms DESC LIMIT 25",
+            "category": "Performance",
+        },
+        {
+            "name": "Large uncompressed payloads",
+            "description": "Responses over 100 KB served with high latency",
+            "sql": f"SELECT url, status, resp_bytes, round(elapsed / 1000.0, 2) AS elapsed_ms FROM {table_name} WHERE resp_bytes > 102400 ORDER BY resp_bytes DESC LIMIT 50",
+            "category": "Performance",
+        },
+        # Cache (4)
+        {
+            "name": "Cache status distribution",
+            "description": "Request volume and bandwidth share by Fastly cache state",
+            "sql": f"SELECT cache, count(*) AS requests, sum(resp_bytes) AS total_bytes FROM {table_name} GROUP BY cache ORDER BY requests DESC",
+            "category": "Cache",
+        },
+        {
+            "name": "Top cache misses by URL",
+            "description": "URLs generating the most cache MISS responses",
+            "sql": f"SELECT url, count(*) AS misses, sum(resp_bytes) AS miss_bytes FROM {table_name} WHERE cache LIKE 'MISS%' GROUP BY url ORDER BY misses DESC LIMIT 25",
+            "category": "Cache",
+        },
+        {
+            "name": "Uncacheable PASS endpoints",
+            "description": "Endpoints bypassing cache via PASS",
+            "sql": f"SELECT url, count(*) AS pass_requests FROM {table_name} WHERE cache LIKE 'PASS%' GROUP BY url ORDER BY pass_requests DESC LIMIT 25",
+            "category": "Cache",
+        },
+        {
+            "name": "Low-TTL cached objects",
+            "description": "Cached HIT responses with short TTLs under 60 seconds",
+            "sql": f"SELECT url, count(*) AS hits, round(avg(ttl), 1) AS avg_ttl_s, round(avg(age), 1) AS avg_age_s FROM {table_name} WHERE cache LIKE 'HIT%' AND ttl < 60 GROUP BY url ORDER BY hits DESC LIMIT 25",
+            "category": "Cache",
+        },
+        # Origin (4)
+        {
+            "name": "Origin 5xx errors by URL",
+            "description": "URLs returning server errors (HTTP 500-599)",
+            "sql": f"SELECT url, status, count(*) AS error_count FROM {table_name} WHERE status >= 500 GROUP BY url, status ORDER BY error_count DESC LIMIT 50",
+            "category": "Origin",
+        },
+        {
+            "name": "Backend traffic & error breakdown",
+            "description": "Requests and 5xx error counts per origin backend",
+            "sql": f"SELECT backend, count(*) AS requests, sum(CASE WHEN status >= 500 THEN 1 ELSE 0 END) AS errors_5xx FROM {table_name} WHERE backend IS NOT NULL GROUP BY backend ORDER BY requests DESC",
+            "category": "Origin",
+        },
+        {
+            "name": "Slowest origin backends",
+            "description": "Average and max latency grouped by backend",
+            "sql": f"SELECT backend, count(*) AS requests, round(avg(elapsed) / 1000.0, 2) AS avg_ms, round(max(elapsed) / 1000.0, 2) AS max_ms FROM {table_name} WHERE backend IS NOT NULL GROUP BY backend ORDER BY avg_ms DESC",
+            "category": "Origin",
+        },
+        {
+            "name": "Edge vs shield request split",
+            "description": "Comparison of edge requests versus origin-shield requests",
+            "sql": f"SELECT edge, cache, count(*) AS requests FROM {table_name} GROUP BY edge, cache ORDER BY requests DESC",
+            "category": "Origin",
+        },
+        # Security (5)
+        {
+            "name": "Top client IPs by request volume",
+            "description": "Highest-volume client IP addresses and 4xx/5xx error counts",
+            "sql": f"SELECT ip, country, asn, count(*) AS requests, sum(CASE WHEN status >= 400 THEN 1 ELSE 0 END) AS errors FROM {table_name} GROUP BY ip, country, asn ORDER BY requests DESC LIMIT 50",
+            "category": "Security",
+        },
+        {
+            "name": "JA4 TLS fingerprint distribution",
+            "description": "Top JA4 client TLS fingerprints and distinct IP counts",
+            "sql": f"SELECT ja4, count(*) AS requests, count(DISTINCT ip) AS distinct_ips FROM {table_name} WHERE ja4 IS NOT NULL AND ja4 != '' GROUP BY ja4 ORDER BY requests DESC LIMIT 25",
+            "category": "Security",
+        },
+        {
+            "name": "Authentication 401/403 spikes",
+            "description": "Client IPs triggering HTTP 401 or 403 responses",
+            "sql": f"SELECT ip, url, status, count(*) AS denied_count FROM {table_name} WHERE status IN (401, 403) GROUP BY ip, url, status ORDER BY denied_count DESC LIMIT 50",
+            "category": "Security",
+        },
+        {
+            "name": "404 content discovery scanners",
+            "description": "Client IPs hitting the highest number of distinct 404 URLs",
+            "sql": f"SELECT ip, count(*) AS total_404s, count(DISTINCT url) AS distinct_404_urls FROM {table_name} WHERE status = 404 GROUP BY ip HAVING count(DISTINCT url) >= 5 ORDER BY distinct_404_urls DESC LIMIT 25",
+            "category": "Security",
+        },
+        {
+            "name": "WAF blocked & flagged requests",
+            "description": "Requests where WAF inspection triggered or blocked traffic",
+            "sql": f"SELECT ip, url, waf_resp, status, count(*) AS hits FROM {table_name} WHERE waf = true OR waf_resp > 0 GROUP BY ip, url, waf_resp, status ORDER BY hits DESC LIMIT 50",
+            "category": "Security",
+        },
+        # Network (4)
+        {
+            "name": "Traffic by country",
+            "description": "Request volume and bandwidth grouped by client country",
+            "sql": f"SELECT country, count(*) AS requests, sum(resp_bytes) AS total_bytes FROM {table_name} GROUP BY country ORDER BY requests DESC LIMIT 50",
+            "category": "Network",
+        },
+        {
+            "name": "Top autonomous systems (ASNs)",
+            "description": "Request count and egress bytes by client ASN",
+            "sql": f"SELECT asn, count(*) AS requests, sum(resp_bytes) AS total_bytes FROM {table_name} WHERE asn IS NOT NULL GROUP BY asn ORDER BY requests DESC LIMIT 50",
+            "category": "Network",
+        },
+        {
+            "name": "Transport protocol mix (HTTP/3 vs HTTP/2)",
+            "description": "Breakdown of HTTP protocol versions and transport layer",
+            "sql": f"SELECT proto, transport, count(*) AS requests FROM {table_name} GROUP BY proto, transport ORDER BY requests DESC",
+            "category": "Network",
+        },
+        {
+            "name": "Proxy & hosting network traffic",
+            "description": "Requests classified by proxy type and connection speed",
+            "sql": f"SELECT p_type, c_type, count(*) AS requests FROM {table_name} WHERE p_type IS NOT NULL AND p_type != '' GROUP BY p_type, c_type ORDER BY requests DESC LIMIT 25",
+            "category": "Network",
         },
     ]
 

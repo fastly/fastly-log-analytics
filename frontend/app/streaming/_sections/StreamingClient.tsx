@@ -5,7 +5,7 @@ import Link from 'next/link'
 import { parseAsInteger, useQueryState } from 'nuqs'
 import { AlertTriangle, BarChart3, Clock, ExternalLink, Gauge, Play, TrendingUp, Wifi } from 'lucide-react'
 import { client, unwrapClient } from '@/lib/api'
-import { isCloudMode } from '@/lib/cloud-engine/mode'
+import { getCmcdResidualSections } from '@/lib/cloud-engine/cmcd-rollup'
 import {
   usePlotlyRangeZoom,
   useReportCancelQueries,
@@ -85,15 +85,16 @@ function StreamingBody({
   const data = cmcdQuery.data
   const overview = data?.overview
   const hasStreamingData = Boolean(data?.available && data?.has_data)
-  const needsCloudExtended =
-    isCloudMode() &&
+  const residualSections = React.useMemo(() => getCmcdResidualSections(data), [data])
+  const needsExtended =
     hasStreamingData &&
+    residualSections.length > 0 &&
     !data?.bitrate_ladder?.length &&
     !data?.stream_type_dist?.length
   const extendedSectionRef = React.useRef<HTMLDivElement>(null)
   const extendedVisible = useInViewOnce(extendedSectionRef, {
     rootMargin: '100px',
-    enabled: needsCloudExtended,
+    enabled: needsExtended,
   })
   const extendedQuery = useServiceQuery(
     analyticsReportQueryKey({
@@ -112,19 +113,19 @@ function StreamingBody({
             filters: filterPayload,
             bucket_seconds: bucketSeconds,
             top_n: topN,
-            sections: ['bitrate_ladder', 'stream_type_dist'],
+            sections: residualSections,
             ...rangeBody,
           },
         }),
       ),
-    { enabled: needsCloudExtended && extendedVisible, staleTime: 30_000, refetchInterval: 30_000 },
+    { enabled: needsExtended && extendedVisible, staleTime: 30_000, refetchInterval: 30_000 },
   )
   const queryStatus = {
     isLoading: cmcdQuery.isLoading,
     isFetching: cmcdQuery.isFetching,
     error: cmcdQuery.error as AnalyticsCardError | null,
   }
-  const extendedQueryStatus = needsCloudExtended
+  const extendedQueryStatus = needsExtended
     ? {
         isLoading: cmcdQuery.isLoading || (extendedVisible && extendedQuery.isLoading),
         isFetching: cmcdQuery.isFetching || (extendedVisible && extendedQuery.isFetching),

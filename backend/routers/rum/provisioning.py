@@ -245,6 +245,7 @@ def _rum_status_sync(request: Request, service_id: str) -> dict[str, Any]:
         "error_sample_rate": rum_cfg.get("error_sample_rate", 1.0),
         "resource_sample_rate": rum_cfg.get("resource_sample_rate", DEFAULT_RESOURCE_SAMPLE_RATE),
         "custom_condition": rum_cfg.get("custom_condition", ""),
+        "supports_storage_purge": True,
     }
 
 
@@ -383,9 +384,29 @@ def update_rum_settings(
     original_cfg = copy.deepcopy(cfg)
     baseline_raw = svcconfig.snapshot_config(service_id)
     prev_cond = (cfg.get("rum") or {}).get("custom_condition", "")
+    prev_faro_version = (cfg.get("rum") or {}).get("faro_version")
     prev_fp = rum_vcl_fingerprint(service_id, cfg)
     prev_active_fields = svcconfig.active_log_field_ids(cfg)
     prev_ver = get_active_version(service_id, token)
+
+    target_faro_version = body.faro_version.strip() if body.faro_version and body.faro_version.strip() else None
+    faro_changed = bool(target_faro_version and target_faro_version != prev_faro_version)
+    if faro_changed:
+        try:
+            available_faro = asyncio.run(fetch_available_faro_versions())
+        except ValueError as e:
+            raise_internal(
+                logger,
+                e,
+                code="faro_registry_unavailable",
+                status=503,
+                message="Faro version registry unavailable",
+            )
+        if target_faro_version not in available_faro:
+            raise HTTPException(
+                status_code=400,
+                detail=make_error("unknown_faro_version", f"Unknown Faro Web SDK version: {target_faro_version}"),
+            )
 
     def _apply_settings(c: dict) -> None:
         rum_block = c.setdefault("rum", {})
@@ -427,7 +448,12 @@ def update_rum_settings(
     new_ver: int | None = None
 
     try:
-        if vcl_changed:
+        if faro_changed:
+            assert target_faro_version is not None
+            upgrade_res = upgrade_faro_version(service_id, target_faro_version, token, activate=True)
+            vcl_reconciled = True
+            new_ver = upgrade_res.get("logging_service_active_version")
+        elif vcl_changed:
             reconcile_res = reconcile_vcl_state(service_id, token, dry_run=False, activate=True)
             vcl_reconciled = True
             new_ver = getattr(reconcile_res, "activated_version", None)

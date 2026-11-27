@@ -41,7 +41,6 @@ import {
   SKELETON_ROWS,
   type QueryResponse,
 } from './QueryToolbarAndResults'
-import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
 
 const RawSqlMode = dynamic(
   () => import('./RawSqlEditor').then((m) => m.RawSqlMode),
@@ -341,9 +340,7 @@ function QueryPageInner() {
         description={
           isStructured
             ? 'Browse raw request logs using the global filter bar — column headers sort server-side.'
-            : IS_CLOUD_MODE
-              ? 'Write custom SQL against the in-browser DuckDB engine (tables logs, requests, client_vitals, client_errors). Header sorting is client-side only.'
-              : 'Write custom SQL against ClickHouse (least-privilege fla_cv_* views such as fla_cv_request_facts). Header sorting is client-side only.'
+            : 'Write custom SQL against tables logs, client_vitals, and client_errors. Header sorting is client-side only.'
         }
       >
         <Button

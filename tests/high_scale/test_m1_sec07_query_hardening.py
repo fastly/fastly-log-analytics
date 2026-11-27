@@ -6151,3 +6151,40 @@ def test_sec_t5_iter40_live_chdb_paren_free_replace() -> None:
                     f"Real chdb Iter40 suite failed:\nSTDOUT:\n{run_res.stdout}\nSTDERR:\n{run_res.stderr}"
                 )
                 assert "ITER40_CHDB_ALL_OK" in run_res.stdout
+
+
+def test_hs_query_explain_and_portable_presets_with_categories() -> None:
+    from backend.models.analytics import PresetQuery, QueryResponse
+    from backend.routers.query import _get_presets
+
+    seen_sql: list[str] = []
+
+    class _ExplainClient:
+        def execute(self, sql: str, params=None, settings=None):
+            if "system.one" in sql:
+                return [{"n": 0}]
+            seen_sql.append(sql)
+            if sql.lstrip().upper().startswith("EXPLAIN "):
+                return [{"explain": "Expression (Projection)"}, {"explain": "ReadFromMergeTree"}]
+            return [{"url": "/index.html", "status": 200}]
+
+    svc = SimpleNamespace(service_id="svc-explain", client=_ExplainClient())
+    res = hs_query.query_endpoint(
+        svc,
+        DashboardQueryRequest(sql="SELECT url, status FROM logs", explain=True),
+        "2026-11-19T00:00:00Z",
+        "2026-11-19T01:00:00Z",
+        mask_ips=False,
+    )
+    validated = QueryResponse.model_validate(res)
+    assert validated.explain_plan == "Expression (Projection)\nReadFromMergeTree"
+    assert any(s.lstrip().upper().startswith("EXPLAIN ") for s in seen_sql)
+
+    presets = _get_presets({"name": "svc_explain", "service_id": "svc-explain"})
+    assert len(presets) == 26
+    for raw in presets:
+        preset = PresetQuery.model_validate(raw)
+        assert preset.category is not None
+        assert "SUMMARIZE" not in preset.sql.upper()
+        assert "percentile_cont" not in preset.sql.lower()
+        assert "starts_with(" not in preset.sql.lower()

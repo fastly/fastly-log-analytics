@@ -19,7 +19,8 @@ import {
   handleCmcdRequest,
   queryCmcdAggregates,
 } from "./cmcd";
-import { clearCmcdRollupCache, cmcdFromRollup, MAX_CMCD_ROLLUP_FILES } from "./cmcd-rollup";
+import { clearCmcdRollupCache, cmcdFromRollup, getCmcdResidualSections, isCmcdPartial, MAX_CMCD_ROLLUP_FILES } from "./cmcd-rollup";
+import * as cmcdModule from "./cmcd";
 import { MissingCloudFileError } from "./dashboard/file-errors";
 import { BOUNDS, Histogram } from "./dashboard/histogram";
 import { Hll } from "./dashboard/hll";
@@ -1333,5 +1334,108 @@ describe("Feature F24 — CMCD Streaming Media cloud-engine", () => {
     );
     expect(res?.rebuffer_by_country.map((r) => r.country)).toEqual(["US"]);
     expect(res?.rebuffer_by_asn.map((r) => r.asn)).toEqual([7922]);
+  });
+
+  it("defaults bucket_seconds to 300, rounds floats to 2dp, drops queryCmcdStatus, and reports partial rollup sections", async () => {
+    expect("queryCmcdStatus" in cmcdModule).toBe(false);
+
+    const engine = new DuckDBAnalyticalEngine();
+    try {
+      const baseMs = 1_800_000_000_000;
+      await engine.executeSql(`INSERT INTO requests
+        (scoped_key, ts_ms, country, cmcd_sid, cmcd_cid, cmcd_br, cmcd_tb, cmcd_bl, cmcd_mtp, cmcd_bs, cmcd_ot)
+        VALUES
+          ('native', ${baseMs + 10_000}, 'US', 's1', 'c1', 1001, 3000, 1111, 2222, true, 'v'),
+          ('native', ${baseMs + 70_000}, 'US', 's2', 'c1', 2000, 3000, 2222, 3333, false, 'v'),
+          ('native', ${baseMs + 130_000}, 'US', 's3', 'c1', 2500, 3000, 3333, 4444, false, 'v')`);
+      const data = await queryCmcdAggregates({ engine });
+      expect(data.sessions_ts).toHaveLength(1);
+      expect(data.overview.avg_bitrate).toBe(1833.67);
+      expect(data.overview.avg_buffer_length).toBe(2222);
+      expect(data.overview.rebuffer_rate).toBe(33.33);
+      expect(data.top_content[0].avg_bitrate).toBe(1833.67);
+    } finally {
+      await engine.reset();
+    }
+
+    const t0 = 1_800_000_000_000;
+    const t1 = t0 + 300_000;
+    const hllOf = (items: string[]) => {
+      const h = new Hll();
+      for (const item of items) h.add(item);
+      return h.toBytes();
+    };
+    const bytes = parquetWriteBuffer({
+      columnData: [
+        { name: "kind", type: "STRING", data: ["bucket", "sf"] },
+        { name: "bucket", type: "INT64", data: [BigInt(t0), null] },
+        { name: "key", type: "STRING", data: [null, "h"] },
+        { name: "label", type: "STRING", data: [null, null] },
+        { name: "truncated", type: "BOOLEAN", data: [false, false] },
+        { name: "reqs", type: "INT64", data: [BigInt(3), BigInt(3)] },
+        { name: "sid_hll", type: "BYTE_ARRAY", data: [hllOf(["s1"]), hllOf(["s1"])] },
+        { name: "rebuffer_events", type: "INT64", data: [BigInt(0), BigInt(0)] },
+        { name: "rebuffer_sid_hll", type: "BYTE_ARRAY", data: [null, null] },
+        { name: "has_bs", type: "INT64", data: [BigInt(0), BigInt(0)] },
+        { name: "has_su", type: "INT64", data: [BigInt(0), BigInt(0)] },
+        { name: "has_ot", type: "INT64", data: [BigInt(3), BigInt(0)] },
+        { name: "has_bl", type: "INT64", data: [BigInt(0), BigInt(0)] },
+        { name: "has_br", type: "INT64", data: [BigInt(3), BigInt(0)] },
+        { name: "has_mtp", type: "INT64", data: [BigInt(0), BigInt(0)] },
+        { name: "has_cid", type: "INT64", data: [BigInt(0), BigInt(0)] },
+        { name: "br_sum", type: "DOUBLE", data: [5501, 0] },
+        { name: "br_n", type: "INT64", data: [BigInt(3), BigInt(0)] },
+        { name: "tb_sum", type: "DOUBLE", data: [null, null] },
+        { name: "tb_n", type: "INT64", data: [BigInt(0), BigInt(0)] },
+        { name: "bl_sum", type: "DOUBLE", data: [null, null] },
+        { name: "bl_n", type: "INT64", data: [BigInt(0), BigInt(0)] },
+        { name: "mtp_sum", type: "DOUBLE", data: [null, null] },
+        { name: "mtp_n", type: "INT64", data: [BigInt(0), BigInt(0)] },
+        { name: "v_br_sum", type: "DOUBLE", data: [5501, 0] },
+        { name: "v_br_n", type: "INT64", data: [BigInt(3), BigInt(0)] },
+        { name: "v_tb_sum", type: "DOUBLE", data: [null, null] },
+        { name: "v_tb_n", type: "INT64", data: [BigInt(0), BigInt(0)] },
+        { name: "v_bl_sum", type: "DOUBLE", data: [null, null] },
+        { name: "v_bl_n", type: "INT64", data: [BigInt(0), BigInt(0)] },
+        { name: "util_sum", type: "DOUBLE", data: [null, null] },
+        { name: "util_n", type: "INT64", data: [BigInt(0), BigInt(0)] },
+        { name: "util_all_sum", type: "DOUBLE", data: [null, null] },
+        { name: "util_all_n", type: "INT64", data: [BigInt(0), BigInt(0)] },
+        { name: "startup_requests", type: "INT64", data: [BigInt(0), BigInt(0)] },
+        { name: "su_bl_sum", type: "DOUBLE", data: [null, null] },
+        { name: "su_bl_n", type: "INT64", data: [BigInt(0), BigInt(0)] },
+        { name: "su_ttfb_sum", type: "DOUBLE", data: [null, null] },
+        { name: "su_ttfb_n", type: "INT64", data: [BigInt(0), BigInt(0)] },
+        { name: "v_bl_hist", type: "BYTE_ARRAY", data: [null, null] },
+        { name: "bl_hist", type: "BYTE_ARRAY", data: [null, null] },
+        { name: "v_mtp_hist", type: "BYTE_ARRAY", data: [null, null] },
+        { name: "mtp_hist", type: "BYTE_ARRAY", data: [null, null] },
+        { name: "min_ts", type: "INT64", data: [BigInt(t0 + 1000), null] },
+        { name: "max_ts", type: "INT64", data: [BigInt(t0 + 2000), null] },
+        { name: "first_ts", type: "INT64", data: [null, null] },
+        { name: "last_ts", type: "INT64", data: [null, null] },
+      ],
+    });
+    const partialRollup = await cmcdFromRollup(
+      {
+        start_time: new Date(t0).toISOString(),
+        end_time: new Date(t1).toISOString(),
+      },
+      {
+        async fetchJson() {
+          return {
+            files: [{ key: "processed/request/cmcd_summary/window=partial.parquet", start: new Date(t0).toISOString(), end: new Date(t1).toISOString(), size: bytes.byteLength, rows: 2 }],
+            next_cursor: null,
+            complete: true,
+          };
+        },
+        async fetchFile() {
+          return { bytes, cached: false };
+        },
+      },
+    );
+    expect(partialRollup?.overview.avg_bitrate).toBe(1833.67);
+    expect(isCmcdPartial(partialRollup)).toBe(true);
+    expect(getCmcdResidualSections(partialRollup)).toEqual(["bitrate_ladder", "stream_type_dist"]);
   });
 });
