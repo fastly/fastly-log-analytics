@@ -28,7 +28,7 @@ describe("DuckDB browser assets", () => {
   it("load from an immutable versioned path", () => {
     expect(duckdbAssetUrls("https://flp.example", "1.33.1-dev57.0")).toEqual({
       worker:
-        "https://flp.example/duckdb/1.33.1-dev57.0/duckdb-browser-eh.worker.js",
+        "https://flp.example/duckdb/1.33.1-dev57.0/duckdb-browser-eh.v2.worker.js",
       wasm: "https://flp.example/duckdb/1.33.1-dev57.0/duckdb-eh.wasm",
       extensions: "https://flp.example/duckdb/1.33.1-dev57.0/extensions",
     });

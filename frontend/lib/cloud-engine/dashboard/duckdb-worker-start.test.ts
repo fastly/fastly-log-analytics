@@ -30,7 +30,7 @@ it("starts the DuckDB worker while the module import is still loading", async ()
   });
   const backend = createBrowserBackend();
   await vi.waitFor(() => expect(workers).toEqual([
-    `https://flp.test/duckdb/${DUCKDB_WASM_VERSION}/duckdb-browser-eh.worker.js`,
+    `https://flp.test/duckdb/${DUCKDB_WASM_VERSION}/duckdb-browser-eh.v2.worker.js`,
   ]));
   gate.release();
   await (await backend).dispose();

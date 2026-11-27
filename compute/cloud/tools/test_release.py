@@ -259,6 +259,22 @@ def test_early_hints_order_css_boot_scripts_fonts_then_duckdb_within_ten_links(t
     }
 
 
+def test_early_hints_prefer_v2_duckdb_worker_when_present(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    write_export(out, {"dashboard.html": 1})
+    (out / "duckdb/1.2.3/duckdb-browser-eh.v2.worker.js").write_text("v2")
+
+    routes = extract_early_hints(out, ["/dashboard"])["routes"]
+
+    assert routes["/dashboard"] == [
+        CSS,
+        script(0),
+        FONT,
+        "</duckdb/1.2.3/duckdb-browser-eh.v2.worker.js>; rel=prefetch",
+        "</duckdb/1.2.3/duckdb-eh.wasm>; rel=prefetch",
+    ]
+
+
 def test_early_hints_skip_routes_with_too_little_to_hint(tmp_path: Path) -> None:
     out = tmp_path / "out"
     write_export(out, {"dashboard.html": 0, "usage.html": 0})

@@ -516,10 +516,12 @@ export async function createNodeBackend(): Promise<DuckDBBackend> {
 }
 
 /** Matches the `/duckdb/<version>/` layout written by scripts/copy-duckdb-assets.mjs. */
+export const DUCKDB_WORKER_FILENAME = "duckdb-browser-eh.v2.worker.js";
+
 export function duckdbAssetUrls(origin: string, version: string) {
   const base = `${origin}/duckdb/${version}`;
   return {
-    worker: `${base}/duckdb-browser-eh.worker.js`,
+    worker: `${base}/${DUCKDB_WORKER_FILENAME}`,
     wasm: `${base}/duckdb-eh.wasm`,
     extensions: `${base}/extensions`,
   };
