@@ -3384,7 +3384,7 @@ def test_bucket_labels_use_the_clickhouse_minute_specifier() -> None:
     client = _Client_cmcd()
     _run(client, sections={"sessions_ts"})
     timeseries = next(sql for sql, _ in client.calls if "cmcd:timeseries" in sql)
-    assert "'%Y-%m-%d %H:%i:%S'" in timeseries and "%M" not in timeseries
+    assert "'%Y-%m-%dT%H:%i:%SZ'" in timeseries and "%M" not in timeseries
 
 
 # ── Merged from test_cmcd_projection_wiring.py ───────────────────────
