@@ -1228,9 +1228,11 @@ async function parseSecurityRequest(req: Request, url: URL): Promise<SecurityAgg
 
 /** Whether a /security read masks client IPs: by its body, query or the analyst headers. */
 export function securityMaskIps(req: Request, url: URL, body: Record<string, unknown>): boolean {
+  const maskParam = url.searchParams.get("mask_ips");
   return Boolean(
     body.mask_ips ||
-      url.searchParams.get("mask_ips") === "1" ||
+      maskParam === "1" ||
+      maskParam === "true" ||
       req.headers.get("x-mask-ips") === "1" ||
       req.headers.get("x-session-role") === "analyst-no-pii",
   );

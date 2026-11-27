@@ -1228,7 +1228,7 @@ async function queryNetworkTransport(params: NetworkQueryParams) {
   const summary = rows.find((entry) => !entry.is_protocol);
   const row: Record<string, unknown> = summary ? {
     total_requests: Number(summary.total_requests ?? 0),
-    bandwidth_bytes: summary.bandwidth_bytes == null ? null : Number(summary.bandwidth_bytes),
+    bandwidth_bytes: Number(summary.bandwidth_bytes ?? 0),
     tcp_rtt_p50_ms: summary.tcp_rtt_p50_ms,
     tcp_rtt_p90_ms: summary.tcp_rtt_p90_ms,
     tcp_rtt_p95_ms: summary.tcp_rtt_p95_ms,
@@ -1236,7 +1236,17 @@ async function queryNetworkTransport(params: NetworkQueryParams) {
     retrans_rate_pct: summary.retrans_rate_pct == null ? null : roundTo(Number(summary.retrans_rate_pct), 2),
     packet_loss_pct: summary.packet_loss_pct,
     delivery_rate_mbps: summary.delivery_rate_mbps,
-  } : {};
+  } : {
+    total_requests: 0,
+    bandwidth_bytes: 0,
+    tcp_rtt_p50_ms: null,
+    tcp_rtt_p90_ms: null,
+    tcp_rtt_p95_ms: null,
+    tcp_rtt_p99_ms: null,
+    retrans_rate_pct: null,
+    packet_loss_pct: null,
+    delivery_rate_mbps: null,
+  };
   const protocols = rows.filter((entry) => entry.is_protocol)
     .map((entry) => ({ protocol: entry.protocol_key, requests: entry.total_requests }));
   const total = Number(row.total_requests ?? 0);

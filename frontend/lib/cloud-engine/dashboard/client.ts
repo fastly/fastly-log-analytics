@@ -5,7 +5,7 @@ import { beginCloudLoading } from "../loading-progress";
 import { resetCloudMetadataCache } from "../metadata-cache";
 import { resetRangeLoaderCache } from "../range-loader";
 import { clearSecurityRollupCache } from "../security-rollup";
-import { clearCloudSessionReferences } from "../session-reference";
+import { clearCloudSessionKeys } from "../sessions";
 import { resetOpsLogsClient } from "../telemetry/client";
 import { clearOpsCaches } from "../telemetry/sources";
 import { resetUsageSettingsCache } from "../usage/summary";
@@ -509,7 +509,7 @@ async function executeIdentityTransition(
   clearRollupQueryCache();
   clearSecurityRollupCache();
   resetRangeLoaderCache();
-  clearCloudSessionReferences();
+  clearCloudSessionKeys();
   resetCloudMetadataCache();
   resetUsageSettingsCache();
   resetComputeBillingCache();

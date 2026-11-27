@@ -155,10 +155,14 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
   });
 
   beforeEach(() => {
-    vi.stubGlobal("fetch", vi.fn().mockImplementation(async (input: RequestInfo | URL) =>
-      Response.json(String(input).includes("/api/services")
-        ? { services: [{ service_id: "svc-1", rum: { enabled: true }, scoring: { enabled: false } }] }
-        : { latest_log_at: "2026-11-06T00:00:00Z" })));
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/scoring/status")) return Response.json({ enabled: false });
+      if (url.includes("/api/services")) {
+        return Response.json({ services: [{ service_id: "svc-1", rum: { enabled: true }, scoring: { enabled: false } }] });
+      }
+      return Response.json({ latest_log_at: "2026-11-06T00:00:00Z" });
+    }));
     setOriginSqlExecutor({
       tableName: "requests",
       getColumns: async () => new Set(["ottfb", "ost", "edge", "pop", "oip", "url", "host"]),
@@ -1395,8 +1399,14 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
         new CloudBudgetError("over", { unit: "bytes", needed: 200 * MiB, limit: 64 * MiB }));
       const res = await query("SELECT status, count(*) AS requests FROM logs GROUP BY status");
       expect(res?.status).toBe(413);
-      expect((await res!.json()).detail).toBe("Cloud query over this time range needs 200.0 MiB of log data " +
-        "(columns: timestamp, status) but the browser scan budget is 64.0 MiB; choose a shorter time range or select fewer columns");
+      const queryBudgetMsg =
+        "Cloud query over this time range needs 200.0 MiB of log data " +
+        "(columns: timestamp, status) but the browser scan budget is 64.0 MiB; choose a shorter time range or select fewer columns";
+      expect((await res!.json()).detail).toEqual({
+        error: "cloud_scan_budget_exceeded",
+        message: queryBudgetMsg,
+        messages: [queryBudgetMsg],
+      });
     });
   });
 
@@ -1497,7 +1507,13 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
         }),
       );
       expect(res?.status).toBe(413);
-      expect(await res?.json()).toEqual({ detail: message });
+      expect(await res?.json()).toEqual({
+        detail: {
+          error: "cloud_scan_budget_exceeded",
+          message,
+          messages: [message],
+        },
+      });
     } finally {
       vi.mocked(ensureCloudRange).mockReset().mockImplementation(async () => getDuckDBEngine().readContext());
     }
@@ -1615,16 +1631,28 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       body: JSON.stringify({ sections: ["transport"], start_time: "2026-11-05T00:00:00Z", end_time: "2026-11-06T00:00:00Z" }),
     }));
     expect(res?.status).toBe(413);
-    expect((await res!.json()).detail).toBe("Cloud /network transport over this time range needs 80.0 MiB of log data " +
+    const netTransportMsg =
+      "Cloud /network transport over this time range needs 80.0 MiB of log data " +
       `(columns: ${networkScanColumns("/api/network/bundle", { sections: ["transport"] })!.join(", ")}) ` +
-      "but the browser scan budget is 64.0 MiB; choose a shorter time range");
+      "but the browser scan budget is 64.0 MiB; choose a shorter time range";
+    expect((await res!.json()).detail).toEqual({
+      error: "cloud_scan_budget_exceeded",
+      message: netTransportMsg,
+      messages: [netTransportMsg],
+    });
     vi.mocked(ensureCloudRange).mockRejectedValue(new CloudBudgetError("over", { unit: "files", needed: 300, limit: 256 }));
     const files = await handleCloudAnalyticalRequest(new Request("http://localhost/api/network-quality", {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({}),
     }));
     vi.mocked(ensureCloudRange).mockReset().mockImplementation(async () => getDuckDBEngine().readContext());
-    expect((await files!.json()).detail).toBe("Cloud /network quality over this time range needs 300 files of log data " +
-      "but the browser scan budget is 256 files; choose a shorter time range");
+    const netQualityMsg =
+      "Cloud /network quality over this time range needs 300 files of log data " +
+      "but the browser scan budget is 256 files; choose a shorter time range";
+    expect((await files!.json()).detail).toEqual({
+      error: "cloud_scan_budget_exceeded",
+      message: netQualityMsg,
+      messages: [netQualityMsg],
+    });
   });
 
   describe("raw scans over the browser budget", () => {
@@ -2546,7 +2574,8 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect(rumRes).not.toBeNull();
     expect(rumRes!.status).toBe(200);
     const rumJson = await rumRes!.json();
-    expect(rumJson).toHaveProperty("metrics");
+    expect(rumJson).toHaveProperty("vitals");
+    expect(rumJson).toHaveProperty("beacon_count");
 
     const cmcdRes = await handleCloudAnalyticalRequest(
       new Request("http://localhost/api/cmcd/aggregates", {
@@ -2583,7 +2612,9 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
         method: "GET",
       }),
     );
-    expect(scoreRes).toBeNull();
+    expect(scoreRes).not.toBeNull();
+    expect(scoreRes!.status).toBe(200);
+    expect(await scoreRes!.json()).toHaveProperty("enabled");
 
     const presetsRes = await handleCloudAnalyticalRequest(
       new Request("http://localhost/api/presets", { method: "GET" }),
@@ -3021,8 +3052,10 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       }),
     );
 
-    expect(webVitalsRes?.status).toBe(204);
-    expect(uxEventsRes?.status).toBe(204);
+    expect(webVitalsRes?.status).toBe(200);
+    expect(await webVitalsRes?.json()).toEqual({ ok: true });
+    expect(uxEventsRes?.status).toBe(200);
+    expect(await uxEventsRes?.json()).toEqual({ ok: true });
 
     resolveCatalog(Response.json({ groups: [], fields: [] }));
     resolveExtents(
@@ -3623,7 +3656,14 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     const { getDuckDBEngine } = await import("./dashboard/duckdb");
     const { currentStoreMetaEpoch } = await import("./dashboard/file-store");
     const { currentOpsCacheEpoch, syncOpsCacheForSession } = await import("./telemetry/sources");
-    const sessionRefMod = await import("./session-reference");
+    const { clearCloudSessionKeys, openSessionToken, sealSessionToken } = await import("./sessions");
+    const sealedPayload = {
+      ip: "198.51.100.77",
+      ja4: "t13d_test",
+      s: "2026-11-10T00:00:00Z",
+      e: "2026-11-10T01:00:00Z",
+      svc: "svc-1",
+    };
 
     const ls = new Map<string, string>();
     vi.stubGlobal("localStorage", {
@@ -3704,9 +3744,8 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     engine.setPresentColumnsOverride(["ip", "status"]);
     const duckdbResetSpy = vi.spyOn(engine, "reset");
 
-    const refUuid = "22222222-3333-4444-8555-666666666666";
-    sessionRefMod.saveCloudSessionReference(refUuid, "raw-alice-session-token");
-    expect(sessionRefMod.readCloudSessionReference(refUuid)).toBe("raw-alice-session-token");
+    const sealedToken = sealSessionToken(sealedPayload);
+    expect(openSessionToken(sealedToken)).toMatchObject(sealedPayload);
 
     let releaseExtentsFetch = null as (() => void) | null;
     const currentBootstrapRole = "analyst-no-pii";
@@ -3769,13 +3808,14 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     expect(currentStoreMetaEpoch()).toBeGreaterThan(metaEpochBefore);
     expect(currentOpsCacheEpoch()).toBeGreaterThan(opsEpochBefore);
     expect(cacheBuckets.has("flp-ops-parquet-v1:alice:admin")).toBe(false);
-    expect(sessionRefMod.readCloudSessionReference(refUuid)).toBeNull();
+    expect(openSessionToken(sealedToken)).toBeNull();
     expect(duckdbResetSpy).toHaveBeenCalledTimes(1);
     expect(await inFlightBundle).toBe("ERR:AbortError");
 
     // 1b. Cross-tab window "storage" event listener also purges Tab 1 immediately on logout in Tab 2:
     if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
-      sessionRefMod.saveCloudSessionReference(refUuid, "second-tab-secret");
+      const secondToken = sealSessionToken(sealedPayload);
+      expect(openSessionToken(secondToken)).toMatchObject(sealedPayload);
       const epochBeforeStorage = currentStoreMetaEpoch();
       ls.delete("flp-dashboard-cache-identity");
       const storageEvt = Object.assign(new Event("storage"), {
@@ -3786,7 +3826,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
       window.dispatchEvent(storageEvt);
       await new Promise((r) => setTimeout(r, 25));
       expect(currentStoreMetaEpoch()).toBeGreaterThan(epochBeforeStorage);
-      expect(sessionRefMod.readCloudSessionReference(refUuid)).toBeNull();
+      expect(openSessionToken(secondToken)).toBeNull();
     }
 
     // 2. SEC-T5-ITER23-02: Concurrent setDashboardCacheIdentity("bob:admin") calls MUST coalesce & wait for full cleanup!
@@ -3940,12 +3980,13 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     holdCacheDelete = true;
     const clear1 = clearDashboardData();
     await new Promise((r) => setTimeout(r, 10));
-    sessionRefMod.saveCloudSessionReference(refUuid, "leaked-mid-clear-secret");
+    const midClearToken = sealSessionToken(sealedPayload);
     const clear2 = clearDashboardData();
     holdCacheDelete = false;
     (releaseCacheDelete as (() => void) | null)?.();
     await Promise.all([clear1, clear2]);
-    expect(sessionRefMod.readCloudSessionReference(refUuid)).toBeNull();
+    expect(openSessionToken(midClearToken)).toBeNull();
+    clearCloudSessionKeys();
 
     if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
       ls.set("flp-dashboard-cache-identity", "alice:admin");
@@ -4089,7 +4130,7 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
         new Request(`http://localhost/api/services/svc-1/scoring/${route}`),
       );
       expect(res?.status).toBe(200);
-      expect(await res!.json()).toEqual({
+      expect(await res!.json()).toMatchObject({
         supported: false, available: false, reason: "scoring_fields_not_present",
       });
     }
@@ -4110,11 +4151,11 @@ describe("adapter.ts Milestone 3 domain route dispatching", () => {
     const perReasonRes = await handleCloudAnalyticalRequest(
       new Request("http://localhost/api/services/svc-1/scoring/evaluation/per-reason"),
     );
-    expect(await perReasonRes!.json()).toEqual({ rows: [], n_good: 0, n_bad: 0, has_min_samples: false });
+    expect(await perReasonRes!.json()).toMatchObject({ buckets: [], n_good: 0, n_bad: 0, has_min_samples_overall: false });
     const curvesRes = await handleCloudAnalyticalRequest(
       new Request("http://localhost/api/services/svc-1/scoring/curves"),
     );
-    expect(await curvesRes!.json()).toMatchObject({ available: false, n_good: 0, n_bad: 0, auc: null });
+    expect(await curvesRes!.json()).toMatchObject({ has_min_samples: false, n_good: 0, n_bad: 0, auc: null });
     expect(ensureCloudRange).not.toHaveBeenCalled();
 
     // When analytics runs with edge_score enabled, pass-1 projects ONLY narrow scoring columns (no url/ua/ip)

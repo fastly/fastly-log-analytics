@@ -334,14 +334,11 @@ export function buildOriginTimeseriesSql(
       : `QUANTILE_CONT(${latExpr}, ${pctVal})`;
   const tsExpr = 'EPOCH_MS(CAST("ts_ms" AS BIGINT))';
   const edgeCol = splitByLeg ? `, "edge"` : "";
-  const cacheExpr =
-    actualCols.has("cache_status") && actualCols.has("cache")
-      ? `UPPER(COALESCE(NULLIF(CAST("cache_status" AS VARCHAR), ''), CAST("cache" AS VARCHAR), ''))`
-      : actualCols.has("cache_status")
-        ? `UPPER(COALESCE(CAST("cache_status" AS VARCHAR), ''))`
-        : actualCols.has("cache")
-          ? `UPPER(COALESCE(CAST("cache" AS VARCHAR), ''))`
-          : null;
+  const cacheExpr = actualCols.has("cache")
+    ? `UPPER(COALESCE(CAST("cache" AS VARCHAR), ''))`
+    : actualCols.has("cache_status")
+      ? `UPPER(COALESCE(CAST("cache_status" AS VARCHAR), ''))`
+      : null;
   const missExpr = cacheExpr ? `COUNT(*) FILTER (WHERE ${cacheExpr} LIKE 'MISS%')` : "0";
 
   return `
@@ -905,7 +902,7 @@ function originSectionColumns(sections: readonly string[], body: Record<string, 
   const latency = ["ottfb", "ttfb", "cache"];
   const columns: Record<string, string[]> = {
     summary: [...latency, "cache", "ottlb", "elapsed", "ost", "obytes"],
-    timeseries: [...ttlb ? ["ottlb"] : latency, ...body.split_by_leg ? ["edge"] : []],
+    timeseries: [...ttlb ? ["ottlb", "cache"] : latency, ...body.split_by_leg ? ["edge"] : []],
     slow_urls: [...latency, "url"],
     status_codes: ["ost"],
     path_breakdown: [...latency, "edge"],
@@ -935,7 +932,8 @@ export function originScanColumns(pathname: string, body: Record<string, unknown
   const filters = filterFields(body.filters);
   const custom = filterFields(body.custom_filters);
   if (!base || !filters || !custom) return null;
-  return [...new Set([...base, ...filters, ...custom])];
+  const extra = route === "drilldown" && body.dimension === "shield_pop" ? ["edge"] : [];
+  return [...new Set([...base, ...extra, ...filters, ...custom])];
 }
 
 function parseFilters(

@@ -320,6 +320,15 @@ describe("Cloud dashboard response contract", () => {
     expect(warm.body.fields.country.rows).toEqual([{ value: "US", count: 2, pct: 100 }]);
 
     const unknown = await bundle({ not_in_catalog: { mode: "include", values: ["x"] } });
-    expect(unknown).toEqual({ status: 400, body: { detail: "Unknown field in Cloud dashboard filter" } });
+    expect(unknown).toEqual({
+      status: 400,
+      body: {
+        detail: {
+          error: "unknown_filter_field",
+          message: "Unknown field in Cloud dashboard filter",
+          messages: ["Unknown field in Cloud dashboard filter"],
+        },
+      },
+    });
   });
 });

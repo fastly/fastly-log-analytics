@@ -344,7 +344,7 @@ perf-ci:
 fast-ci:
 	$(MAKE) openapi-drift
 	@$(MAKE) -j4 typecheck-frontend lint-frontend lint format-check typecheck stray-file-gate
-	cd frontend && npx vitest run hooks/ lib/ stores/ __tests__/contract/backend-contract.test.ts
+	cd frontend && npx vitest run hooks/ lib/ stores/ __tests__/contract/backend-contract.test.ts __tests__/contract/cross-edition-openapi.contract.test.ts
 	uv run pytest tests/contract tests/security tests/models tests/architecture tests/utils
 	$(MAKE) release-confidence-tests
 

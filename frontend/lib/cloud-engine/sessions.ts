@@ -279,12 +279,11 @@ function fromBase64Url(input: string): Uint8Array | null {
 }
 
 function randomBytes(length: number): Uint8Array {
-  const bytes = new Uint8Array(length);
-  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
-    crypto.getRandomValues(bytes);
-  } else {
-    for (let i = 0; i < length; i++) bytes[i] = Math.floor(Math.random() * 256);
+  if (typeof crypto === "undefined" || typeof crypto.getRandomValues !== "function") {
+    throw new Error("CSPRNG crypto.getRandomValues is required");
   }
+  const bytes = new Uint8Array(length);
+  crypto.getRandomValues(bytes);
   return bytes;
 }
 
@@ -371,7 +370,10 @@ export function sealSessionToken(payload: SessionTokenPayload): string {
   return `fls_${toBase64Url(concatBytes(iv, ciphertext, mac))}`;
 }
 
-export function openSessionToken(token: string): SessionTokenPayload | null {
+export function openSessionToken(
+  token: string,
+  expectedServiceId?: string,
+): SessionTokenPayload | null {
   if (typeof token !== "string" || !token.startsWith("fls_")) return null;
   const raw = fromBase64Url(token.slice(4));
   if (!raw || raw.length < 16 + 2 + 32) return null;
@@ -398,12 +400,16 @@ export function openSessionToken(token: string): SessionTokenPayload | null {
     ) {
       return null;
     }
+    const svc = typeof parsed.svc === "string" ? parsed.svc : "";
+    if (expectedServiceId && svc.length > 0 && svc !== expectedServiceId) {
+      return null;
+    }
     return {
       ip: parsed.ip,
       ja4: typeof parsed.ja4 === "string" ? parsed.ja4 : null,
       s: parsed.s,
       e: parsed.e,
-      svc: typeof parsed.svc === "string" ? parsed.svc : "",
+      svc,
     };
   } catch {
     return null;
@@ -1012,7 +1018,7 @@ export async function handleSessionsDetail(
         },
       };
     }
-    const opened = openSessionToken(body.session_token);
+    const opened = openSessionToken(body.session_token, ctx.serviceId);
     if (!opened) {
       return {
         status: 400,
@@ -1053,6 +1059,20 @@ export async function handleSessionsDetail(
     }
   }
 
+  const startMs = Date.parse(startTime);
+  const endMs = Date.parse(endTime);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || startMs > endMs) {
+    return {
+      status: 400,
+      body: {
+        detail: {
+          error: "invalid_time_range",
+          message: "Invalid session detail time range.",
+        },
+      },
+    };
+  }
+
   const tableName = requireSafeIdent(ctx.tableName ?? "requests", "tableName");
   const useJa4Only = maskIps && !body.session_token && (!targetIp || targetIp === "0.0.0.0" || targetIp === "[redacted]") && Boolean(targetJa4);
   const ja4Clause =
@@ -1066,8 +1086,8 @@ export async function handleSessionsDetail(
   const sql = `
     SELECT *
     FROM ${tableName}
-    WHERE ${ipWherePrefix}${timestampSql} >= EPOCH_MS(CAST(${Date.parse(startTime)} AS BIGINT))
-      AND ${timestampSql} <= EPOCH_MS(CAST(${Date.parse(endTime)} AS BIGINT))${useJa4Only ? ` AND ${ja4Clause}` : ja4Clause}
+    WHERE ${ipWherePrefix}${timestampSql} >= EPOCH_MS(CAST(${Math.trunc(startMs)} AS BIGINT))
+      AND ${timestampSql} <= EPOCH_MS(CAST(${Math.trunc(endMs)} AS BIGINT))${useJa4Only ? ` AND ${ja4Clause}` : ja4Clause}
     ORDER BY ${timestampSql} ASC
     LIMIT 500
   `;

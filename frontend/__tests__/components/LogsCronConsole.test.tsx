@@ -24,6 +24,8 @@ vi.mock('@/lib/cloud-engine/mode', () => ({
   get IS_CLOUD_MODE() {
     return mockCloudMode
   },
+  isCloudMode: () => mockCloudMode,
+  setCloudModeRuntime: vi.fn(),
 }))
 
 import { CronLiveLog, FloatingOperationsDock } from '@/app/logs/_sections/LogsCronConsole'

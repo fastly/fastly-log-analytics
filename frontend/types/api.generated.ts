@@ -2353,6 +2353,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/usage/compute": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Usage Compute
+         * @description Report Compute stats as not applicable on High-Scale deployments.
+         */
+        get: operations["usage_compute_api_usage_compute_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/queries": {
         parameters: {
             query?: never;
@@ -5658,6 +5678,18 @@ export interface components {
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: components["schemas"]["SectionTimingEntry"][];
+            /** Rollup */
+            rollup?: {
+                [key: string]: unknown;
+            } | null;
+            /** Raw Window */
+            raw_window?: {
+                [key: string]: string;
+            } | null;
+            /** Approx */
+            _approx?: boolean | null;
+            /** Approx Note */
+            _approx_note?: string | null;
             /**
              * Asset Type Breakdown
              * @default []
@@ -5703,6 +5735,8 @@ export interface components {
             range_token?: string | null;
             /** Anchor */
             anchor?: string | null;
+            /** Sections */
+            sections?: string[] | null;
         };
         /**
          * AuditLogEntry
@@ -5827,6 +5861,33 @@ export interface components {
              */
             mode: string;
         };
+        /** BootstrapCapabilities */
+        BootstrapCapabilities: {
+            /**
+             * Edition
+             * @enum {string}
+             */
+            edition: "high_scale" | "cloud";
+            /**
+             * Auth Mode
+             * @enum {string}
+             */
+            auth_mode: "share_passcode_oauth" | "passkey";
+            /** Alerts */
+            alerts: boolean;
+            /** Operational Logs */
+            operational_logs: boolean;
+            /** Postgres Metadata Storage */
+            postgres_metadata_storage: boolean;
+            /** Ngwaf Workspaces */
+            ngwaf_workspaces: boolean;
+            /** Sqlite Debug Profiler */
+            sqlite_debug_profiler: boolean;
+            /** Fos Multi Service Restore */
+            fos_multi_service_restore: boolean;
+            /** Heartbeat Required */
+            heartbeat_required: boolean;
+        };
         /**
          * BootstrapDebugState
          * @description Diagnostics capability and audience settings for authenticated clients.
@@ -5928,6 +5989,7 @@ export interface components {
             cron_runs_first_page?: components["schemas"]["CronRunsResponse"] | null;
             last_sync?: components["schemas"]["LastSyncInfo"] | null;
             scoring_labels?: components["schemas"]["ScoringLabelsListResponse"] | null;
+            capabilities?: components["schemas"]["BootstrapCapabilities"] | null;
         };
         /** BootstrapService */
         BootstrapService: {
@@ -6884,6 +6946,54 @@ export interface components {
             /** Expired Dataset Count */
             expired_dataset_count?: number | null;
         };
+        /**
+         * CloudMeasuredEstimate
+         * @description Optional Cloud steady-state measured inputs/units attached to prefill.
+         */
+        CloudMeasuredEstimate: {
+            /** Inputs */
+            inputs?: {
+                [key: string]: unknown;
+            } | null;
+            /** Units */
+            units?: {
+                [key: string]: unknown;
+            } | null;
+            /** Measuredinputs */
+            measuredInputs?: {
+                [key: string]: unknown;
+            } | null;
+            /** Measuredunits */
+            measuredUnits?: {
+                [key: string]: unknown;
+            } | null;
+            /** Window */
+            window?: {
+                [key: string]: unknown;
+            } | null;
+            /** Compaction */
+            compaction?: {
+                [key: string]: unknown;
+            } | null;
+            /** Servicecompaction */
+            serviceCompaction?: {
+                [key: string]: unknown;
+            } | null;
+            /** Rumenabled */
+            rumEnabled?: boolean | null;
+            /** Relay */
+            relay?: number | null;
+            /** Rates */
+            rates?: {
+                [key: string]: unknown;
+            } | null;
+            /** Usagelogging */
+            usageLogging?: boolean | null;
+            /** Fosregion */
+            fosRegion?: string | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** CmcdAggregatesResponse */
         CmcdAggregatesResponse: {
             /** Debug Queries */
@@ -6979,6 +7089,11 @@ export interface components {
              * @default []
              */
             stream_type_dist: components["schemas"]["CmcdStreamTypeRow"][];
+            /**
+             * Partial Sections
+             * @default []
+             */
+            partial_sections: string[];
         };
         /** CmcdBitrateLadderRow */
         CmcdBitrateLadderRow: {
@@ -7843,6 +7958,15 @@ export interface components {
              * @default true
              */
             raw_logs_deleted: boolean;
+            /** Compute Requests */
+            compute_requests?: number | null;
+            /** Compute Vcpu Ms */
+            compute_vcpu_ms?: number | null;
+            /** Compute Billed Vcpu Ms */
+            compute_billed_vcpu_ms?: number | null;
+            /** Kv Ops */
+            kv_ops?: number | null;
+            incurred?: components["schemas"]["IncurredCostSummary"] | null;
         };
         /**
          * CustomCard
@@ -9462,6 +9586,40 @@ export interface components {
             next_run_at?: number | null;
         } & {
             [key: string]: unknown;
+        };
+        /** IncurredCostLine */
+        IncurredCostLine: {
+            /** Id */
+            id: string;
+            /** Label */
+            label: string;
+            /** Usd */
+            usd?: number | null;
+            /** Detail */
+            detail: string;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "fastly" | "logged" | "none";
+            /** Parts */
+            parts?: components["schemas"]["IncurredCostPart"][] | null;
+        };
+        /** IncurredCostPart */
+        IncurredCostPart: {
+            /** Label */
+            label: string;
+            /** Usd */
+            usd: number;
+        };
+        /** IncurredCostSummary */
+        IncurredCostSummary: {
+            /** Total */
+            total: number;
+            /** Lines */
+            lines: components["schemas"]["IncurredCostLine"][];
+            /** Telemetryusd */
+            telemetryUsd?: number | null;
         };
         /**
          * IngestCatchupStatus
@@ -12022,6 +12180,18 @@ export interface components {
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: components["schemas"]["SectionTimingEntry"][];
+            /** Rollup */
+            rollup?: {
+                [key: string]: unknown;
+            } | null;
+            /** Raw Window */
+            raw_window?: {
+                [key: string]: string;
+            } | null;
+            /** Approx */
+            _approx?: boolean | null;
+            /** Approx Note */
+            _approx_note?: string | null;
             /** Component Observations */
             _component_observations?: {
                 [key: string]: components["schemas"]["BaseResponse"];
@@ -12110,6 +12280,18 @@ export interface components {
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: components["schemas"]["SectionTimingEntry"][];
+            /** Rollup */
+            rollup?: {
+                [key: string]: unknown;
+            } | null;
+            /** Raw Window */
+            raw_window?: {
+                [key: string]: string;
+            } | null;
+            /** Approx */
+            _approx?: boolean | null;
+            /** Approx Note */
+            _approx_note?: string | null;
             /**
              * Has Data
              * @default true
@@ -12381,6 +12563,18 @@ export interface components {
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: components["schemas"]["SectionTimingEntry"][];
+            /** Rollup */
+            rollup?: {
+                [key: string]: unknown;
+            } | null;
+            /** Raw Window */
+            raw_window?: {
+                [key: string]: string;
+            } | null;
+            /** Approx */
+            _approx?: boolean | null;
+            /** Approx Note */
+            _approx_note?: string | null;
             /** Available */
             available: boolean;
             /**
@@ -12823,6 +13017,18 @@ export interface components {
              * @default 0
              */
             total: number;
+            /** Rollup */
+            rollup?: {
+                [key: string]: unknown;
+            } | null;
+            /** Raw Window */
+            raw_window?: {
+                [key: string]: string;
+            } | null;
+            /** Approx */
+            _approx?: boolean | null;
+            /** Approx Note */
+            _approx_note?: string | null;
             summary?: components["schemas"]["OriginSummarySection"];
             timeseries?: components["schemas"]["OriginTimeseriesSection"];
             slow_urls?: components["schemas"]["OriginSlowUrlsSection"];
@@ -12888,6 +13094,18 @@ export interface components {
              * @default 0
              */
             total: number;
+            /** Rollup */
+            rollup?: {
+                [key: string]: unknown;
+            } | null;
+            /** Raw Window */
+            raw_window?: {
+                [key: string]: string;
+            } | null;
+            /** Approx */
+            _approx?: boolean | null;
+            /** Approx Note */
+            _approx_note?: string | null;
             /**
              * Dimension
              * @default host
@@ -13038,6 +13256,18 @@ export interface components {
              * @default []
              */
             rows: components["schemas"]["OriginIpHealthRow"][];
+            /** Rollup */
+            rollup?: {
+                [key: string]: unknown;
+            } | null;
+            /** Raw Window */
+            raw_window?: {
+                [key: string]: string;
+            } | null;
+            /** Approx */
+            _approx?: boolean | null;
+            /** Approx Note */
+            _approx_note?: string | null;
         };
         /** OriginIpHealthRow */
         OriginIpHealthRow: {
@@ -13148,6 +13378,18 @@ export interface components {
              * @default []
              */
             rows: components["schemas"]["OriginPathRow"][];
+            /** Rollup */
+            rollup?: {
+                [key: string]: unknown;
+            } | null;
+            /** Raw Window */
+            raw_window?: {
+                [key: string]: string;
+            } | null;
+            /** Approx */
+            _approx?: boolean | null;
+            /** Approx Note */
+            _approx_note?: string | null;
         };
         /** OriginPathBreakdownSection */
         OriginPathBreakdownSection: {
@@ -13249,6 +13491,18 @@ export interface components {
              * @default []
              */
             rows: components["schemas"]["OriginPopLatencyRow"][];
+            /** Rollup */
+            rollup?: {
+                [key: string]: unknown;
+            } | null;
+            /** Raw Window */
+            raw_window?: {
+                [key: string]: string;
+            } | null;
+            /** Approx */
+            _approx?: boolean | null;
+            /** Approx Note */
+            _approx_note?: string | null;
         };
         /** OriginPopLatencyRow */
         OriginPopLatencyRow: {
@@ -13389,6 +13643,18 @@ export interface components {
              * @default 0
              */
             total: number;
+            /** Rollup */
+            rollup?: {
+                [key: string]: unknown;
+            } | null;
+            /** Raw Window */
+            raw_window?: {
+                [key: string]: string;
+            } | null;
+            /** Approx */
+            _approx?: boolean | null;
+            /** Approx Note */
+            _approx_note?: string | null;
             /**
              * Requires Fields
              * @default []
@@ -13490,6 +13756,18 @@ export interface components {
              * @default []
              */
             rows: components["schemas"]["OriginSlowUrlRow"][];
+            /** Rollup */
+            rollup?: {
+                [key: string]: unknown;
+            } | null;
+            /** Raw Window */
+            raw_window?: {
+                [key: string]: string;
+            } | null;
+            /** Approx */
+            _approx?: boolean | null;
+            /** Approx Note */
+            _approx_note?: string | null;
         };
         /** OriginSlowUrlsSection */
         OriginSlowUrlsSection: {
@@ -13558,6 +13836,18 @@ export interface components {
              * @default []
              */
             rows: components["schemas"]["OriginStatusCodeRow"][];
+            /** Rollup */
+            rollup?: {
+                [key: string]: unknown;
+            } | null;
+            /** Raw Window */
+            raw_window?: {
+                [key: string]: string;
+            } | null;
+            /** Approx */
+            _approx?: boolean | null;
+            /** Approx Note */
+            _approx_note?: string | null;
         };
         /** OriginStatusCodesSection */
         OriginStatusCodesSection: {
@@ -13632,6 +13922,18 @@ export interface components {
             origin_error_rate?: number | null;
             /** Obytes P50 */
             obytes_p50?: number | null;
+            /** Rollup */
+            rollup?: {
+                [key: string]: unknown;
+            } | null;
+            /** Raw Window */
+            raw_window?: {
+                [key: string]: string;
+            } | null;
+            /** Approx */
+            _approx?: boolean | null;
+            /** Approx Note */
+            _approx_note?: string | null;
         };
         /** OriginSummarySection */
         OriginSummarySection: {
@@ -13755,6 +14057,18 @@ export interface components {
              * @default []
              */
             series: components["schemas"]["OriginTimeseriesPoint"][];
+            /** Rollup */
+            rollup?: {
+                [key: string]: unknown;
+            } | null;
+            /** Raw Window */
+            raw_window?: {
+                [key: string]: string;
+            } | null;
+            /** Approx */
+            _approx?: boolean | null;
+            /** Approx Note */
+            _approx_note?: string | null;
         };
         /** OriginTimeseriesSection */
         OriginTimeseriesSection: {
@@ -13958,6 +14272,21 @@ export interface components {
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: components["schemas"]["SectionTimingEntry"][];
+            /** Rollup */
+            rollup?: {
+                [key: string]: unknown;
+            } | null;
+            /** Raw Window */
+            raw_window?: {
+                [key: string]: string;
+            } | null;
+            /**
+             * Approx
+             * @default false
+             */
+            _approx: boolean;
+            /** Approx Note */
+            _approx_note?: string | null;
             /**
              * Top Urls
              * @default []
@@ -13979,11 +14308,6 @@ export interface components {
              */
             scatter: components["schemas"]["PerformanceScatterPoint"][];
             waterfall?: components["schemas"]["PerformanceWaterfall"];
-            /**
-             * Approx
-             * @default false
-             */
-            _approx: boolean;
         };
         /** PerformanceAsnRow */
         PerformanceAsnRow: {
@@ -14362,6 +14686,18 @@ export interface components {
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: components["schemas"]["SectionTimingEntry"][];
+            /** Rollup */
+            rollup?: {
+                [key: string]: unknown;
+            } | null;
+            /** Raw Window */
+            raw_window?: {
+                [key: string]: string;
+            } | null;
+            /** Approx */
+            _approx?: boolean | null;
+            /** Approx Note */
+            _approx_note?: string | null;
             /** Data */
             data: components["schemas"]["PopHealthItem"][];
         };
@@ -14622,6 +14958,7 @@ export interface components {
             edge_ratio?: number | null;
             /** Rum Beacons Per Day */
             rum_beacons_per_day?: number | null;
+            cloud_measured?: components["schemas"]["CloudMeasuredEstimate"] | null;
         };
         /** PresetQuery */
         PresetQuery: {
@@ -14631,6 +14968,8 @@ export interface components {
             description: string;
             /** Sql */
             sql: string;
+            /** Category */
+            category?: string | null;
         } & {
             [key: string]: unknown;
         };
@@ -16062,6 +16401,8 @@ export interface components {
              * @default
              */
             custom_condition: string;
+            /** Faro Version */
+            faro_version?: string | null;
             /**
              * Token
              * @default
@@ -16171,6 +16512,11 @@ export interface components {
             resource_sample_rate?: number | null;
             /** Custom Condition */
             custom_condition?: string | null;
+            /**
+             * Supports Storage Purge
+             * @default true
+             */
+            supports_storage_purge: boolean;
         } & {
             [key: string]: unknown;
         };
@@ -17459,6 +17805,11 @@ export interface components {
              * @default []
              */
             bot_efficiency: components["schemas"]["BotEfficiencyRow"][];
+            /**
+             * Rdns Verification Available
+             * @default true
+             */
+            rdns_verification_available: boolean;
         };
         /** SecurityBotRow */
         SecurityBotRow: {
@@ -19253,6 +19604,107 @@ export interface components {
             /** Granularity */
             granularity: string;
         };
+        /** UsageComputePoint */
+        UsageComputePoint: {
+            /** Time */
+            time: string;
+            /**
+             * App Requests
+             * @default 0
+             */
+            app_requests: number;
+            /**
+             * Worker Requests
+             * @default 0
+             */
+            worker_requests: number;
+            /**
+             * App Vcpu Ms
+             * @default 0
+             */
+            app_vcpu_ms: number;
+            /**
+             * Worker Vcpu Ms
+             * @default 0
+             */
+            worker_vcpu_ms: number;
+            /**
+             * Billed Ms
+             * @default 0
+             */
+            billed_ms: number;
+        };
+        /** UsageComputeResponse */
+        UsageComputeResponse: {
+            /** Debug Queries */
+            _debug_queries?: components["schemas"]["DebugQuery"][];
+            /** Debug Calls */
+            _debug_calls?: components["schemas"]["DebugCall"][];
+            /** Debug Sqlite */
+            _debug_sqlite?: {
+                [key: string]: unknown;
+            }[];
+            /** Debug Postgres */
+            _debug_postgres?: {
+                [key: string]: unknown;
+            }[];
+            /**
+             * Is Cached
+             * @default false
+             */
+            _is_cached: boolean;
+            _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
+            /** Section Timings */
+            _section_timings?: components["schemas"]["SectionTimingEntry"][];
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "fastly" | "unavailable" | "not_applicable";
+            /** Reason */
+            reason?: string | null;
+            /**
+             * Requests
+             * @default 0
+             */
+            requests: number;
+            /**
+             * Vcpu Ms
+             * @default 0
+             */
+            vcpu_ms: number;
+            /**
+             * Billed Ms
+             * @default 0
+             */
+            billed_ms: number;
+            /**
+             * App Requests
+             * @default 0
+             */
+            app_requests: number;
+            /**
+             * Worker Requests
+             * @default 0
+             */
+            worker_requests: number;
+            /**
+             * App Vcpu Ms
+             * @default 0
+             */
+            app_vcpu_ms: number;
+            /**
+             * Worker Vcpu Ms
+             * @default 0
+             */
+            worker_vcpu_ms: number;
+            /** Covered From */
+            covered_from?: string | null;
+            /** Covered To */
+            covered_to?: string | null;
+            /** Data */
+            data?: components["schemas"]["UsageComputePoint"][];
+        };
         /** UsageLogActivityPoint */
         UsageLogActivityPoint: {
             /** Time */
@@ -19649,6 +20101,18 @@ export interface components {
             _response_cache?: components["schemas"]["ResponseCacheObservation"] | null;
             /** Section Timings */
             _section_timings?: components["schemas"]["SectionTimingEntry"][];
+            /** Rollup */
+            rollup?: {
+                [key: string]: unknown;
+            } | null;
+            /** Raw Window */
+            raw_window?: {
+                [key: string]: string;
+            } | null;
+            /** Approx */
+            _approx?: boolean | null;
+            /** Approx Note */
+            _approx_note?: string | null;
             overview?: components["schemas"]["OverviewMetrics"] | null;
             caching?: components["schemas"]["CachingMetrics"] | null;
             security?: components["schemas"]["SecurityMetrics"] | null;
@@ -34971,6 +35435,115 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["UsageRumBreakdownResponse"];
+                };
+            };
+            /** @description Bad request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Unauthenticated */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Rate limited */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Internal error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Upstream error */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Service unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    usage_compute_api_usage_compute_get: {
+        parameters: {
+            query?: {
+                start_time?: string;
+                end_time?: string;
+                service?: string | null;
+                service_id?: string | null;
+            };
+            header?: {
+                "x-fastly-service-id"?: string | null;
+                "x-service-id"?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UsageComputeResponse"];
                 };
             };
             /** @description Bad request */

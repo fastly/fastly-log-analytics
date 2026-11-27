@@ -46,9 +46,9 @@ export async function cloudServiceStatus(
   }
   const config = service[match[2] as "rum" | "cmcd"];
   const enabled = config?.enabled === true || match[2] === "rum" && service.rum_enabled === true;
+  const role = options?.role ?? request.headers.get("x-analyst-role") ?? undefined;
+  const isAnalyst = Boolean(options?.isAnalyst || role === "analyst" || role === "analyst-no-pii");
   if (match[2] === "rum") {
-    const role = options?.role ?? request.headers.get("x-analyst-role") ?? undefined;
-    const isAnalyst = Boolean(options?.isAnalyst || role === "analyst" || role === "analyst-no-pii");
     const enabledAt = (config?.enabled_at as string | null | undefined) ?? null;
     if (isAnalyst) {
       return Response.json({
@@ -61,6 +61,11 @@ export async function cloudServiceStatus(
       enabled,
       enabled_at: enabledAt,
       supports_storage_purge: false,
+    });
+  }
+  if (isAnalyst) {
+    return Response.json({
+      enabled,
     });
   }
   return Response.json({

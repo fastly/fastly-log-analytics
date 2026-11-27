@@ -3,7 +3,7 @@ import type { MeasuredEstimate } from "./estimatePrefill";
 import { LIST_RATES } from "./rates";
 import { bucketUsage, type UsageBucketBy } from "./series";
 import type { StorageBillingInterval, StorageBillingSummary } from "./storageBilling";
-import { buildSevenLineCostTable, type ComputeBilling, type UsageInput, type UsageSummary } from "./summary";
+import { DEFAULT_SETTINGS, buildSevenLineCostTable, type ComputeBilling, type UsageInput, type UsageSummary } from "./summary";
 
 type ApiSchemas = components["schemas"];
 
@@ -11,7 +11,11 @@ export type UsageCostTable = ReturnType<typeof buildSevenLineCostTable>;
 
 export type CloudStorageIntervalWire = ApiSchemas["StorageBillingInterval"];
 
-export type CloudCurrentStorageResponse = ApiSchemas["CurrentStorageResponse"] & {
+export type CloudCurrentStorageResponse = Omit<
+  ApiSchemas["CurrentStorageResponse"],
+  "storage_intervals"
+> & {
+  storage_intervals?: CloudStorageIntervalWire[];
   compute_requests?: number;
   compute_vcpu_ms?: number;
   compute_billed_vcpu_ms?: number;
@@ -34,8 +38,8 @@ export type CloudUsageOperationsResponse = Omit<ApiSchemas["UsageOperationsRespo
   data: CloudUsageOperationsPoint[];
 };
 
-export type CloudPrefillResponse = ApiSchemas["PrefillResponse"] & {
-  cloud_measured?: MeasuredEstimate;
+export type CloudPrefillResponse = Omit<ApiSchemas["PrefillResponse"], "cloud_measured"> & {
+  cloud_measured?: MeasuredEstimate | null;
 };
 
 export interface CloudStorageBillingInput {
@@ -177,7 +181,9 @@ export function buildCloudUsageEndpoints(args: BuildCloudUsageEndpointsArgs) {
         live_billed_gb_hours: sb?.summary.liveGbHours ?? 0,
         deleted_billed_gb_hours: (sb?.summary.deletedGbHours ?? 0) + (sb?.summary.minimumBilledGbHours ?? 0),
         minimum_billed_gb_hours: sb?.summary.minimumBilledGbHours ?? 0,
-        storage_intervals: omitIntervals ? [] : intervals.map(toSnakeCaseStorageInterval),
+        ...(omitIntervals
+          ? {}
+          : { storage_intervals: intervals.map(toSnakeCaseStorageInterval) }),
         observed_at: observedAtMs !== null ? new Date(observedAtMs).toISOString() : null,
         archive_bytes: archiveBytes,
         archive_objects: archiveObjects,
@@ -268,61 +274,94 @@ export function buildCloudUsageEndpoints(args: BuildCloudUsageEndpointsArgs) {
     },
 
     prefill(): CloudPrefillResponse {
-      const rates = prefillEstimate?.rates ?? input.settings;
-      const inputs = prefillEstimate?.inputs;
-      const zone = resolveBillingZone(prefillEstimate?.fosRegion, rates.cdn_egress_rate_per_gb);
-      const fallbackBytes = inputs
-        ? Math.max(1, Math.round(inputs.gzBytesPerLine * inputs.rawBytesPerGzByte))
-        : null;
-      return {
-        _is_cached: false,
-        class_a_rate_per_1k: rates.class_a_rate_per_1k,
-        class_b_rate_per_10k: rates.class_b_rate_per_10k,
-        cdn_egress_rate_per_gb: rates.cdn_egress_rate_per_gb,
-        storage_rate_per_gb_month: rates.storage_rate_per_gb_month,
-        min_billed_days: inputs?.minBilledDays ?? input.settings.min_billed_days,
-        billing_zone: zone,
-        fos_region: prefillEstimate?.fosRegion ?? null,
-        estimated_bytes_per_line: estimatedBytesPerLine ?? fallbackBytes,
-        data_days: prefillEstimate?.window.days ?? summary.days,
-        log_period_seconds: inputs?.logPeriodS ?? null,
-        sample_rate: inputs?.samplePct ?? 100,
-        edge_only: inputs?.edgeOnly ?? false,
-        delete_after: inputs?.deleteAfter ?? true,
-        log_retention_days: inputs?.retentionDays ?? 30,
-        rum_retention_days: inputs?.rumRetentionDays ?? 30,
-        snapshot_interval_minutes: 5,
-        requests_per_day: inputs ? Math.round(inputs.requestsPerDay) : null,
-        edge_requests_per_day: inputs ? Math.round(inputs.edgeRequestsPerDay) : null,
-        edge_ratio: inputs && inputs.requestsPerDay > 0
-          ? Number(((inputs.edgeRequestsPerDay / inputs.requestsPerDay) * 100).toFixed(2))
-          : null,
-        rum_beacons_per_day: inputs ? Math.round(inputs.rumPageviewsPerDay) : null,
-        ...(prefillEstimate ? { cloud_measured: prefillEstimate } : {}),
-      };
+      return buildCloudPrefillResponse({
+        prefillEstimate,
+        settings: input.settings,
+        dataDays: summary.days,
+        estimatedBytesPerLine,
+      });
     },
 
-    prefillRates(): ApiSchemas["PrefillRatesResponse"] {
-      const rates = input.settings;
-      const inputs = prefillEstimate?.inputs;
-      return {
-        _is_cached: false,
-        class_a_rate_per_1k: rates.class_a_rate_per_1k,
-        class_b_rate_per_10k: rates.class_b_rate_per_10k,
-        cdn_egress_rate_per_gb: rates.cdn_egress_rate_per_gb,
-        storage_rate_per_gb_month: rates.storage_rate_per_gb_month,
-        min_billed_days: rates.min_billed_days,
-        billing_zone: resolveBillingZone(prefillEstimate?.fosRegion, rates.cdn_egress_rate_per_gb),
-        fos_region: prefillEstimate?.fosRegion ?? null,
-        data_days: prefillEstimate?.window.days ?? summary.days,
-        log_period_seconds: inputs?.logPeriodS ?? null,
-        sample_rate: inputs?.samplePct ?? 100,
-        edge_only: inputs?.edgeOnly ?? false,
-        delete_after: inputs?.deleteAfter ?? true,
-        log_retention_days: inputs?.retentionDays ?? 30,
-        rum_retention_days: inputs?.rumRetentionDays ?? 30,
-        snapshot_interval_minutes: 5,
-      };
+    prefillRates(): CloudPrefillRatesResponse {
+      return buildCloudPrefillRatesResponse({
+        settings: input.settings,
+        prefillEstimate,
+        dataDays: summary.days,
+      });
     },
+  };
+}
+
+export type CloudPrefillRatesResponse = ApiSchemas["PrefillRatesResponse"] & {
+  compute_request_rate_per_million?: number;
+};
+
+export function buildCloudPrefillRatesResponse(args: {
+  settings: UsageInput["settings"];
+  prefillEstimate?: MeasuredEstimate | null;
+  dataDays?: number;
+}): CloudPrefillRatesResponse {
+  const { settings, prefillEstimate = null, dataDays = 0 } = args;
+  const inputs = prefillEstimate?.inputs;
+  const zone = resolveBillingZone(prefillEstimate?.fosRegion, settings.cdn_egress_rate_per_gb);
+  return {
+    _is_cached: false,
+    class_a_rate_per_1k: settings.class_a_rate_per_1k,
+    class_b_rate_per_10k: settings.class_b_rate_per_10k,
+    cdn_egress_rate_per_gb: settings.cdn_egress_rate_per_gb,
+    storage_rate_per_gb_month: settings.storage_rate_per_gb_month,
+    min_billed_days: settings.min_billed_days,
+    compute_request_rate_per_million: settings.compute_request_rate_per_million,
+    billing_zone: zone,
+    fos_region: prefillEstimate?.fosRegion ?? null,
+    data_days: prefillEstimate?.window.days ?? dataDays,
+    log_period_seconds: inputs?.logPeriodS ?? null,
+    sample_rate: inputs?.samplePct ?? 100,
+    edge_only: inputs?.edgeOnly ?? false,
+    delete_after: inputs?.deleteAfter ?? true,
+    log_retention_days: inputs?.retentionDays ?? 30,
+    rum_retention_days: inputs?.rumRetentionDays ?? 30,
+    snapshot_interval_minutes: 5,
+  };
+}
+
+export function buildCloudPrefillResponse(args: {
+  prefillEstimate?: MeasuredEstimate | null;
+  settings?: UsageInput["settings"];
+  dataDays?: number;
+  estimatedBytesPerLine?: number | null;
+}): CloudPrefillResponse {
+  const { prefillEstimate = null, settings = DEFAULT_SETTINGS, dataDays = 0, estimatedBytesPerLine = null } = args;
+  const rates = prefillEstimate?.rates ?? settings;
+  const inputs = prefillEstimate?.inputs;
+  const zone = resolveBillingZone(prefillEstimate?.fosRegion, rates.cdn_egress_rate_per_gb);
+  const fallbackBytes = inputs
+    ? Math.max(1, Math.round(inputs.gzBytesPerLine * inputs.rawBytesPerGzByte))
+    : null;
+  return {
+    _is_cached: false,
+    class_a_rate_per_1k: rates.class_a_rate_per_1k,
+    class_b_rate_per_10k: rates.class_b_rate_per_10k,
+    cdn_egress_rate_per_gb: rates.cdn_egress_rate_per_gb,
+    storage_rate_per_gb_month: rates.storage_rate_per_gb_month,
+    min_billed_days: inputs?.minBilledDays ?? settings.min_billed_days,
+    billing_zone: zone,
+    fos_region: prefillEstimate?.fosRegion ?? null,
+    estimated_bytes_per_line: estimatedBytesPerLine ?? fallbackBytes,
+    data_days: prefillEstimate?.window.days ?? dataDays,
+    log_period_seconds: inputs?.logPeriodS ?? null,
+    sample_rate: inputs?.samplePct ?? 100,
+    edge_only: inputs?.edgeOnly ?? false,
+    delete_after: inputs?.deleteAfter ?? true,
+    log_retention_days: inputs?.retentionDays ?? 30,
+    rum_retention_days: inputs?.rumRetentionDays ?? 30,
+    snapshot_interval_minutes: 5,
+    requests_per_day: inputs ? Math.round(inputs.requestsPerDay) : null,
+    edge_requests_per_day: inputs ? Math.round(inputs.edgeRequestsPerDay) : null,
+    edge_ratio: inputs && inputs.requestsPerDay > 0
+      ? Number(((inputs.edgeRequestsPerDay / inputs.requestsPerDay) * 100).toFixed(2))
+      : null,
+    rum_beacons_per_day: inputs ? Math.round(inputs.rumPageviewsPerDay) : null,
+    ...(prefillEstimate ? { ...prefillEstimate, cloud_measured: prefillEstimate } : { rates }),
   };
 }

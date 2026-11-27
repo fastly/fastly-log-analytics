@@ -2710,7 +2710,7 @@ describe("persistent Parquet store", () => {
     const { getDuckDBEngine } = await import("./duckdb");
     const { clearDashboardData, setDashboardCacheIdentity } = await import("./client");
     const { OPFS_DIRECTORY } = await import("./store-index");
-    const sessionRefMod = await import("../session-reference");
+    const { clearCloudSessionKeys, openSessionToken, sealSessionToken } = await import("../sessions");
     const { fetchCloudMetadata } = await import("../metadata-cache");
 
     const fromIso = "2026-11-21T04:00:00.000Z";
@@ -2916,11 +2916,17 @@ describe("persistent Parquet store", () => {
     expect(clearResolvedWhilePutPending).toBe(false);
     expect(await globalThis.caches.keys()).toEqual([]);
 
-    // 4. V6 + dynamic cacheScope + sessionStorage + metadataCache (SEC-T5-ITER18-02):
-    const refUuid = "11111111-2222-4333-8444-555555555555";
-    sessionRefMod.saveCloudSessionReference(refUuid, "eyJpcCI6IjIwMy4wLjExMy41NSIsInN2YyI6InN2Yy1hbGljZSJ9");
-    expect(sessionRefMod.readCloudSessionReference(refUuid)).not.toBeNull();
-    expect(typeof (sessionRefMod as Record<string, unknown>).clearCloudSessionReferences).toBe("function");
+    // 4. V6 + dynamic cacheScope + durable session token key wipe + metadataCache (SEC-T5-ITER18-02):
+    const sampleSession = {
+      ip: "203.0.113.55",
+      ja4: null,
+      s: fromIso,
+      e: toIso,
+      svc: "svc-alice",
+    };
+    const aliceToken = sealSessionToken(sampleSession);
+    expect(openSessionToken(aliceToken)).toMatchObject(sampleSession);
+    expect(typeof clearCloudSessionKeys).toBe("function");
 
     throwStorageSecurityError = true;
     await setDashboardCacheIdentity("alice:admin");
@@ -2942,8 +2948,9 @@ describe("persistent Parquet store", () => {
     await setDashboardCacheIdentity("alice:admin");
     expect(listOpfsFiles().length).toBeGreaterThan(0);
 
-    // Seed session reference + metadata cache under Alice, then switch to Bob while localStorage throws SecurityError:
-    sessionRefMod.saveCloudSessionReference(refUuid, "eyJpcCI6IjIwMy4wLjExMy41NSJ9");
+    // Issue sealed token + warm metadata cache under Alice, then switch to Bob while localStorage throws SecurityError:
+    const preSwitchToken = sealSessionToken(sampleSession);
+    expect(openSessionToken(preSwitchToken)).toMatchObject(sampleSession);
     await fetchCloudMetadata("/api/services", new AbortController().signal);
 
     await setDashboardCacheIdentity("bob:analyst-no-pii");
@@ -2952,12 +2959,13 @@ describe("persistent Parquet store", () => {
     expect(listOpfsFiles()).toEqual([]);
     expect([...opfsRootTree.keys()]).toEqual([]);
     expect(await globalThis.caches.keys()).toEqual([]);
-    expect(sessionRefMod.readCloudSessionReference(refUuid)).toBeNull();
+    expect(openSessionToken(preSwitchToken)).toBeNull();
 
-    // Also verify clearDashboardData() wipes sessionStorage['fla.cloud-session-references']:
-    sessionRefMod.saveCloudSessionReference(refUuid, "eyJpcCI6IjIwMy4wLjExMy45OSJ9");
+    // Also verify clearDashboardData() rotates/wipes the Cloud session HMAC key:
+    const postSwitchToken = sealSessionToken(sampleSession);
+    expect(openSessionToken(postSwitchToken)).toMatchObject(sampleSession);
     await clearDashboardData();
-    expect(sessionRefMod.readCloudSessionReference(refUuid)).toBeNull();
+    expect(openSessionToken(postSwitchToken)).toBeNull();
   }, 45_000);
 });
 

@@ -10,7 +10,8 @@ import { readColumns } from "./dashboard/parquet";
 import { mapLimit } from "./dashboard/sources";
 import { parseEpochMs, roundTo } from "./engine-utils";
 import { fetchLanes } from "./fetch-lanes";
-import { hasFilterValues } from "./rollup-sections";
+import { hasFilterValues, getCmcdResidualSections, isCmcdPartial, type CmcdAggregateSection } from "./rollup-sections";
+export { getCmcdResidualSections, isCmcdPartial, type CmcdAggregateSection } from "./rollup-sections";
 import { formatAsnDisplayLabel, loadAsnNames } from "./asn-names";
 
 const CMCD_FETCH_CONCURRENCY = 16;
@@ -247,54 +248,7 @@ function round2(value: number | null): number | null {
   return value == null || !Number.isFinite(value) ? null : roundTo(value, 2);
 }
 
-export type CmcdAggregateSection =
-  | "overview"
-  | "sessions_ts"
-  | "buffer_health_ts"
-  | "bitrate_ts"
-  | "throughput_ts"
-  | "top_content"
-  | "rebuffer_by_country"
-  | "rebuffer_by_asn"
-  | "object_type_dist"
-  | "streaming_format_dist"
-  | "startup_ts"
-  | "session_duration_dist"
-  | "bitrate_ladder"
-  | "stream_type_dist";
-
-const VALID_CMCD_SECTIONS = new Set<CmcdAggregateSection>([
-  "overview",
-  "sessions_ts",
-  "buffer_health_ts",
-  "bitrate_ts",
-  "throughput_ts",
-  "top_content",
-  "rebuffer_by_country",
-  "rebuffer_by_asn",
-  "object_type_dist",
-  "streaming_format_dist",
-  "startup_ts",
-  "session_duration_dist",
-  "bitrate_ladder",
-  "stream_type_dist",
-]);
-
 const CMCD_RESIDUAL_SECTIONS = ["bitrate_ladder", "stream_type_dist"] as const;
-
-export function getCmcdResidualSections(data: unknown): CmcdAggregateSection[] {
-  if (!data || typeof data !== "object") return [];
-  const partial = (data as { partial_sections?: unknown }).partial_sections;
-  if (!Array.isArray(partial)) return [];
-  return partial.filter(
-    (s): s is CmcdAggregateSection =>
-      typeof s === "string" && VALID_CMCD_SECTIONS.has(s as CmcdAggregateSection),
-  );
-}
-
-export function isCmcdPartial(data: unknown): boolean {
-  return getCmcdResidualSections(data).length > 0;
-}
 
 /** Whether `cmcd_summary` may answer this /api/cmcd/aggregates read. */
 export function cmcdRollupEligible(params: CmcdQueryParams): boolean {

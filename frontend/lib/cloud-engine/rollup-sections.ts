@@ -175,3 +175,50 @@ export function singleLowCardFilter(
   }
   return { field: field as FilteredRollupField, value: raw };
 }
+
+export type CmcdAggregateSection =
+  | "overview"
+  | "sessions_ts"
+  | "buffer_health_ts"
+  | "bitrate_ts"
+  | "throughput_ts"
+  | "top_content"
+  | "rebuffer_by_country"
+  | "rebuffer_by_asn"
+  | "object_type_dist"
+  | "streaming_format_dist"
+  | "startup_ts"
+  | "session_duration_dist"
+  | "bitrate_ladder"
+  | "stream_type_dist";
+
+const VALID_CMCD_SECTIONS = new Set<CmcdAggregateSection>([
+  "overview",
+  "sessions_ts",
+  "buffer_health_ts",
+  "bitrate_ts",
+  "throughput_ts",
+  "top_content",
+  "rebuffer_by_country",
+  "rebuffer_by_asn",
+  "object_type_dist",
+  "streaming_format_dist",
+  "startup_ts",
+  "session_duration_dist",
+  "bitrate_ladder",
+  "stream_type_dist",
+]);
+
+export function getCmcdResidualSections(data: unknown): CmcdAggregateSection[] {
+  if (!data || typeof data !== "object") return [];
+  const partial = (data as { partial_sections?: unknown }).partial_sections;
+  if (!Array.isArray(partial)) return [];
+  return partial.filter(
+    (s): s is CmcdAggregateSection =>
+      typeof s === "string" && VALID_CMCD_SECTIONS.has(s as CmcdAggregateSection),
+  );
+}
+
+export function isCmcdPartial(data: unknown): boolean {
+  return getCmcdResidualSections(data).length > 0;
+}

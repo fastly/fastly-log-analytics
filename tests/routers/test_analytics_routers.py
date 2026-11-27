@@ -1511,6 +1511,7 @@ def test_assets_aggregates_post_get_and_populated_logs(client, test_service_sour
         "backend.high_scale.ingest_controller.get_high_scale_service_registry",
         lambda: SimpleNamespace(resolve=lambda sid: svc),
     )
+    monkeypatch.setattr(svcconfig, "active_log_field_ids", lambda cfg: ["ttl", "resp_header_content_encoding"])
     CacheRegistry.clear_all()
 
     pop_resp = client.post("/api/assets/aggregates", headers=_SVC_HEADERS, json=w_json)

@@ -169,7 +169,7 @@ export function UsageStatCards({
     ? pricedLines.reduce((sum, line) => sum + (line.usd ?? 0), 0)
     : roughCostA + roughCostB + roughStorage + roughBandwidth
   const excludedCosts = pricedLines
-    ? pricedLines.filter((line) => line.usd === null).map((line) => line.label)
+    ? pricedLines.filter((line) => line.usd == null).map((line) => line.label)
     : [
         errorStorage ? 'storage' : null,
         opsUnavailable ? 'operations' : null,
@@ -275,12 +275,12 @@ export function UsageStatCards({
       label: <span>{line.label}:</span>,
       value: (
         <div className="flex flex-col items-end">
-          {line.usd === null ? (
+          {line.usd == null ? (
             <strong className="text-muted-foreground">n/a</strong>
           ) : (
             <strong className="text-foreground">{fmtUSD(line.usd)}</strong>
           )}
-          {line.usd !== null && line.parts?.map((part) => (
+          {line.usd != null && line.parts?.map((part) => (
             <span key={part.label} className="text-[10px] text-muted-foreground">
               {`${part.label} ${fmtUSD(part.usd)}`}
             </span>

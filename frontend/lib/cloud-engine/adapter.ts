@@ -98,12 +98,14 @@ import {
 } from "./query-params";
 import { sseResponse, type SseEmit } from "./sse-response";
 import { captureCloudQueryContext, measureCloudQuery, publishCloudWorkerTelemetry, type CloudQueryContext } from "./readiness";
-import { compileFiltersToSql, FIELD_DUCKDB_TYPES, getDuckDBEngine, type DuckDBReadContext } from "./dashboard/duckdb";
+import { compileFiltersToSql, FIELD_DUCKDB_TYPES, getDuckDBEngine, type DuckDBColumnType, type DuckDBReadContext } from "./dashboard/duckdb";
 import type { RowGroupFilterPredicate } from "./dashboard/parquet-projection";
 import type { components } from "@/types/api.generated";
 import { handleSecurityRequest, securityMaskIps, securityScanColumns, threatIntelScanColumns } from "./security";
-import { shareAuditRows } from "./share-audit";
+import { cloudScoringControlBridge } from "./scoring-bridge";
+import { buildCloudShareStatusPayload, shareAuditRows } from "./share-audit";
 import {
+  clearCloudSessionKeys,
   handleSessionsDetail,
   handleSessionsList,
   openSessionToken,
@@ -137,7 +139,11 @@ import {
 import { estimateMonthlyUsage } from "./usage/estimate";
 import { fetchEstimatePrefill } from "./usage/estimatePrefill";
 import { LIST_RATES } from "./usage/rates";
-import { bucketUsage } from "./usage/series";
+import {
+  buildCloudPrefillRatesResponse,
+  buildCloudPrefillResponse,
+  buildCloudUsageEndpoints,
+} from "./usage/endpoints";
 import {
   calculateStorageBilling,
   type StorageBillingInterval,
@@ -149,7 +155,7 @@ import {
   type StorageImpactBreakdown,
 } from "./usage/storageImpact";
 import {
-  buildSevenLineCostTable,
+  DEFAULT_SETTINGS,
   deletedBytesAccountingSince,
   fetchCloudStorageInventory,
   fetchIngestDeletedIntervals,
@@ -184,9 +190,11 @@ const sharedPlatformBundle = createSharedRequests<PlatformBundle>();
 const settledPlatformBundles = new Map<string, { at: number; value: PlatformBundle }>();
 const PLATFORM_BUNDLE_TTL_MS = 15_000;
 let lastPlatformBundleEpoch = 0;
+let _lastBootstrapSessionKey: string | null = null;
 
 export function resetCloudPlatformBundleCache(): void {
   settledPlatformBundles.clear();
+  _lastBootstrapSessionKey = null;
 }
 
 type CloudStorageBillingResult = {
@@ -691,6 +699,16 @@ async function processNativeCloudBootstrap(response: Response): Promise<Response
       : null;
   const needsLogin = Boolean((settings as Record<string, unknown>).needs_login);
   const maskIps = Boolean((settings as Record<string, unknown>).mask_ips);
+  const nextSessionKey = needsLogin
+    ? null
+    : `${userObj?.id ?? ""}|${userObj?.role ?? ""}|${maskIps ? "1" : "0"}`;
+  if (
+    needsLogin ||
+    (_lastBootstrapSessionKey !== null && _lastBootstrapSessionKey !== nextSessionKey)
+  ) {
+    clearCloudSessionKeys();
+  }
+  _lastBootstrapSessionKey = nextSessionKey;
   await setDashboardCacheIdentity(cloudCacheIdentity(payload));
   await syncOpsCacheForSession({
     userId: needsLogin ? null : (userObj?.id ?? null),
@@ -781,7 +799,12 @@ async function catalogCustomFields(
         : /INT|FLOAT|DOUBLE|DECIMAL|REAL/i.test(String(field.sql_type)) ? "number" : "string",
     }));
   if ([...ids].some((id) => !fields.some((field) => field.id === id))) {
-    return jsonResponse({ detail: unknownDetail }, request, undefined, 400);
+    return jsonResponse(
+      { detail: { error: "unknown_filter_field", message: unknownDetail, messages: [unknownDetail] } },
+      request,
+      undefined,
+      400,
+    );
   }
   return fields;
 }
@@ -1023,11 +1046,11 @@ function securityNgwafBotsDecorator(
       const svcRes = await fetchCloudMetadata("/api/services", new AbortController().signal);
       if (!svcRes.ok) return null;
       const payload = (await svcRes.json()) as {
-        services?: Array<{ service_id?: string; ngwaf_workspace_id?: string | null }>;
+        services?: Array<{ service_id?: string; ngwaf_workspace_id?: string | null; ngwaf_configured?: boolean }>;
       };
       const services = payload.services ?? [];
       const svc = serviceId ? services.find((s) => s.service_id === serviceId) : services[0];
-      if (!svc?.ngwaf_workspace_id) return null;
+      if (!svc?.ngwaf_workspace_id && svc?.ngwaf_configured !== true) return null;
       const qs = new URLSearchParams({
         from: start,
         to: end,
@@ -1711,7 +1734,10 @@ export async function handleCloudAnalyticalRequest(
       );
     }
     if (!(error instanceof CloudBudgetError)) throw error;
-    return Response.json({ detail: error.message }, { status: 413 });
+    return Response.json(
+      { detail: { error: "cloud_scan_budget_exceeded", message: error.message, messages: [error.message] } },
+      { status: 413 },
+    );
   });
   // A speculative prefetch is not part of the page's selected result; its budget miss is expected.
   if (request.headers.get("x-flp-cloud-prefetch") === "1") return handle();
@@ -1879,6 +1905,9 @@ async function handleCloudRequestInner(
     );
   }
   if (/^\/api\/services\/[^/]+\/scoring\//.test(path) && !isLocalScan(path, request.method)) {
+    const control = await cloudScoringControlBridge(request);
+    assertAdapterEpoch(request, entryMetaEpoch);
+    if (control) return control;
     if (isNativeCloudRoute(request.method, path)) return null;
     assertAdapterEpoch(request, entryMetaEpoch);
     const response = await cloudScoringRead(request);
@@ -1887,7 +1916,25 @@ async function handleCloudRequestInner(
   }
   if (/^\/api\/services\/[^/]+\/(?:rum|cmcd)\/(?:status|versions)$/.test(path)) {
     assertAdapterEpoch(request, entryMetaEpoch);
-    const response = await withLoading("session", () => cloudServiceStatus(request));
+    const headerRole = request.headers.get("x-session-role") ?? request.headers.get("x-analyst-role");
+    const isRemoteAnalyst = (() => {
+      try {
+        return useSessionRoleStore.getState().isRemoteAnalyst;
+      } catch {
+        return false;
+      }
+    })();
+    const role: "admin" | "analyst" | "analyst-no-pii" =
+      headerRole === "analyst-no-pii"
+        ? "analyst-no-pii"
+        : headerRole === "analyst"
+          ? "analyst"
+          : isRemoteAnalyst
+            ? "analyst"
+            : "admin";
+    const response = await withLoading("session", () =>
+      cloudServiceStatus(request, { role, isAnalyst: role !== "admin" || isRemoteAnalyst }),
+    );
     assertAdapterEpoch(request, entryMetaEpoch);
     return response ?? unsupportedCloudEndpoint(request);
   }
@@ -1922,7 +1969,13 @@ async function handleCloudRequestInner(
           activeIds = new Set(service.active_log_field_ids);
         }
       }
-      return jsonResponse(cloudSchema(catalog, activeIds), request);
+      const headerRole = request.headers.get("x-session-role");
+      const isNoPii =
+        url.searchParams.get("mask_ips") === "1" ||
+        request.headers.get("x-mask-ips") === "1" ||
+        headerRole === "analyst-no-pii" ||
+        useSessionRoleStore.getState().isRemoteAnalyst;
+      return jsonResponse(cloudSchema(catalog, activeIds, isNoPii), request);
     }
     return jsonResponse(catalog, request);
   }
@@ -1995,9 +2048,13 @@ async function handleCloudRequestInner(
     if (localScan && path === "/api/sessions/detail") {
       const params = await readRequestParams(request);
       assertAdapterEpoch(request, entryMetaEpoch);
-      if (typeof params.session_token === "string" && params.session_token.length > 0 && !openSessionToken(params.session_token)) {
+      const explicitSid =
+        typeof params.service_id === "string" && params.service_id.length > 0
+          ? params.service_id
+          : (request.headers.get("x-service-id") ?? undefined);
+      if (typeof params.session_token === "string" && params.session_token.length > 0 && !openSessionToken(params.session_token, explicitSid)) {
         return jsonResponse(
-          { detail: { error: "invalid_session_token", message: "Invalid or malformed session token." } },
+          { detail: { error: "session_token_invalid", message: "Invalid or malformed session token." } },
           request,
           undefined,
           400,
@@ -2124,9 +2181,9 @@ async function dispatchCloudRequest(
     return null;
   }
 
-  // Silence high-scale-only browser beacons when running on Cloud Compute
+  // Acknowledge browser telemetry beacons cleanly on Cloud Compute
   if (pathname === "/api/web-vitals" || pathname === "/api/ux-events") {
-    return new Response(null, { status: 204 });
+    return jsonResponse({ ok: true }, request);
   }
 
   if (pathname === "/api/admin/debug-settings" && method === "GET") {
@@ -2223,88 +2280,24 @@ async function dispatchCloudRequest(
       }).catch(() => null),
     ]);
     const invitesJson = invitesRes?.ok
-      ? ((await invitesRes.json().catch(() => ({ invites: [] }))) as {
-          invites?: Array<{
-            id: string;
-            display_name?: string;
-            role?: string;
-            created_at?: number | string;
-            expires_at?: number | string;
-            accepted_at?: number | string | null;
-            last_login_at?: number | string | null;
-            revoked?: boolean;
-          }>;
-        })
+      ? ((await invitesRes.json().catch(() => ({ invites: [] }))) as Parameters<
+          typeof buildCloudShareStatusPayload
+        >[0])
       : { invites: [] };
     const usersJson = usersRes?.ok
-      ? ((await usersRes.json().catch(() => ({ users: [] }))) as {
-          users?: Array<{
-            id: string;
-            display_name?: string;
-            role?: string;
-            created_at?: number | string;
-            last_login_at?: number | string | null;
-            revoked?: boolean;
-            passkeys?: Array<{ id: string; created_at?: number | string }>;
-          }>;
-        })
+      ? ((await usersRes.json().catch(() => ({ users: [] }))) as Parameters<
+          typeof buildCloudShareStatusPayload
+        >[1])
       : { users: [] };
     const servicesJson = servicesRes?.ok
-      ? ((await servicesRes.json().catch(() => ({ services: [] }))) as {
-          services?: Array<{ service_id: string; name?: string; service_name?: string }>;
-        })
+      ? ((await servicesRes.json().catch(() => ({ services: [] }))) as Parameters<
+          typeof buildCloudShareStatusPayload
+        >[2])
       : { services: [] };
-    const svcList = (servicesJson.services ?? []).map((s) => ({
-      service_id: s.service_id,
-      name: s.name || s.service_name || s.service_id,
-    }));
-    const allServiceIds = svcList.map((s) => s.service_id);
-    const toIso = (v: number | string | null | undefined): string | null => {
-      if (v == null) return null;
-      if (typeof v === "number") {
-        return new Date(v > 1e12 ? v : v * 1000).toISOString();
-      }
-      return String(v);
-    };
-    const invites = (invitesJson.invites ?? [])
-      .filter((i) => !i.revoked)
-      .map((i) => ({
-        id: i.id,
-        name: i.display_name || i.id,
-        email: i.role || "analyst",
-        auth_method: "passkey",
-        created_at: toIso(i.created_at) ?? new Date().toISOString(),
-        expires_at: toIso(i.expires_at),
-        last_login_at: toIso(i.last_login_at ?? i.accepted_at),
-        service_ids: allServiceIds,
-        pii_policy: { mask_ips: i.role === "analyst-no-pii" },
-        allow_concurrent_sessions: true,
-      }));
-    const sessions = (usersJson.users ?? [])
-      .filter((u) => !u.revoked)
-      .map((u) => ({
-        session_id: u.id,
-        invite_id: u.id,
-        name: u.display_name || u.id,
-        email: u.role || "analyst",
-        auth_method: `Passkey (${u.passkeys?.length ?? 0})`,
-        ip_address: u.role || "user",
-        last_active_time:
-          toIso(u.last_login_at ?? u.created_at) ?? new Date().toISOString(),
-      }));
     const originUrl =
       typeof window !== "undefined" ? window.location.origin : null;
     return jsonResponse(
-      {
-        sharing_active: true,
-        public_url: originUrl,
-        active_session_count: sessions.length,
-        max_concurrent_sessions: 100,
-        invites,
-        sessions,
-        services: svcList,
-        rate_limits: { lockouts: [], failures: [] },
-      },
+      buildCloudShareStatusPayload(invitesJson, usersJson, servicesJson, originUrl),
       request,
     );
   }
@@ -2459,16 +2452,26 @@ async function dispatchCloudRequest(
     assertAdapterEpoch(request, entryMetaEpoch);
     if (filterFields instanceof Response) return filterFields;
 
+    const bundleServiceId =
+      searchParams.get("service_id") ?? request.headers.get("x-service-id") ?? undefined;
+    const wantBundleBots =
+      pathname === "/api/dashboard/bundle" &&
+      (!Array.isArray(body.sections) || body.sections.includes("bots"));
+    const finishBundleBots = wantBundleBots
+      ? securityNgwafBotsDecorator(
+          new Date(fromMs).toISOString(),
+          new Date(toMs).toISOString(),
+          { ...(bundleServiceId ? { service_id: bundleServiceId } : {}), sections: ["top_bots"] },
+        )
+      : null;
+
     assertAdapterEpoch(request, entryMetaEpoch);
     const asnNamesReady = loadAsnNames();
     const result = await runInWorker(
       {
         from: new Date(fromMs).toISOString(),
         to: new Date(toMs).toISOString(),
-        serviceId:
-          searchParams.get("service_id") ??
-          request.headers.get("x-service-id") ??
-          undefined,
+        serviceId: bundleServiceId,
         filters,
         customFields,
         filterFields,
@@ -2570,6 +2573,9 @@ async function dispatchCloudRequest(
       });
     };
     const aggregates = {
+      _is_cached: false,
+      earliest_log_at: result.from ?? null,
+      latest_log_at: result.to ?? null,
       data: Object.fromEntries(Object.entries(result.cards).map(([field, card]) =>
         [field, { top: decorateCardTop(field, card.top), total: card.total }],
       )),
@@ -2633,6 +2639,7 @@ async function dispatchCloudRequest(
 
     return jsonResponse(
       {
+        _is_cached: false,
         summary: {
           total_requests: totalReqs,
           error_rate: totalReqs > 0 ? ((total4xx + total5xx) / totalReqs) * 100 : 0,
@@ -2648,7 +2655,15 @@ async function dispatchCloudRequest(
         aggregates,
         fields,
         ...(wantBots
-          ? { top_bots: { bots: await classifyUserAgentCounts(uaCounts, 10), ngwaf_bots: [] } }
+          ? {
+              top_bots: await (async () => {
+                const classified = await classifyUserAgentCounts(uaCounts, 10);
+                const decorated = finishBundleBots
+                  ? ((await finishBundleBots({ ngwaf_bots: [] })) as { ngwaf_bots?: unknown[] })
+                  : { ngwaf_bots: [] };
+                return { bots: classified, ngwaf_bots: decorated.ngwaf_bots ?? [] };
+              })(),
+            }
           : {}),
       },
       request,
@@ -2704,6 +2719,7 @@ async function dispatchCloudRequest(
     );
     assertAdapterEpoch(request, entryMetaEpoch);
     if (customFields instanceof Response) return customFields;
+    const searchFilters = filters.filter((f) => f.field !== fieldName);
     if (Array.isArray(body.fields) && body.fields.length > 0) {
       assertAdapterEpoch(request, entryMetaEpoch);
       const summaries = await searchFieldSummariesInWorker(
@@ -2711,7 +2727,7 @@ async function dispatchCloudRequest(
         toIso,
         body.fields[0] as CardField,
         body.search ?? "",
-        filters,
+        searchFilters,
         {
           limit: body.limit ?? 20,
           signal: request.signal,
@@ -2728,7 +2744,7 @@ async function dispatchCloudRequest(
       toIso,
       fieldName,
       body.search ?? "",
-      filters,
+      searchFilters,
       {
         limit: body.limit ?? 50,
         signal: request.signal,
@@ -2802,11 +2818,15 @@ async function dispatchCloudRequest(
         (err: unknown) => {
           checkUsageEpoch();
           if (isAdapterAbortError(err)) throw err;
-          return LIST_RATES;
+          return DEFAULT_SETTINGS;
         },
       );
       checkUsageEpoch();
-      return jsonResponse(settings, request, usageDebug(1));
+      return jsonResponse(
+        buildCloudPrefillRatesResponse({ settings }),
+        request,
+        usageDebug(1),
+      );
     }
     if (pathname === "/api/usage/prefill") {
       const prefill = await fetchEstimatePrefill(
@@ -2819,7 +2839,11 @@ async function dispatchCloudRequest(
         return null;
       });
       checkUsageEpoch();
-      return jsonResponse(prefill ?? { rates: LIST_RATES }, request, usageDebug(1));
+      return jsonResponse(
+        buildCloudPrefillResponse({ prefillEstimate: prefill }),
+        request,
+        usageDebug(1),
+      );
     }
     if (pathname === "/api/usage/compute") {
       const computed = await computeUsage(
@@ -2860,135 +2884,43 @@ async function dispatchCloudRequest(
     const by = requestedBucket === "hour" || requestedBucket === "day"
       ? requestedBucket
       : toMs - fromMs <= 2 * 86_400_000 ? "hour" : "day";
-    const points = bucketUsage(input.rows, {
-      from: fromMs,
-      to: toMs,
-      by,
-    });
     const resolvedBilling = await costBilling;
     checkUsageEpoch();
     const resolvedStorageBilling = storageBillingRead ? await storageBillingRead : null;
     checkUsageEpoch();
+    const omitIntervals =
+      searchParams.get("include_intervals") === "0" ||
+      searchParams.get("include_intervals") === "false";
+    const endpoints = buildCloudUsageEndpoints({
+      fromMs,
+      toMs,
+      by,
+      input,
+      summary,
+      storageBilling: resolvedStorageBilling,
+      billing: resolvedBilling,
+      omitIntervals,
+    });
 
     if (pathname === "/api/usage/current-storage") {
-      const storageBilling = resolvedStorageBilling!;
-      const costLines = buildSevenLineCostTable({
-        hours: (toMs - fromMs) / 3_600_000,
-        settings: input.settings,
-        billedGbHours: storageBilling.summary.totalGbHours,
-        classA: summary.totals.classA,
-        classB: summary.totals.classB,
-        cdnHits: summary.totals.cdnHit,
-        loggedCdnBytes: summary.bytesRead,
-        loggedComputeRequests: summary.computeRequests,
-        loggedComputeVcpuMs: summary.computeVcpuMs,
-        loggedComputeSegments: summary.computeSegments,
-        billing: resolvedBilling,
-      });
-      const observedAtMs = storageBilling.observedAt ?? summary.storage.snapshotAt;
-      const liveIntervalBytes = storageBilling.intervals
-        .filter((interval) => interval.kind === "live")
-        .reduce((sum, interval) => sum + interval.bytes, 0);
-      const liveBytes = storageBilling.intervals.some((interval) => interval.kind === "live")
-        ? liveIntervalBytes
-        : summary.storage.totalBytes;
-      const omitIntervals =
-        searchParams.get("include_intervals") === "0" ||
-        searchParams.get("include_intervals") === "false";
+      const payload = endpoints.currentStorage();
       return jsonResponse(
-        {
-          total_billed_gb_hours: storageBilling.summary.totalGbHours,
-          live_billed_gb_hours: storageBilling.summary.liveGbHours,
-          deleted_billed_gb_hours:
-            storageBilling.summary.deletedGbHours +
-            storageBilling.summary.minimumBilledGbHours,
-          minimum_billed_gb_hours: storageBilling.summary.minimumBilledGbHours,
-          storage_billing_complete: storageBilling.summary.complete,
-          storage_billing_provenance: storageBilling.summary.provenance,
-          ...(omitIntervals ? {} : { storage_intervals: storageBilling.intervals }),
-          observed_at:
-            observedAtMs !== null ? new Date(observedAtMs).toISOString() : null,
-          live_bytes: liveBytes,
-          deleted_bytes: storageBilling.deletedBytes,
-          deleted_bytes_complete: storageBilling.deletedBytesComplete,
-          deleted_bytes_provenance: storageBilling.deletedBytesProvenance,
-          // Same rows as High-Scale: raw logs deleted after ingest but still billed, the Parquet kept,
-          // and what compaction and retention deleted inside the minimum-billing window.
-          regular_log_bytes: storageBilling.impact.requestLogBytes,
-          rum_bytes: storageBilling.impact.rumLogBytes,
-          raw_logs_deleted: storageBilling.impact.rawLogsDeleted,
-          processed_request_bytes: storageBilling.impact.processedRequestBytes,
-          processed_rum_bytes: storageBilling.impact.processedRumBytes,
-          processed_objects: storageBilling.impact.processedObjects,
-          cloud_copy_deleted_bytes: storageBilling.impact.compactionDeletedBytes,
-          archive_expired_bytes: storageBilling.impact.retentionDeletedBytes,
-          compute_requests: summary.computeRequests,
-          compute_vcpu_ms: summary.computeVcpuMs,
-          compute_billed_vcpu_ms: summary.computeBilledVcpuMs ?? 0,
-          kv_ops: summary.kvOps,
-          cache_lookups: summary.cacheLookups,
-          cache_replaces: summary.cacheReplaces,
-          purges: summary.purges,
-          incurred: costLines,
-          reconciliation: summary.storage,
-          seven_line_table: costLines.lines,
-        },
+        payload,
         request,
-        usageDebug(storageBilling.intervals.length),
+        usageDebug(resolvedStorageBilling?.intervals.length ?? 0),
       );
     }
     if (pathname === "/api/usage/operations") {
-      const complete = input.telemetryCoverage?.fos_usage === true;
-      return jsonResponse(
-        {
-          source: "local",
-          complete,
-          provenance: ["fos_usage"],
-          granularity: by,
-          note: complete
-            ? "Measured from this service's local Object Storage operation ledger."
-            : "Local Object Storage operation ledger is incomplete or disabled for this range.",
-          fos_fields_found: complete ? ["fos_usage.class_a", "fos_usage.class_b"] : [],
-          total_class_a: summary.totals.classA,
-          total_class_b: summary.totals.classB,
-          data: points.map((p) => ({
-            date: new Date(p.t).toISOString(),
-            class_a: p.classA,
-            class_b: p.classB,
-            kv_class_a: p.kvClassA,
-            kv_class_b: p.kvClassB,
-            kv_usd: p.kvUsd,
-          })),
-        },
-        request,
-        usageDebug(points.length),
-      );
+      const payload = endpoints.operations();
+      return jsonResponse(payload, request, usageDebug(payload.data.length));
     }
     if (pathname === "/api/usage/bandwidth") {
-      return jsonResponse(
-        {
-          total_bytes: summary.bytesRead,
-          data: points.map((p) => ({
-            time: new Date(p.t).toISOString(),
-            bandwidth_bytes: p.bytesOut,
-          })),
-        },
-        request,
-        usageDebug(points.length),
-      );
+      const payload = endpoints.bandwidth();
+      return jsonResponse(payload, request, usageDebug(payload.data.length));
     }
     if (pathname === "/api/usage/log-activity") {
-      return jsonResponse(
-        {
-          data: points.map((p) => ({
-            time: new Date(p.t).toISOString(),
-            row_count: p.ingestedRows,
-            api_requests: p.requests,
-          })),
-        },
-        request,
-        usageDebug(points.length),
-      );
+      const payload = endpoints.logActivity();
+      return jsonResponse(payload, request, usageDebug(payload.data.length));
     }
   }
 
@@ -3000,7 +2932,17 @@ async function dispatchCloudRequest(
     return jsonResponse(res, request);
   }
   if (pathname === "/api/admin/metadata-storage" && method === "GET") {
-    return jsonResponse({ supported: false, reason: "cloud_postgres_storage_unavailable" }, request);
+    return jsonResponse(
+      {
+        tables: {},
+        db_bytes: 0,
+        db_path: "cloud://fos",
+        retention: {},
+        supported: false,
+        reason: "cloud_postgres_storage_unavailable",
+      },
+      request,
+    );
   }
   if (pathname === "/api/admin/metadata-cleanup" && method === "POST") {
     const body = (await request.clone().json().catch(() => ({}))) as {
@@ -3080,7 +3022,58 @@ async function dispatchCloudRequest(
 
   // Page 10: Security Analytics (/api/security/*); /api/security/ngwaf-bots is served by Compute edge.
   if (pathname.startsWith("/api/security/") && pathname !== "/api/security/ngwaf-bots") {
-    return handleSecurityRequest(request, pathname, url, read);
+    const secRequest =
+      useSessionRoleStore.getState().isRemoteAnalyst &&
+      request.headers.get("x-mask-ips") !== "1"
+        ? (() => {
+            const headers = new Headers(request.headers);
+            headers.set("x-mask-ips", "1");
+            return new Request(request, { headers });
+          })()
+        : request;
+    const wantsNgwafOverlay =
+      pathname === "/api/security/aggregates" ||
+      pathname === "/api/security/bundle" ||
+      pathname === "/api/security/top-bots";
+    if (!wantsNgwafOverlay) {
+      return handleSecurityRequest(secRequest, pathname, url, read);
+    }
+    const secParams = await readRequestParams(secRequest);
+    assertAdapterEpoch(secRequest, entryMetaEpoch);
+    let end = String(secParams.end_time ?? secParams.end ?? "");
+    if (!end) {
+      const extentsRes = await fetchCloudMetadata("/api/log-extents", secRequest.signal).catch(() => null);
+      assertAdapterEpoch(secRequest, entryMetaEpoch);
+      const extents = extentsRes?.ok
+        ? ((await extentsRes.json().catch(() => null)) as { latest_log_at?: string | null } | null)
+        : null;
+      end = extents?.latest_log_at ?? new Date().toISOString();
+    }
+    const { start } = queryRange({ ...secParams, end }, 24);
+    const secServiceId =
+      (typeof secParams.service_id === "string" && secParams.service_id) ||
+      searchParams.get("service_id") ||
+      secRequest.headers.get("x-service-id") ||
+      undefined;
+    const finishNgwaf = securityNgwafBotsDecorator(start, end, {
+      ...secParams,
+      ...(secServiceId ? { service_id: secServiceId } : {}),
+      ...(pathname === "/api/security/top-bots" ? { sections: ["top_bots"] } : {}),
+    });
+    const rawRes = await handleSecurityRequest(secRequest, pathname, url, read);
+    if (!rawRes || !rawRes.ok) return rawRes;
+    const payload = (await rawRes.json()) as Record<string, unknown>;
+    const decorated = (await finishNgwaf(payload)) as Record<string, unknown>;
+    if (pathname === "/api/security/top-bots") {
+      return jsonResponse(
+        {
+          bots: decorated.bots ?? payload.bots ?? [],
+          ngwaf_bots: decorated.ngwaf_bots ?? payload.ngwaf_bots ?? [],
+        },
+        request,
+      );
+    }
+    return jsonResponse(decorated, request);
   }
 
   const parseRequestParams = async (): Promise<Record<string, unknown>> => {
@@ -3199,7 +3192,7 @@ async function dispatchCloudRequest(
         return jsonResponse(res, request);
       }
       const data = pathname.endsWith("/analytics") ? await cloudRumAnalytics(rumParams)
-        : pathname.endsWith("/live-events") ? await cloudRumLiveEvents(rumParams)
+        : pathname.endsWith("/live-events") ? await cloudRumLiveEvents({ ...rumParams, maskIps })
         : await handleRumRequest(pathname, rumParams);
       return jsonResponse(data, request);
     } catch (error) {
@@ -3263,10 +3256,14 @@ async function dispatchCloudRequest(
   if (pathname === "/api/sessions/detail" && method === "POST") {
     const params = await parseRequestParams();
     const { maskIps, role } = resolveMaskIpsAndRole(params);
+    const explicitSid =
+      typeof params.service_id === "string" && params.service_id.length > 0
+        ? params.service_id
+        : (request.headers.get("x-service-id") ?? undefined);
     const res = await handleSessionsDetail(
       params as unknown as SessionDetailRequest,
       {
-        serviceId: String(params.service_id ?? "default"),
+        serviceId: explicitSid,
         maskIps,
         role,
         runSql: (sql) => executeSql(sql, [], request.signal),
@@ -3294,7 +3291,53 @@ async function dispatchCloudRequest(
     const serviceId = pathname.startsWith("/api/query/schema/")
       ? decodeUriStrict(pathname.slice("/api/query/schema/".length))
       : String(params.service_id ?? "logs");
-    return jsonResponse(getQuerySchema(serviceId, maskIps), request);
+    let activeFieldIds: ReadonlySet<string> | undefined;
+    const rawCustomColumnTypes = read?.getCustomColumnTypes();
+    let customColumnTypes: Map<string, DuckDBColumnType> | undefined = rawCustomColumnTypes
+      ? new Map(rawCustomColumnTypes)
+      : undefined;
+    const lookupServiceId =
+      pathname.startsWith("/api/query/schema/") && serviceId && serviceId !== "logs"
+        ? serviceId
+        : (typeof params.service_id === "string" && params.service_id !== "logs" ? params.service_id : undefined);
+    const servicesRes = await fetchCloudMetadata("/api/services", request.signal).catch(() => null);
+    if (servicesRes?.ok) {
+      const servicesPayload = (await servicesRes.json().catch(() => null)) as {
+        services?: Array<{
+          service_id?: string;
+          active_log_field_ids?: string[];
+          log_fields?: { custom_fields?: Array<{ name?: string; sql_type?: string; duckdb_type?: string; enabled?: boolean }> };
+        }>;
+      } | null;
+      const service = lookupServiceId
+        ? servicesPayload?.services?.find((item) => item.service_id === lookupServiceId)
+        : servicesPayload?.services?.[0];
+      if (Array.isArray(service?.active_log_field_ids)) {
+        activeFieldIds = new Set(service.active_log_field_ids);
+      }
+      const cfList = service?.log_fields?.custom_fields ?? [];
+      if (cfList.length > 0) {
+        const merged = new Map<string, DuckDBColumnType>(customColumnTypes ?? []);
+        for (const cf of cfList) {
+          if (cf.enabled === false || typeof cf.name !== "string" || !cf.name) continue;
+          const rawType = String(cf.sql_type ?? cf.duckdb_type ?? "VARCHAR").toUpperCase();
+          const dtype: DuckDBColumnType = /BOOL/.test(rawType)
+            ? "BOOLEAN"
+            : /INT|FLOAT|DOUBLE|DECIMAL|REAL|NUM/.test(rawType)
+              ? "DOUBLE"
+              : "VARCHAR";
+          merged.set(cf.name, dtype);
+        }
+        customColumnTypes = merged;
+      }
+    }
+    return jsonResponse(
+      getQuerySchema(serviceId, maskIps, {
+        ...(activeFieldIds ? { activeFieldIds } : {}),
+        ...(customColumnTypes ? { customColumnTypes } : {}),
+      }),
+      request,
+    );
   }
 
   if (pathname === "/api/query" && method === "POST") {

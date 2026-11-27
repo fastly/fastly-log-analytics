@@ -49,7 +49,7 @@ describe('useRumStatus', () => {
   it('maps 403 to an unauthorized-disabled status', async () => {
     server.use(http.get('*/api/services/svc/rum/status', () => HttpResponse.json({}, { status: 403 })))
     const { result } = renderHook(() => useRumStatus('svc'), { wrapper: makeQueryWrapper(createTestQueryClient()) })
-    await waitFor(() => expect(result.current.data).toEqual({ enabled: false, unauthorized: true }))
+    await waitFor(() => expect(result.current.data).toEqual({ enabled: false, supports_storage_purge: false, unauthorized: true }))
   })
 
   it('returns parsed JSON on success and null on other failures', async () => {

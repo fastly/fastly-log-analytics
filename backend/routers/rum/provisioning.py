@@ -448,8 +448,7 @@ def update_rum_settings(
     new_ver: int | None = None
 
     try:
-        if faro_changed:
-            assert target_faro_version is not None
+        if faro_changed and target_faro_version is not None:
             upgrade_res = upgrade_faro_version(service_id, target_faro_version, token, activate=True)
             vcl_reconciled = True
             new_ver = upgrade_res.get("logging_service_active_version")

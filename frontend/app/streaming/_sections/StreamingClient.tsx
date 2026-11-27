@@ -5,7 +5,7 @@ import Link from 'next/link'
 import { parseAsInteger, useQueryState } from 'nuqs'
 import { AlertTriangle, BarChart3, Clock, ExternalLink, Gauge, Play, TrendingUp, Wifi } from 'lucide-react'
 import { client, unwrapClient } from '@/lib/api'
-import { getCmcdResidualSections } from '@/lib/cloud-engine/cmcd-rollup'
+import { getCmcdResidualSections } from '@/lib/cloud-engine/rollup-sections'
 import {
   usePlotlyRangeZoom,
   useReportCancelQueries,

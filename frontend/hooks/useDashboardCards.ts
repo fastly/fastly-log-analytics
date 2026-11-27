@@ -200,7 +200,7 @@ export function useRumStatus(
         `/api/services/${serviceId}/rum/status`,
         { signal },
       )
-      if (res.status === 403) return { enabled: false, unauthorized: true }
+      if (res.status === 403) return { enabled: false, unauthorized: true, supports_storage_purge: false }
       return res.ok ? res.data : null
     },
     enabled: !!serviceId && enabled,

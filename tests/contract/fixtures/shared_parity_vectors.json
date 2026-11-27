@@ -1,0 +1,86 @@
+{
+  "pii_ip_masking": [
+    { "input": "198.51.100.42", "expected": "198.51.100.xxx" },
+    { "input": "10.0.0.1", "expected": "10.0.0.xxx" },
+    { "input": "198.51.100.xxx", "expected": "198.51.100.xxx" },
+    { "input": "2001:db8:abcd:1234:5678::1", "expected": "2001:db8:abcd::" },
+    { "input": "2001:db8:abcd::", "expected": "2001:db8:abcd::" },
+    { "input": "not-an-ip", "expected": "[redacted]" }
+  ],
+  "asset_classification": [
+    { "url": "/hero.WEBP?w=800", "expected_asset_type": "Images" },
+    { "url": "/a/LOGO.PNG#v=2", "expected_asset_type": "Images" },
+    { "url": "/docs/spec.PDF#page=2", "expected_asset_type": "Documents" },
+    { "url": "/bundle.tar.gz?dl=1", "expected_asset_type": "Documents" },
+    { "url": "/static/app.mjs?v=42#top", "expected_asset_type": "JavaScript/CSS" },
+    { "url": "/styles/main.CSS?theme=dark", "expected_asset_type": "JavaScript/CSS" },
+    { "url": "/fonts/inter.woff2?subset=latin", "expected_asset_type": "Fonts" },
+    { "url": "/hls/seg.m4s?seq=9", "expected_asset_type": "Video" },
+    { "url": "/api/v1/checkout?step=2", "expected_asset_type": "API/Dynamic" }
+  ],
+  "waf_signal_filtering": {
+    "raw_tags": "SQLI, BOT-ANALYSIS, VERIFIED-BOT-GOOGLE, SUSPECTED-BOT, SITE.CUSTOM, DATACENTER, SITE-FLAGGED-IP, TOR-EXIT, CORPORATE-PROXY, RESIDENTIAL-PROXY, PUBLIC-PROXY, VPN, XSS ",
+    "excluded_prefixes": ["VERIFIED-BOT", "SUSPECTED-", "SITE."],
+    "excluded_exact": [
+      "BOT-ANALYSIS",
+      "DATACENTER",
+      "SITE-FLAGGED-IP",
+      "TOR-EXIT",
+      "CORPORATE-PROXY",
+      "RESIDENTIAL-PROXY",
+      "PUBLIC-PROXY",
+      "VPN"
+    ],
+    "expected_attack_signals": ["SQLI", "XSS"]
+  },
+  "cookie_compliance_normalization": [
+    { "input": "missin", "expected": "missing" },
+    { "input": "unknow", "expected": "unknown" },
+    { "input": "tamper", "expected": "tampered" },
+    { "input": "expire", "expected": "expired" },
+    { "input": "valid", "expected": "valid" }
+  ],
+  "cache_collapse_detail": {
+    "url": "/api/catalog",
+    "rates": {
+      "w_hits": 25,
+      "w_miss": 75,
+      "w_pass": 10,
+      "w_total": 120,
+      "b_hits": 80,
+      "b_miss": 20,
+      "b_pass": 5,
+      "b_total": 110
+    },
+    "timeline_rows": [
+      {
+        "bucket": "2026-11-05T00:00:00Z",
+        "total_requests": 50,
+        "real_hits": 15,
+        "misses": 30
+      }
+    ],
+    "miss_rows": [
+      {
+        "timestamp": "2026-11-05T00:05:00Z",
+        "cache": "MISS",
+        "pop": "SJC",
+        "ip": "203.0.113.9",
+        "status": 200
+      }
+    ],
+    "expected": {
+      "url": "/api/catalog",
+      "window_hit_rate": 25.0,
+      "baseline_hit_rate": 80.0,
+      "window_pass_rate_approx": 8.33,
+      "baseline_pass_rate_approx": 4.55,
+      "breakdown": { "hits": 25, "misses": 75, "passes": 10, "other": 10 },
+      "timeline_hit_rate": 0.3333333333333333,
+      "timeline_expected_hits": 36,
+      "has_data": true,
+      "masked_ip": "203.0.113.xxx",
+      "unmasked_ip": "203.0.113.9"
+    }
+  }
+}

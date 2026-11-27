@@ -24631,6 +24631,204 @@
         }
       }
     },
+    "/api/usage/compute": {
+      "get": {
+        "tags": [
+          "usage"
+        ],
+        "summary": "Usage Compute",
+        "description": "Report Compute stats as not applicable on High-Scale deployments.",
+        "operationId": "usage_compute_api_usage_compute_get",
+        "parameters": [
+          {
+            "name": "start_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "Start Time"
+            }
+          },
+          {
+            "name": "end_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "",
+              "title": "End Time"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          },
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service Id"
+            }
+          },
+          {
+            "name": "x-fastly-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Fastly-Service-Id"
+            }
+          },
+          {
+            "name": "x-service-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Service-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageComputeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthenticated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/queries": {
       "get": {
         "tags": [
@@ -48832,6 +49030,54 @@
             "type": "array",
             "title": "Section Timings"
           },
+          "rollup": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollup"
+          },
+          "raw_window": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Window"
+          },
+          "_approx": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx"
+          },
+          "_approx_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx Note"
+          },
           "asset_type_breakdown": {
             "items": {
               "$ref": "#/components/schemas/AssetTypeBreakdownRow"
@@ -48936,6 +49182,20 @@
               }
             ],
             "title": "Anchor"
+          },
+          "sections": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sections"
           }
         },
         "type": "object",
@@ -49199,6 +49459,67 @@
           "passphrase"
         ],
         "title": "Body_backup_import_api_admin_share_backup_import_post"
+      },
+      "BootstrapCapabilities": {
+        "properties": {
+          "edition": {
+            "type": "string",
+            "enum": [
+              "high_scale",
+              "cloud"
+            ],
+            "title": "Edition"
+          },
+          "auth_mode": {
+            "type": "string",
+            "enum": [
+              "share_passcode_oauth",
+              "passkey"
+            ],
+            "title": "Auth Mode"
+          },
+          "alerts": {
+            "type": "boolean",
+            "title": "Alerts"
+          },
+          "operational_logs": {
+            "type": "boolean",
+            "title": "Operational Logs"
+          },
+          "postgres_metadata_storage": {
+            "type": "boolean",
+            "title": "Postgres Metadata Storage"
+          },
+          "ngwaf_workspaces": {
+            "type": "boolean",
+            "title": "Ngwaf Workspaces"
+          },
+          "sqlite_debug_profiler": {
+            "type": "boolean",
+            "title": "Sqlite Debug Profiler"
+          },
+          "fos_multi_service_restore": {
+            "type": "boolean",
+            "title": "Fos Multi Service Restore"
+          },
+          "heartbeat_required": {
+            "type": "boolean",
+            "title": "Heartbeat Required"
+          }
+        },
+        "type": "object",
+        "required": [
+          "edition",
+          "auth_mode",
+          "alerts",
+          "operational_logs",
+          "postgres_metadata_storage",
+          "ngwaf_workspaces",
+          "sqlite_debug_profiler",
+          "fos_multi_service_restore",
+          "heartbeat_required"
+        ],
+        "title": "BootstrapCapabilities"
       },
       "BootstrapDebugState": {
         "properties": {
@@ -49548,6 +49869,16 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/ScoringLabelsListResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "capabilities": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BootstrapCapabilities"
               },
               {
                 "type": "null"
@@ -52321,6 +52652,154 @@
         ],
         "title": "ClickHouseStatusResponse"
       },
+      "CloudMeasuredEstimate": {
+        "properties": {
+          "inputs": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inputs"
+          },
+          "units": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Units"
+          },
+          "measuredInputs": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Measuredinputs"
+          },
+          "measuredUnits": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Measuredunits"
+          },
+          "window": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window"
+          },
+          "compaction": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compaction"
+          },
+          "serviceCompaction": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Servicecompaction"
+          },
+          "rumEnabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rumenabled"
+          },
+          "relay": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Relay"
+          },
+          "rates": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rates"
+          },
+          "usageLogging": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Usagelogging"
+          },
+          "fosRegion": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fosregion"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "CloudMeasuredEstimate",
+        "description": "Optional Cloud steady-state measured inputs/units attached to prefill."
+      },
       "CmcdAggregatesResponse": {
         "properties": {
           "_debug_queries": {
@@ -52496,6 +52975,14 @@
             },
             "type": "array",
             "title": "Stream Type Dist",
+            "default": []
+          },
+          "partial_sections": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Partial Sections",
             "default": []
           }
         },
@@ -54930,6 +55417,60 @@
             "type": "boolean",
             "title": "Raw Logs Deleted",
             "default": true
+          },
+          "compute_requests": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compute Requests"
+          },
+          "compute_vcpu_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compute Vcpu Ms"
+          },
+          "compute_billed_vcpu_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compute Billed Vcpu Ms"
+          },
+          "kv_ops": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kv Ops"
+          },
+          "incurred": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IncurredCostSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
@@ -59474,6 +60015,114 @@
           "trigger"
         ],
         "title": "InProcessScheduleEntry"
+      },
+      "IncurredCostLine": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Usd"
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "fastly",
+              "logged",
+              "none"
+            ],
+            "title": "Source"
+          },
+          "parts": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/IncurredCostPart"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parts"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "label",
+          "detail",
+          "source"
+        ],
+        "title": "IncurredCostLine"
+      },
+      "IncurredCostPart": {
+        "properties": {
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "usd": {
+            "type": "number",
+            "title": "Usd"
+          }
+        },
+        "type": "object",
+        "required": [
+          "label",
+          "usd"
+        ],
+        "title": "IncurredCostPart"
+      },
+      "IncurredCostSummary": {
+        "properties": {
+          "total": {
+            "type": "number",
+            "title": "Total"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/IncurredCostLine"
+            },
+            "type": "array",
+            "title": "Lines"
+          },
+          "telemetryUsd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Telemetryusd"
+          }
+        },
+        "type": "object",
+        "required": [
+          "total",
+          "lines"
+        ],
+        "title": "IncurredCostSummary"
       },
       "IngestCatchupStatus": {
         "properties": {
@@ -67619,6 +68268,54 @@
             "type": "array",
             "title": "Section Timings"
           },
+          "rollup": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollup"
+          },
+          "raw_window": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Window"
+          },
+          "_approx": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx"
+          },
+          "_approx_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx Note"
+          },
           "_component_observations": {
             "anyOf": [
               {
@@ -67891,6 +68588,54 @@
             },
             "type": "array",
             "title": "Section Timings"
+          },
+          "rollup": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollup"
+          },
+          "raw_window": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Window"
+          },
+          "_approx": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx"
+          },
+          "_approx_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx Note"
           },
           "has_data": {
             "type": "boolean",
@@ -68685,6 +69430,54 @@
             },
             "type": "array",
             "title": "Section Timings"
+          },
+          "rollup": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollup"
+          },
+          "raw_window": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Window"
+          },
+          "_approx": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx"
+          },
+          "_approx_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx Note"
           },
           "available": {
             "type": "boolean",
@@ -69863,6 +70656,54 @@
             "title": "Total",
             "default": 0
           },
+          "rollup": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollup"
+          },
+          "raw_window": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Window"
+          },
+          "_approx": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx"
+          },
+          "_approx_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx Note"
+          },
           "summary": {
             "$ref": "#/components/schemas/OriginSummarySection"
           },
@@ -70005,6 +70846,54 @@
             "type": "integer",
             "title": "Total",
             "default": 0
+          },
+          "rollup": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollup"
+          },
+          "raw_window": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Window"
+          },
+          "_approx": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx"
+          },
+          "_approx_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx Note"
           },
           "dimension": {
             "type": "string",
@@ -70403,6 +71292,54 @@
             "type": "array",
             "title": "Rows",
             "default": []
+          },
+          "rollup": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollup"
+          },
+          "raw_window": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Window"
+          },
+          "_approx": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx"
+          },
+          "_approx_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx Note"
           }
         },
         "type": "object",
@@ -70684,6 +71621,54 @@
             "type": "array",
             "title": "Rows",
             "default": []
+          },
+          "rollup": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollup"
+          },
+          "raw_window": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Window"
+          },
+          "_approx": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx"
+          },
+          "_approx_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx Note"
           }
         },
         "type": "object",
@@ -70914,6 +71899,54 @@
             "type": "array",
             "title": "Rows",
             "default": []
+          },
+          "rollup": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollup"
+          },
+          "raw_window": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Window"
+          },
+          "_approx": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx"
+          },
+          "_approx_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx Note"
           }
         },
         "type": "object",
@@ -71266,6 +72299,54 @@
             "title": "Total",
             "default": 0
           },
+          "rollup": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollup"
+          },
+          "raw_window": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Window"
+          },
+          "_approx": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx"
+          },
+          "_approx_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx Note"
+          },
           "requires_fields": {
             "items": {
               "type": "string"
@@ -71487,6 +72568,54 @@
             "type": "array",
             "title": "Rows",
             "default": []
+          },
+          "rollup": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollup"
+          },
+          "raw_window": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Window"
+          },
+          "_approx": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx"
+          },
+          "_approx_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx Note"
           }
         },
         "type": "object",
@@ -71635,6 +72764,54 @@
             "type": "array",
             "title": "Rows",
             "default": []
+          },
+          "rollup": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollup"
+          },
+          "raw_window": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Window"
+          },
+          "_approx": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx"
+          },
+          "_approx_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx Note"
           }
         },
         "type": "object",
@@ -71866,6 +73043,54 @@
               }
             ],
             "title": "Obytes P50"
+          },
+          "rollup": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollup"
+          },
+          "raw_window": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Window"
+          },
+          "_approx": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx"
+          },
+          "_approx_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx Note"
           }
         },
         "type": "object",
@@ -72203,6 +73428,54 @@
             "type": "array",
             "title": "Series",
             "default": []
+          },
+          "rollup": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollup"
+          },
+          "raw_window": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Window"
+          },
+          "_approx": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx"
+          },
+          "_approx_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx Note"
           }
         },
         "type": "object",
@@ -72858,6 +74131,48 @@
             "type": "array",
             "title": "Section Timings"
           },
+          "rollup": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollup"
+          },
+          "raw_window": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Window"
+          },
+          "_approx": {
+            "type": "boolean",
+            "title": "Approx",
+            "default": false
+          },
+          "_approx_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx Note"
+          },
           "top_urls": {
             "items": {
               "$ref": "#/components/schemas/PerformanceUrlRow"
@@ -72892,11 +74207,6 @@
           },
           "waterfall": {
             "$ref": "#/components/schemas/PerformanceWaterfall"
-          },
-          "_approx": {
-            "type": "boolean",
-            "title": "Approx",
-            "default": false
           }
         },
         "type": "object",
@@ -73885,6 +75195,54 @@
             "type": "array",
             "title": "Section Timings"
           },
+          "rollup": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollup"
+          },
+          "raw_window": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Window"
+          },
+          "_approx": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx"
+          },
+          "_approx_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx Note"
+          },
           "data": {
             "items": {
               "$ref": "#/components/schemas/PopHealthItem"
@@ -74619,6 +75977,16 @@
               }
             ],
             "title": "Rum Beacons Per Day"
+          },
+          "cloud_measured": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CloudMeasuredEstimate"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
@@ -74637,6 +76005,17 @@
           "sql": {
             "type": "string",
             "title": "Sql"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
           }
         },
         "additionalProperties": true,
@@ -78656,6 +80035,17 @@
             "title": "Custom Condition",
             "default": ""
           },
+          "faro_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Faro Version"
+          },
           "token": {
             "type": "string",
             "title": "Token",
@@ -79118,6 +80508,11 @@
               }
             ],
             "title": "Custom Condition"
+          },
+          "supports_storage_purge": {
+            "type": "boolean",
+            "title": "Supports Storage Purge",
+            "default": true
           }
         },
         "additionalProperties": true,
@@ -83617,6 +85012,11 @@
             "type": "array",
             "title": "Bot Efficiency",
             "default": []
+          },
+          "rdns_verification_available": {
+            "type": "boolean",
+            "title": "Rdns Verification Available",
+            "default": true
           }
         },
         "type": "object",
@@ -88935,6 +90335,189 @@
         ],
         "title": "UsageBandwidthResponse"
       },
+      "UsageComputePoint": {
+        "properties": {
+          "time": {
+            "type": "string",
+            "title": "Time"
+          },
+          "app_requests": {
+            "type": "integer",
+            "title": "App Requests",
+            "default": 0
+          },
+          "worker_requests": {
+            "type": "integer",
+            "title": "Worker Requests",
+            "default": 0
+          },
+          "app_vcpu_ms": {
+            "type": "number",
+            "title": "App Vcpu Ms",
+            "default": 0
+          },
+          "worker_vcpu_ms": {
+            "type": "number",
+            "title": "Worker Vcpu Ms",
+            "default": 0
+          },
+          "billed_ms": {
+            "type": "number",
+            "title": "Billed Ms",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "time"
+        ],
+        "title": "UsageComputePoint"
+      },
+      "UsageComputeResponse": {
+        "properties": {
+          "_debug_queries": {
+            "items": {
+              "$ref": "#/components/schemas/DebugQuery"
+            },
+            "type": "array",
+            "title": "Debug Queries"
+          },
+          "_debug_calls": {
+            "items": {
+              "$ref": "#/components/schemas/DebugCall"
+            },
+            "type": "array",
+            "title": "Debug Calls"
+          },
+          "_debug_sqlite": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Sqlite"
+          },
+          "_debug_postgres": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Debug Postgres"
+          },
+          "_is_cached": {
+            "type": "boolean",
+            "title": "Is Cached",
+            "default": false
+          },
+          "_response_cache": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseCacheObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "_section_timings": {
+            "items": {
+              "$ref": "#/components/schemas/SectionTimingEntry"
+            },
+            "type": "array",
+            "title": "Section Timings"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "fastly",
+              "unavailable",
+              "not_applicable"
+            ],
+            "title": "Source"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "requests": {
+            "type": "integer",
+            "title": "Requests",
+            "default": 0
+          },
+          "vcpu_ms": {
+            "type": "number",
+            "title": "Vcpu Ms",
+            "default": 0
+          },
+          "billed_ms": {
+            "type": "number",
+            "title": "Billed Ms",
+            "default": 0
+          },
+          "app_requests": {
+            "type": "integer",
+            "title": "App Requests",
+            "default": 0
+          },
+          "worker_requests": {
+            "type": "integer",
+            "title": "Worker Requests",
+            "default": 0
+          },
+          "app_vcpu_ms": {
+            "type": "number",
+            "title": "App Vcpu Ms",
+            "default": 0
+          },
+          "worker_vcpu_ms": {
+            "type": "number",
+            "title": "Worker Vcpu Ms",
+            "default": 0
+          },
+          "covered_from": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Covered From"
+          },
+          "covered_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Covered To"
+          },
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/UsageComputePoint"
+            },
+            "type": "array",
+            "title": "Data"
+          }
+        },
+        "type": "object",
+        "required": [
+          "source"
+        ],
+        "title": "UsageComputeResponse"
+      },
       "UsageLogActivityPoint": {
         "properties": {
           "time": {
@@ -90042,6 +91625,54 @@
             },
             "type": "array",
             "title": "Section Timings"
+          },
+          "rollup": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollup"
+          },
+          "raw_window": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Window"
+          },
+          "_approx": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx"
+          },
+          "_approx_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approx Note"
           },
           "overview": {
             "anyOf": [

@@ -131,6 +131,16 @@ describe("buildCloudUsageEndpoints", () => {
       billed_until: toMs,
     });
 
+    const compactStorage = buildCloudUsageEndpoints({
+      fromMs,
+      toMs,
+      by: "day",
+      input: fixtureUsageInput,
+      summary,
+      omitIntervals: true,
+    }).currentStorage();
+    expect("storage_intervals" in compactStorage).toBe(false);
+
     const bw = endpoints.bandwidth();
     expect(bw).toMatchObject({
       granularity: "day",

@@ -632,6 +632,170 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/provision/ngwaf-workspaces": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List NGWAF workspaces accessible with the service or supplied Fastly token */
+        get: {
+            parameters: {
+                query?: {
+                    service_id?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Available NGWAF workspaces */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["NgwafWorkspacesResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/provision/ngwaf-workspaces": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List NGWAF workspaces accessible with the service or supplied Fastly token */
+        get: {
+            parameters: {
+                query?: {
+                    service_id?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Available NGWAF workspaces */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["NgwafWorkspacesResponse"];
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/provision/services/{service_id}/ngwaf-workspace": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Persist or clear the NGWAF workspace ID on a provisioned service */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    service_id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["NgwafWorkspaceSetInput"];
+                };
+            };
+            responses: {
+                /** @description Updated NGWAF workspace assignment */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["NgwafWorkspaceSetResponse"];
+                    };
+                };
+            };
+        };
+        trace?: never;
+    };
+    "/api/admin/provision/services/{service_id}/ngwaf-workspace": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                service_id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Persist or clear the NGWAF workspace ID on a provisioned service */
+        patch: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    service_id: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["NgwafWorkspaceSetInput"];
+                };
+            };
+            responses: {
+                /** @description Updated NGWAF workspace assignment */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["NgwafWorkspaceSetResponse"];
+                    };
+                };
+            };
+        };
+        trace?: never;
+    };
     "/api/admin/jobs/{job_id}": {
         parameters: {
             query?: never;
@@ -3649,6 +3813,22 @@ export interface components {
         };
         Users: {
             users: components["schemas"]["User"][];
+        };
+        NgwafWorkspace: {
+            id: string;
+            name: string;
+            description?: string;
+        };
+        NgwafWorkspacesResponse: {
+            workspaces: components["schemas"]["NgwafWorkspace"][];
+            error_hint?: string;
+        };
+        NgwafWorkspaceSetInput: {
+            ngwaf_workspace_id?: string | null;
+        };
+        NgwafWorkspaceSetResponse: {
+            ok: boolean;
+            ngwaf_workspace_id: string | null;
         };
     };
     responses: never;

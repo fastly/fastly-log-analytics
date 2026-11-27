@@ -139,6 +139,20 @@ export const SESSION_PII_COLUMNS = new Set([
   "cmcd_session",
 ]);
 
+function stripPiiAffixes(colLower: string): string {
+  return colLower.replace(/^(?:xfilter_|filter_|_cf_)/, "").replace(/_\d+$/, "");
+}
+
+function isSessionPiiCol(colLower: string): boolean {
+  return SESSION_PII_COLUMNS.has(colLower) || SESSION_PII_COLUMNS.has(stripPiiAffixes(colLower));
+}
+
+function isIpPiiCol(colLower: string): boolean {
+  if (isSessionPiiCol(colLower)) return false;
+  const stripped = stripPiiAffixes(colLower);
+  return IP_PII_COLUMNS.has(colLower) || IP_PII_COLUMNS.has(stripped);
+}
+
 /**
  * Build the 26 query console presets across 6 categories (`Traffic`, `Performance`,
  * `Cache`, `Origin`, `Security`, `Network`), starting with the 3 canonical presets
@@ -320,7 +334,7 @@ export function getQueryPresets(
 
 function isPiiSchemaColumn(rawName: string): boolean {
   const norm = rawName.trim().toLowerCase();
-  return IP_PII_COLUMNS.has(norm) || SESSION_PII_COLUMNS.has(norm);
+  return isIpPiiCol(norm) || isSessionPiiCol(norm);
 }
 
 function resolveCustomTypeEntries(
@@ -887,11 +901,11 @@ function scrubNestedValue(val: unknown): unknown {
     for (const [k, v] of val.entries()) {
       if (typeof k === "string") {
         const lower = k.toLowerCase();
-        if (IP_PII_COLUMNS.has(lower) && v != null && v !== "") {
+        if (isIpPiiCol(lower) && v != null && v !== "") {
           outMap.set(scrubIpText(k), "0.0.0.0");
           continue;
         }
-        if (SESSION_PII_COLUMNS.has(lower) && v != null && v !== "") {
+        if (isSessionPiiCol(lower) && v != null && v !== "") {
           outMap.set(scrubIpText(k), "[redacted]");
           continue;
         }
@@ -913,9 +927,9 @@ function scrubNestedValue(val: unknown): unknown {
       const lower = k.toLowerCase();
       const v = rec[k];
       const safeKey = scrubIpText(k);
-      if (IP_PII_COLUMNS.has(lower) && v != null && v !== "") {
+      if (isIpPiiCol(lower) && v != null && v !== "") {
         outObj[safeKey] = "0.0.0.0";
-      } else if (SESSION_PII_COLUMNS.has(lower) && v != null && v !== "") {
+      } else if (isSessionPiiCol(lower) && v != null && v !== "") {
         outObj[safeKey] = "[redacted]";
       } else {
         outObj[safeKey] = scrubNestedValue(v);
@@ -935,10 +949,10 @@ export function redactQueryRowsForPii(
     const copy: Record<string, unknown> = { ...row };
     for (const key of Object.keys(copy)) {
       const lower = key.toLowerCase();
-      if (IP_PII_COLUMNS.has(lower) && copy[key] != null && copy[key] !== "") {
+      if (isIpPiiCol(lower) && copy[key] != null && copy[key] !== "") {
         copy[key] = "0.0.0.0";
       } else if (
-        SESSION_PII_COLUMNS.has(lower) &&
+        isSessionPiiCol(lower) &&
         copy[key] != null &&
         copy[key] !== ""
       ) {
@@ -1133,7 +1147,8 @@ export async function executeCloudQuery(
     userCteAliases = rewritten.userCteAliases;
     validateUserSql(innerSql, effectiveAllowedSet);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const rawMessage = err instanceof Error ? err.message : String(err);
+    const message = maskIps ? scrubIpText(rawMessage) : rawMessage;
     return {
       status: 403,
       body: {
@@ -1222,8 +1237,7 @@ export async function executeCloudQuery(
           const describeTarget =
             tbl === "requests" ? "requests" : `main.${quoteSqlIdent(tbl)}`;
           const descRows = await ctx
-            .runSql(`DESCRIBE SELECT * FROM ${describeTarget} LIMIT 0`)
-            .catch(() => []);
+            .runSql(`DESCRIBE SELECT * FROM ${describeTarget} LIMIT 0`);
           const validDesc =
             Array.isArray(descRows) &&
             descRows.length > 0 &&
@@ -1242,14 +1256,14 @@ export async function executeCloudQuery(
                 /^(?:VAR)?CHAR(?:\(\d+\))?$|^(?:TEXT|STRING|BPCHAR)$/i.test(
                   colType.trim(),
                 );
-              if (IP_PII_COLUMNS.has(colLower)) {
+              if (isIpPiiCol(colLower)) {
                 piiColIdents.push(colIdent);
                 replacements.push(
                   isScalarTextType
                     ? `'0.0.0.0' AS ${colIdent}`
                     : `CAST(NULL AS ${colType}) AS ${colIdent}`,
                 );
-              } else if (SESSION_PII_COLUMNS.has(colLower)) {
+              } else if (isSessionPiiCol(colLower)) {
                 piiColIdents.push(colIdent);
                 replacements.push(
                   isScalarTextType
@@ -1378,7 +1392,8 @@ export async function executeCloudQuery(
       },
     };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const rawMessage = err instanceof Error ? err.message : String(err);
+    const message = maskIps ? scrubIpText(rawMessage) : rawMessage;
     return {
       status: 400,
       body: {

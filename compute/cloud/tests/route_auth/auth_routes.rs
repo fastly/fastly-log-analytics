@@ -355,6 +355,7 @@ fn services_listing_is_redacted_for_analysts_only() {
         "faro_version",
         "cmcd",
         "scoring",
+        "ngwaf_configured",
         "active_log_field_ids",
     ]
     .into();
@@ -404,6 +405,7 @@ fn services_listing_is_redacted_for_analysts_only() {
             for feature in ["cmcd", "scoring"] {
                 assert_eq!(service[feature], json!({"enabled": false}));
             }
+            assert_eq!(service["ngwaf_configured"], false);
             assert_eq!(
                 service["log_fields"],
                 json!({

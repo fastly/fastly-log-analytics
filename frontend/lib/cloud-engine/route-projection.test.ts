@@ -287,7 +287,7 @@ describe("Cloud route column projections", () => {
       });
       if (!("sessions" in response.body)) throw new Error("Session scan failed");
       return response.body.sessions.map(({ session_token, ...rest }) => {
-        expect(session_token).toMatch(/^fls_[0-9a-f]{32}$/);
+        expect(session_token).toMatch(/^fls_[A-Za-z0-9_-]{64,}$/);
         return rest;
       });
     },

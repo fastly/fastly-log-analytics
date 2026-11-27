@@ -91,10 +91,9 @@ export function AssetsReportContent({
   const rollupFirst = isCloudMode() && assetsRollupCacheFilter(filterPayload) !== false
   const range = { relativeRange, isAutoRange, startTime, endTime, anchor }
   const postAssets = (sections: readonly AssetsSection[] | undefined, rangeBody: RangeWire['rangeBody'], signal: AbortSignal | undefined) => {
-    // `sections` is a Cloud-only request field.
-    const body: components['schemas']['AssetsRequest'] & { sections?: readonly AssetsSection[] } = {
+    const body: components['schemas']['AssetsRequest'] = {
       filters: filterPayload,
-      ...sections ? { sections } : {},
+      ...sections ? { sections: [...sections] } : {},
       ...rangeBody,
     }
     return unwrapClient(client.POST('/api/assets/aggregates', { signal, body }))

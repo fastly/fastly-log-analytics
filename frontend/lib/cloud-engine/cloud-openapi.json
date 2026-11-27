@@ -469,6 +469,114 @@
         }
       }
     },
+    "/api/provision/ngwaf-workspaces": {
+      "get": {
+        "summary": "List NGWAF workspaces accessible with the service or supplied Fastly token",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Available NGWAF workspaces",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/NgwafWorkspacesResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/provision/ngwaf-workspaces": {
+      "get": {
+        "summary": "List NGWAF workspaces accessible with the service or supplied Fastly token",
+        "parameters": [
+          {
+            "name": "service_id",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Available NGWAF workspaces",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/NgwafWorkspacesResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/provision/services/{service_id}/ngwaf-workspace": {
+      "parameters": [
+        {
+          "name": "service_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string" }
+        }
+      ],
+      "patch": {
+        "summary": "Persist or clear the NGWAF workspace ID on a provisioned service",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/NgwafWorkspaceSetInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated NGWAF workspace assignment",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/NgwafWorkspaceSetResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/provision/services/{service_id}/ngwaf-workspace": {
+      "parameters": [
+        {
+          "name": "service_id",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string" }
+        }
+      ],
+      "patch": {
+        "summary": "Persist or clear the NGWAF workspace ID on a provisioned service",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/NgwafWorkspaceSetInput" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated NGWAF workspace assignment",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/NgwafWorkspaceSetResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/jobs/{job_id}": {
       "parameters": [
         {
@@ -6595,6 +6703,44 @@
           }
         },
         "required": ["users"],
+        "additionalProperties": false
+      },
+      "NgwafWorkspace": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "description": { "type": "string" }
+        },
+        "required": ["id", "name"],
+        "additionalProperties": false
+      },
+      "NgwafWorkspacesResponse": {
+        "type": "object",
+        "properties": {
+          "workspaces": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/NgwafWorkspace" }
+          },
+          "error_hint": { "type": "string" }
+        },
+        "required": ["workspaces"],
+        "additionalProperties": false
+      },
+      "NgwafWorkspaceSetInput": {
+        "type": "object",
+        "properties": {
+          "ngwaf_workspace_id": { "type": ["string", "null"] }
+        },
+        "additionalProperties": false
+      },
+      "NgwafWorkspaceSetResponse": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "ngwaf_workspace_id": { "type": ["string", "null"] }
+        },
+        "required": ["ok", "ngwaf_workspace_id"],
         "additionalProperties": false
       }
     }

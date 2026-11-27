@@ -351,7 +351,7 @@ function InsightsBody({
           onTabChange={setActiveTab}
           isLoading={isPending}
           isCounted={(insight) => !isPendingPlaceholder(insight)}
-          emptyMessage={availability ? ({ section }) => {
+          emptyMessage={Array.isArray(availability?.insights) ? ({ section }) => {
             const supported = availableInsights.some((entry) => section.key === 'all' || entry.category === section.key)
             return supported && statusFilter !== 'all'
               ? { title: 'No insights match this status', description: 'Change the status filter to see the evaluated detectors.' }
