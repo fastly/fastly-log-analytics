@@ -9,7 +9,7 @@ import { Switch } from '@/components/ui/switch'
 import { ShieldCheck, AlertCircle, AlertTriangle, Trash2 } from 'lucide-react'
 import { useSSE, useOpenGeneration } from '@/hooks/useSSE'
 import { SSEActionDialogShell, SSEExecutionSection } from '@/components/SSEModal'
-import { isCloudMode } from '@/lib/cloud-engine/mode'
+import { useRumStatus } from '@/hooks/useDashboardCards'
 import type { ServiceConfig } from '@/types/api'
 
 export interface EnableRumDialogProps {
@@ -111,7 +111,11 @@ export function DisableRumDialog(props: DisableRumDialogProps) {
 }
 
 function DisableRumDialogBody({ service, open, onOpenChange, onComplete }: DisableRumDialogProps) {
-  const isCloud = isCloudMode()
+  const { data: statusData } = useRumStatus(service?.service_id ?? null, {
+    enabled: open && Boolean(service?.service_id),
+  })
+  const supportsStoragePurge =
+    (statusData as (typeof statusData & { supports_storage_purge?: boolean }) | undefined)?.supports_storage_purge !== false
   const [removeCloudFiles, setRemoveCloudFiles] = useState(true)
   const [removeBucket, setRemoveBucket] = useState(false)
   const [isExecuting, setIsExecuting] = useState(false)
@@ -126,7 +130,7 @@ function DisableRumDialogBody({ service, open, onOpenChange, onComplete }: Disab
   const handleExecute = () => {
     setIsExecuting(true)
     const disableUrl = `/api/services/${service.service_id}/rum/disable`
-    start(disableUrl, isCloud ? {} : {
+    start(disableUrl, !supportsStoragePurge ? {} : {
       remove_cloud_files: removeCloudFiles,
       remove_bucket: isLoggingEnabled ? false : removeBucket,
     })
@@ -168,11 +172,11 @@ function DisableRumDialogBody({ service, open, onOpenChange, onComplete }: Disab
           </AlertDescription>
         </Alert>
 
-        {isCloud ? (
+        {!supportsStoragePurge ? (
           <Alert role="status">
             <AlertDescription>
-              Cloud disables beacon collection through a native service reconcile job and preserves retained RUM data.
-              Deleting RUM logs or the FOS bucket is not supported by this action.
+              Disabling beacon collection reconciles the service configuration and preserves retained RUM data.
+              Deleting RUM logs or the FOS bucket is not supported for this service.
             </AlertDescription>
           </Alert>
         ) : <div className="space-y-4">

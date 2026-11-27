@@ -205,6 +205,7 @@ class RumSettingsUpdateRequest(BaseModel):
     error_sample_rate: float = Field(default=1.0, ge=0.01, le=1.0)
     resource_sample_rate: float = Field(default=0.1, ge=0.01, le=1.0)
     custom_condition: str = ""
+    faro_version: str | None = None
     token: str = ""
 
 

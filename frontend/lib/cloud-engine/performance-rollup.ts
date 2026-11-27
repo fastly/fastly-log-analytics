@@ -105,9 +105,9 @@ function scatter(result: RollupResult) {
 export function performanceRollupEligible(path: string, body: PerformanceRollupBody): boolean {
   // None of PERFORMANCE_ROLLUP_SECTIONS (waterfall, ttl_dist, top_urls, top_asns, scatter) are in filtered_rollups.
   if (!/^\/api\/performance(?:\/aggregates)?\/*$/.test(path) || hasFilterValues(body.filters)) return false;
+  if (!Array.isArray(body.sections) || body.sections.length === 0) return true;
   const servable = new Set<string>(PERFORMANCE_ROLLUP_SECTIONS);
-  return Array.isArray(body.sections) && body.sections.length > 0 &&
-    body.sections.every((section) => servable.has(section));
+  return body.sections.every((section) => servable.has(section));
 }
 
 /**
@@ -125,7 +125,10 @@ export function performanceAggregatesFromRollup(
   result: RollupResult,
   body: PerformanceRollupBody,
 ): (PerformanceAggregatesResponse & { rollup: NetworkRollupMeta }) | null {
-  const sections = new Set(body.sections ?? []);
+  const requested = Array.isArray(body.sections) && body.sections.length > 0
+    ? body.sections
+    : PERFORMANCE_ROLLUP_SECTIONS;
+  const sections = new Set(requested);
   const out: PerformanceAggregatesResponse = { _approx: false };
   const { waterfall, fields, truncated } = result.rollup;
   const approximate: string[] = [];
@@ -223,9 +226,10 @@ export async function performanceFromRollup(
   const fromMs = parseEpochMs(body.start_time ?? undefined);
   const toMs = parseEpochMs(body.end_time ?? undefined);
   if (fromMs === null || toMs === null || fromMs >= toMs) return null;
+  const needAsns = !Array.isArray(body.sections) || body.sections.length === 0 || body.sections.includes("top_asns");
   const [result] = await Promise.all([
     queryRollup(source, { fromMs, toMs, signal, spec: spec ?? undefined }),
-    body.sections?.includes("top_asns") ? loadAsnNames() : Promise.resolve(null),
+    needAsns ? loadAsnNames() : Promise.resolve(null),
   ]);
   return result ? performanceAggregatesFromRollup(result, body) : null;
 }

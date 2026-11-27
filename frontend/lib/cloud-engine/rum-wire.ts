@@ -2,7 +2,8 @@ import { loadAsnNames } from "./asn-names";
 import { getDuckDBEngine, duckSqlString } from "./dashboard/duckdb";
 import { parseEpochMs, roundTo } from "./engine-utils";
 import { formatAsnLabel } from "./performance";
-import { buildRumWhere, queryRumAnalytics, queryRumLiveEvents, rumRowWeightExpr, type RumQueryParams } from "./rum";
+import { redactQueryRowsForPii } from "./query";
+import { buildRumWhere, queryRumLiveEvents, rumRowWeightExpr, type RumQueryParams } from "./rum";
 import { queryRumWireFromRollup, type RumRollupSource } from "./rum-rollup";
 
 const BEACON_IDENTITY = `coalesce(nullif(request_event_id, ''), nullif(client_id, '') || '_' || round(ts_ms / 1000.0)::BIGINT::VARCHAR,
@@ -25,28 +26,28 @@ export async function cloudRumUsage(params: RumQueryParams, classARate: number) 
   const engine = params.engine ?? getDuckDBEngine().readContext();
   const where = buildRumWhere(params);
   const errorWhere = buildRumWhere(params, "client_errors");
-  const [vitalsWeight, errorsWeight] = await Promise.all([
-    rumRowWeightExpr(engine, "client_vitals", params.signal),
-    rumRowWeightExpr(engine, "client_errors", params.signal),
-  ]);
   const rows = await engine.executeSql<Record<string, unknown>>(`WITH events AS (
-    SELECT ts_ms, ${BEACON_IDENTITY} AS beacon_id, ${vitalsWeight.weight} AS w FROM client_vitals WHERE ${where} AND ${PAGE_VITALS}
-    UNION ALL SELECT ts_ms, ${BEACON_IDENTITY}, ${errorsWeight.weight} AS w FROM client_errors WHERE ${errorWhere}
-  ), per_beacon AS (
-    SELECT strftime(epoch_ms(ts_ms), '%Y-%m-%d') AS date, beacon_id, max(w) AS w
-    FROM events GROUP BY 1, 2
-  ) SELECT date, round(sum(w))::BIGINT AS beacons FROM per_beacon GROUP BY 1 ORDER BY 1`, [], params.signal);
-  const data = rows.map((row) => ({
-    date: String(row.date), beacon_count: Number(row.beacons),
-    estimated_class_a_ops: Number(row.beacons),
-    estimated_cost_usd: Number(row.beacons) / 1000 * classARate,
-  }));
+    SELECT ts_ms, ${BEACON_IDENTITY} AS beacon_id FROM client_vitals WHERE ${where} AND ${PAGE_VITALS}
+    UNION ALL SELECT ts_ms, ${BEACON_IDENTITY} AS beacon_id FROM client_errors WHERE ${errorWhere}
+  ) SELECT strftime(epoch_ms(ts_ms), '%Y-%m-%d') AS date, COUNT(DISTINCT beacon_id)::BIGINT AS beacons FROM events GROUP BY 1 ORDER BY 1`, [], params.signal);
+  const data = rows.map((row) => {
+    const beacons = Number(row.beacons);
+    return {
+      date: String(row.date),
+      beacon_count: beacons,
+      estimated_class_a_ops: beacons,
+      estimated_cost_usd: roundTo(beacons / 1000 * classARate, 6),
+    };
+  });
   const total = data.reduce((sum, row) => sum + row.beacon_count, 0);
   const days = (Date.parse(String(params.end_time)) - Date.parse(String(params.start_time))) / 86400000;
   return {
-    data, total_beacons: total, total_estimated_class_a: total,
-    total_estimated_cost_usd: total / 1000 * classARate, class_a_rate_per_1k: classARate,
-    average_beacons_per_day: days > 0 ? total / days : 0,
+    data,
+    total_beacons: total,
+    total_estimated_class_a: total,
+    total_estimated_cost_usd: roundTo(total / 1000 * classARate, 6),
+    class_a_rate_per_1k: classARate,
+    average_beacons_per_day: days > 0 ? roundTo(total / days, 2) : 0,
     note: "Estimated from processed RUM beacon identities, not raw delivery receipts. One FOS Class A operation is estimated per beacon; these operations are included in total FOS usage.",
   };
 }
@@ -210,8 +211,7 @@ export async function cloudRumAnalytics(
     if (rolled) return rolled;
   }
   const engine = params.engine ?? getDuckDBEngine().readContext();
-  const [data, vitalsWeight, errorsWeight] = await Promise.all([
-    queryRumAnalytics({ ...params, engine }),
+  const [vitalsWeight, errorsWeight] = await Promise.all([
     rumRowWeightExpr(engine, "client_vitals", params.signal),
     rumRowWeightExpr(engine, "client_errors", params.signal),
   ]);
@@ -310,7 +310,7 @@ export async function cloudRumAnalytics(
   const errorRows = await engine.executeSql<Record<string, unknown>>(
     `SELECT
       coalesce(nullif(error_message, ''), nullif(message, ''), '') AS message,
-      coalesce(filename, source, '') AS file,
+      coalesce(nullif(filename, ''), nullif(source, ''), 'unknown.js') AS file,
       coalesce(lineno, 0)::BIGINT AS line,
       coalesce(colno, 0)::BIGINT AS col,
       coalesce(round(sum(${errorsWeight.weight})), 0)::BIGINT AS count
@@ -359,10 +359,24 @@ export async function cloudRumAnalytics(
   for (const row of vitalRows) {
     vitalsMap.set(String(row.metric_name ?? "").toUpperCase(), row);
   }
+  const beaconCount = Number(counts?.beacons ?? 0);
+  const errorCount = Number(counts?.errors ?? 0);
+  let noData = beaconCount === 0 && errorCount === 0;
+  if (noData && (params.device_type || params.country || params.page_url || params.filters || params.start_time != null || params.end_time != null)) {
+    const svcClause = params.service_id
+      ? `(service_id = ${duckSqlString(String(params.service_id))} OR service_id IS NULL)`
+      : "1=1";
+    const [anyV, anyE] = await Promise.all([
+      engine.executeSql<{ n: number }>(`SELECT 1 AS n FROM client_vitals WHERE ${svcClause} LIMIT 1`, [], params.signal),
+      engine.executeSql<{ n: number }>(`SELECT 1 AS n FROM client_errors WHERE ${svcClause} LIMIT 1`, [], params.signal),
+    ]);
+    noData = anyV.length === 0 && anyE.length === 0;
+  }
+
   const shapeCwv = (name: "LCP" | "CLS" | "INP" | "FCP" | "TTFB") => {
     const row = vitalsMap.get(name);
     if (!row || !Number(row.total_w ?? 0)) {
-      return { p75: null, distribution: { good: 0, needs_improvement: 0, poor: 0 } };
+      return { p75: null, distribution: noData ? null : { good: 0, needs_improvement: 0, poor: 0 } };
     }
     const rawP75 = row.p75 == null ? null : Number(row.p75);
     const p75 = rawP75 == null ? null
@@ -390,7 +404,7 @@ export async function cloudRumAnalytics(
     trendByBucket.set(Number(row.bucket), row);
   }
   const paddedBuckets: number[] = [];
-  if (!data.no_data && startMs != null && endMs != null && endMs > startMs) {
+  if (!noData && startMs != null && endMs != null && endMs > startMs) {
     const firstBucket = Math.floor(startMs / stepMs) * stepMs;
     const lastBucket = Math.floor((endMs - 1) / stepMs) * stepMs;
     const totalBuckets = Math.floor((lastBucket - firstBucket) / stepMs) + 1;
@@ -426,13 +440,14 @@ export async function cloudRumAnalytics(
   }
 
   return {
-    ...data,
+    no_data: noData,
+    ...(noData ? { message: "Waiting for real-time RUM user events..." } : {}),
     is_mock: false,
     estimated: Boolean(counts?.sampled),
-    beacon_count: Number(counts?.beacons ?? 0),
+    beacon_count: beaconCount,
     pageview_count: Number(counts?.pageviews ?? 0),
     interaction_count: Number(counts?.interactions ?? 0),
-    error_count: Number(counts?.errors ?? 0),
+    error_count: errorCount,
     vitals: {
       lcp: shapeCwv("LCP"),
       cls: shapeCwv("CLS"),
@@ -457,7 +472,7 @@ export async function cloudRumAnalytics(
     slowest_networks,
     errors: errorRows.map((row) => ({
       message: String(row.message ?? ""),
-      file: String(row.file ?? ""),
+      file: String(row.file ?? "") || "unknown.js",
       line: Number(row.line ?? 0),
       col: Number(row.col ?? 0),
       count: Number(row.count ?? 0),
@@ -481,12 +496,17 @@ export async function cloudRumAnalytics(
 
 export async function cloudRumLiveEvents(params: RumQueryParams) {
   const data = await queryRumLiveEvents(params);
-  return data.events.map((row) => {
-    const etype = String(row.event_type);
+  const events = data.events.map((row) => {
+    const rawType = String(row.event_type ?? "pageview");
+    const etype = rawType === "vital" ? "pageview" : rawType;
     const reqId = typeof row.req_id === "string" && row.req_id ? row.req_id : null;
     const resourceUrl = typeof row.resource_url === "string" && row.resource_url ? decodePct(row.resource_url) : null;
     const metricName = typeof row.metric_name === "string" && row.metric_name ? row.metric_name : null;
     const metricValue = row.metric_value != null && Number.isFinite(Number(row.metric_value)) ? Number(row.metric_value) : null;
+    const rawTtfb = row.ttfb != null ? Number(row.ttfb) : NaN;
+    const ttfbMs = Number.isFinite(rawTtfb) && rawTtfb > 0
+      ? Math.trunc(rawTtfb < 15 ? rawTtfb * 1000 : rawTtfb)
+      : null;
     const desc = etype === "error"
       ? String(row.message ?? "")
       : etype === "resource"
@@ -503,9 +523,12 @@ export async function cloudRumLiveEvents(params: RumQueryParams) {
       resource_url: resourceUrl,
       metric_name: metricName,
       metric_value: metricValue,
-      raw_log: row,
+      raw_log: { ...row, ttfb: ttfbMs },
     };
   });
+  return params.maskIps
+    ? (redactQueryRowsForPii(events, true) as typeof events)
+    : events;
 }
 
 export async function cloudRumRequestLog(

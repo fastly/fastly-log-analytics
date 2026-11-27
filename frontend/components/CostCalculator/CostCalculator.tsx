@@ -12,12 +12,7 @@ import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { Table, TableBody, TableCell, TableRow } from '@/components/ui/table'
 import { LabelWithInfo } from '@/components/ui/confirm-dialog'
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from '@/components/ui/tooltip'
+import { BillingZoneSelector, MinimumChargeNotice } from './BillingNoticeComponents'
 import {
   type PrefillResponse,
   type BillingZone,
@@ -212,19 +207,12 @@ export function Inputs({ s, r, set }: InputsProps) {
         </Row>
       </div>
 
-      <div className='mt-4 p-3 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-md space-y-2'>
-        <div className='text-xs font-semibold text-amber-700 dark:text-amber-400'>Minimum Charge per Object</div>
-        <Row label='Min. days billed per object (even if deleted early)'>
-          <ReadOnlyValue value={s.minDays} />
-        </Row>
-        <div className='text-[11px] text-amber-700/80 dark:text-amber-500/80'>
-          Edit on the <a href={buildServiceHref('/admin', activeServiceId)} className='underline font-medium hover:text-amber-900 dark:hover:text-amber-300'>admin page</a>.
-        </div>
-        <div className='text-xs text-amber-600 dark:text-amber-500 space-y-0.5'>
-          <div>Objects created/day: <strong>{fmtN(Math.round(r.objectsPerDay))}</strong></div>
-          <div>Sustained billed footprint (30d): <strong>{fmtN(Math.round(r.objectsBilled))}</strong> objects</div>
-        </div>
-      </div>
+      <MinimumChargeNotice
+        minDays={s.minDays}
+        objectsPerDay={r.objectsPerDay}
+        objectsBilled={r.objectsBilled}
+        activeServiceId={activeServiceId}
+      />
     </section>
   )
 }
@@ -335,54 +323,16 @@ export function Pricing({ s, setZone }: PricingProps) {
           </Button>
         </div>
 
-        <div className="mb-4 space-y-2 p-3 bg-muted/40 rounded-lg border border-border/50">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-              Delivery Billing Zone
-              {s.fosRegion && s.billingZone === billingZoneForFosRegion(s.fosRegion) ? (
-                <span className="ml-1.5 font-normal normal-case text-muted-foreground/80">
-                  (auto: {s.fosRegion})
-                </span>
-              ) : null}
-            </span>
-            <span className="text-xs font-semibold text-primary">
-              ${s.rateEgress.toFixed(2)} / GB
-            </span>
-          </div>
-          <div className="grid grid-cols-3 gap-1.5 p-1 bg-muted/80 rounded-md">
-            {(['MBZ100', 'MBZ200', 'Global'] as const).map((zone) => {
-              const isSelected = s.billingZone === zone
-              return (
-                <TooltipProvider key={zone}>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <button
-                        type="button"
-                        onClick={() => setZone?.(zone)}
-                        className={cn(
-                          'px-2.5 py-1.5 text-xs font-medium rounded transition-all text-center',
-                          isSelected
-                            ? 'bg-background text-foreground shadow-sm font-semibold'
-                            : 'text-muted-foreground hover:text-foreground hover:bg-background/50'
-                        )}
-                        aria-pressed={isSelected}
-                      >
-                        {zone}
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent side="top" className="max-w-[260px] text-xs">
-                      <p className="font-semibold mb-1">{zone} (${BILLING_ZONE_RATES[zone].toFixed(2)}/GB)</p>
-                      <p>{BILLING_ZONE_DESCRIPTIONS[zone]}</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-              )
-            })}
-          </div>
-          <p className="text-[11px] text-muted-foreground leading-normal">
-            {BILLING_ZONE_DESCRIPTIONS[s.billingZone || 'MBZ200']}
-          </p>
-        </div>
+        <BillingZoneSelector
+          selectedZone={s.billingZone || 'MBZ200'}
+          egressRate={s.rateEgress}
+          onSelectZone={(zone) => setZone?.(zone)}
+          autoDerivedLabel={
+            s.fosRegion && s.billingZone === billingZoneForFosRegion(s.fosRegion)
+              ? `(auto: ${s.fosRegion})`
+              : null
+          }
+        />
 
         <div className='space-y-0'>
           <Row label='Object Storage Class A ($/1,000 ops)'><ReadOnlyValue value={s.rateA} /></Row>

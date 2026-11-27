@@ -44,13 +44,13 @@ describe("cloud-engine query module", () => {
     );
   });
 
-  it("rewrites FROM logs to FROM requests and appends default LIMIT 1000", () => {
+  it("rewrites FROM logs to FROM requests and appends default LIMIT 500", () => {
     const { rewrittenSql, hasExplicitLimit } = rewriteCloudQuerySql(
       "SELECT status, count(*) FROM logs GROUP BY 1",
     );
     expect(hasExplicitLimit).toBe(false);
     expect(rewrittenSql).toBe(
-      "SELECT status, count(*) FROM requests GROUP BY 1 LIMIT 1000",
+      "SELECT status, count(*) FROM requests GROUP BY 1 LIMIT 500",
     );
   });
 
@@ -63,6 +63,7 @@ describe("cloud-engine query module", () => {
       detail: {
         error: "sql_not_permitted",
         message: expect.stringContaining("read_parquet"),
+        messages: [expect.stringContaining("read_parquet")],
       },
     });
   });
@@ -201,6 +202,36 @@ describe("Cloud query scan planning", () => {
       expect(res.body.columns).not.toContain("scoped_key");
       expect(res.body.data[0]).not.toHaveProperty("scoped_key");
       expect(res.body.data[0]).toMatchObject({ status: 200 });
+    }
+  });
+
+  it("enforces parity defaults: integer elapsed_ms, default max_rows 500, canonical ErrorEnvelope, portable presets, and active/custom schema forwarding", async () => {
+    const executedSql: string[] = [];
+    const res = await executeCloudQuery(
+      { sql: "SELECT url FROM logs" },
+      { runSql: async (sql) => { executedSql.push(sql); return [{ url: "/a" }]; } },
+    );
+    expect(res.status).toBe(200);
+    if ("elapsed_ms" in res.body) {
+      expect(Number.isInteger(res.body.elapsed_ms)).toBe(true);
+    }
+    expect(executedSql[0]).toContain("LIMIT 501");
+
+    const schema = getQuerySchema("svc-1", true, {
+      activeFieldIds: ["url", "ja4", "ip"],
+      customColumnTypes: new Map([["custom_tag", "VARCHAR"]]),
+    });
+    const colNames = schema.schema.map((c) => c.column);
+    expect(colNames).toContain("timestamp");
+    expect(colNames).toContain("url");
+    expect(colNames).toContain("ja4");
+    expect(colNames).toContain("custom_tag");
+    expect(colNames).not.toContain("ip");
+
+    for (const preset of getQueryPresets("svc-1")) {
+      expect(preset.sql).not.toMatch(/\bSUMMARIZE\b/i);
+      expect(preset.sql).not.toMatch(/\bpercentile_cont\b/i);
+      expect(preset.sql).not.toMatch(/\bstarts_with\s*\(/i);
     }
   });
 });

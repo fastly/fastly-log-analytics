@@ -720,4 +720,35 @@ describe("Cloud RUM status and versions services lookup", () => {
     const schema = await (await handleCloudAnalyticalRequest(request("/api/schema", "GET", undefined, "fixture-a")))!.json();
     expect(schema.columns.map((c: { name: string }) => c.name)).toEqual(["timestamp", "status"]);
   });
+
+  it("sets supports_storage_purge: false for admin /rum/status and redacts /rum/status for analysts", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      Response.json({
+        services: [{
+          service_id: "fixture-a",
+          rum_enabled: true,
+          rum: {
+            enabled: true,
+            enabled_at: "2026-01-01T00:00:00Z",
+            sample_rate: 0.5,
+            custom_condition: "req.http.X-Private",
+          },
+        }],
+      }),
+    ));
+
+    const adminRes = await cloudServiceStatus(request("/api/services/fixture-a/rum/status"));
+    expect(await adminRes!.json()).toMatchObject({
+      enabled: true,
+      enabled_at: "2026-01-01T00:00:00Z",
+      sample_rate: 0.5,
+      supports_storage_purge: false,
+    });
+
+    const analystRes = await cloudServiceStatus(request("/api/services/fixture-a/rum/status"), { role: "analyst" });
+    expect(await analystRes!.json()).toEqual({
+      enabled: true,
+      enabled_at: "2026-01-01T00:00:00Z",
+    });
+  });
 });

@@ -845,7 +845,9 @@ def test_waterfall_scatter_and_top_asn_labels(monkeypatch) -> None:
 
     zero_row = {"component_count": 0, "edge_processing": None, "origin_wait": None, "origin_download": None, "client_download": None}  # fmt: skip
     res_zero = _run_perf(_PerfClient({"waterfall": [zero_row]}), sections={"waterfall"})
-    assert res_zero.waterfall.avg is not None and res_zero.waterfall.avg.model_dump() == dict.fromkeys(("edge_processing", "origin_wait", "origin_download", "client_download"), 0.0)  # fmt: skip
+    assert res_zero.waterfall.avg is None
+    res_empty = _run_perf(_PerfClient({"waterfall": []}), sections={"waterfall"})
+    assert res_empty.waterfall.avg is None
 
     sc_client = _PerfClient({"scatter": [{"origin_ms": 100.0, "edge_ms": 150.0, "cache": "MISS"}, {"origin_ms": 20.0, "edge_ms": 100.0, "cache": "HIT"}, {"origin_ms": 5.0, "edge_ms": 1.0, "cache": ""}]})  # fmt: skip
     sc_res = _run_perf(sc_client, sections={"scatter", "waterfall"})

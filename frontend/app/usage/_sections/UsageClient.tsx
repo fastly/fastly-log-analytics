@@ -7,7 +7,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Activity as ActivityIcon } from 'lucide-react'
 import { useTheme } from 'next-themes'
 import { AnalyticsCard, useInViewOnce } from '@/components/AnalyticsCard'
-import { isCloudMode } from '@/lib/cloud-engine/mode'
+import type { EstimateRates } from '@/lib/cloud-engine/usage/estimate'
 import type { ComputeUsageResponse } from '@/lib/cloud-engine/usage/computeSeries'
 import type { MeasuredEstimate } from '@/lib/cloud-engine/usage/estimatePrefill'
 import { ReportLayout } from '@/components/ReportLayout'
@@ -15,10 +15,8 @@ import { Skeleton, SkeletonGrid } from '@/components/ui/skeleton'
 import { useIsDataReady } from '@/hooks/useBootstrap'
 import type { ReportConfiguration } from '@/hooks/useDashboardCards'
 import { adminFetch, client, unwrapClient } from '@/lib/api'
-import { estimateLogLineBytes, type LogFieldsCatalogLike } from '@/lib/apiLogFields'
-import type { LogFieldsConfig } from '@/types/api'
-import { queryKeys } from '@/lib/apiQueryKeys'
 import type { ChartInterval } from '@/lib/utils'
+import type { components } from '@/types/api.generated'
 import { useFilterStore, useServiceStore } from '@/stores/filterStore'
 import type {
   BandwidthUsageData,
@@ -131,7 +129,6 @@ export function UsagePageContent({
   const estimatorVisible = useInViewOnce(estimatorRef, { rootMargin: '100px' })
   const [rumVisible, setRumVisible] = React.useState(false)
   const handleRumVisible = React.useCallback(() => setRumVisible(true), [])
-  const cloudMode = isCloudMode()
 
   // The Cost Estimator lives below the fold; defer /api/usage/prefill until it nears
   // the viewport so initial /usage loads avoid a second compute-billing call and a 7-day
@@ -153,15 +150,15 @@ export function UsagePageContent({
   } = useQuery({
     queryKey: ['usage', 'storage', activeServiceId, queryStartTime, queryEndTime],
     queryFn: async ({ signal }) => {
-      const query = {
-        start: queryStartTime ?? undefined,
-        end: queryEndTime ?? undefined,
-        ...(cloudMode ? { include_intervals: '0' } : {}),
-      } as { start?: string; end?: string }
       return unwrapClient(
         client.GET('/api/usage/current-storage', {
           signal,
-          params: { query },
+          params: {
+            query: {
+              start: queryStartTime ?? undefined,
+              end: queryEndTime ?? undefined,
+            },
+          },
         }),
       )
     },
@@ -281,34 +278,6 @@ export function UsagePageContent({
     staleTime: 5 * 60_000,
   })
 
-  const { data: cloudLogFields } = useQuery({
-    queryKey: ['usage', 'cloud-log-fields', activeServiceId],
-    queryFn: async ({ signal }) => {
-      return unwrapClient(client.GET('/api/services/{service_id}/log-fields', {
-        params: { path: { service_id: activeServiceId! } },
-        signal,
-      }))
-    },
-    enabled: isReady && cloudMode && estimatorVisible && Boolean(activeServiceId),
-    staleTime: 5 * 60_000,
-  })
-
-  const { data: cloudLogFieldsCatalog } = useQuery({
-    queryKey: queryKeys.logFieldsCatalog(activeServiceId ?? undefined),
-    queryFn: async ({ signal }) => {
-      return unwrapClient(client.GET('/api/log-fields/catalog', { signal }))
-    },
-    enabled: isReady && cloudMode && estimatorVisible && Boolean(activeServiceId),
-    staleTime: 5 * 60_000,
-  })
-
-  const cloudEstimatedBytesPerLine = cloudMode
-    ? estimateLogLineBytes(
-        cloudLogFields?.log_fields as LogFieldsConfig | undefined,
-        cloudLogFieldsCatalog as LogFieldsCatalogLike,
-      )
-    : null
-
   const storageWithMeta = storage as StorageUsageData | undefined
   const opsWithMeta = ops as (typeof ops & {
     source?: string
@@ -336,14 +305,62 @@ export function UsagePageContent({
       if (!response.ok) throw new Error(`Compute usage failed (${response.status})`)
       return response.json()
     },
-    enabled: isReady && cloudMode,
+    enabled: isReady,
     staleTime: 60_000,
   })
 
+  type PrefillWire = components['schemas']['PrefillResponse'] & {
+    cloud_measured?: Partial<MeasuredEstimate>
+    inputs?: Partial<MeasuredEstimate['inputs']>
+    units?: Partial<MeasuredEstimate['units']>
+    measuredInputs?: MeasuredEstimate['measuredInputs']
+    measuredUnits?: MeasuredEstimate['measuredUnits']
+    rates?: Partial<Record<keyof EstimateRates, number | null>>
+    window?: MeasuredEstimate['window']
+    compaction?: MeasuredEstimate['compaction']
+    serviceCompaction?: MeasuredEstimate['serviceCompaction']
+    rumEnabled?: boolean
+    relay?: number
+    usageLogging?: boolean
+    fosRegion?: string
+  }
+  type PrefillRatesWire = components['schemas']['PrefillRatesResponse'] & {
+    compute_request_rate_per_million?: number | null
+  }
+
   const prefill = prefillFull ?? prefillRates
-  const cloudPrefill = cloudMode ? prefillFull as unknown as Partial<MeasuredEstimate> | undefined : undefined
-  const rateSettings = cloudMode ? cloudPrefill?.rates ?? prefillRates : prefill
+  const prefillFullWire = prefillFull as PrefillWire | undefined
+  const prefillRatesWire = prefillRates as PrefillRatesWire | undefined
+  const cloudPrefill: Partial<MeasuredEstimate> | undefined = prefillFullWire?.cloud_measured ?? (
+    prefillFullWire?.inputs
+      ? {
+          inputs: prefillFullWire.inputs as MeasuredEstimate['inputs'],
+          units: prefillFullWire.units as MeasuredEstimate['units'],
+          measuredInputs: prefillFullWire.measuredInputs,
+          measuredUnits: prefillFullWire.measuredUnits,
+          rates: prefillFullWire.rates as MeasuredEstimate['rates'],
+          window: prefillFullWire.window,
+          compaction: prefillFullWire.compaction,
+          serviceCompaction: prefillFullWire.serviceCompaction,
+          rumEnabled: prefillFullWire.rumEnabled,
+          relay: prefillFullWire.relay,
+          usageLogging: prefillFullWire.usageLogging,
+          fosRegion: prefillFullWire.fosRegion,
+        }
+      : undefined
+  )
+  const hasCloudRates = prefillRatesWire?.compute_request_rate_per_million !== undefined
+  const showCompute = Boolean(compute && compute.source !== 'not_applicable')
+  const useCloudEstimator = Boolean(
+    cloudPrefill ||
+    hasCloudRates ||
+    showCompute ||
+    storageWithMeta?.incurred?.lines?.length ||
+    (storageWithMeta && 'compute_requests' in storageWithMeta),
+  )
+  const rateSettings = cloudPrefill?.rates ?? prefill
   const loadingPrefill = !prefillRates && !prefillFull
+  const estimatedBytesPerLine = prefillFullWire?.estimated_bytes_per_line ?? prefillRatesWire?.estimated_bytes_per_line ?? null
 
   const isFetchingAny =
     fetchingStorage || fetchingOps || fetchingBw || fetchingActivity || fetchingRumBreakdown
@@ -394,7 +411,6 @@ export function UsagePageContent({
         storageBillingProvenance={storageWithMeta?.storage_billing_provenance}
         operationsSource={opsWithMeta?.source}
         operationsComplete={opsWithMeta?.complete}
-        cloudMode={cloudMode}
       />
 
       <UsageChartsGrid
@@ -425,7 +441,7 @@ export function UsagePageContent({
         rateEgress={rateEgress}
         effectiveInterval={config.effectiveInterval}
         setChartInterval={setChartInterval}
-        showCompute={cloudMode}
+        showCompute={showCompute}
         compute={compute}
         loadingCompute={loadingCompute}
         fetchingCompute={fetchingCompute}
@@ -435,27 +451,27 @@ export function UsagePageContent({
       <div
         ref={estimatorRef}
         className={
-          cloudMode
+          useCloudEstimator
             ? 'min-h-[920px] [contain-intrinsic-size:920px] [content-visibility:auto]'
             : 'min-h-[680px] [contain-intrinsic-size:680px] [content-visibility:auto]'
         }
       >
         <AnalyticsCard
           title="Cost Estimator"
-          description={cloudMode
+          description={useCloudEstimator
             ? 'Estimate monthly Cloud Compute, storage, CDN and store costs from your service and contract rates.'
             : 'Estimate your monthly FOS cost based on your configuration and contract rates. Pre-filled from your active service and rate settings.'}
         >
           {loadingPrefill || (estimatorVisible && loadingPrefillFull) ? (
-            <div className={cloudMode ? 'space-y-3 min-h-[820px]' : 'space-y-3 min-h-[580px]'}>
+            <div className={useCloudEstimator ? 'space-y-3 min-h-[820px]' : 'space-y-3 min-h-[580px]'}>
               <SkeletonGrid count={4} height="36px" className="rounded-md" />
             </div>
-          ) : cloudMode ? (
+          ) : useCloudEstimator ? (
             <CloudCostCalculator
               key={activeServiceId}
               prefillData={cloudPrefill}
               rates={prefillRates}
-              estimatedBytesPerLine={cloudEstimatedBytesPerLine}
+              estimatedBytesPerLine={estimatedBytesPerLine}
               localStorageGbHours={localStorageGbHours}
               localStoragePeriodHours={localStoragePeriodHours}
             />

@@ -24,7 +24,8 @@ export type ComputeUsageResponse =
       /** Hourly, only for hours Platform Metrics returned. */
       data: ComputePoint[];
     }
-  | { source: "unavailable"; reason: string };
+  | { source: "unavailable"; reason: string }
+  | { source: "not_applicable"; data: ComputePoint[]; reason?: string | null };
 
 const DAY_MS = 86_400_000;
 

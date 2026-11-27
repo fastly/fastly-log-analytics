@@ -83,7 +83,7 @@ _HS_CMCD_CACHE_TTL = float(os.getenv("HS_CMCD_CACHE_TTL_SECONDS", "60"))
 _memo = ResponseMemo(ttl=_HS_CMCD_CACHE_TTL, maxsize=128, prewarmer=False)
 CacheRegistry.register("hs_cmcd_aggregates_memo", _memo.cache)
 _DEFAULT_WINDOW = timedelta(days=1)
-_BUCKET_FORMAT = "%Y-%m-%d %H:%M:%S"
+_BUCKET_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _DURATION_BUCKETS = {1: "<30s", 2: "30s–2m", 3: "2–5m", 4: "5–10m", 5: "10–30m", 6: "30m–1h", 7: ">1h"}
 _BITRATE_LADDER_TIERS = {
     1: "< 1 Mbps (SD)",
@@ -171,9 +171,7 @@ _EVENTS_BASE = """
 """
 _EVENTS_SELECT = _EVENTS_BASE.replace("{prewhere_clause}", "")
 _EVENTS = _EVENTS_SELECT.replace("{from_table}", "cmcd_projection_facts").replace("{asn_expr}", "asn")
-_BUCKET = (
-    "formatDateTime(toStartOfInterval({column}, INTERVAL {{bucket_seconds:UInt32}} SECOND), '%Y-%m-%d %H:%i:%S', 'UTC')"
-)
+_BUCKET = "formatDateTime(toStartOfInterval({column}, INTERVAL {{bucket_seconds:UInt32}} SECOND), '%Y-%m-%dT%H:%i:%SZ', 'UTC')"
 _VIDEO = "ot = 'v'"
 
 
@@ -306,7 +304,15 @@ def _round(value: Any) -> float | None:
 def _pad(
     start: datetime, end: datetime, bucket_seconds: int, rows: dict[str, dict[str, Any]], default: dict[str, Any]
 ) -> list[dict[str, Any]]:
-    return pad_timeseries_buckets(start, end, bucket_seconds, rows, default, end_inclusive=False)
+    return pad_timeseries_buckets(
+        start,
+        end,
+        bucket_seconds,
+        rows,
+        default,
+        bucket_fmt=_BUCKET_FORMAT,
+        end_inclusive=False,
+    )
 
 
 def _sessions_ts(rows: Iterable[dict[str, Any]], new_sessions: Mapping[str, int]) -> dict[str, dict[str, Any]]:

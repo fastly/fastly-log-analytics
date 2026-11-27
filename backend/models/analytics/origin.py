@@ -5,6 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from backend.models.analytics._common import (
+    AnalyticsCompletenessMixin,
     ShieldingRow,
     _move_fields,
     _UrlRequestsWireBase,
@@ -77,7 +78,7 @@ class OriginTimeseriesPoint(WireSafeModel):
     edge: bool | None = None
 
 
-class OriginDrilldownResponse(HasDataMixin, BaseResponse):
+class OriginDrilldownResponse(AnalyticsCompletenessMixin, HasDataMixin, BaseResponse):
     dimension: str = "host"
     rows: list[OriginDrilldownRow] = []
 
@@ -100,7 +101,7 @@ class _OriginSummaryMetricsMixin(BaseModel):
     obytes_p50: float | None = None
 
 
-class OriginSummaryResponse(_OriginSummaryMetricsMixin, HasDataMixin, BaseResponse):
+class OriginSummaryResponse(AnalyticsCompletenessMixin, _OriginSummaryMetricsMixin, HasDataMixin, BaseResponse):
     pass
 
 
@@ -131,31 +132,31 @@ class _OriginIpHealthMixin(BaseModel):
     rows: list[OriginIpHealthRow] = []
 
 
-class OriginTimeseriesResponse(_OriginTimeseriesMixin, HasDataMixin, BaseResponse):
+class OriginTimeseriesResponse(AnalyticsCompletenessMixin, _OriginTimeseriesMixin, HasDataMixin, BaseResponse):
     pass
 
 
-class OriginSlowUrlsResponse(_OriginSlowUrlsMixin, HasDataMixin, BaseResponse):
+class OriginSlowUrlsResponse(AnalyticsCompletenessMixin, _OriginSlowUrlsMixin, HasDataMixin, BaseResponse):
     pass
 
 
-class OriginStatusCodesResponse(_OriginStatusCodesMixin, HasDataMixin, BaseResponse):
+class OriginStatusCodesResponse(AnalyticsCompletenessMixin, _OriginStatusCodesMixin, HasDataMixin, BaseResponse):
     pass
 
 
-class OriginPathBreakdownResponse(_OriginPathBreakdownMixin, HasDataMixin, BaseResponse):
+class OriginPathBreakdownResponse(AnalyticsCompletenessMixin, _OriginPathBreakdownMixin, HasDataMixin, BaseResponse):
     pass
 
 
-class OriginPopLatencyResponse(_OriginPopLatencyMixin, HasDataMixin, BaseResponse):
+class OriginPopLatencyResponse(AnalyticsCompletenessMixin, _OriginPopLatencyMixin, HasDataMixin, BaseResponse):
     pass
 
 
-class OriginIpHealthResponse(_OriginIpHealthMixin, HasDataMixin, BaseResponse):
+class OriginIpHealthResponse(AnalyticsCompletenessMixin, _OriginIpHealthMixin, HasDataMixin, BaseResponse):
     pass
 
 
-class OriginShieldingAnalysisResponse(HasDataMixin, BaseResponse):
+class OriginShieldingAnalysisResponse(AnalyticsCompletenessMixin, HasDataMixin, BaseResponse):
     requires_fields: list[str] = []
     edge_only: bool = False
     rows: list[ShieldingRow] = []
@@ -199,7 +200,7 @@ class OriginIpHealthSection(_OriginSectionApproxMixin, _OriginIpHealthMixin, _Ha
     pass
 
 
-class OriginAggregatesResponse(HasDataMixin, BaseResponse):
+class OriginAggregatesResponse(AnalyticsCompletenessMixin, HasDataMixin, BaseResponse):
     summary: OriginSummarySection = Field(default_factory=OriginSummarySection)
     timeseries: OriginTimeseriesSection = Field(default_factory=OriginTimeseriesSection)
     slow_urls: OriginSlowUrlsSection = Field(default_factory=OriginSlowUrlsSection)

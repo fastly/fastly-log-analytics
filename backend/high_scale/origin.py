@@ -829,6 +829,9 @@ def origin_drilldown(
             )
             dim_map = {
                 "pop": "custom_fields['pop']",
+                "shield_pop": "custom_fields['pop']",
+                "datacenter": "custom_fields['server_region']",
+                "protocol": "custom_fields['proto']",
                 "backend": "custom_fields['backend']",
                 "oip": "custom_fields['oip']",
                 "origin_ip": "custom_fields['oip']",
@@ -837,6 +840,7 @@ def origin_drilldown(
                 "country": "country",
             }
             col_expr = dim_map.get(dimension, f"custom_fields['{dimension}']")
+            shield_clause = " AND lower(custom_fields['edge']) IN ('false', '0')" if dimension == "shield_pop" else ""
             latency_expr = (
                 "coalesce(toFloat64OrNull(custom_fields['ottfb']), toFloat64OrNull(custom_fields['ttfb']) * 1000000.0)"
             )
@@ -846,8 +850,8 @@ def origin_drilldown(
                     f"/* origin:drilldown */ SELECT {col_expr} AS key, count() AS requests, "
                     f"quantilesExact(0.5, 0.95, 0.99)({latency_expr}) AS latency_q, "
                     "round(countIf(toInt32OrZero(custom_fields['ost']) BETWEEN 500 AND 599) * 100.0 / nullIf(count(), 0), 2) AS error_rate, "
-                    "toInt64(round(median(toInt64OrNull(custom_fields['obytes'])))) AS bytes "
-                    f"FROM request_facts WHERE {where_sql} AND {latency_expr} IS NOT NULL AND {col_expr} != '' "
+                    "toInt64(round(avg(toInt64OrNull(custom_fields['obytes'])))) AS bytes "
+                    f"FROM request_facts WHERE {where_sql}{shield_clause} AND {latency_expr} IS NOT NULL AND {col_expr} != '' "
                     f"GROUP BY key ORDER BY {_ORDER_BY_P95} LIMIT {{limit:UInt32}}",
                     {**params, "limit": limit},
                 ),

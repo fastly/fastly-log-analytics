@@ -85,7 +85,9 @@ describe('OriginClient on Cloud', () => {
     setCloudModeRuntime(true)
     const sections = recordPosts('/api/origin/aggregates', () => ({
       ...originRaw,
-      slow_urls: { has_data: true, rows: [{ url: '/slow', requests: 77, p50_ms: 10, p95_ms: 300, p99_ms: 400 }] },
+      summary: { ...originRaw.summary, _approx: true, _approx_note: 'Percentiles are estimated from summary histograms (≈).' },
+      ip_health: { ...originRaw.ip_health, _approx: true, _approx_note: 'Percentiles are estimated from summary histograms (≈).' },
+      slow_urls: { has_data: true, _approx: true, _approx_note: 'Percentiles are estimated from summary histograms (≈).', rows: [{ url: '/slow', requests: 77, p50_ms: 10, p95_ms: 300, p99_ms: 400 }] },
       rollup: meta(
         ['summary.ottfb_p50_ms', 'slow_urls.p95_ms', 'ip_health.p50_ms', 'ip_health.p95_ms', 'timeseries.value'],
         ['slow_urls.requests', 'ip_health.requests'],
@@ -180,7 +182,7 @@ describe('PerformanceClient on Cloud', () => {
     expect(plots).toContain(JSON.stringify([['< 60s', '> 1d'], [9, 4]]))
     expect(plots.some((plot) => plot?.includes(JSON.stringify([[40], ['Origin TTFB Wait']])))).toBe(true)
     expect(plots).toContain(`${JSON.stringify([[0.5], [1]])}|${JSON.stringify([[12.5], [3.25]])}`)
-    expect(sections).toEqual([['ttl_dist', 'waterfall', 'top_urls', 'top_asns', 'scatter']])
+    expect(sections).toEqual([undefined])
     expect(await screen.findByText('/slow/report')).toBeInTheDocument()
     expect(screen.getByText('Slowest URLs (≥ counts)')).toBeInTheDocument()
     expect(screen.getByText('Slowest Networks')).toBeInTheDocument()

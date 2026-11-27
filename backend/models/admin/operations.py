@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -167,11 +167,29 @@ class _PrefillRatesBase(_BillingRatesMixin, BaseResponse):
     fos_region: str | None = None
 
 
+class CloudMeasuredEstimate(PassthroughModel):
+    """Optional Cloud steady-state measured inputs/units attached to prefill."""
+
+    inputs: dict[str, Any] | None = None
+    units: dict[str, Any] | None = None
+    measuredInputs: dict[str, Any] | None = None
+    measuredUnits: dict[str, Any] | None = None
+    window: dict[str, Any] | None = None
+    compaction: dict[str, Any] | None = None
+    serviceCompaction: dict[str, Any] | None = None
+    rumEnabled: bool | None = None
+    relay: int | None = None
+    rates: dict[str, Any] | None = None
+    usageLogging: bool | None = None
+    fosRegion: str | None = None
+
+
 class PrefillResponse(_PrefillRatesBase):
     requests_per_day: int | None = None
     edge_requests_per_day: int | None = None
     edge_ratio: float | None = None
     rum_beacons_per_day: int | None = None
+    cloud_measured: CloudMeasuredEstimate | None = None
 
 
 class PrefillRatesResponse(_PrefillRatesBase):
@@ -243,6 +261,26 @@ class PlatformGeographyResponse(BaseResponse):
     reason: str | None = None
 
 
+class IncurredCostPart(BaseModel):
+    label: str
+    usd: float
+
+
+class IncurredCostLine(BaseModel):
+    id: str
+    label: str
+    usd: float | None = None
+    detail: str
+    source: Literal["fastly", "logged", "none"]
+    parts: list[IncurredCostPart] | None = None
+
+
+class IncurredCostSummary(BaseModel):
+    total: float
+    lines: list[IncurredCostLine]
+    telemetryUsd: float | None = None
+
+
 class CurrentStorageResponse(BaseResponse):
     live_bytes: int
     live_files: int
@@ -275,6 +313,35 @@ class CurrentStorageResponse(BaseResponse):
     processed_objects: int = 0
     # True when raw logs are deleted after ingest, so rum_bytes / regular_log_bytes are deleted-but-billed.
     raw_logs_deleted: bool = True
+    compute_requests: int | None = None
+    compute_vcpu_ms: float | None = None
+    compute_billed_vcpu_ms: float | None = None
+    kv_ops: int | None = None
+    incurred: IncurredCostSummary | None = None
+
+
+class UsageComputePoint(BaseModel):
+    time: str
+    app_requests: int = 0
+    worker_requests: int = 0
+    app_vcpu_ms: float = 0
+    worker_vcpu_ms: float = 0
+    billed_ms: float = 0
+
+
+class UsageComputeResponse(BaseResponse):
+    source: Literal["fastly", "unavailable", "not_applicable"]
+    reason: str | None = None
+    requests: int = 0
+    vcpu_ms: float = 0
+    billed_ms: float = 0
+    app_requests: int = 0
+    worker_requests: int = 0
+    app_vcpu_ms: float = 0
+    worker_vcpu_ms: float = 0
+    covered_from: str | None = None
+    covered_to: str | None = None
+    data: list[UsageComputePoint] = Field(default_factory=list)
 
 
 class UsageOperationsPoint(BaseModel):

@@ -13,6 +13,9 @@ import { DuckDBAnalyticalEngine } from "./dashboard/test-fixtures";
 import {
   computeNetworkHealthScore,
   deduplicateMetroLeaderboard,
+  emptyNetworkBundle,
+  emptyNetworkHealth,
+  emptyNetworkQuality,
   handleNetworkRequest,
   NETWORK_SCAN_COLUMNS,
   networkScanColumns,
@@ -20,6 +23,7 @@ import {
   queryNetworkBundle,
   queryNetworkHealth,
 } from "./network";
+import { POP_COORDINATES } from "./origin";
 import { resetAsnNamesForTest, setAsnNamesForTest } from "./asn-names";
 
 describe("Feature F21 — Network cloud-engine", () => {
@@ -290,7 +294,7 @@ describe("Feature F21 — Network cloud-engine", () => {
     expect(
       bundle.network_quality.protocol_distribution.map((p) => p.protocol),
     ).toEqual(["HTTP/3", "HTTP/2", "HTTP/1.1", "HTTP/1.0", "Other"]);
-    expect(bundle.pop_health.pops).toHaveLength(2);
+    expect(bundle.pop_health).toHaveLength(2);
 
     const viaHandler = await handleNetworkRequest("/api/network/bundle", {
       engine,
@@ -505,5 +509,53 @@ describe("Feature F21 — Network cloud-engine", () => {
       filters: { status: { mode: "include", values: ["200"] }, host: { mode: "include", values: ["a.example"] } },
     })?.toSorted()).toEqual([...NETWORK_SCAN_COLUMNS, "host"].toSorted());
     expect(networkScanColumns("/api/network/bundle", { filters: "invalid-json" })).toBeNull();
+  });
+
+  it("matches High-Scale empty shapes, never emits null global_health_score, filters null quality rtt_ms, checks transport fields, and loads full POP coords", async () => {
+    const emptyHealth = emptyNetworkHealth(["tcp_rtt"]);
+    expect(emptyHealth.summary.total_reqs).toBe(0);
+    expect(emptyHealth.summary.global_health_score).toBe(0);
+
+    const emptyQual = emptyNetworkQuality(["tcp_rtt"]);
+    expect(emptyQual.by_country).toEqual([]);
+    expect(emptyQual.by_pop).toEqual([]);
+    expect(emptyQual.countries).toEqual([]);
+    expect(emptyQual.region_country).toBe("US");
+
+    const emptyBundle = emptyNetworkBundle(["tcp_rtt"]);
+    expect(emptyBundle.available).toBe(false);
+    expect(emptyBundle.health).toBeDefined();
+    expect(emptyBundle.quality).toBeDefined();
+    expect(emptyBundle.transport).toBeDefined();
+    expect(emptyBundle.pop_health).toEqual([]);
+
+    expect(Object.keys(POP_COORDINATES).length).toBeGreaterThan(150);
+    expect(POP_COORDINATES.QPG).toBeDefined();
+    expect(POP_COORDINATES.SJC).toBeDefined();
+
+    const engine = new DuckDBAnalyticalEngine();
+    try {
+      await engine.executeSql(`INSERT INTO requests
+        (scoped_key, ts_ms, country, region, city, lat, lon, asn, pop, status, resp_bytes, cache, ttfb, tcp_rtt, ploss, proto)
+        VALUES
+          ('p', 1700000100000, 'US', 'CA', 'San Jose', 37.3, -121.9, 64500, 'SJC', 200, 1000, NULL, 0.01234, 10000, 0.0, 'HTTP/2'),
+          ('p', 1700000105000, 'US', 'TX', 'Dallas', 32.8, -96.8, 64501, 'DFW', 200, 1000, 'HIT', 0.02, NULL, 0.0, 'HTTP/2')`);
+      const bundle = await queryNetworkBundle({
+        engine,
+        region_country: "US",
+        active_log_field_ids: ["tcp_rtt", "ploss"],
+      });
+      expect(bundle.network_health.summary.global_health_score).not.toBeNull();
+      expect(bundle.network_quality.by_pop.every((r) => r.rtt_ms != null)).toBe(true);
+      expect(bundle.network_quality.by_region.every((r) => r.rtt_ms != null)).toBe(true);
+      expect(bundle.network_quality.by_pop.map((r) => r.pop)).toEqual(["SJC"]);
+      expect(bundle.network_quality.by_region.map((r) => r.value)).toEqual(["CA"]);
+      expect(bundle.network_quality.scatter).toEqual([
+        { rtt_ms: 10, ttfb_ms: 12.34, cache: "UNKNOWN" },
+      ]);
+      expect(bundle.transport.missing_fields).toEqual(["retrans", "delivery_rate"]);
+    } finally {
+      await engine.reset();
+    }
   });
 });

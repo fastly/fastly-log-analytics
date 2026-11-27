@@ -3,6 +3,7 @@ import { getDuckDBEngine, type DuckDBColumnType, type DuckDBReadContext } from "
 import { compileFiltersToSql } from "./dashboard/duckdb";
 import type { DashboardFilter } from "./dashboard/filters";
 import { cloudActiveLogFieldIds } from "./active-log-fields";
+import popCoordinatesJson from "./pop-coordinates.json";
 import { fetchCloudMetadata } from "./metadata-cache";
 import type { Schema } from "@/types/api";
 
@@ -136,37 +137,9 @@ export const ORIGIN_ROLLUP_TABLES = {
   shielding_routes: "shielding_routes.parquet",
 } as const;
 
-export const POP_COORDINATES: Readonly<Record<string, readonly [number, number]>> = {
-  AMS: [52.3086, 4.7639],
-  ATL: [33.6407, -84.4277],
-  BFI: [47.53, -122.302],
-  BOS: [42.3656, -71.0096],
-  CDG: [49.0097, 2.5479],
-  CHI: [41.9742, -87.9073],
-  DEN: [39.8561, -104.6737],
-  DFW: [32.8998, -97.0403],
-  EWR: [40.6895, -74.1745],
-  FRA: [50.0379, 8.5622],
-  GRU: [-23.4356, -46.4731],
-  HKG: [22.308, 113.9185],
-  IAD: [38.9531, -77.4565],
-  ICN: [37.4602, 126.4407],
-  JFK: [40.6413, -73.7781],
-  LAX: [33.9416, -118.4085],
-  LCY: [51.5053, 0.0553],
-  LHR: [51.47, -0.4543],
-  MAD: [40.4983, -3.5676],
-  MIA: [25.7959, -80.287],
-  NRT: [35.772, 140.3929],
-  ORD: [41.9742, -87.9073],
-  SEA: [47.4502, -122.3088],
-  SFO: [37.6213, -122.379],
-  SIN: [1.3644, 103.9915],
-  SJC: [37.3382, -121.8863],
-  SYD: [-33.9399, 151.1753],
-  TYO: [35.5494, 139.7798],
-  YYZ: [43.6777, -79.6248],
-};
+export const POP_COORDINATES: Readonly<Record<string, readonly [number, number]>> = Object.fromEntries(
+  Object.entries(popCoordinatesJson).map(([code, coords]) => [code, [coords[0], coords[1]] as const]),
+);
 
 function optFloat(val: unknown, ndigits?: number): number | null {
   if (val === null || val === undefined || val === "") return null;
@@ -361,11 +334,20 @@ export function buildOriginTimeseriesSql(
       : `QUANTILE_CONT(${latExpr}, ${pctVal})`;
   const tsExpr = 'EPOCH_MS(CAST("ts_ms" AS BIGINT))';
   const edgeCol = splitByLeg ? `, "edge"` : "";
+  const cacheExpr =
+    actualCols.has("cache_status") && actualCols.has("cache")
+      ? `UPPER(COALESCE(NULLIF(CAST("cache_status" AS VARCHAR), ''), CAST("cache" AS VARCHAR), ''))`
+      : actualCols.has("cache_status")
+        ? `UPPER(COALESCE(CAST("cache_status" AS VARCHAR), ''))`
+        : actualCols.has("cache")
+          ? `UPPER(COALESCE(CAST("cache" AS VARCHAR), ''))`
+          : null;
+  const missExpr = cacheExpr ? `COUNT(*) FILTER (WHERE ${cacheExpr} LIKE 'MISS%')` : "0";
 
   return `
     SELECT
       time_bucket(INTERVAL '${bucketMinutes} minutes', ${tsExpr}) AS ts,
-      COUNT(*) AS miss_count,
+      ${missExpr} AS miss_count,
       ${aggExpr} / 1000.0 AS value
       ${edgeCol}
     FROM ${table}
@@ -578,6 +560,7 @@ export function shapeOriginPopLatencyRows(
     return {
       has_data: false,
       requires_group_c: requiresGroupC,
+      median_p95_ms: 0,
       rows: [],
     };
   }
@@ -627,7 +610,7 @@ export function buildOriginIpHealthSql(
     WHERE ${where} AND "oip" IS NOT NULL AND "oip" != '' AND "oip" != '-' AND "ost" IS NOT NULL
     GROUP BY "oip"
     HAVING COUNT(*) >= ${safeMin}
-    ORDER BY error_pct DESC
+    ORDER BY p95_ms DESC NULLS LAST, error_pct DESC
     LIMIT ${safeLimit}
   `;
 }
@@ -761,7 +744,7 @@ export function buildOriginDrilldownSql(
     host: ["host"],
     shield_pop: ["pop"],
     pop: ["pop"],
-    datacenter: ["server_region", "pop"],
+    datacenter: ["server_region"],
     protocol: ["proto", "protocol"],
     oip: ["oip"],
   };
@@ -778,10 +761,14 @@ export function buildOriginDrilldownSql(
       ? `"status" >= 500 AND "status" < 600`
       : "FALSE";
   const bytesExpr = actualCols.has("obytes")
-    ? `SUM("obytes")`
+    ? `CAST(ROUND(AVG("obytes")) AS BIGINT)`
     : actualCols.has("resp_bytes")
-      ? `SUM("resp_bytes")`
+      ? `CAST(ROUND(AVG("resp_bytes")) AS BIGINT)`
       : "NULL";
+  const shieldFilter =
+    dimension === "shield_pop" && actualCols.has("edge")
+      ? ` AND COALESCE(LOWER(CAST("edge" AS VARCHAR)), '') IN ('false', '0')`
+      : "";
   const safeLimit = Math.max(1, Math.min(100, Math.trunc(limit)));
   const qCol = quoteIdent(dimCol);
 
@@ -795,7 +782,7 @@ export function buildOriginDrilldownSql(
       ROUND(COUNT(*) FILTER (WHERE ${errorExpr}) * 100.0 / NULLIF(COUNT(*), 0), 2) AS error_rate,
       ${bytesExpr} AS bytes
     FROM ${table}
-    WHERE ${where} AND (${latVal} IS NOT NULL) AND ${qCol} IS NOT NULL AND CAST(${qCol} AS VARCHAR) != ''
+    WHERE ${where}${shieldFilter} AND (${latVal} IS NOT NULL) AND ${qCol} IS NOT NULL AND CAST(${qCol} AS VARCHAR) != ''
     GROUP BY 1
     ORDER BY requests DESC
     LIMIT ${safeLimit}
@@ -1015,7 +1002,7 @@ export async function queryOriginSlowUrlsWithFallback(
   table: string,
   where: string,
   actualCols: ReadonlySet<string>,
-  minRequests = 10,
+  minRequests = 50,
   limit = 20,
   signal?: AbortSignal,
 ): Promise<OriginSlowUrlsSection> {
@@ -1027,13 +1014,7 @@ export async function queryOriginSlowUrlsWithFallback(
     limit,
   );
   if (!primarySql) return { has_data: false, rows: [] };
-  let rows = await executor.query(primarySql, signal);
-  if (rows.length === 0 && minRequests > 1) {
-    const fallbackSql = buildOriginSlowUrlsSql(table, where, actualCols, 1, limit);
-    if (fallbackSql) {
-      rows = await executor.query(fallbackSql, signal);
-    }
-  }
+  const rows = await executor.query(primarySql, signal);
   return shapeOriginSlowUrlsRows(rows);
 }
 
@@ -1054,13 +1035,7 @@ export async function queryOriginIpHealthWithFallback(
     minRequests,
   );
   if (!primarySql) return { has_data: false, rows: [] };
-  let rows = await executor.query(primarySql, signal);
-  if (rows.length === 0 && minRequests > 1) {
-    const fallbackSql = buildOriginIpHealthSql(table, where, actualCols, limit, 1);
-    if (fallbackSql) {
-      rows = await executor.query(fallbackSql, signal);
-    }
-  }
+  const rows = await executor.query(primarySql, signal);
   return shapeOriginIpHealthRows(rows);
 }
 
@@ -1077,6 +1052,7 @@ export async function queryOriginAggregates(
     timeseries_percentile?: "p50" | "p95" | "p99";
     slow_urls_limit?: number;
     slow_urls_min_requests?: number;
+    min_requests?: number;
     ip_health_limit?: number;
     pop_latency_limit?: number;
     sections?: OriginSectionName[] | null;
@@ -1122,7 +1098,7 @@ export async function queryOriginAggregates(
       table,
       where,
       actualCols,
-      body.slow_urls_min_requests ?? 10,
+      body.slow_urls_min_requests ?? body.min_requests ?? 50,
       body.slow_urls_limit ?? 20,
       signal,
     );
@@ -1165,6 +1141,7 @@ export async function queryOriginAggregates(
       out.pop_latency = {
         has_data: false,
         requires_group_c: requiresGroupC,
+        median_p95_ms: 0,
         rows: [],
       };
     }
@@ -1177,7 +1154,7 @@ export async function queryOriginAggregates(
       where,
       actualCols,
       body.ip_health_limit ?? 30,
-      10,
+      body.min_requests ?? 10,
       signal,
     );
   }
@@ -1373,7 +1350,7 @@ export async function handleOriginRequest(
         ...body,
         slow_urls_limit: Number(body.limit ?? body.slow_urls_limit ?? 20),
         slow_urls_min_requests: Number(
-          body.min_requests ?? body.slow_urls_min_requests ?? 10,
+          body.min_requests ?? body.slow_urls_min_requests ?? 50,
         ),
         sections: ["slow_urls"],
       },
@@ -1415,6 +1392,7 @@ export async function handleOriginRequest(
       {
         ...body,
         ip_health_limit: Number(body.limit ?? body.ip_health_limit ?? 30),
+        ...(body.min_requests != null ? { min_requests: Number(body.min_requests) } : {}),
         sections: ["ip_health"],
       },
       request.signal,

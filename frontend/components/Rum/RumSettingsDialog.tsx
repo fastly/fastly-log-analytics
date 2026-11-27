@@ -13,12 +13,10 @@ import { Switch } from '@/components/ui/switch'
 import { Input } from '@/components/ui/input'
 import { ArrowRight, Settings2, Sparkles } from 'lucide-react'
 import { RumVersionPicker } from '@/components/ProvisionWizard/ProvisionWizard'
-import { useSSE, type SSELine } from '@/hooks/useSSE'
-import { useOpenGeneration } from '@/hooks/useSSE'
+import { useOpenGeneration, type SSELine } from '@/hooks/useSSE'
 import { SSEActionDialogShell, SSEExecutionSection } from '@/components/SSEModal'
 import { adminFetch, queryKeys } from "@/lib/api";
 import { invalidateCloudConfigMetadata } from '@/lib/cloud-engine/metadata-cache'
-import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { useRumStatus } from '@/hooks/useDashboardCards'
 
 export {
@@ -180,21 +178,17 @@ function RumSettingsDialogBody({
     }
   }, [availableVersions, currentVersion, form, latestVersion, serviceId, statusData])
 
-  const { lines: sseLines, status: sseStatus, error: sseError, start: sseStart, stop: sseStop } = useSSE()
-
   const invalidateRumCaches = React.useCallback((sid: string) => {
     void queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap() })
     void queryClient.invalidateQueries({ queryKey: queryKeys.services() })
     void queryClient.invalidateQueries({ queryKey: queryKeys.rumStatus(sid) })
     void queryClient.invalidateQueries({ queryKey: queryKeys.rumVersions(sid) })
-    if (isCloudMode()) invalidateCloudConfigMetadata()
+    invalidateCloudConfigMetadata()
   }, [queryClient])
 
-  // Invalidate queries on completion or error
   useEffect(() => {
-    const cloud = isCloudMode()
-    const terminalDone = cloud ? syncStatus === 'done' : (sseStatus === 'done' || syncStatus === 'done')
-    const terminalError = sseStatus === 'error' || syncStatus === 'error'
+    const terminalDone = syncStatus === 'done'
+    const terminalError = syncStatus === 'error'
     if ((terminalDone || terminalError) && !completedRef.current) {
       completedRef.current = true
       if (terminalDone) onComplete?.()
@@ -203,7 +197,7 @@ function RumSettingsDialogBody({
     if (!terminalDone && !terminalError) {
       completedRef.current = false
     }
-  }, [sseStatus, syncStatus, onComplete, serviceId, invalidateRumCaches])
+  }, [syncStatus, onComplete, serviceId, invalidateRumCaches])
 
   if (!serviceId) return null
 
@@ -212,14 +206,14 @@ function RumSettingsDialogBody({
     (percent) => Number.isFinite(percent) && percent >= 1 && percent <= 100,
   )
   const isNoOp = !selectedVersion
-  const cloud = isCloudMode()
   const versionChanged = selectedVersion !== currentVersion
 
   const handleExecute = async () => {
     if (noVersions || isNoOp || isExecuting) return
 
     setIsExecuting(true)
-    setLocalLogs(['⚙️  Updating client-side RUM settings...'])
+    setLocalLogs([])
+    setSyncError(null)
     setSyncStatus('streaming')
 
     try {
@@ -233,7 +227,7 @@ function RumSettingsDialogBody({
         error_sample_rate: errorSamplePercent / 100,
         resource_sample_rate: resourceSamplePercent / 100,
         custom_condition: customCondition,
-        ...(cloud && versionChanged ? { faro_version: selectedVersion } : {}),
+        ...(versionChanged ? { faro_version: selectedVersion } : {}),
       }
       const settingsRes = await adminFetch(`/api/services/${serviceId}/rum/settings`, {
         method: 'POST',
@@ -251,56 +245,32 @@ function RumSettingsDialogBody({
         throw new Error(errorMsg)
       }
 
-      setLocalLogs((prev) => [
-        ...prev,
-        '✅ RUM capture settings saved successfully!',
-        '✅ Client-side rum-tracker.js wrapper compiled and deployed to FOS.',
-        '✅ Fastly Edge VCL reconciled and deployed successfully.',
-      ])
-
-      // In Cloud mode, faro_version is included in the single reconcile above.
-      if (!cloud && versionChanged) {
-        setLocalLogs((prev) => [...prev, `⏳ Version change detected (${currentVersion || 'unpinned'} ➔ ${selectedVersion}). Starting streamed bundle upgrade...`])
-        sseStart(`/api/services/${serviceId}/rum/upgrade`, {
-          version: selectedVersion,
-          activate: true,
-        })
-      } else {
-        setSyncStatus('done')
+      const body = (await settingsRes.json().catch(() => ({}))) as { message?: string }
+      if (body.message) {
+        setLocalLogs([body.message])
       }
+      setSyncStatus('done')
     } catch (err) {
       setSyncStatus('error')
       const errorMsg = err instanceof Error ? err.message : String(err)
       setSyncError(errorMsg || 'An error occurred while updating settings')
-      setLocalLogs((prev) => [...prev, `❌ Error: ${errorMsg || 'An error occurred'}`])
+      setLocalLogs([errorMsg || 'An error occurred'])
     }
   }
 
-  const handleStop = () => {
-    sseStop()
-    invalidateRumCaches(serviceId)
-  }
-
-  // Combine local sync logs with SSE upgrade log streams
-  const displayedLines: SSELine[] = [
-    ...localLogs.map((log, index) => ({
-      _id: -1000 - index,
-      message: log,
-      type: log.startsWith('❌') ? 'error' : log.startsWith('⏳') ? 'info' : 'log'
-    })),
-    ...sseLines
-  ]
-  const currentStatus = !cloud && versionChanged ? (sseStatus === 'idle' ? syncStatus : sseStatus) : syncStatus
-  const currentError = !cloud && versionChanged ? (sseError || syncError) : syncError
+  const displayedLines: SSELine[] = localLogs.map((log, index) => ({
+    _id: -1000 - index,
+    message: log,
+    type: syncStatus === 'error' ? 'error' : 'log',
+  }))
 
   return (
     <SSEActionDialogShell
       open={open}
       onOpenChange={onOpenChange}
       reloadOnDone={false}
-      status={currentStatus}
-      onStop={!cloud && versionChanged ? handleStop : undefined}
-      stopDisabled={cloud || !versionChanged}
+      status={syncStatus}
+      stopDisabled
       isExecuting={isExecuting}
       titleClassName="text-primary"
       title={
@@ -321,8 +291,8 @@ function RumSettingsDialogBody({
           title="Applying RUM Settings"
           subtitle="Configuring capture options and publishing the revised tracking wrapper to Object Storage..."
           lines={displayedLines}
-          status={currentStatus}
-          error={currentError}
+          status={syncStatus}
+          error={syncError}
           heightClassName="h-[300px]"
           progressLabel="Task Log"
           doneMessage={

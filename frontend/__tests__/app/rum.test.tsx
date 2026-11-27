@@ -851,8 +851,15 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
       expect(screen.getByRole('button', { name: /apply settings/i })).toBeEnabled()
     })
 
-    it('invalidates the versions query once the upgrade stream completes, without a manual reload', async () => {
+    it('invalidates the versions query once settings with changed version completes, without a manual reload', async () => {
       let versionCalls = 0
+      useMockAdminFetch = true
+      mockAdminFetch.mockReset()
+      mockAdminFetch.mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, message: 'Settings and Faro SDK updated' }),
+      })
       server.use(
         http.get(`${getApiBase()}/api/services/:service_id/rum/versions`, () => {
           versionCalls += 1
@@ -860,7 +867,7 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
         }),
       )
       const user = userEvent.setup()
-      const { rerender } = renderCard()
+      renderCard()
 
       await waitFor(() => expect(versionCalls).toBe(1))
       await user.click(await screen.findByRole('button', { name: /rum settings/i }))
@@ -868,14 +875,15 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
       await user.click(screen.getByRole('button', { name: /apply settings/i }))
 
       await waitFor(() => {
-        expect(mockStart).toHaveBeenCalledWith(`/api/services/${SVC_FARO}/rum/upgrade`, {
-          version: '1.9.0',
-          activate: true,
-        })
+        expect(mockAdminFetch).toHaveBeenCalledWith(
+          `/api/services/${SVC_FARO}/rum/settings`,
+          expect.objectContaining({
+            method: 'POST',
+            body: expect.stringContaining('"faro_version":"1.9.0"'),
+          }),
+        )
       })
-
-      sseState.status = 'done'
-      rerender(<RumFaroVersionCard serviceId={SVC_FARO} />)
+      expect(mockStart).not.toHaveBeenCalled()
 
       await waitFor(() => expect(versionCalls).toBe(2))
     })
@@ -953,7 +961,7 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
       await waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1))
     })
 
-    it('triggers both settings POST and streamed version upgrade when target version changes', async () => {
+    it('submits settings with faro_version in one POST request when target version changes', async () => {
       const user = userEvent.setup()
       renderDialog({ currentVersion: null })
 
@@ -972,29 +980,25 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
           error_sample_rate: 1,
           resource_sample_rate: 0.1,
           custom_condition: '',
+          faro_version: '1.9.0',
         }),
       })
-
-      await waitFor(() => {
-        expect(mockStart).toHaveBeenCalledWith('/api/services/svc-1/rum/upgrade', {
-          version: '1.9.0',
-          activate: true,
-        })
-      })
+      expect(mockStart).not.toHaveBeenCalled()
     })
 
     it('shows execution screen during progress', async () => {
+      let resolveReq!: (v: unknown) => void
+      mockAdminFetch.mockImplementationOnce(
+        () => new Promise((resolve) => { resolveReq = resolve }),
+      )
       const user = userEvent.setup()
-      const { rerender } = renderDialog({ currentVersion: null })
+      renderDialog({ currentVersion: null })
 
       await user.click(screen.getByRole('button', { name: /apply settings/i }))
 
-      sseState.status = 'streaming'
-      rerender(<RumSettingsDialog {...DEFAULT_DIALOG_PROPS} currentVersion={null} onOpenChange={vi.fn()} />)
-
-      expect(screen.getByText(/applying rum settings/i)).toBeInTheDocument()
+      expect(await screen.findByText(/applying rum settings/i)).toBeInTheDocument()
       expect(screen.queryByRole('button', { name: /cancel/i })).not.toBeInTheDocument()
-      expect(screen.getByRole('button', { name: /^stop$/i })).toBeInTheDocument()
+      resolveReq({ ok: true, status: 200, json: async () => ({ ok: true, message: 'Settings updated' }) })
     })
 
     it('calculates and displays estimated uncompressed log line size based on active toggles', async () => {
@@ -1104,8 +1108,12 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
       expect(screen.queryByText(/rum not enabled/i)).not.toBeInTheDocument()
     })
 
-    it('Cloud disable preserves retained data rather than advertising High-Scale deletion options', async () => {
-      setCloudModeRuntime(true)
+    it('hides storage purge controls when supports_storage_purge is false', async () => {
+      server.use(
+        http.get('/api/services/:service_id/rum/status', () =>
+          HttpResponse.json({ enabled: true, supports_storage_purge: false }),
+        ),
+      )
       sseState.status = 'idle'
       mockStart.mockClear()
       const qc = createTestQueryClient()
@@ -1117,7 +1125,7 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
         />,
         { wrapper: makeQueryWrapper(qc) },
       )
-      expect(await screen.findByRole('status')).toHaveTextContent(/Cloud.*preserves retained RUM data/i)
+      expect(await screen.findByRole('status')).toHaveTextContent(/preserves retained RUM data/i)
       expect(screen.queryByRole('switch', { name: /delete/i })).not.toBeInTheDocument()
       await userEvent.click(screen.getByRole('button', { name: 'Disable RUM' }))
       expect(mockStart).toHaveBeenLastCalledWith(`/api/services/${SVC_PANEL}/rum/disable`, {})

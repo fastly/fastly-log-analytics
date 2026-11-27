@@ -110,6 +110,7 @@ describe("origin cloud-engine module (F18)", () => {
             start_time: "2023-11-14T22:00:00Z",
             end_time: "2023-11-14T23:00:00Z",
             sections: ["summary", "slow_urls"],
+            slow_urls_min_requests: 1,
             filters: { url: { mode: "include", values: ["/a?b=1"] } },
           }),
         }),
@@ -257,6 +258,7 @@ describe("origin cloud-engine module (F18)", () => {
 
     const popEmpty = shapeOriginPopLatencyRows([], { requiresGroupC: true });
     expect(popEmpty.requires_group_c).toBe(true);
+    expect(popEmpty.median_p95_ms).toBe(0);
 
     const popLat = shapeOriginPopLatencyRows([
       { pop: "SJC", requests: 100, p50_ms: 10, p95_ms: 20 },
@@ -285,25 +287,95 @@ describe("origin cloud-engine module (F18)", () => {
     expect(dd.rows[0]?.key).toBe("origin.example.com");
   });
 
-  it("falls back from min_requests = 10 to 1 for slow_urls and ip_health when primary query returns empty", async () => {
+  it("enforces min_requests strictly without falling back to 1 when primary query returns empty", async () => {
     const queries: string[] = [];
     const executor: OriginSqlExecutor = {
       query: vi.fn(async (sql: string) => {
         queries.push(sql);
-        if (sql.includes("HAVING COUNT(*) >= 10")) return [];
-        return [{ url: "/rare-slow", oip: "198.51.100.7", requests: 2, p50_ms: 100, p95_ms: 250, p99_ms: 300, error_pct: 50 }];
+        return [];
       }),
     };
     const cols = new Set(["url", "ottfb", "oip", "ost"]);
 
-    const slowRes = await queryOriginSlowUrlsWithFallback(executor, "requests", "TRUE", cols, 10, 20);
-    expect(slowRes.has_data).toBe(true);
-    expect(slowRes.rows[0]?.url).toBe("/rare-slow");
+    const slowRes = await queryOriginSlowUrlsWithFallback(executor, "requests", "TRUE", cols, 50, 20);
+    expect(slowRes).toEqual({ has_data: false, rows: [] });
+    expect(queries[0]).toContain("HAVING COUNT(*) >= 50");
 
     const ipRes = await queryOriginIpHealthWithFallback(executor, "requests", "TRUE", cols, 30, 10);
-    expect(ipRes.has_data).toBe(true);
-    expect(ipRes.rows[0]?.oip).toBe("198.51.100.7");
-    expect(queries.length).toBe(4);
+    expect(ipRes).toEqual({ has_data: false, rows: [] });
+    expect(queries[1]).toContain("HAVING COUNT(*) >= 10");
+    expect(queries.length).toBe(2);
+  });
+
+  it("sorts ip_health by p95_ms DESC, counts MISS% in timeseries.miss_count, aligns drilldown dimensions/AVG(obytes), and sets median_p95_ms=0 on empty pop_latency", async () => {
+    const engine = getDuckDBEngine();
+    try {
+      await engine.executeSql(`
+        INSERT INTO requests (scoped_key, ts_ms, "timestamp", cache, ottfb, ost, oip, url, host, pop, edge, proto, server_region, obytes)
+        VALUES
+          ('op', 1700000000000, epoch_ms(1700000000000), 'MISS', 80000, 200, '203.0.113.10', '/slow', 'h1', 'IAD', FALSE, 'HTTP/2', 'us-east', 1000),
+          ('op', 1700000001000, epoch_ms(1700000001000), 'PASS', 20000, 503, '203.0.113.20', '/err', 'h1', 'SJC', TRUE, 'HTTP/3', 'us-west', 3000)
+      `);
+      const aggRes = await handleOriginRequest(
+        new Request("https://example.test/api/origin/aggregates", {
+          method: "POST",
+          body: JSON.stringify({
+            start_time: "2023-11-14T22:00:00Z",
+            end_time: "2023-11-14T23:00:00Z",
+            sections: ["timeseries"],
+          }),
+        }),
+      );
+      const agg = await aggRes!.json();
+      expect(agg.timeseries.series[0].miss_count).toBe(1);
+
+      const ipRes = await queryOriginIpHealthWithFallback(
+        {
+          query: (sql, signal) => engine.executeSql(sql, [], signal),
+          getColumns: async () => new Set(["ottfb", "ost", "oip"]),
+        },
+        "requests",
+        "TRUE",
+        new Set(["ottfb", "ost", "oip"]),
+        30,
+        1,
+      );
+      expect(ipRes.rows.map((r) => r.oip)).toEqual(["203.0.113.10", "203.0.113.20"]);
+
+      const ddShield = await queryOriginDrilldown(
+        { start_time: "2023-11-14T22:00:00Z", end_time: "2023-11-14T23:00:00Z", dimension: "shield_pop" },
+        undefined,
+        {
+          query: (sql, signal) => engine.executeSql(sql, [], signal),
+          getColumns: async () => new Set(["ts_ms", "pop", "edge", "ottfb", "ost", "obytes"]),
+        },
+      );
+      expect(ddShield.rows).toHaveLength(1);
+      expect(ddShield.rows[0].key).toBe("IAD");
+      expect(ddShield.rows[0].bytes).toBe(1000);
+
+      const ddDc = await queryOriginDrilldown(
+        { start_time: "2023-11-14T22:00:00Z", end_time: "2023-11-14T23:00:00Z", dimension: "datacenter" },
+        undefined,
+        {
+          query: (sql, signal) => engine.executeSql(sql, [], signal),
+          getColumns: async () => new Set(["ts_ms", "server_region", "ottfb", "ost", "obytes"]),
+        },
+      );
+      expect(ddDc.rows.map((r) => r.key).sort()).toEqual(["us-east", "us-west"]);
+
+      const ddProto = await queryOriginDrilldown(
+        { start_time: "2023-11-14T22:00:00Z", end_time: "2023-11-14T23:00:00Z", dimension: "protocol" },
+        undefined,
+        {
+          query: (sql, signal) => engine.executeSql(sql, [], signal),
+          getColumns: async () => new Set(["ts_ms", "proto", "ottfb", "ost", "obytes"]),
+        },
+      );
+      expect(ddProto.rows.map((r) => r.key).sort()).toEqual(["HTTP/2", "HTTP/3"]);
+    } finally {
+      await engine.reset();
+    }
   });
 
   it("enriches shielding routes with great-circle POP distance and anomaly eligibility", () => {
@@ -361,7 +433,7 @@ describe("origin cloud-engine module (F18)", () => {
         }) }), undefined, undefined, read))!.json();
       const data = await post("aggregates", {
         sections: ["summary", "timeseries", "slow_urls", "path_breakdown", "pop_latency", "ip_health"],
-        slow_urls_min_requests: 5, ip_health_limit: 20, timeseries_percentile: "p99",
+        slow_urls_min_requests: 5, min_requests: 1, ip_health_limit: 20, timeseries_percentile: "p99",
       });
       const hosts = await post("drilldown", { dimension: "host", limit: 20 });
       // Approximate per-group digests took ~1 GB of WASM heap here, outside DuckDB's memory limit.

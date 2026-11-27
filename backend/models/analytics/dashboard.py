@@ -5,6 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from backend.models.analytics._common import (
+    AnalyticsCompletenessMixin,
     HistoryObservation,
     ReaderCoverage,
     TimeSeriesPoint,
@@ -319,7 +320,7 @@ class FastlyReportedMetrics(WireSafeModel):
     logged_bandwidth_bytes: int
 
 
-class ValueSummaryResponse(BaseResponse):
+class ValueSummaryResponse(AnalyticsCompletenessMixin, BaseResponse):
     overview: OverviewMetrics | None = None
     caching: CachingMetrics | None = None
     security: SecurityMetrics | None = None
@@ -431,6 +432,7 @@ class PresetQuery(WireSafeModel):
     name: str
     description: str
     sql: str
+    category: str | None = None
 
 
 class QuerySchemaResponse(BaseResponse):

@@ -3,6 +3,9 @@ import { describe, expect, it, vi } from 'vitest'
 import { CloudCostCalculator } from '@/components/CostCalculator/CloudCostCalculator'
 import { DEFAULT_COMPACTION, DEFAULT_INPUTS, DEFAULT_UNITS, LIST_PRICE_RATES, type UnitCosts } from '@/lib/cloud-engine/usage/estimate'
 
+import { CostCalculator } from '@/components/CostCalculator/CostCalculator'
+import { BillingZoneSelector, MinimumChargeNotice } from '@/components/CostCalculator/BillingNoticeComponents'
+
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: vi.fn() }),
 }))
@@ -182,5 +185,21 @@ describe('Cloud cost calculator', () => {
     }} />)
     expect(screen.queryByText('(auto: us-east-1)')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Global/ })).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('shares BillingZoneSelector and MinimumChargeNotice consistently between CostCalculator and CloudCostCalculator', () => {
+    expect(BillingZoneSelector).toBeDefined()
+    expect(MinimumChargeNotice).toBeDefined()
+    const { unmount } = render(<CostCalculator />)
+    expect(screen.getByText('Delivery Billing Zone')).toBeInTheDocument()
+    expect(screen.getByText('Minimum Charge per Object')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /MBZ200/ })).toHaveAttribute('aria-pressed', 'true')
+    fireEvent.click(screen.getByRole('button', { name: /Global/ }))
+    expect(screen.getByRole('button', { name: /Global/ })).toHaveAttribute('aria-pressed', 'true')
+    unmount()
+
+    render(<CloudCostCalculator />)
+    expect(screen.getByText('Delivery Billing Zone')).toBeInTheDocument()
+    expect(screen.getByText('Minimum Charge per Object')).toBeInTheDocument()
   })
 })

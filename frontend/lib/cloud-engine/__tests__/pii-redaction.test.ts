@@ -319,14 +319,14 @@ describe('T5-FE-05: cloud-engine executeCloudQuery shadow-masked CTE and handleS
 
     expect(
       rewriteCloudQuerySql('SELECT url AS "distinct" FROM logs', 'svc_table').rewrittenSql,
-    ).toBe('SELECT url AS "distinct" FROM svc_table LIMIT 1000')
+    ).toBe('SELECT url AS "distinct" FROM svc_table LIMIT 500')
     expect(
       rewriteCloudQuerySql(
         'WITH p AS ((SELECT url FROM logs) UNION ALL SELECT url FROM logs) SELECT * FROM p',
         'svc_table',
       ).rewrittenSql,
     ).toBe(
-      'WITH p AS ((SELECT url FROM svc_table) UNION ALL SELECT url FROM svc_table) SELECT * FROM p LIMIT 1000',
+      'WITH p AS ((SELECT url FROM svc_table) UNION ALL SELECT url FROM svc_table) SELECT * FROM p LIMIT 500',
     )
 
     // 3. Nested containers ([url], {'u': url}, MAP {'u': url}, encode(url)) + split_part(url, '.', 1..4) + WHERE url LIKE '%<ip>%'
@@ -703,11 +703,11 @@ describe('T5-FE-05: cloud-engine executeCloudQuery shadow-masked CTE and handleS
     }
 
     expect(rewriteCloudQuerySql('SELECT status AS as FROM logs', 'requests').rewrittenSql).toBe(
-      'SELECT status AS as FROM requests LIMIT 1000',
+      'SELECT status AS as FROM requests LIMIT 500',
     )
     expect(
       rewriteCloudQuerySql("SELECT {'as': status}.as FROM logs", 'requests').rewrittenSql,
-    ).toBe("SELECT {'as': status}.as FROM requests LIMIT 1000")
+    ).toBe("SELECT {'as': status}.as FROM requests LIMIT 500")
     expect(
       rewriteCloudQuerySql(
         'SELECT c.status FROM logs AS a JOIN logs AS b ON {where: 1} IS NOT NULL, logs AS c',

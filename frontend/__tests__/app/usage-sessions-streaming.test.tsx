@@ -724,6 +724,78 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     )
   })
 
+  test('UsagePage uses canonical PrefillResponse cloud_measured and estimated_bytes_per_line without duplicate catalog fetches or cloudMode gating', async () => {
+    useMockAdminFetch = true
+    mockAdminFetch.mockImplementation(async () =>
+      Response.json({
+        source: 'fastly',
+        requests: 500,
+        vcpu_ms: 1000,
+        billed_ms: 1000,
+        app_requests: 300,
+        worker_requests: 200,
+        app_vcpu_ms: 600,
+        worker_vcpu_ms: 400,
+        covered_from: '2026-01-01T00:00:00.000Z',
+        covered_to: '2026-01-01T01:00:00.000Z',
+        data: [],
+      }),
+    )
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === '/api/usage/prefill/rates') return { data: LIST_PRICE_RATES }
+      if (path === '/api/usage/prefill') {
+        return {
+          data: {
+            ...LIST_PRICE_RATES,
+            estimated_bytes_per_line: 2640,
+            cloud_measured: {
+              inputs: { ...DEFAULT_INPUTS, requestsPerDay: 54321, edgeRequestsPerDay: 40000 },
+              units: DEFAULT_UNITS,
+              measuredInputs: { requestsPerDay: true, edgeRequestsPerDay: true },
+              measuredUnits: {},
+              rates: LIST_PRICE_RATES,
+              window: { days: 7, files: 10, lines: 100 },
+            },
+          },
+        }
+      }
+      return undefined
+    })
+
+    renderWithQuery(<UsagePage />, { queryClient })
+    expect(await screen.findByText('Compute (app + worker)')).toBeInTheDocument()
+    expect(screen.getByRole('spinbutton', { name: 'Total requests per day' })).toHaveValue(54321)
+    expect(screen.getByRole('spinbutton', { name: 'Average bytes per log line' })).toHaveValue(2640)
+    expect(mockGet).not.toHaveBeenCalledWith('/api/services/{service_id}/log-fields', expect.anything())
+    expect(mockGet).not.toHaveBeenCalledWith('/api/log-fields/catalog', expect.anything())
+    expect(mockAdminFetch).toHaveBeenCalledWith(
+      '/api/usage/compute?start_time=2026-01-01T00%3A00%3A00Z&end_time=2026-01-01T01%3A00%3A00Z',
+      expect.anything(),
+    )
+  })
+
+  test('High-Scale UsagePage queries /api/usage/compute and suppresses Compute UI when source is not_applicable', async () => {
+    useMockAdminFetch = true
+    mockAdminFetch.mockImplementation(async () => Response.json({ source: 'not_applicable', data: [] }))
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === '/api/usage/prefill/rates' || path === '/api/usage/prefill') {
+        return { data: makePrefill({}) } as never
+      }
+      return undefined
+    })
+
+    renderWithQuery(<UsagePage />, { queryClient })
+    await waitFor(() =>
+      expect(mockAdminFetch).toHaveBeenCalledWith(
+        '/api/usage/compute?start_time=2026-01-01T00%3A00%3A00Z&end_time=2026-01-01T01%3A00%3A00Z',
+        expect.anything(),
+      ),
+    )
+    expect(await screen.findByTestId('cost-calculator')).toBeInTheDocument()
+    expect(screen.queryByText('Compute Requests')).not.toBeInTheDocument()
+    expect(screen.queryByText('Compute vCPU')).not.toBeInTheDocument()
+  })
+
   test('sessions page mounts and renders title', () => {
     renderWithQuery(<SessionsPage />, { queryClient })
     expect(screen.getByText('User Sessions')).toBeInTheDocument()
@@ -817,9 +889,9 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     expect(screen.queryByText(/3958\.4825/)).not.toBeInTheDocument()
   })
 
-  test('Cloud streaming defers below-the-fold bitrate_ladder and stream_type_dist query until entering view', async () => {
+  test('Streaming defers below-the-fold residual bitrate_ladder and stream_type_dist query when primary response is partial', async () => {
     useMockDataTable = false
-    setCloudModeRuntime(true)
+    setCloudModeRuntime(false)
     let triggerIntersect: (() => void) | null = null
     vi.stubGlobal('IntersectionObserver', class {
       private cb: IntersectionObserverCallback
@@ -853,6 +925,7 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
             ...CMCD_FIXTURE,
             bitrate_ladder: [],
             stream_type_dist: [],
+            partial_sections: ['bitrate_ladder', 'stream_type_dist'],
           },
         } as never
       })

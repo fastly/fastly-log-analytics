@@ -120,7 +120,6 @@ export function UsageStatCards({
   storageBillingProvenance,
   operationsSource,
   operationsComplete,
-  cloudMode = false,
 }: {
   storage: StorageUsageData | undefined
   loadingStorage: boolean
@@ -141,14 +140,13 @@ export function UsageStatCards({
   rateStorage: number
   activeServiceId: string | null
   onNavigateToAdmin: (href: string) => void
-  /** Cloud only: Fastly Platform Metrics Compute for the range; logs are the fallback. */
+  /** Platform Metrics Compute summary for the range when Compute is applicable. */
   compute?: ComputeUsageResponse
   localStorageGbHours?: number | null
   storageBillingComplete?: boolean
   storageBillingProvenance?: string[]
   operationsSource?: string
   operationsComplete?: boolean
-  cloudMode?: boolean
 }) {
   const deletedBytesComplete = storage?.deleted_bytes_complete
   const deletedBytesProvenance = storage?.deleted_bytes_provenance
@@ -400,7 +398,11 @@ export function UsageStatCards({
     ],
   )
 
-  const useCloudHeight = cloudMode || Boolean(storage?.incurred?.lines?.length)
+  const useCloudHeight = Boolean(
+    computeRow ||
+    (compute != null && compute.source !== 'not_applicable') ||
+    storage?.incurred?.lines?.length,
+  )
 
   return (
     <div

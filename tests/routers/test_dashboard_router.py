@@ -585,6 +585,50 @@ def test_query_select_executes_against_clickhouse(client, monkeypatch):
     assert isinstance(body["_debug_queries"], list) and len(body["_debug_queries"]) >= 1
 
 
+def test_query_explain_runs_clickhouse_explain_and_presets_include_categories(client):
+    seen_sql: list[str] = []
+
+    def _exec(sql, params=None, settings=None):
+        if "system.one" in sql:
+            return [{"n": 0}]
+        seen_sql.append(sql)
+        if sql.lstrip().upper().startswith("EXPLAIN "):
+            return [{"explain": "Expression (Projection)"}, {"explain": "ReadFromMergeTree"}]
+        return [{"url": "/index.html", "status": 200}]
+
+    fake_hs_service = SimpleNamespace(service_id=MOCK_SERVICE_ID, client=SimpleNamespace(execute=_exec))
+    with patch(
+        "backend.high_scale.ingest_controller.get_high_scale_service_registry",
+        return_value=SimpleNamespace(resolve=lambda sid: fake_hs_service),
+    ):
+        resp = client.post(
+            "/api/query", headers=_Q_HEADERS, json={"sql": "SELECT url, status FROM logs", "explain": True}
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["explain_plan"] == "Expression (Projection)\nReadFromMergeTree"
+    assert any(s.lstrip().upper().startswith("EXPLAIN ") for s in seen_sql)
+
+    with (
+        patch("backend.routers.query.get_cached_presets", return_value=None),
+        patch("backend.routers.query.set_cached_presets"),
+        patch(
+            "backend.routers.query.get_source_for_service",
+            return_value={"name": "test_service", "service_id": MOCK_SERVICE_ID},
+        ),
+    ):
+        presets_resp = client.get("/api/presets", headers=_Q_HEADERS)
+    assert presets_resp.status_code == 200, presets_resp.text
+    presets = presets_resp.json()
+    assert len(presets) == 26
+    assert all(p.get("category") for p in presets)
+    for preset in presets:
+        sql = preset["sql"]
+        assert "SUMMARIZE" not in sql.upper()
+        assert "percentile_cont" not in sql.lower()
+        assert "starts_with(" not in sql.lower()
+
+
 @pytest.mark.parametrize(
     "unsafe_sql",
     [

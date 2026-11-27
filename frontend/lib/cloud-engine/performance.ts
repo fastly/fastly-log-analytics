@@ -108,7 +108,7 @@ export interface PerfTopUrlItem {
 }
 
 export interface PerfTopAsnItem {
-  asn: string;
+  asn: number | string;
   label: string;
   requests: number;
   avg: number;
@@ -451,10 +451,17 @@ export function shapePerformanceAsnRows(rows: Record<string, unknown>[]): PerfTo
   return rows.map((row) => {
     const rawAsn = row.asn ?? row.value ?? "";
     const asnStr = typeof rawAsn === "number" ? String(Math.trunc(rawAsn)) : String(rawAsn ?? "").trim();
-    const existingLabel = typeof row.label === "string" && row.label.trim() !== "" ? row.label : null;
+    const asnVal: number | string = /^\d+$/.test(asnStr) ? Number(asnStr) : asnStr;
+    const existingLabel = typeof row.label === "string" && row.label.trim() !== "" ? row.label.trim() : null;
+    const cachedName = getCachedAsnName(asnStr);
+    const label = existingLabel
+      ? formatAsnDisplayLabel(asnStr, existingLabel)
+      : cachedName
+        ? formatAsnDisplayLabel(asnStr, cachedName)
+        : formatAsnLabel(asnStr);
     return {
-      asn: asnStr,
-      label: existingLabel ?? formatAsnLabel(asnStr),
+      asn: asnVal,
+      label,
       requests: Math.trunc(toNum(row.req_count ?? row.requests)),
       avg: roundTo(toNum(row.avg_ms ?? row.avg), 2),
       p50: roundTo(toNum(row.p50_ms ?? row.p50), 2),
@@ -525,7 +532,7 @@ export async function executePerformanceAggregates(
   };
 
   const response: PerformanceAggregatesResponse = {
-    _approx: !filtered,
+    _approx: false,
   };
 
   const tasks: Promise<void>[] = [];
@@ -536,6 +543,7 @@ export async function executePerformanceAggregates(
         if (!filtered && typeof client.tryRollup === "function") {
           const rollupRows = await client.tryRollup(PERFORMANCE_ROLLUPS.perf_top_urls, window);
           if (rollupRows) {
+            response._approx = true;
             response.top_urls = shapePerfTopUrlRows(rollupRows);
             return;
           }
@@ -555,6 +563,7 @@ export async function executePerformanceAggregates(
           const rollupRows = await client.tryRollup(PERFORMANCE_ROLLUPS.perf_top_asns, window);
           if (rollupRows) {
             await asnNamesReady;
+            response._approx = true;
             response.top_asns = shapePerformanceAsnRows(rollupRows);
             return;
           }
@@ -572,6 +581,7 @@ export async function executePerformanceAggregates(
         if (!filtered && typeof client.tryRollup === "function") {
           const rollupRows = await client.tryRollup(PERFORMANCE_ROLLUPS.perf_ttl_dist, window);
           if (rollupRows) {
+            response._approx = true;
             response.ttl_dist = shapePerfTtlDistRows(rollupRows);
             return;
           }

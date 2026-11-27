@@ -4,17 +4,11 @@ import { useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { flexRender, useTable } from '@tanstack/react-table'
 import { basicTableFeatures, type BasicColumnDef } from '@/lib/table'
-import { buildServiceHref, cn, formatBytes, formatCount, formatUSD } from '@/lib/utils'
+import { buildServiceHref, formatBytes, formatCount, formatUSD } from '@/lib/utils'
 import { useServiceStore } from '@/stores/filterStore'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import { Table, TableBody, TableCell, TableRow } from '@/components/ui/table'
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from '@/components/ui/tooltip'
 import {
   DEFAULT_INPUTS,
   DEFAULT_UNITS,
@@ -24,8 +18,8 @@ import {
   type EstimateRates,
 } from '@/lib/cloud-engine/usage/estimate'
 import type { MeasuredEstimate } from '@/lib/cloud-engine/usage/estimatePrefill'
+import { BillingZoneSelector, MinimumChargeNotice } from './BillingNoticeComponents'
 import {
-  BILLING_ZONE_DESCRIPTIONS,
   BILLING_ZONE_RATES,
   billingZoneForFosRegion,
   type BillingZone,
@@ -325,19 +319,13 @@ export function CloudCostCalculator({ prefillData, prefillNote, rates: configure
               )}
             </div>
 
-            <div className="mt-4 p-3 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-md space-y-2">
-              <div className="text-xs font-semibold text-amber-700 dark:text-amber-400">Minimum Charge per Object</div>
-              <Row label="Min. days billed per object (even if deleted early)">
-                <ReadOnlyValue value={inputs.minBilledDays} />
-              </Row>
-              <div className="text-[11px] text-amber-700/80 dark:text-amber-500/80">
-                Edit on the <a href={buildServiceHref('/admin', activeServiceId)} className="underline font-medium hover:text-amber-900 dark:hover:text-amber-300">admin page</a>.
-              </div>
-              <div className="text-xs text-amber-600 dark:text-amber-500 space-y-0.5">
-                <div>Objects created/day: <strong>{fmtN(Math.round(objectsPerDay))}</strong></div>
-                <div>Sustained billed footprint ({inputs.minBilledDays}d): <strong>{fmtN(Math.round(objectsBilled))}</strong> objects</div>
-              </div>
-            </div>
+            <MinimumChargeNotice
+              minDays={inputs.minBilledDays}
+              objectsPerDay={objectsPerDay}
+              objectsBilled={objectsBilled}
+              activeServiceId={activeServiceId}
+              billedDaysLabel={inputs.minBilledDays}
+            />
           </section>
         </div>
 
@@ -355,54 +343,12 @@ export function CloudCostCalculator({ prefillData, prefillNote, rates: configure
               </Button>
             </div>
 
-            <div className="mb-4 space-y-2 p-3 bg-muted/40 rounded-lg border border-border/50">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                  Delivery Billing Zone
-                  {autoDerivedZone && prefillData?.fosRegion ? (
-                    <span className="ml-1.5 font-normal normal-case text-muted-foreground/80">
-                      (auto: {prefillData.fosRegion})
-                    </span>
-                  ) : null}
-                </span>
-                <span className="text-xs font-semibold text-primary">
-                  ${rates.cdn_egress_rate_per_gb.toFixed(2)} / GB
-                </span>
-              </div>
-              <div className="grid grid-cols-3 gap-1.5 p-1 bg-muted/80 rounded-md">
-                {(['MBZ100', 'MBZ200', 'Global'] as const).map((zone) => {
-                  const isSelected = activeZone === zone
-                  return (
-                    <TooltipProvider key={zone}>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <button
-                            type="button"
-                            onClick={() => setSelectedZone(zone)}
-                            className={cn(
-                              'px-2.5 py-1.5 text-xs font-medium rounded transition-all text-center',
-                              isSelected
-                                ? 'bg-background text-foreground shadow-sm font-semibold'
-                                : 'text-muted-foreground hover:text-foreground hover:bg-background/50',
-                            )}
-                            aria-pressed={isSelected}
-                          >
-                            {zone}
-                          </button>
-                        </TooltipTrigger>
-                        <TooltipContent side="top" className="max-w-[260px] text-xs">
-                          <p className="font-semibold mb-1">{zone} (${BILLING_ZONE_RATES[zone].toFixed(2)}/GB)</p>
-                          <p>{BILLING_ZONE_DESCRIPTIONS[zone]}</p>
-                        </TooltipContent>
-                      </Tooltip>
-                    </TooltipProvider>
-                  )
-                })}
-              </div>
-              <p className="text-[11px] text-muted-foreground leading-normal">
-                {BILLING_ZONE_DESCRIPTIONS[activeZone]}
-              </p>
-            </div>
+            <BillingZoneSelector
+              selectedZone={activeZone}
+              egressRate={rates.cdn_egress_rate_per_gb}
+              onSelectZone={setSelectedZone}
+              autoDerivedLabel={autoDerivedZone && prefillData?.fosRegion ? `(auto: ${prefillData.fosRegion})` : null}
+            />
 
             <div className="space-y-0">
               <Row label="Object Storage Class A ($/1,000 ops)"><ReadOnlyValue value={rates.class_a_rate_per_1k} /></Row>

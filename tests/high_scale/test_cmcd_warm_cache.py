@@ -57,7 +57,7 @@ _CANNED: dict[str, list[dict[str, Any]]] = {
     "cmcd:overview_duration": [{"avg_duration": 125.4}],
     "cmcd:timeseries": [
         {
-            "bucket": "2026-09-14 10:05:00",
+            "bucket": "2026-09-14T10:05:00Z",
             "concurrent_sessions": 4,
             "rebuffer_session_pct": 33.333,
             "p50_buffer": 10.0,
@@ -74,7 +74,7 @@ _CANNED: dict[str, list[dict[str, Any]]] = {
     "cmcd:sessions": [
         {
             "kind": "new_sessions",
-            "k": "2026-09-14 10:05:00",
+            "k": "2026-09-14T10:05:00Z",
             "session_count": 2,
             "positive_duration_sum": 0.0,
             "positive_duration_count": 0,
@@ -152,7 +152,7 @@ _CANNED: dict[str, list[dict[str, Any]]] = {
             "median_mtp": None,
         },
     ],
-    "cmcd:new_sessions": [{"bucket": "2026-09-14 10:05:00", "new_sessions": 2}],
+    "cmcd:new_sessions": [{"bucket": "2026-09-14T10:05:00Z", "new_sessions": 2}],
     "cmcd:session_duration_dist": [
         {"sort_order": 2, "session_count": 1, "positive_duration_sum": 61.6, "positive_duration_count": 1},
         {"sort_order": 5, "session_count": 3, "positive_duration_sum": 440.0, "positive_duration_count": 3},
@@ -240,7 +240,7 @@ def test_cmcd_consolidates_overview_into_probe_timeseries_and_session_duration()
         "peak_viewers": 4,
         "avg_session_duration": 125,
     }
-    bucket_1005 = next(p for p in res["sessions_ts"] if p["bucket"].startswith("2026-09-14 10:05:00"))
+    bucket_1005 = next(p for p in res["sessions_ts"] if p["bucket"].startswith("2026-09-14T10:05:00Z"))
     assert bucket_1005["new_sessions"] == 2
     assert len(res["session_duration_dist"]) == 2
     assert res["top_content"][0]["content_id"] == "movie-1"
@@ -315,7 +315,7 @@ def test_cmcd_probe_runs_in_parallel_wave_with_queries_and_preserves_ot_and_bs_g
             if "cmcd:timeseries" in sql:
                 return [
                     {
-                        "bucket": "2026-09-14 10:05:00",
+                        "bucket": "2026-09-14T10:05:00Z",
                         "concurrent_sessions": 4,
                         "rebuffer_session_pct": 33.333,
                         "p50_buffer": 10.0,

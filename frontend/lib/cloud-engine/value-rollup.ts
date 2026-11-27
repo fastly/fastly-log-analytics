@@ -126,6 +126,18 @@ const sumOf = (values: Iterable<RollupValue>) => {
   return out;
 };
 
+function trimmedValueTotals(rollup: Rollup, field: string): Map<string, RollupValue> {
+  const out = new Map<string, RollupValue>();
+  for (const [value, v] of valueTotals(rollup, field)) {
+    const key = value.trim();
+    if (!key) continue;
+    const into = out.get(key) ?? emptyValue();
+    out.set(key, into);
+    addValue(into, v);
+  }
+  return out;
+}
+
 /** The top `limit` values by requests (ties by value), as `[value, requests]`. */
 function topByRequests(totals: Map<string, RollupValue>, limit: number): [string, number][] {
   return [...totals]
@@ -217,6 +229,8 @@ export function valueSummaryFromRollup(
     const threatsBlocked = hasWafField ? overview.threatsBlocked : null;
     if (byClass) {
       const bytes = sumOf(byClass.values());
+      const errorRequests = cls("ERROR").requests ||
+        (!truncated.has("all_fields/cache") ? countWhere(fields.get("cache"), (value) => value.toUpperCase() === "ERROR") : 0);
       out.overview = {
         total_requests: total,
         total_bandwidth_bytes: bytes.bytesCount ? roundTo(bytes.respBytes, 2) : null,
@@ -224,7 +238,9 @@ export function valueSummaryFromRollup(
         cache_acceleration_factor: acceleration,
         threats_blocked: threatsBlocked,
         edge_hit_requests: hasCache ? hits : null,
-        origin_requests: hasCache ? cls("MISS").requests + cls("PASS").requests : null,
+        origin_requests: hasCache
+          ? cls("MISS").requests + cls("PASS").requests + cls("SYNTH").requests + errorRequests
+          : null,
       };
     } else {
       const cache = fields.get("cache");
@@ -247,7 +263,7 @@ export function valueSummaryFromRollup(
         cache_acceleration_factor: avgHit !== null && avgHit > 0 && avgMiss !== null ? roundTo(avgMiss / avgHit, 1) : null,
         threats_blocked: threatsBlocked,
         edge_hit_requests: hasCache ? hits : null,
-        origin_requests: hasCache ? state("MISS") + state("PASS") : null,
+        origin_requests: hasCache ? state("MISS") + state("PASS") + state("SYNTH") + state("ERROR") : null,
       };
     }
   }
@@ -272,7 +288,7 @@ export function valueSummaryFromRollup(
     }
     out.caching = {
       total_requests: total,
-      hit_requests: hasCache ? hits : null,
+      hit_requests: hasCache ? hits : 0,
       miss_requests: hasCache ? cls("MISS").requests : null,
       pass_requests: hasCache ? cls("PASS").requests : null,
       synth_requests: hasCache ? cls("SYNTH").requests : null,
@@ -313,7 +329,7 @@ export function valueSummaryFromRollup(
       out.security.waf_logged = 0;
       out.security.waf_passed = 0;
     }
-    out.security.top_waf_signals = topByRequests(valueTotals(rollup, "waf_signal"), 20)
+    out.security.top_waf_signals = topByRequests(trimmedValueTotals(rollup, "waf_signal"), 10)
       .map(([signal, count]) => ({ signal, count }));
     if (truncated.has("value/waf_signal")) meta.lower_bound.push("security.top_waf_signals");
   }
@@ -324,7 +340,7 @@ export function valueSummaryFromRollup(
     const verifiedCount = rollup.binsTotals?.get("verified_bot") ?? 0;
     const hasWafSig = valueTotals(rollup, "waf_signal").size > 0 || verifiedCount > 0;
     let botRequests: number | null = bots || null;
-    let topBots = topByRequests(names, 20).map(([name, count]) => ({ name, count }));
+    let topBots = topByRequests(trimmedValueTotals(rollup, "bot_name"), 10).map(([name, count]) => ({ name, count }));
     if (bots === 0) {
       const uaEntries = [...fields.get("ua") ?? []]
         .filter(([ua, cnt]) => ua !== "" && cnt > 0)
@@ -335,7 +351,7 @@ export function valueSummaryFromRollup(
         if (!wellKnown) return null;
         const classified = classifyUserAgentCountsSync(
           uaEntries.slice(0, BOT_UA_CLASSIFY_LIMIT),
-          20,
+          10,
           wellKnown,
         );
         botRequests = classified.matchedRequests;

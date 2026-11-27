@@ -2,6 +2,7 @@ import type { RollupAgg, RollupResult } from "./dashboard/rollup-query";
 import { emptyAgg, queryRollup, rebucketSeries, rollupGroup, sumAggs } from "./dashboard/rollup-query";
 import {
   asnTrendFromBuckets,
+  computeGlobalHealthScoreFromLeaderboard,
   computeNetworkHealthScore,
   deduplicateMetroLeaderboard,
   emptyNetworkHealth,
@@ -227,6 +228,12 @@ export function networkHealthFromRollup(
   const worstAsn = pickWorstSignificant(by_asn, total.reqs);
   const worstCountry = pickWorstSignificant(by_country, total.reqs);
 
+  const leaderboard = by_asn.slice(0, topN).map((row) => ({
+    ...row, label: row.as_name, total_reqs: row.reqs,
+    health_score_now: row.health_score,
+    ...asnTrendFromBuckets(heatmapByAsn.get(row.asn), buckets.length, bucketMs / 1000, row.health_score),
+  }));
+
   return {
     available: true,
     has_data: true,
@@ -236,15 +243,11 @@ export function networkHealthFromRollup(
     heatmap,
     shielding_analysis: undefined,
     has_metro: metro_leaderboard.length > 0,
-    leaderboard: by_asn.slice(0, topN).map((row) => ({
-      ...row, label: row.as_name, total_reqs: row.reqs,
-      health_score_now: row.health_score,
-      ...asnTrendFromBuckets(heatmapByAsn.get(row.asn), buckets.length, bucketMs / 1000, row.health_score),
-    })),
+    leaderboard,
     summary: {
       total_requests: total.reqs,
       total_reqs: total.reqs,
-      global_health_score: healthScore,
+      global_health_score: computeGlobalHealthScoreFromLeaderboard(leaderboard, healthScore),
       worst_asn: worstAsn ? { label: worstAsn.as_name, score: worstAsn.health_score } : null,
       worst_country: worstCountry ? { label: resolveCountryName(worstCountry.country), score: worstCountry.health_score } : null,
       avg_rtt_ms: roundTo((total.avgRttUs ?? 0) / 1000, 2),
@@ -447,13 +450,14 @@ function qualityAnswer(
 
   const popRow = (pop: string, agg: Pick<RollupAgg, "requests" | "rttSum" | "rttCount">) => {
     const us = avg(agg.rttSum, agg.rttCount);
-    return { pop, rtt_ms: us == null ? null : us / 1000, reqs: agg.requests, value: pop, label: pop };
+    if (us == null) return [];
+    return [{ pop, rtt_ms: roundTo(us / 1000, 2), reqs: agg.requests, value: pop, label: pop }];
   };
-  const pops = [...rollup.dims.get("pop") ?? []].map(([pop, agg]) => popRow(pop, agg));
+  const pops = [...rollup.dims.get("pop") ?? []].flatMap(([pop, agg]) => popRow(pop, agg));
   // Rows without a PoP: what the PoP rows leave of the total, unless some PoPs were cut.
   const popped = sumAggs(rollup.dims.get("pop")?.values() ?? []);
   if (!popsCut && total.requests > popped.requests) {
-    pops.push(popRow("Unknown", {
+    pops.push(...popRow("Unknown", {
       requests: total.requests - popped.requests,
       rttSum: total.rttSum - popped.rttSum,
       rttCount: total.rttCount - popped.rttCount,
@@ -465,14 +469,19 @@ function qualityAnswer(
     const [country, region] = JSON.parse(key) as [string, string];
     if (country !== regionCountry) return [];
     const us = avg(agg.rttSum, agg.rttCount);
-    return [{ value: region, rtt_ms: us == null ? null : us / 1000, reqs: agg.requests, label: region }];
+    if (us == null) return [];
+    return [{ value: region, rtt_ms: roundTo(us / 1000, 2), reqs: agg.requests, label: region }];
   }).sort((a, b) => b.reqs - a.reqs) : [];
 
   const scatter = (rollup.samples ?? [])
     .filter((sample) => sample.rttUs != null)
     .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : a.tsMs - b.tsMs))
     .slice(0, SCATTER_LIMIT)
-    .map((sample) => ({ rtt_ms: sample.rttUs! / 1000, ttfb_ms: sample.ttfbS * 1000, cache: sample.cache }));
+    .map((sample) => ({
+      rtt_ms: roundTo(sample.rttUs! / 1000, 2),
+      ttfb_ms: roundTo(sample.ttfbS * 1000, 2),
+      cache: sample.cache || "UNKNOWN",
+    }));
 
   const tp = overall?.get("");
   const available = Array.isArray(activeLogFieldIds)
@@ -529,7 +538,11 @@ export function qualityFromRollup(result: RollupResult, params: NetworkQueryPara
     const available = Array.isArray(params.active_log_field_ids)
       ? hasTcpRttField(new Set(params.active_log_field_ids))
       : false;
-    return { ...emptyNetworkQuality(missing), available, rollup: rollupMeta };
+    return {
+      ...emptyNetworkQuality(missing, String(params.region_country ?? "US")),
+      available,
+      rollup: rollupMeta,
+    };
   }
   const { answer, missingParts } = quality;
   if (!missingParts.length) return answer;
@@ -627,7 +640,7 @@ const TRANSPORT_APPROXIMATE = ["tcp_rtt_p50_ms", "tcp_rtt_p90_ms", "tcp_rtt_p95_
  * loss, delivery rate and the protocol split are exact; RTT percentiles come
  * from the coalesced RTT histogram. Null when a summary predates the rows.
  */
-export function transportFromRollup(result: RollupResult) {
+export function transportFromRollup(result: RollupResult, activeLogFieldIds?: readonly string[]) {
   const overall = rollupGroup(result.rollup, "transport", "overall");
   const protos = rollupGroup(result.rollup, "transport", "proto");
   if (!overall || !protos) return null;
@@ -641,6 +654,13 @@ export function transportFromRollup(result: RollupResult) {
   const lowerBound = result.rollup.truncated.has("transport/proto") ? ["protocol_distribution"] : [];
   const dimsCountry = result.rollup.dims.get("country") ?? result.rollup.dims.get("asn");
   const retransCount = Math.max(agg?.retrans ?? 0, dimsCountry ? sumAggs(dimsCountry.values()).retrans : 0);
+  const transportFields = ["tcp_rtt", "retrans", "ploss", "delivery_rate"] as const;
+  const missingFields = Array.isArray(activeLogFieldIds)
+    ? (() => {
+        const enabled = new Set(activeLogFieldIds);
+        return transportFields.filter((f) => !enabled.has(f));
+      })()
+    : (p50 == null ? ["tcp_rtt"] : []);
   return {
     total_requests: total,
     bandwidth_bytes: total ? agg!.respBytes : null,
@@ -651,8 +671,10 @@ export function transportFromRollup(result: RollupResult) {
     retrans_rate_pct: total > 0 ? roundTo((retransCount * 100) / total, 2) : null,
     packet_loss_pct: agg?.plossCount ? (agg.plossSum / agg.plossCount) * 100 : null,
     delivery_rate_mbps: agg?.deliveryCount ? ((agg.deliverySum / agg.deliveryCount) * 8) / 1_000_000 : null,
-    has_transport_data: total > 0,
-    missing_fields: p50 == null ? ["tcp_rtt"] : [],
+    has_transport_data: Array.isArray(activeLogFieldIds)
+      ? missingFields.length < transportFields.length
+      : total > 0,
+    missing_fields: missingFields,
     protocol_distribution: normalizeProtocolDistribution(
       [...protos].map(([protocol, p]) => ({ protocol, requests: p.requests })),
       total,
@@ -729,7 +751,7 @@ function filteredNetworkHealthSummary(
     summary: {
       total_requests: total.reqs,
       total_reqs: total.reqs,
-      global_health_score: healthScore,
+      global_health_score: healthScore ?? 0,
       worst_asn: null,
       worst_country: null,
       avg_rtt_ms: roundTo((total.avgRttUs ?? 0) / 1000, 2),
@@ -847,7 +869,7 @@ export async function networkFromRollup(
     const wantsHealth = sections.some((section) => HEALTH_SECTIONS.has(section));
     const core = wantsHealth ? networkHealthFromRollup(result, params) : null;
     if (wantsHealth && core === null) return null;
-    const transport = sections.includes("transport") ? transportFromRollup(result) : null;
+    const transport = sections.includes("transport") ? transportFromRollup(result, params.active_log_field_ids) : null;
     if (sections.includes("transport") && transport === null) return null;
     return networkBundle(core, null, sections.includes("pop_health") ? popHealthFromRollup(result) : null, transport);
   }

@@ -152,3 +152,4 @@ class CmcdAggregatesResponse(BaseResponse):
     session_duration_dist: list[CmcdSessionDurationRow] = []
     bitrate_ladder: list[CmcdBitrateLadderRow] = []
     stream_type_dist: list[CmcdStreamTypeRow] = []
+    partial_sections: list[str] = []

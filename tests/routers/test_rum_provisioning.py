@@ -383,4 +383,55 @@ def test_rum_settings_save_sampling_controls_and_always_redeploy_tracker_and_vcl
     # RUM matches client timings to request logs by `rid`, so an enabled service gets the field.
     assert cfg["log_fields"]["field_overrides"] == {"rid": True}
     assert (status["capture_resources"], status["resource_sample_rate"], status["sample_rate"]) == (False, 0.2, 0.5)
+    assert status["supports_storage_purge"] is True
     assert too_low.status_code == 422
+
+
+def test_rum_status_analyst_redaction_and_settings_faro_version_upgrade() -> None:
+    admin_client = TestClient(_make_rum_app(analyst=False))
+    analyst_client = TestClient(_make_rum_app(analyst=True))
+    cfg: dict[str, Any] = {
+        "service_id": SVC,
+        "fastly_api_key": "tok-stored",
+        "rum_enabled": True,
+        "rum_enabled_at": "2026-01-01T00:00:00Z",
+        "rum": {"enabled": True, "faro_version": "2.9.0", "custom_condition": ""},
+    }
+
+    def _apply_mutation(_sid: str, fn):
+        fn(cfg)
+        return cfg
+
+    with (
+        patch("backend.config.load_config", return_value=cfg),
+        patch("backend.config.snapshot_config", return_value=None),
+        patch("backend.config.mutate_config", side_effect=_apply_mutation),
+        patch("backend.provision.rum_assets.upload_rum_tracker_js", return_value={"skipped": False}),
+        patch("backend.provision.declarative.reconciler.reconcile_vcl_state", return_value=MagicMock(error=None)),
+        patch(
+            "backend.routers.rum.provisioning.fetch_available_faro_versions",
+            new=AsyncMock(return_value=["2.10.0", "2.9.0"]),
+        ),
+        patch(
+            "backend.routers.rum.provisioning.upgrade_faro_version",
+            return_value={"version": "2.10.0", "activated": True},
+        ) as mock_upgrade,
+    ):
+        analyst_status = analyst_client.get(f"/api/services/{SVC}/rum/status")
+        assert analyst_status.status_code == 200
+        assert analyst_status.json() == {"enabled": True, "enabled_at": "2026-01-01T00:00:00Z"}
+
+        bad_ver = admin_client.post(
+            f"/api/services/{SVC}/rum/settings",
+            json={**_settings_payload(""), "faro_version": "9.9.9"},
+        )
+        assert bad_ver.status_code == 400
+        assert bad_ver.json()["detail"]["error"] == "unknown_faro_version"
+        mock_upgrade.assert_not_called()
+
+        ok_ver = admin_client.post(
+            f"/api/services/{SVC}/rum/settings",
+            json={**_settings_payload(""), "faro_version": "2.10.0"},
+        )
+        assert ok_ver.status_code == 200, ok_ver.text
+        mock_upgrade.assert_called_once_with(SVC, "2.10.0", "tok-stored", activate=True)

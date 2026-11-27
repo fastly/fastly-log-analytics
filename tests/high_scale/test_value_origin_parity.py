@@ -396,3 +396,60 @@ def test_value_summary_io_url_extension_fallback_and_ctype_precedence() -> None:
         assert f"endsWith(lower(url), '{ext}')" in io_opps_sql
     assert "endsWith(lower(url), '.svg')" not in io_opps_sql
     assert "= '' AND" in io_opps_sql
+
+
+def test_origin_drilldown_aligns_dimensions_shield_pop_and_avg_bytes() -> None:
+    from backend.high_scale.origin import origin_drilldown
+    from backend.models.analytics import OriginDrilldownRequest
+
+    for dimension, expected_col, expect_shield_filter in [
+        ("datacenter", "custom_fields['server_region']", False),
+        ("protocol", "custom_fields['proto']", False),
+        ("shield_pop", "custom_fields['pop']", True),
+    ]:
+        sqls: list[str] = []
+
+        class _Client:
+            def execute(self, sql: str, params: dict | None = None) -> list[dict[str, Any]]:
+                sqls.append(sql)
+                return []
+
+        svc = _empty_service(_Client(), service_id=f"svc-dd-{dimension}")
+        req = OriginDrilldownRequest(
+            dimension=dimension,
+            start_time="2026-11-24T16:00:00Z",
+            end_time="2026-11-24T17:00:00Z",
+        )
+        origin_drilldown(svc, req, "2026-11-24T16:00:00Z", "2026-11-24T17:00:00Z")
+        dd_sql = next(s for s in sqls if "origin:drilldown" in s)
+        assert expected_col in dd_sql
+        assert "avg(toInt64OrNull(custom_fields['obytes']))" in dd_sql
+        if expect_shield_filter:
+            assert "custom_fields['edge']" in dd_sql and "'false'" in dd_sql
+
+
+def test_assets_aggregates_strips_query_includes_zstd_and_reports_missing_fields(monkeypatch) -> None:
+    from backend import config as svcconfig
+
+    sqls: list[str] = []
+
+    class _Client:
+        def execute(self, sql: str, params: dict | None = None) -> list[dict[str, Any]]:
+            sqls.append(sql)
+            return []
+
+    monkeypatch.setattr(svcconfig, "load_config", lambda _sid: {"service_id": "svc-assets-parity"})
+    monkeypatch.setattr(svcconfig, "active_log_field_ids", lambda _cfg: ["url", "cache"])
+    svc = _empty_service(_Client(), service_id="svc-assets-parity")
+    req = AssetsRequest(
+        filters={},
+        sections=["summary"],
+        start_time="2026-11-24T16:00:00Z",
+        end_time="2026-11-24T18:00:00Z",
+    )
+    res = assets_aggregates(svc, req, "2026-11-24T16:00:00Z", "2026-11-24T18:00:00Z")
+    dims_sql = next(s for s in sqls if "assets:summary_dims" in s)
+    assert "path_lower LIKE '%.js'" in dims_sql
+    assert "url_lower LIKE '%.js'" not in dims_sql
+    assert "'zstd'" in dims_sql
+    assert res.missing_fields == ["ttl", "resp_header_content_encoding"]

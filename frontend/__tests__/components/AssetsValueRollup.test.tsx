@@ -343,16 +343,20 @@ describe('FastlyValueClient on Cloud', () => {
     expect(await screen.findByText(/^≈120/)).toBeInTheDocument()
   })
 
-  it('splits overview onto filtered_rollups for a single low-cardinality filter, and keeps one raw read for other filters', async () => {
+  it('splits overview onto filtered_rollups for a single low-cardinality filter while preserving raw overview fields, and keeps one raw read for other filters', async () => {
     setCloudModeRuntime(true)
     layout.filterPayload = { pop: { mode: 'include', values: ['LIS'] } }
+    const rawOverview = { ...overview, threats_blocked: 17, cache_acceleration_factor: 4.2 }
     const split = recordPosts('/api/value/summary', (asked) =>
-      asked?.includes('overview') ? { overview, rollup: meta } : { network, caching: null },
+      asked?.length === 1 && asked[0] === 'overview'
+        ? { overview: { ...overview, threats_blocked: null, cache_acceleration_factor: null }, rollup: meta }
+        : { overview: rawOverview, network, caching: null },
     )
     const { unmount } = renderBootstrapped(<FastlyValueClient />, { withNuqs: true })
 
     expect(await screen.findByText('4.3k')).toBeInTheDocument()
-    expect(split).toEqual(expect.arrayContaining([['overview'], ['caching', 'network']]))
+    expect(await screen.findByText('17')).toBeInTheDocument()
+    expect(split).toEqual(expect.arrayContaining([['overview'], ['overview', 'caching', 'network']]))
     expect(split).toHaveLength(2)
     expect(within(screen.getByTestId('rollup-data-through-slot')).getByText(/Data through 09:45/)).toBeInTheDocument()
     unmount()

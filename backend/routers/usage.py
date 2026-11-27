@@ -39,6 +39,7 @@ from backend.models.admin import (
     UsageOperationsResponse,
     UsageRumBreakdownResponse,
 )
+from backend.models.admin.operations import UsageComputeResponse
 from backend.models.common import DEFAULT_ERROR_RESPONSES
 from backend.repositories import assets as repo
 from backend.repositories.utils.response_cache import (
@@ -1902,4 +1903,21 @@ def usage_rum_breakdown(
 
     rum_payload = _USAGE_RESPONSE_MEMO.coalesce(f"usage_rum_breakdown:{rum_memo_key}", _compute_rum)
     resp: UsageRumBreakdownResponse = UsageRumBreakdownResponse.with_telemetry(**rum_payload)
+    return resp
+
+
+@usage_router.get(
+    "/compute",
+    response_model=UsageComputeResponse,
+    dependencies=[Depends(_set_usage_cache_control)],
+)
+@query_errors()
+def usage_compute(
+    start_time: str = Query(default=""),
+    end_time: str = Query(default=""),
+    source: dict[str, Any] = Depends(get_source),
+) -> UsageComputeResponse:
+    """Report Compute stats as not applicable on High-Scale deployments."""
+    _ = (start_time, end_time, source)
+    resp: UsageComputeResponse = UsageComputeResponse.with_telemetry(source="not_applicable", data=[])
     return resp

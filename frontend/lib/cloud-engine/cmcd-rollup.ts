@@ -240,7 +240,60 @@ function str(col: ArrayLike<unknown> | undefined, i: number): string | null {
 
 function histQuantile(hist: Histogram, q: number): number | null {
   const v = hist.quantile(q);
-  return v == null ? null : v / 1000;
+  return v == null ? null : roundTo(v / 1000, 2);
+}
+
+function round2(value: number | null): number | null {
+  return value == null || !Number.isFinite(value) ? null : roundTo(value, 2);
+}
+
+export type CmcdAggregateSection =
+  | "overview"
+  | "sessions_ts"
+  | "buffer_health_ts"
+  | "bitrate_ts"
+  | "throughput_ts"
+  | "top_content"
+  | "rebuffer_by_country"
+  | "rebuffer_by_asn"
+  | "object_type_dist"
+  | "streaming_format_dist"
+  | "startup_ts"
+  | "session_duration_dist"
+  | "bitrate_ladder"
+  | "stream_type_dist";
+
+const VALID_CMCD_SECTIONS = new Set<CmcdAggregateSection>([
+  "overview",
+  "sessions_ts",
+  "buffer_health_ts",
+  "bitrate_ts",
+  "throughput_ts",
+  "top_content",
+  "rebuffer_by_country",
+  "rebuffer_by_asn",
+  "object_type_dist",
+  "streaming_format_dist",
+  "startup_ts",
+  "session_duration_dist",
+  "bitrate_ladder",
+  "stream_type_dist",
+]);
+
+const CMCD_RESIDUAL_SECTIONS = ["bitrate_ladder", "stream_type_dist"] as const;
+
+export function getCmcdResidualSections(data: unknown): CmcdAggregateSection[] {
+  if (!data || typeof data !== "object") return [];
+  const partial = (data as { partial_sections?: unknown }).partial_sections;
+  if (!Array.isArray(partial)) return [];
+  return partial.filter(
+    (s): s is CmcdAggregateSection =>
+      typeof s === "string" && VALID_CMCD_SECTIONS.has(s as CmcdAggregateSection),
+  );
+}
+
+export function isCmcdPartial(data: unknown): boolean {
+  return getCmcdResidualSections(data).length > 0;
 }
 
 /** Whether `cmcd_summary` may answer this /api/cmcd/aggregates read. */
@@ -255,7 +308,7 @@ export function cmcdRollupEligible(params: CmcdQueryParams): boolean {
   ) {
     return false;
   }
-  return (params.bucket_seconds ?? 60) >= 300;
+  return (params.bucket_seconds ?? 300) >= 300;
 }
 
 async function listCmcdSummaryFiles(
@@ -785,7 +838,7 @@ async function cmcdFromFiles(
     });
     bitrate_ts.push({
       bucket: tsIso,
-      avg_bitrate: encBrVal,
+      avg_bitrate: round2(encBrVal),
       timestamp: tsIso,
       avg_encoded_bitrate: roundTo(encBr, 1),
       avg_top_bitrate: roundTo(topBr, 1),
@@ -850,9 +903,9 @@ async function cmcdFromFiles(
             session_count: sess,
             requests: c.reqs,
             avg_bitrate_kbps: roundTo(brAvg ?? 0, 1),
-            avg_bitrate: brAvg,
-            avg_buffer_length: blAvg,
-            rebuffer_rate: hasBsEffective && sess > 0 ? (rebSess * 100) / sess : null,
+            avg_bitrate: round2(brAvg),
+            avg_buffer_length: round2(blAvg),
+            rebuffer_rate: round2(hasBsEffective && sess > 0 ? (rebSess * 100) / sess : null),
           };
         })
         .sort((a, b) => b.sessions - a.sessions || a.content_id.localeCompare(b.content_id))
@@ -872,7 +925,7 @@ async function cmcdFromFiles(
             sessions: sess,
             requests: c.reqs,
             rebuffer_events: c.rebufferEvents,
-            rebuffer_rate: hasBsEffective && sess > 0 ? (rebSess * 100) / sess : null,
+            rebuffer_rate: round2(hasBsEffective && sess > 0 ? (rebSess * 100) / sess : null),
           };
         })
         .filter((row) => row.sessions > 0)
@@ -896,12 +949,12 @@ async function cmcdFromFiles(
             as_name,
             label,
             session_count: sess,
-            avg_bitrate: brAvg,
-            avg_buffer_length: blAvg,
+            avg_bitrate: round2(brAvg),
+            avg_buffer_length: round2(blAvg),
             sessions: sess,
             requests: a.reqs,
             rebuffer_events: a.rebufferEvents,
-            rebuffer_rate: hasBsEffective && sess > 0 ? (rebSess * 100) / sess : null,
+            rebuffer_rate: round2(hasBsEffective && sess > 0 ? (rebSess * 100) / sess : null),
             avg_throughput_kbps: roundTo(a.mtpN > 0 ? a.mtpSum / a.mtpN : 0, 1),
           };
         })
@@ -938,8 +991,8 @@ async function cmcdFromFiles(
         ? Math.round(positiveDurations.reduce((sum, d) => sum + d, 0) / positiveDurations.length)
         : null,
       rebuffer_rate: hasBsEffective && activeSessions ? roundTo((rebufferSessions * 100) / activeSessions, 2) : null,
-      avg_bitrate: hasOt ? (overall.vBrN > 0 ? overall.vBrSum / overall.vBrN : null) : (overall.brN > 0 ? overall.brSum / overall.brN : null),
-      avg_buffer_length: hasOt ? (overall.vBlN > 0 ? overall.vBlSum / overall.vBlN : null) : (overall.blN > 0 ? overall.blSum / overall.blN : null),
+      avg_bitrate: round2(hasOt ? (overall.vBrN > 0 ? overall.vBrSum / overall.vBrN : null) : (overall.brN > 0 ? overall.brSum / overall.brN : null)),
+      avg_buffer_length: round2(hasOt ? (overall.vBlN > 0 ? overall.vBlSum / overall.vBlN : null) : (overall.blN > 0 ? overall.blSum / overall.blN : null)),
       median_throughput: histQuantile(hasOt ? overall.vMtpHist : overall.mtpHist, 0.5),
     },
     summary: {
@@ -974,5 +1027,9 @@ async function cmcdFromFiles(
     session_duration_dist,
     bitrate_ladder: [],
     stream_type_dist: [],
+    partial_sections:
+      !params.sections?.length && (overall.hasBr > 0 || sfs.size > 0)
+        ? [...CMCD_RESIDUAL_SECTIONS]
+        : [],
   };
 }

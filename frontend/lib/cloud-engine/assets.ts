@@ -47,8 +47,9 @@ export interface DimRowInput {
   is_compressible?: number | boolean;
 }
 
-export function emptyAssetsAggregates() {
+export function emptyAssetsAggregates(missingFields: string[] = []) {
   return {
+    missing_fields: missingFields,
     summary: {
       total_requests: 0,
       total_bytes: 0,
@@ -336,11 +337,11 @@ const LIKE_ANY = (column: string, exts: readonly string[]) =>
 
 /** High-Scale's `_ASSET_TYPE_CASE`: the asset type from the URL's extension. */
 const ASSET_TYPE_SQL = `CASE
-          WHEN ${LIKE_ANY("url_lower", [".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico"])} THEN 'Images'
-          WHEN ${LIKE_ANY("url_lower", [".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".csv", ".zip", ".tar", ".gz", ".tgz", ".rar", ".7z"])} THEN 'Documents'
-          WHEN ${LIKE_ANY("url_lower", [".js", ".mjs", ".css"])} THEN 'JavaScript/CSS'
-          WHEN ${LIKE_ANY("url_lower", [".woff", ".woff2", ".ttf", ".otf", ".eot"])} THEN 'Fonts'
-          WHEN ${LIKE_ANY("url_lower", [".m3u8", ".ts", ".mp4", ".m4s", ".webm"])} THEN 'Video'
+          WHEN ${LIKE_ANY("path_lower", [".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico"])} THEN 'Images'
+          WHEN ${LIKE_ANY("path_lower", [".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".csv", ".zip", ".tar", ".gz", ".tgz", ".rar", ".7z"])} THEN 'Documents'
+          WHEN ${LIKE_ANY("path_lower", [".js", ".mjs", ".css"])} THEN 'JavaScript/CSS'
+          WHEN ${LIKE_ANY("path_lower", [".woff", ".woff2", ".ttf", ".otf", ".eot"])} THEN 'Fonts'
+          WHEN ${LIKE_ANY("path_lower", [".m3u8", ".ts", ".mp4", ".m4s", ".webm"])} THEN 'Video'
           ELSE 'API/Dynamic'
         END`;
 
@@ -355,6 +356,7 @@ const DERIVED_ASSET_CTE = `
     SELECT
       *,
       LOWER(COALESCE(url, path, '')) AS url_lower,
+      split_part(split_part(LOWER(COALESCE(url, path, '')), '?', 1), '#', 1) AS path_lower,
       COALESCE(NULLIF(content_encoding, ''), NULLIF(resp_header_content_encoding, ''), '') AS raw_encoding
     FROM requests
   ),
@@ -366,11 +368,12 @@ const DERIVED_ASSET_CTE = `
       CASE
         WHEN LOWER(raw_encoding) LIKE '%br%' THEN 'br'
         WHEN LOWER(raw_encoding) LIKE '%gzip%' THEN 'gzip'
+        WHEN LOWER(raw_encoding) LIKE '%zstd%' THEN 'zstd'
         WHEN raw_encoding != '' THEN raw_encoding
         ELSE 'uncompressed'
       END AS norm_encoding,
-      (LOWER(raw_encoding) IN ('gzip', 'br', 'deflate'))::INTEGER AS is_compressed,
-      (${LIKE_ANY("split_part(split_part(url_lower, '?', 1), '#', 1)", [".js", ".mjs", ".css", ".svg", ".html", ".json"])})::INTEGER AS is_compressible,
+      (LOWER(raw_encoding) IN ('gzip', 'br', 'deflate', 'zstd'))::INTEGER AS is_compressed,
+      (${LIKE_ANY("path_lower", [".js", ".mjs", ".css", ".svg", ".html", ".json"])})::INTEGER AS is_compressible,
       COALESCE(resp_body_size, resp_bytes, 0)::BIGINT AS body_bytes,
       COALESCE(ttfb_ms, ttfb * 1000.0, time_to_first_byte_ns / 1000000.0, time_elapsed_usec / 1000.0, elapsed / 1000.0, 0.0)::DOUBLE AS norm_ttfb_ms,
       COALESCE(origin_Whole_ms, origin_time_ms, 0.0)::DOUBLE AS norm_origin_ms,
@@ -406,8 +409,20 @@ export async function queryAssetsAggregates(params: AssetsQueryParams = {}) {
     params.signal,
   );
 
+  const activeFields = want("summary")
+    ? await cloudActiveLogFieldIds(params.service_id, params.signal ?? new AbortController().signal)
+    : null;
+  const missingFields = activeFields
+    ? [
+        ...(!activeFields.has("ttl") ? ["ttl"] : []),
+        ...(!activeFields.has("resp_header_content_encoding") && !activeFields.has("content_encoding")
+          ? ["resp_header_content_encoding"]
+          : []),
+      ]
+    : [];
+
   if (want("summary") && dimRows.length === 0) {
-    return selectAssetsSections(emptyAssetsAggregates(), sections);
+    return selectAssetsSections(emptyAssetsAggregates(missingFields), sections);
   }
 
   const computed = computeSummaryFromDims(dimRows);
@@ -459,18 +474,8 @@ export async function queryAssetsAggregates(params: AssetsQueryParams = {}) {
     params.signal,
   );
 
-  const activeFields = want("summary")
-    ? await cloudActiveLogFieldIds(params.service_id, params.signal ?? new AbortController().signal)
-    : null;
   return selectAssetsSections({
-    missing_fields: activeFields
-      ? [
-          ...(!activeFields.has("ttl") ? ["ttl"] : []),
-          ...(!activeFields.has("resp_header_content_encoding") && !activeFields.has("content_encoding")
-            ? ["resp_header_content_encoding"]
-            : []),
-        ]
-      : [],
+    missing_fields: missingFields,
     summary: {
       total_requests: computed.total_requests,
       total_bytes: computed.total_bytes,

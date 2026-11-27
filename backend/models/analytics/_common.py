@@ -2,9 +2,28 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from backend.models.common import WireSafeModel
+
+
+class AnalyticsCompletenessMixin(BaseModel):
+    """Shared completeness metadata and approximation markers on analytics responses."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    rollup: dict[str, Any] | None = Field(default=None, exclude_if=lambda value: value is None)
+    raw_window: dict[str, str] | None = Field(default=None, exclude_if=lambda value: value is None)
+    approx: bool | None = Field(
+        default=None,
+        alias="_approx",
+        exclude_if=lambda value: value is None,
+    )
+    approx_note: str | None = Field(
+        default=None,
+        alias="_approx_note",
+        exclude_if=lambda value: value is None,
+    )
 
 
 def _aliased_optional_field(name: str) -> Any:

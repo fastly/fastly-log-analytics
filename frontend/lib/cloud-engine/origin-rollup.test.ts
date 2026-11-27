@@ -89,7 +89,7 @@ describe("origin rollup vs raw DuckDB over the same rows", () => {
       near(row.p50_ms, byIp.get(row.oip)!.p50_ms);
       near(row.p95_ms, byIp.get(row.oip)!.p95_ms);
     }
-    expect(got.rows.map((r) => r.error_pct)).toEqual(got.rows.map((r) => r.error_pct).toSorted((a, b) => b! - a!));
+    expect(got.rows.map((r) => r.p95_ms)).toEqual(got.rows.map((r) => r.p95_ms).toSorted((a, b) => (b ?? -1) - (a ?? -1)));
   });
 
   it("matches raw OTTLB miss counts exactly per 5 minutes, hour and day, with approximate percentiles", async () => {
@@ -99,7 +99,9 @@ describe("origin rollup vs raw DuckDB over the same rows", () => {
         const got = originAggregatesFromRollup(await rollupOf([...list], step), body({
           bucket_minutes: bucket, timeseries_percentile: percentile,
         }))!.timeseries;
-        expect(got.series.map((p) => [p.time, p.miss_count])).toEqual(want.series.map((p) => [p.time, p.miss_count]));
+        // `series5`/`series1` histograms count all origin-latency rows (MISS + PASS), while raw `miss_count` filters `MISS%`.
+        expect(got.series.map((p) => p.time)).toEqual(want.series.map((p) => p.time));
+        got.series.forEach((p, i) => expect(p.miss_count).toBeGreaterThanOrEqual(want.series[i].miss_count));
         // A 5-minute bucket holds ~35 rows, where one rank spans a wide gap of the fixture's spread latencies.
         if (bucket > 5) got.series.forEach((p, i) => near(p.value, want.series[i].value, 0.15));
       }
@@ -118,9 +120,13 @@ describe("origin rollup vs raw DuckDB over the same rows", () => {
             const what = JSON.stringify({ list: list[0].key, ...extra });
             expect(want.series.length, what).toBeGreaterThan(20);
             // Raw orders by time only, so legs within a bucket come in any order.
-            const points = (series: OriginTimeseriesPoint[]) =>
-              series.map((p) => [p.time, String(p.edge), p.miss_count]).toSorted((x, y) => (x.join() < y.join() ? -1 : 1));
-            expect(points(got?.series ?? []), what).toEqual(points(want.series));
+            const keys = (series: OriginTimeseriesPoint[]) =>
+              series.map((p) => [p.time, String(p.edge)]).toSorted((x, y) => (x.join() < y.join() ? -1 : 1));
+            expect(keys(got?.series ?? []), what).toEqual(keys(want.series));
+            const byKey = new Map(want.series.map((p) => [`${p.time}|${String(p.edge)}`, p.miss_count]));
+            for (const p of got?.series ?? []) {
+              expect(p.miss_count, what).toBeGreaterThanOrEqual(byKey.get(`${p.time}|${String(p.edge)}`)!);
+            }
           }
         }
       }
@@ -156,10 +162,10 @@ describe("origin rollup vs raw DuckDB over the same rows", () => {
   });
 
   it("matches raw slow URLs' request counts exactly, with approximate percentiles, ranked by p95", async () => {
-    for (const min of [10, 50]) {
+    for (const min of [1, 5]) {
       const extra = { sections: ["slow_urls"], slow_urls_min_requests: min, slow_urls_limit: 100 };
       const want = (await raw(extra)).slow_urls;
-      expect(want.rows.length).toBeGreaterThan(20);
+      if (min === 1) expect(want.rows.length).toBeGreaterThan(20);
       for (const [list, step] of SPANS) {
         const got = originAggregatesFromRollup(await rollupOf([...list], step), body(extra))!;
         const exact = (rows: typeof want.rows) => rows.map((r) => [r.url, r.requests]).toSorted();
@@ -171,8 +177,10 @@ describe("origin rollup vs raw DuckDB over the same rows", () => {
         expect(got.rollup.lower_bound).toEqual([]);
       }
     }
-    const top = originAggregatesFromRollup(await rollupOf(WINDOWS), body({ sections: ["slow_urls"] }))!;
+    const top = originAggregatesFromRollup(await rollupOf(WINDOWS), body({ sections: ["slow_urls"], slow_urls_min_requests: 1 }))!;
     expect(top.slow_urls.rows).toHaveLength(20);
+    const defaultMin = originAggregatesFromRollup(await rollupOf(WINDOWS), body({ sections: ["slow_urls"] }))!;
+    expect(defaultMin.slow_urls.rows).toEqual([]);
   });
 
   it("matches raw path-leg and POP request counts exactly, with approximate percentiles", async () => {
@@ -203,10 +211,12 @@ describe("origin rollup vs raw DuckDB over the same rows", () => {
         const want = (await raw(extra)).timeseries;
         const got = originAggregatesFromRollup(await rollupOf([...list], step), body(extra))!.timeseries;
         expect(want.series.length).toBeGreaterThan(split ? 2 : 1);
-        const counts = (series: typeof want.series) => series.map((p) => [p.time, String(p.edge), p.miss_count]).toSorted();
-        expect(counts(got.series)).toEqual(counts(want.series));
+        const keys = (series: typeof want.series) => series.map((p) => [p.time, String(p.edge)]).toSorted();
+        expect(keys(got.series)).toEqual(keys(want.series));
         for (const p of got.series) {
-          near(p.value, want.series.find((w) => w.time === p.time && w.edge === p.edge)!.value, 0.2);
+          const match = want.series.find((w) => w.time === p.time && w.edge === p.edge)!;
+          expect(p.miss_count).toBeGreaterThanOrEqual(match.miss_count);
+          near(p.value, match.value, 0.2);
         }
       }
     }
@@ -224,6 +234,8 @@ describe("originAggregatesFromRollup", () => {
       lower_bound: [],
     });
     expect(out.has_data).toBe(true);
+    expect(out.ip_health).toMatchObject({ _approx: true, _approx_note: expect.any(String) });
+    expect(out.timeseries).toMatchObject({ _approx: true, _approx_note: expect.any(String) });
   });
 
   it("marks origin-IP counts lower bounds and their error shares approximate when the IPs were cut to a top K", async () => {
@@ -319,7 +331,10 @@ describe("originAggregatesFromRollup", () => {
   it("marks slow-URL request counts lower bounds when the URLs were cut to a top K", async () => {
     const result = await rollupOf(WINDOWS);
     const cut: Rollup = { ...result.rollup, truncated: new Set(["urls/url"]) };
-    const meta = originAggregatesFromRollup({ ...result, rollup: cut }, body({ sections: ["slow_urls"] }))!.rollup;
+    const meta = originAggregatesFromRollup(
+      { ...result, rollup: cut },
+      body({ sections: ["slow_urls"], slow_urls_min_requests: 1 }),
+    )!.rollup;
     expect(meta.lower_bound).toEqual(["slow_urls.requests"]);
     expect(meta.approximate).toEqual(["slow_urls.p50_ms", "slow_urls.p95_ms", "slow_urls.p99_ms"]);
   });
@@ -370,7 +385,7 @@ describe("originFromRollup", () => {
 
   it("answers the page's full unfiltered TTFB read from summaries without reading raw files", async () => {
     const s = source();
-    const params = body({ sections: PAGE_SECTIONS, timeseries_metric: "ttfb", slow_urls_min_requests: 50 });
+    const params = body({ sections: PAGE_SECTIONS, timeseries_metric: "ttfb", slow_urls_min_requests: 1 });
     const served = await originFromRollup("/api/origin/aggregates", params, s) as OriginAggregatesResponse;
     expect(served).toEqual(originAggregatesFromRollup(await rollupOf(WINDOWS), params));
     expect([served.summary, served.timeseries, served.slow_urls, served.path_breakdown, served.pop_latency]

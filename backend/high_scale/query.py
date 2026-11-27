@@ -7201,12 +7201,25 @@ def query_endpoint(
         if (cached_res := _HS_QUERY_RESULT_CACHE.get(cache_key)) is not None:
             return {**cached_res, "_section_timings": section_timings}
     t0 = time.perf_counter()
+    explain_plan: str | None = None
     try:
         exec_fn: Any = client.execute
-        if "rewrite_cf" in inspect.signature(exec_fn).parameters:
+        uses_rewrite_cf = "rewrite_cf" in inspect.signature(exec_fn).parameters
+        if uses_rewrite_cf:
             res = exec_fn(sql, settings=settings, rewrite_cf=False)
         else:
             res = client.execute(sql, settings=settings)
+        if req.explain:
+            explain_sql = f"EXPLAIN {sql}"
+            explain_rows = (
+                exec_fn(explain_sql, settings=settings, rewrite_cf=False)
+                if uses_rewrite_cf
+                else client.execute(explain_sql, settings=settings)
+            )
+            explain_plan = "\n".join(
+                " ".join(str(v) for v in row.values()) if isinstance(row, Mapping) else str(row)
+                for row in (explain_rows or [])
+            )
     except Exception as e:
         raise RuntimeError(str(e)) from e
     timer.mark("execute", t0)
@@ -7259,6 +7272,7 @@ def query_endpoint(
         debug_queries=_debug_queries,
         debug_calls=get_tracked_calls(),
         section_timings=section_timings,
+        explain_plan=explain_plan,
     )
     if cache_key is not None:
         _HS_QUERY_RESULT_CACHE[cache_key] = dict(out)

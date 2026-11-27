@@ -352,9 +352,13 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
   const engine = params.engine ?? getDuckDBEngine().readContext();
   params = { ...params, customColumnTypes: engine.getCustomColumnTypes?.() };
   const where = buildCmcdWhere(params);
-  const bucketMs = Math.max(1, Math.min(14400, Math.floor(params.bucket_seconds ?? 60))) * 1000;
+  const bucketMs = Math.max(1, Math.min(14400, Math.floor(params.bucket_seconds ?? 300))) * 1000;
   const topN = Math.max(1, Math.min(100, Math.floor(params.top_n ?? 30)));
-  const nullable = (value: unknown) => value == null ? null : Number(value);
+  const nullable = (value: unknown) => {
+    if (value == null) return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? roundTo(n, 2) : null;
+  };
 
   const coreRows = breakdownOnly
     ? await engine.executeSql<Record<string, unknown>>(
@@ -868,24 +872,12 @@ export async function queryCmcdAggregates(params: CmcdQueryParams = {}) {
   };
 }
 
-export async function queryCmcdStatus(serviceId = "default", signal?: AbortSignal) {
-  const resolved = await resolveCmcdServiceEnabled(serviceId, signal ?? new AbortController().signal);
-  return {
-    service_id: resolved.serviceId,
-    enabled: resolved.enabled,
-    fields: [...CMCD_COLUMNS],
-  };
-}
-
 export async function handleCmcdRequest(
   path: string,
   params: CmcdQueryParams = {},
 ) {
   if (path.includes("/api/cmcd/aggregates")) {
     return queryCmcdAggregates(params);
-  }
-  if (path.includes("/cmcd/status")) {
-    return queryCmcdStatus(params.service_id ?? "default", params.signal);
   }
   if (path.includes("/cmcd/enable") || path.includes("/cmcd/disable")) {
     return { status: "complete", service_id: params.service_id ?? "default" };

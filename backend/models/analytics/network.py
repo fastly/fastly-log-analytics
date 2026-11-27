@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
 from backend.models.analytics._common import (
+    AnalyticsCompletenessMixin,
     ShieldingRow,
     _aliased_optional_field,
 )
@@ -133,7 +134,7 @@ class NetworkHealthSummary(BaseModel):
     worst_country: NetworkWorstEntry | None = None
 
 
-class NetworkHealthResponse(BaseResponse):
+class NetworkHealthResponse(AnalyticsCompletenessMixin, BaseResponse):
     has_data: bool = True
     reason: str | None = None
     available: bool
@@ -147,12 +148,11 @@ class NetworkHealthResponse(BaseResponse):
     metro_leaderboard: list[NetworkMetroRow] = []
     summary: NetworkHealthSummary | None = None
     countries: list[str] = []
-    _approx: bool = False
     has_metro: bool = False
     shielding_analysis: ShieldingAnalysis | None = None
 
 
-class NetworkQualityResponse(BaseResponse):
+class NetworkQualityResponse(AnalyticsCompletenessMixin, BaseResponse):
     available: bool
     by_country: list[NetworkQualityBarRow] = []
     by_asn: list[NetworkQualityBarRow] = []
@@ -161,7 +161,6 @@ class NetworkQualityResponse(BaseResponse):
     by_pop: list[NetworkQualityBarRow] = []
     scatter: list[NetworkQualityScatterPoint] = []
     countries: list[str] = []
-    _approx: bool = False
 
 
 class PopHealthItem(BaseModel):
@@ -175,7 +174,7 @@ class PopHealthItem(BaseModel):
     bandwidth_bytes: int
 
 
-class PopHealthListResponse(BaseResponse):
+class PopHealthListResponse(AnalyticsCompletenessMixin, BaseResponse):
     data: list[PopHealthItem]
 
 
@@ -239,7 +238,7 @@ class NetworkBundleRequest(NetworkHealthRequest):
     region_country: str = "US"
 
 
-class NetworkBundleResponse(BaseResponse):
+class NetworkBundleResponse(AnalyticsCompletenessMixin, BaseResponse):
     component_observations: dict[str, BaseResponse] | None = Field(
         default=None, serialization_alias="_component_observations"
     )

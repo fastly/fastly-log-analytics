@@ -124,7 +124,7 @@ export function UsageChartsGrid({
   rateEgress: number
   effectiveInterval: ChartInterval
   setChartInterval: (interval: ChartInterval) => void
-  /** Cloud only: the Compute Requests and Compute vCPU charts. */
+  /** Show Compute Requests and Compute vCPU charts when Compute metrics apply. */
   showCompute?: boolean
   compute?: ComputeUsageResponse
   loadingCompute?: boolean
@@ -473,10 +473,12 @@ export function UsageChartsGrid({
     [baseLayout, gridColor],
   )
 
+  const effectiveShowCompute = Boolean(showCompute || (compute != null && compute.source !== 'not_applicable'))
+
   const gridHeightClass =
-    showCompute && isRumEnabled
+    effectiveShowCompute && isRumEnabled
       ? 'min-h-[1512px] [contain-intrinsic-size:1512px]'
-      : showCompute || isRumEnabled
+      : effectiveShowCompute || isRumEnabled
         ? 'min-h-[1128px] [contain-intrinsic-size:1128px]'
         : 'min-h-[744px] [contain-intrinsic-size:744px]'
 
@@ -551,7 +553,7 @@ export function UsageChartsGrid({
         <PlotlyChart data={logProcData} layout={baseLayout} height="100%" />
       </AnalyticsCard>
 
-      {showCompute && (
+      {effectiveShowCompute && (
         <>
           <AnalyticsCard
             title="Compute Requests"

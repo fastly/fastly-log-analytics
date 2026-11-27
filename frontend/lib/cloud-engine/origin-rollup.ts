@@ -76,20 +76,25 @@ function ipHealth(result: RollupResult, limit: number): OriginIpHealthSection | 
     .map(([oip, agg]) => ({
       oip, agg,
       errorPct: agg.ostTotal ? roundTo((agg.ost5xx * 100) / agg.ostTotal, 1) : null,
+      hist: latencyHistogram(agg),
     }));
-  const pick = (min: number) => all.filter(({ agg }) => agg.ostTotal >= min);
-  const kept = pick(10).length ? pick(10) : pick(1);
-  const shown = kept
-    .sort((a, b) => (b.errorPct ?? -1) - (a.errorPct ?? -1) || b.agg.ostTotal - a.agg.ostTotal ||
+  const kept = all.filter(({ agg }) => agg.ostTotal >= 10);
+  const rows: OriginIpHealthRow[] = [];
+  for (const { oip, agg, hist } of kept) {
+    if (hist === undefined || agg.ostTotal !== agg.requests) return undefined;
+    rows.push({
+      oip,
+      requests: agg.ostTotal,
+      p50_ms: ms(hist, 0.5),
+      p95_ms: ms(hist, 0.95),
+      error_pct: agg.ostTotal ? roundTo((agg.ost5xx * 100) / agg.ostTotal, 1) : null,
+    });
+  }
+  const sorted = rows
+    .sort((a, b) => (b.p95_ms ?? -Infinity) - (a.p95_ms ?? -Infinity) || b.requests - a.requests ||
       (a.oip < b.oip ? -1 : a.oip > b.oip ? 1 : 0))
     .slice(0, Math.max(1, Math.min(100, Math.trunc(limit))));
-  const rows: OriginIpHealthRow[] = [];
-  for (const { oip, agg, errorPct } of shown) {
-    const hist = latencyHistogram(agg);
-    if (hist === undefined || agg.ostTotal !== agg.requests) return undefined;
-    rows.push({ oip, requests: agg.ostTotal, p50_ms: ms(hist, 0.5), p95_ms: ms(hist, 0.95), error_pct: errorPct });
-  }
-  return { has_data: rows.length > 0, rows };
+  return { has_data: sorted.length > 0, rows: sorted };
 }
 
 /**
@@ -160,9 +165,8 @@ function slowUrls(result: RollupResult, body: OriginRollupBody): OriginSlowUrlsS
     const requests = agg.hists.ttfb?.count() ?? 0;
     return requests ? [{ url, requests, hist: agg.hists.ttfb }] : [];
   });
-  const min = Math.max(1, Math.trunc(body.slow_urls_min_requests ?? 10));
-  let kept = all.filter((row) => row.requests >= min);
-  if (!kept.length) kept = all;
+  const min = Math.max(1, Math.trunc(body.slow_urls_min_requests ?? 50));
+  const kept = all.filter((row) => row.requests >= min);
   const rows = kept
     .map((row) => ({ ...row, p95: row.hist!.quantile(0.95)! }))
     .sort((a, b) => b.p95 - a.p95 || b.requests - a.requests || (a.url < b.url ? -1 : a.url > b.url ? 1 : 0))
@@ -282,6 +286,11 @@ export function originRollupEligible(path: string, body: OriginRollupBody): bool
  * each section's reader). Counts and shares are exact unless a top K cut them;
  * percentiles come from histograms.
  */
+const APPROX_EXACT_NOTE = "Percentiles are estimated from summary histograms (≈). Counts are exact.";
+const APPROX_LOWER_BOUND_NOTE =
+  "Percentiles are estimated from summary histograms (≈). Request counts are lower bounds (≥): summaries keep only their busiest values.";
+const APPROX_TIMESERIES_NOTE = "Percentiles are estimated from summary histograms (≈). Miss counts are exact.";
+
 export function originAggregatesFromRollup(
   result: RollupResult,
   body: OriginRollupBody,
@@ -293,11 +302,20 @@ export function originAggregatesFromRollup(
   if (sections.has("ip_health")) {
     const section = ipHealth(result, body.ip_health_limit ?? 30);
     if (!section) return null;
-    out.ip_health = section;
-    approximate.push("ip_health.p50_ms", "ip_health.p95_ms");
-    if (result.rollup.truncated.has("dims/oip")) {
-      approximate.push("ip_health.error_pct");
-      lowerBound.push("ip_health.requests");
+    const truncatedIp = result.rollup.truncated.has("dims/oip");
+    if (section.has_data) {
+      out.ip_health = {
+        ...section,
+        _approx: true,
+        _approx_note: truncatedIp ? APPROX_LOWER_BOUND_NOTE : APPROX_EXACT_NOTE,
+      };
+      approximate.push("ip_health.p50_ms", "ip_health.p95_ms");
+      if (truncatedIp) {
+        approximate.push("ip_health.error_pct");
+        lowerBound.push("ip_health.requests");
+      }
+    } else {
+      out.ip_health = section;
     }
   }
   if (sections.has("status_codes")) {
@@ -308,37 +326,67 @@ export function originAggregatesFromRollup(
   if (sections.has("timeseries")) {
     const section = latencySeries(result, body);
     if (!section) return null;
-    out.timeseries = section;
-    approximate.push("timeseries.value");
+    if (section.has_data) {
+      out.timeseries = { ...section, _approx: true, _approx_note: APPROX_TIMESERIES_NOTE };
+      approximate.push("timeseries.value");
+    } else {
+      out.timeseries = section;
+    }
   }
   if (sections.has("summary")) {
     const section = originSummary(result);
     if (!section) return null;
-    out.summary = section;
-    approximate.push(
-      "summary.ottfb_p50_ms", "summary.ottfb_p75_ms", "summary.ottfb_p95_ms", "summary.ottfb_p99_ms",
-      "summary.ottlb_p50_ms", "summary.ottlb_p95_ms", "summary.cdn_overhead_p50_ms", "summary.obytes_p50",
-    );
+    if (section.has_data) {
+      out.summary = { ...section, _approx: true, _approx_note: APPROX_EXACT_NOTE };
+      approximate.push(
+        "summary.ottfb_p50_ms", "summary.ottfb_p75_ms", "summary.ottfb_p95_ms", "summary.ottfb_p99_ms",
+        "summary.ottlb_p50_ms", "summary.ottlb_p95_ms", "summary.cdn_overhead_p50_ms", "summary.obytes_p50",
+      );
+    } else {
+      out.summary = section;
+    }
   }
   if (sections.has("slow_urls")) {
     const section = slowUrls(result, body);
     if (!section) return null;
-    out.slow_urls = section;
-    approximate.push("slow_urls.p50_ms", "slow_urls.p95_ms", "slow_urls.p99_ms");
-    if (result.rollup.truncated.has("urls/url")) lowerBound.push("slow_urls.requests");
+    const truncatedUrls = result.rollup.truncated.has("urls/url");
+    if (section.has_data) {
+      out.slow_urls = {
+        ...section,
+        _approx: true,
+        _approx_note: truncatedUrls ? APPROX_LOWER_BOUND_NOTE : APPROX_EXACT_NOTE,
+      };
+      approximate.push("slow_urls.p50_ms", "slow_urls.p95_ms", "slow_urls.p99_ms");
+      if (truncatedUrls) lowerBound.push("slow_urls.requests");
+    } else {
+      out.slow_urls = section;
+    }
   }
   if (sections.has("path_breakdown")) {
     const section = pathBreakdown(result);
     if (!section) return null;
-    out.path_breakdown = section;
-    approximate.push("path_breakdown.p50_ms", "path_breakdown.p95_ms");
+    if (section.has_data) {
+      out.path_breakdown = { ...section, _approx: true, _approx_note: APPROX_EXACT_NOTE };
+      approximate.push("path_breakdown.p50_ms", "path_breakdown.p95_ms");
+    } else {
+      out.path_breakdown = section;
+    }
   }
   if (sections.has("pop_latency")) {
     const section = popLatency(result, body);
     if (!section) return null;
-    out.pop_latency = section;
-    approximate.push("pop_latency.p50_ms", "pop_latency.p95_ms");
-    if (result.rollup.truncated.has("origin/pop")) lowerBound.push("pop_latency.requests");
+    const truncatedPops = result.rollup.truncated.has("origin/pop");
+    if (section.has_data) {
+      out.pop_latency = {
+        ...section,
+        _approx: true,
+        _approx_note: truncatedPops ? APPROX_LOWER_BOUND_NOTE : APPROX_EXACT_NOTE,
+      };
+      approximate.push("pop_latency.p50_ms", "pop_latency.p95_ms");
+      if (truncatedPops) lowerBound.push("pop_latency.requests");
+    } else {
+      out.pop_latency = section;
+    }
   }
   out.has_data = out.summary.has_data || out.timeseries.has_data || out.slow_urls.has_data ||
     out.status_codes.has_data || out.path_breakdown.has_data || out.pop_latency.has_data || out.ip_health.has_data;
@@ -417,21 +465,25 @@ function filteredOriginSummary(
   const agg = found ?? emptyAgg();
   const out = emptyOriginAggregates();
   const { ottfb, ottlb } = agg.hists;
-  out.summary = ottfb?.count()
-    ? shapeOriginSummaryRow({
-      total_misses: agg.missRequests,
-      total_passes: agg.passRequests,
-      ottfb_p50_ms: ms(ottfb, 0.5),
-      ottfb_p75_ms: ms(ottfb, 0.75),
-      ottfb_p95_ms: ms(ottfb, 0.95),
-      ottfb_p99_ms: ms(ottfb, 0.99),
-      ottlb_p50_ms: ms(ottlb, 0.5),
-      ottlb_p95_ms: ms(ottlb, 0.95),
-      cdn_overhead_p50_ms: null,
-      origin_error_rate: agg.ostTotal ? agg.ost5xx / agg.ostTotal : null,
-      obytes_p50: null,
-    })
-    : emptyOriginSummary();
+  out.summary = {
+    ...(ottfb?.count()
+      ? shapeOriginSummaryRow({
+        total_misses: agg.missRequests,
+        total_passes: agg.passRequests,
+        ottfb_p50_ms: ms(ottfb, 0.5),
+        ottfb_p75_ms: ms(ottfb, 0.75),
+        ottfb_p95_ms: ms(ottfb, 0.95),
+        ottfb_p99_ms: ms(ottfb, 0.99),
+        ottlb_p50_ms: ms(ottlb, 0.5),
+        ottlb_p95_ms: ms(ottlb, 0.95),
+        cdn_overhead_p50_ms: null,
+        origin_error_rate: agg.ostTotal ? agg.ost5xx / agg.ostTotal : null,
+        obytes_p50: null,
+      })
+      : emptyOriginSummary()),
+    _approx: true,
+    _approx_note: isTruncated ? APPROX_LOWER_BOUND_NOTE : APPROX_EXACT_NOTE,
+  };
   out.has_data = out.summary.has_data;
   return {
     ...out,

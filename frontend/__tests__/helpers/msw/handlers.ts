@@ -279,6 +279,7 @@ export const handlers = [
   post('/api/usage/operations', { rows: [], total: 0 }),
   get('/api/usage/prefill', { rows: [], total: 0 }),
   get('/api/usage/prefill/rates', { rows: [], total: 0 }),
+  get('/api/usage/compute', { source: 'not_applicable', data: [] }),
   get('/api/usage/current-storage', {
     live_bytes: 0,
     live_files: 0,
