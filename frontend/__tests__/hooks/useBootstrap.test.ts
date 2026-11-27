@@ -31,6 +31,7 @@ import {
   useActiveLogFields,
   useAnalystHeartbeat,
   useBootstrap,
+  useCapabilities,
   useEnforceMaskedFilters,
   useIsAnalyst,
   useIsDataReady,
@@ -2599,6 +2600,59 @@ describe('runEventStream, useEventStream, useServiceStream & useAdminEventStream
           value: origLocation,
         })
       }
+    })
+  })
+
+  describe('useCapabilities', () => {
+    it('returns bootstrapData.capabilities when present and falls back to isCloudMode defaults before bootstrap settles', () => {
+      setCloudModeRuntime(false)
+      const qc1 = createTestQueryClient({ queries: { gcTime: Infinity } })
+      const { result: hsDefault } = renderHook(() => useCapabilities(), {
+        wrapper: makeQueryWrapper(qc1),
+      })
+      expect(hsDefault.current).toMatchObject({
+        edition: 'high_scale',
+        auth_mode: 'share_passcode_oauth',
+        heartbeat_required: true,
+        alerts: true,
+      })
+
+      setCloudModeRuntime(true)
+      const qc2 = createTestQueryClient({ queries: { gcTime: Infinity } })
+      const { result: cloudDefault } = renderHook(() => useCapabilities(), {
+        wrapper: makeQueryWrapper(qc2),
+      })
+      expect(cloudDefault.current).toMatchObject({
+        edition: 'cloud',
+        auth_mode: 'passkey',
+        heartbeat_required: false,
+        alerts: false,
+        ngwaf_workspaces: true,
+      })
+
+      setCloudModeRuntime(false)
+      const qc3 = createTestQueryClient({ queries: { gcTime: Infinity } })
+      qc3.setQueryData(queryKeys.bootstrap(), {
+        capabilities: {
+          edition: 'cloud',
+          auth_mode: 'passkey',
+          alerts: false,
+          operational_logs: false,
+          postgres_metadata_storage: false,
+          ngwaf_workspaces: true,
+          sqlite_debug_profiler: false,
+          fos_multi_service_restore: false,
+          heartbeat_required: false,
+        },
+      })
+      const { result: fromBootstrap } = renderHook(() => useCapabilities(), {
+        wrapper: makeQueryWrapper(qc3),
+      })
+      expect(fromBootstrap.current).toMatchObject({
+        edition: 'cloud',
+        auth_mode: 'passkey',
+        heartbeat_required: false,
+      })
     })
   })
 })

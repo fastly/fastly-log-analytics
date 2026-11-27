@@ -6,12 +6,12 @@ import { Activity, AlertTriangle, Database, Eye, Layers, ShieldCheck, TrendingUp
 import type { components } from '@/types/api.generated'
 import { adminJson, client, unwrapClient, queryKeys } from '@/lib/api'
 import { buildServiceHref, formatCount } from '@/lib/utils'
-import { useBootstrap, useMounted } from '@/hooks/useBootstrap'
+import { useBootstrap, useCapabilities, useMounted } from '@/hooks/useBootstrap'
 import { useServiceStore } from '@/stores/filterStore'
 import { Badge } from '@/components/ui/badge'
 import { buttonVariants } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
-import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { CLOUD_PRUNED_ADMIN_HREFS } from '@/components/AppLayoutChrome'
 
 const ADMIN_PREFETCH_LINKS = [
@@ -27,9 +27,11 @@ const ADMIN_PREFETCH_LINKS = [
 export function AdminPrefetchLinks() {
   const queryClient = useQueryClient()
   const mounted = useMounted()
+  const capabilities = useCapabilities()
+  const cloudMode = capabilities.edition === 'cloud' || isCloudMode()
   const storeServiceId = useServiceStore(s => s.activeServiceId)
   const activeServiceId = mounted ? storeServiceId : null
-  const visibleLinks = IS_CLOUD_MODE
+  const visibleLinks = cloudMode
     ? ADMIN_PREFETCH_LINKS.filter(item => !CLOUD_PRUNED_ADMIN_HREFS.has(item.href))
     : ADMIN_PREFETCH_LINKS
   const handlePrefetch = (key: (typeof ADMIN_PREFETCH_LINKS)[number]['key']) => {
@@ -78,7 +80,9 @@ function useOpsOverviewSeed(): { seed: OpsOverviewSeed; seedServiceId: string | 
 }
 
 export function OperationsOverview() {
-  if (IS_CLOUD_MODE) {
+  const capabilities = useCapabilities()
+  const cloudMode = capabilities.edition === 'cloud' || isCloudMode()
+  if (cloudMode) {
     return (
       <div className="grid grid-cols-1 md:grid-cols-1 gap-3 min-h-[108px] [contain-intrinsic-size:auto_108px]" data-testid="admin-operations-overview">
         <IngestHealthCard />

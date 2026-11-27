@@ -14,7 +14,8 @@ import { DeployRemoteFrontendDialog, TeardownRemoteFrontendDialog } from "@/comp
 import { Skeleton } from "@/components/ui/skeleton"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { client, extractApiError, queryKeys, unwrapClient } from "@/lib/api"
-import { IS_CLOUD_MODE } from "@/lib/cloud-engine/mode"
+import { useCapabilities } from "@/hooks/useBootstrap"
+import { isCloudMode } from "@/lib/cloud-engine/mode"
 import { cn } from "@/lib/utils"
 import Loading from "./loading"
 import { InvitationsPanel } from "./InvitationsPanel"
@@ -37,6 +38,8 @@ function ShareDashboardPageContent() {
   const queryClient = useQueryClient()
   const searchParams = useSearchParams()
   const activeServiceId = searchParams?.get('service')
+  const capabilities = useCapabilities()
+  const isPasskeyMode = capabilities.auth_mode === 'passkey' || isCloudMode()
 
   const [actionError, setActionError] = React.useState('')
   const [activeTab, setActiveTab] = useQueryState('tab', shareTabParser)
@@ -62,7 +65,7 @@ function ShareDashboardPageContent() {
   const { data: live } = useQuery({
     queryKey: SHARE_LIVE_QUERY_KEY,
     queryFn: async ({ signal }) => (await unwrapClient(client.GET('/api/admin/share/live', { signal }))) as ShareLiveFields,
-    enabled: !IS_CLOUD_MODE,
+    enabled: !isPasskeyMode,
     staleTime: 10_000,
     refetchInterval: 5 * 60_000,
     refetchIntervalInBackground: false,
@@ -85,15 +88,15 @@ function ShareDashboardPageContent() {
   return (
     <div className="space-y-6" data-testid="admin-share-root">
       <PageHeader
-        title={IS_CLOUD_MODE ? "Users & Passkey Invitations" : "Remote Dashboard Sharing"}
+        title={isPasskeyMode ? "Users & Passkey Invitations" : "Remote Dashboard Sharing"}
         description={
-          IS_CLOUD_MODE
+          isPasskeyMode
             ? "Create one-time passkey invitation links for admins or analysts, manage registered users, and review the admin audit trail."
             : "Start the share tunnel, manage analyst invitations, monitor live sessions, and review the audit trail."
         }
         icon={ShieldAlert}
       >
-        {!IS_CLOUD_MODE && (
+        {!isPasskeyMode && (
           activeService && activeService.remote_frontend_deployed ? (
             <TeardownRemoteFrontendDialog
               serviceId={activeService.service_id}
@@ -111,7 +114,7 @@ function ShareDashboardPageContent() {
         <BackToAdminLink />
       </PageHeader>
 
-      {!IS_CLOUD_MODE && (
+      {!isPasskeyMode && (
         <Alert className="border-amber-300 bg-amber-50 text-amber-900 [&>svg]:text-amber-900">
           <AlertTriangle className="h-4 w-4" />
           <AlertDescription>
@@ -137,7 +140,7 @@ function ShareDashboardPageContent() {
         </Alert>
       )}
 
-      {!IS_CLOUD_MODE && (
+      {!isPasskeyMode && (
         <div
           className={cn(
             'min-h-[220px] [contain-intrinsic-size:auto_220px] [content-visibility:auto] transition-opacity',
@@ -158,7 +161,7 @@ function ShareDashboardPageContent() {
       <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full" data-testid="admin-share-tabs">
         <TabsList>
           <TabsTrigger value="invites" data-testid="admin-share-tab-invites">Invitations</TabsTrigger>
-          <TabsTrigger value="sessions" data-testid="admin-share-tab-sessions">{IS_CLOUD_MODE ? "Users & Passkeys" : "Sessions"}</TabsTrigger>
+          <TabsTrigger value="sessions" data-testid="admin-share-tab-sessions">{isPasskeyMode ? "Users & Passkeys" : "Sessions"}</TabsTrigger>
           <TabsTrigger value="audit" data-testid="admin-share-tab-audit">Audit</TabsTrigger>
         </TabsList>
 

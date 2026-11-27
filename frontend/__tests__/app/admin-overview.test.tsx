@@ -872,6 +872,61 @@ describe('InvitationsPanel, CreateInviteDialog & useTableSort', () => {
     expect(hasCheck(alice)).toBe(false)
   })
 
+  test('InvitationsPanel hides Edit popover and passcode copy text in passkey mode, and SessionsPanel shows auth_method', async () => {
+    const { SessionsPanel } = await import('@/app/admin/share/ShareSessionsAndAuditPanels')
+    const { buildShareCard } = await import('@/app/admin/share/InvitationsPanel')
+    const passkeyCard = buildShareCard(
+      {
+        id: 'i-pk',
+        name: 'Cloud User',
+        email: 'analyst',
+        auth_method: 'passkey' as never,
+        service_ids: ['svcA'],
+        expires_at: null,
+        created_at: '2026-06-05T09:00:00Z',
+        last_login_at: null,
+        pii_policy: { mask_ips: false },
+        allow_concurrent_sessions: true,
+      },
+      'https://cloud.example.com',
+      [{ service_id: 'svcA', name: 'Service A' }],
+    )
+    expect(passkeyCard).not.toContain('Passcode:')
+    expect(passkeyCard).toContain('Passkey')
+
+    setCloudModeRuntime(true)
+    try {
+      const { unmount } = render(<InvitationsPanel status={shareStatusFixture} onRefresh={vi.fn()} onError={vi.fn()} />)
+      expect(screen.queryByTitle('Edit invite (services, privacy, shared logins)')).not.toBeInTheDocument()
+      unmount()
+
+      render(
+        <SessionsPanel
+          status={{
+            ...shareStatusFixture,
+            sessions: [
+              {
+                session_id: 'u1',
+                invite_id: 'u1',
+                name: 'Passkey User',
+                email: 'analyst',
+                auth_method: 'Passkey (2)' as never,
+                ip_address: '—',
+                last_active_time: '2026-06-05T10:00:00Z',
+              } as never,
+            ],
+          }}
+          onRefresh={vi.fn()}
+          onError={vi.fn()}
+        />,
+      )
+      expect(screen.getByText('Passkey (2)')).toBeInTheDocument()
+      expect(screen.queryByText('Passcode')).not.toBeInTheDocument()
+    } finally {
+      setCloudModeRuntime(false)
+    }
+  })
+
   test('CreateInviteDialog handles allow_concurrent_sessions and OAuth provider modes', async () => {
     useServiceStore.setState({ activeServiceId: 'svcA' })
     const shareServices: ShareStatus['services'] = [{ service_id: 'svcA', name: 'Service A' }]

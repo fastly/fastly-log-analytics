@@ -26,6 +26,28 @@ function sustainedLoss(buckets: Bucket[]) {
   };
 }
 
+function emptyLogAccountingResponse(fromTs: string, toTs: string, reason: string) {
+  return {
+    available: false,
+    reason,
+    by: "day" as const,
+    from_ts: fromTs,
+    to_ts: toTs,
+    buckets: [],
+    totals: {
+      fastly_requests: 0,
+      our_rows: 0,
+      gap: 0,
+      gap_pct: 0,
+      worst_bucket_ts: null,
+      worst_bucket_gap_pct: null,
+    },
+    sustained_loss: null,
+    catchup: null,
+    measurement_basis: "native_sample_adjusted_daily",
+  };
+}
+
 export async function cloudLogAccounting(request: Request): Promise<Response> {
   const hours = Math.min(720, Math.max(24, Number(new URL(request.url).searchParams.get("hours")) || 24));
   let traffic;
@@ -34,33 +56,40 @@ export async function cloudLogAccounting(request: Request): Promise<Response> {
   } catch (error) {
     if (error instanceof AdminApiError && error.status !== 401 && error.status !== 403) {
       const nowS = Math.floor(Date.now() / 1000);
-      return Response.json({
-        available: false,
-        reason: error.message || "Fastly logged traffic accounting is unavailable for this service.",
-        by: "day",
-        from_ts: new Date((nowS - hours * 3600) * 1000).toISOString(),
-        to_ts: new Date(nowS * 1000).toISOString(),
-        measurement_basis: "native_sample_adjusted_daily",
-      });
+      return Response.json(
+        emptyLogAccountingResponse(
+          new Date((nowS - hours * 3600) * 1000).toISOString(),
+          new Date(nowS * 1000).toISOString(),
+          error.message || "Fastly logged traffic accounting is unavailable for this service.",
+        ),
+      );
     }
     throw error;
   }
   const from = Math.max(traffic.from, traffic.to - hours * 3600);
   const days = traffic.days.filter((day) => day.day >= from && day.day < traffic.to);
   if (!days.length || days.some((day) => day.expected_rows == null || day.ingested_rows == null)) {
-    return Response.json({
-      available: false, reason: "Daily sample-adjusted request and ingested-row counts are not both available for this period.",
-      by: "day", from_ts: new Date(from * 1000).toISOString(),
-      to_ts: new Date(traffic.to * 1000).toISOString(),
-      measurement_basis: "native_sample_adjusted_daily",
-    });
+    return Response.json(
+      emptyLogAccountingResponse(
+        new Date(from * 1000).toISOString(),
+        new Date(traffic.to * 1000).toISOString(),
+        "Daily sample-adjusted request and ingested-row counts are not both available for this period.",
+      ),
+    );
   }
   const buckets = days.map((day) => {
     const expected = Number(day.expected_rows);
     const rows = Number(day.ingested_rows);
     const gap = Math.max(0, expected - rows);
-    return { ts: new Date(day.day * 1000).toISOString(),
-      fastly_requests: expected, our_rows: rows, gap, gap_pct: expected ? gap / expected : 0 };
+    const fileCount = Number((day as { file_count?: unknown }).file_count ?? 0);
+    return {
+      ts: new Date(day.day * 1000).toISOString(),
+      fastly_requests: expected,
+      our_rows: rows,
+      file_count: Number.isFinite(fileCount) ? fileCount : 0,
+      gap,
+      gap_pct: expected ? gap / expected : 0,
+    };
   });
   const expected = buckets.reduce((total, bucket) => total + bucket.fastly_requests, 0);
   const rows = buckets.reduce((total, bucket) => total + bucket.our_rows, 0);
@@ -72,11 +101,17 @@ export async function cloudLogAccounting(request: Request): Promise<Response> {
     from_ts: new Date(from * 1000).toISOString(),
     to_ts: new Date(traffic.to * 1000).toISOString(),
     buckets,
-    totals: { fastly_requests: expected, our_rows: rows, gap,
+    totals: {
+      fastly_requests: expected,
+      our_rows: rows,
+      gap,
       gap_pct: expected ? gap / expected : 0,
-      worst_bucket_ts: worst?.ts ?? null, worst_bucket_gap_pct: worst?.gap_pct ?? null },
+      worst_bucket_ts: worst?.ts ?? null,
+      worst_bucket_gap_pct: worst?.gap_pct ?? null,
+    },
     // Native days are complete UTC days, so every bucket counts.
     sustained_loss: sustainedLoss(buckets),
+    catchup: null,
     measurement_basis: "native_sample_adjusted_daily",
   });
 }

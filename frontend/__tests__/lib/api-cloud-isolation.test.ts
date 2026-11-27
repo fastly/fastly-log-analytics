@@ -190,6 +190,35 @@ describe("Cloud subresource 401 session verification", () => {
     expect(replace).toHaveBeenCalledWith("/share-login?return=%2Fdashboard%3Fservice%3Dtest");
   });
 
+  it.each(["Forbidden", "Front authentication required"])(
+    "treats Cloud plain-string 403 (%s) as potential dead session via /api/auth/session",
+    async (plainBody) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL) =>
+          String(input instanceof Request ? input.url : input).endsWith("/api/auth/session")
+            ? Response.json({ user: null }, { status: 200 })
+            : new Response(plainBody, { status: 403 }),
+        ),
+      );
+      await expect(client.GET("/api/health")).rejects.toMatchObject({ status: 403 });
+      expect(replace).toHaveBeenCalledWith("/share-login?return=%2Fdashboard%3Fservice%3Dtest");
+    },
+  );
+
+  it("does not redirect on Cloud plain-string 403 when /api/auth/session confirms active user", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) =>
+        String(input instanceof Request ? input.url : input).endsWith("/api/auth/session")
+          ? Response.json({ user: { id: "analyst-1" } }, { status: 200 })
+          : new Response("Forbidden", { status: 403 }),
+      ),
+    );
+    await expect(client.GET("/api/health")).rejects.toMatchObject({ status: 403 });
+    expect(replace).not.toHaveBeenCalled();
+  });
+
   it.each(["network", "server", "malformed"] as const)("does not log out on an inconclusive %s probe", async (failure) => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       if (!String(input instanceof Request ? input.url : input).endsWith("/api/auth/session")) {

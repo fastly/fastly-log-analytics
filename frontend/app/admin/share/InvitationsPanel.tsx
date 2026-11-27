@@ -13,8 +13,9 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { useAutoFlash, useCopyToClipboard } from "@/hooks/useSSE"
+import { useCapabilities } from "@/hooks/useBootstrap"
 import { client, extractApiError, unwrapClient } from "@/lib/api"
-import { IS_CLOUD_MODE } from "@/lib/cloud-engine/mode"
+import { isCloudMode } from "@/lib/cloud-engine/mode"
 import { formatDeterministicUTC } from "@/lib/utils"
 import { CreateInviteDialog } from "./CreateInviteDialog"
 import { SortableHead } from "./SharingControlPanel"
@@ -40,7 +41,8 @@ const PasscodeDraftSchema = z.string().min(1)
 export function buildShareCard(
   invite: Invite,
   publicUrl: string | null,
-  allServices: Array<{ service_id: string; name?: string }> = []
+  allServices: Array<{ service_id: string; name?: string }> = [],
+  authMode?: 'share_passcode_oauth' | 'passkey',
 ): string {
   const url = publicUrl || '(sharing not active)'
   const nameById = new Map(allServices.map((s) => [s.service_id, s.name || '']))
@@ -49,10 +51,13 @@ export function buildShareCard(
     return name ? `${name} (${id})` : id
   })
   const services = formatted.length ? formatted.join(', ') : 'all assigned services'
+  const isPasskey = (invite.auth_method as string | undefined) === 'passkey' || authMode === 'passkey'
   const credLines =
-    invite.auth_method === 'oauth'
-      ? `Sign-in:      ${invite.oauth_provider ? `${invite.oauth_provider} (SSO)` : 'SSO'}\n              Sign in at the link with the account for ${invite.email}.`
-      : `Passcode:     (delivered separately — never paste here)`
+    isPasskey
+      ? `Sign-in:      Passkey (WebAuthn)\n              Register or sign in with your passkey at the link above.`
+      : invite.auth_method === 'oauth'
+        ? `Sign-in:      ${invite.oauth_provider ? `${invite.oauth_provider} (SSO)` : 'SSO'}\n              Sign in at the link with the account for ${invite.email}.`
+        : `Passcode:     (delivered separately — never paste here)`
   return `==================================================
 FASTLY LOG ANALYSIS - SHARE DASHBOARD INVITATION
 ==================================================
@@ -69,6 +74,8 @@ Note: You will be required to review and agree to the Terms of Access upon signi
 }
 
 export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }: InvitationsPanelProps) {
+  const capabilities = useCapabilities()
+  const isPasskeyMode = capabilities.auth_mode === 'passkey' || isCloudMode()
   const [createOpen, setCreateOpen] = React.useState(false)
   const { busy, run } = useShareMutation(onError, onRefresh)
   const [lastCopiedInviteId, setLastCopiedInviteId] = React.useState<string | null>(null)
@@ -175,7 +182,7 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
 
   const handleCopyShareCard = (invite: Invite) => {
     setLastCopiedInviteId(invite.id)
-    void copy(buildShareCard(invite, status?.public_url ?? null, services))
+    void copy(buildShareCard(invite, status?.public_url ?? null, services, isPasskeyMode ? 'passkey' : 'share_passcode_oauth'))
   }
 
   const inviteColumns: BasicColumnDef<Invite>[] = [
@@ -200,20 +207,20 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
                 variant="outline"
                 className="text-[10px] font-normal"
                 title={
-                  IS_CLOUD_MODE
+                  isPasskeyMode
                     ? 'Signs in via WebAuthn Passkey'
                     : invite.auth_method === 'oauth'
                       ? 'Signs in via SSO / OIDC'
                       : 'Signs in with a passcode'
                 }
               >
-                {IS_CLOUD_MODE
+                {isPasskeyMode
                   ? 'Passkey'
                   : invite.auth_method === 'oauth'
                     ? `SSO${invite.oauth_provider ? ` · ${invite.oauth_provider}` : ''}`
                     : 'Passcode'}
               </Badge>
-              {!IS_CLOUD_MODE && invite.allow_concurrent_sessions && (
+              {!isPasskeyMode && invite.allow_concurrent_sessions && (
                 <Badge variant="outline" className="text-[10px] font-normal" title="Multiple people can use this link at the same time">
                   Shared
                 </Badge>
@@ -300,55 +307,57 @@ export function InvitationsPanel({ status, onRefresh, onError, onViewAuditLogs }
                 )}
               </PopoverContent>
             </Popover>
-            <Popover open={editingServicesFor === invite.id} onOpenChange={(o) => (o ? openEditServices(invite) : setEditingServicesFor(null))}>
-              <PopoverTrigger
-                render={(props: React.ComponentPropsWithRef<'button'>) => (
-                  <Button {...props} size="sm" variant="ghost" title="Edit invite (services, privacy, shared logins)">
-                    <Pencil className="h-3 w-3" />
-                  </Button>
-                )}
-              />
-              <PopoverContent className="w-72">
-                <div className="text-xs font-semibold mb-1">Authorized services</div>
-                <div className="space-y-1 max-h-48 overflow-y-auto">
-                  {services.map((svc) => {
-                    const checked = editingServicesDraft.includes(svc.service_id)
-                    return (
-                      <label key={svc.service_id} className="flex items-center gap-2 text-sm cursor-pointer">
-                        <Checkbox
-                          checked={checked}
-                          onCheckedChange={(v) =>
-                            setEditingServicesDraft((prev) =>
-                              v ? [...prev, svc.service_id] : prev.filter((id) => id !== svc.service_id),
-                            )
-                          }
-                        />
-                        <span className="truncate">{svc.name}</span>
-                      </label>
-                    )
-                  })}
-                  {!services.length && <p className="text-xs text-muted-foreground">No services available.</p>}
-                </div>
-                <label className="flex items-center gap-2 text-sm cursor-pointer pt-2 mt-2 border-t">
-                  <Checkbox checked={editingMaskIps} onCheckedChange={(v) => setEditingMaskIps(!!v)} />
-                  <span>Anonymize client IPs (mask PII)</span>
-                </label>
-                <label className="flex items-center gap-2 text-sm cursor-pointer pt-2 mt-2 border-t">
-                  <Checkbox checked={editingAllowConcurrent} onCheckedChange={(v) => setEditingAllowConcurrent(!!v)} />
-                  <span>Allow shared logins (multiple people at once)</span>
-                </label>
-                <div className="flex justify-end gap-1 pt-2 border-t">
-                  <Button size="sm" variant="ghost" onClick={() => setEditingServicesFor(null)} disabled={savingServices}>
-                    Cancel
-                  </Button>
-                  <Button size="sm" onClick={() => handleSaveServices(invite.id)} disabled={savingServices}>
-                    {savingServices && <Loader2 className="h-3 w-3 mr-1 animate-spin" />}
-                    Save
-                  </Button>
-                </div>
-              </PopoverContent>
-            </Popover>
-            {!IS_CLOUD_MODE && invite.auth_method !== 'oauth' && (
+            {!isPasskeyMode && (
+              <Popover open={editingServicesFor === invite.id} onOpenChange={(o) => (o ? openEditServices(invite) : setEditingServicesFor(null))}>
+                <PopoverTrigger
+                  render={(props: React.ComponentPropsWithRef<'button'>) => (
+                    <Button {...props} size="sm" variant="ghost" title="Edit invite (services, privacy, shared logins)">
+                      <Pencil className="h-3 w-3" />
+                    </Button>
+                  )}
+                />
+                <PopoverContent className="w-72">
+                  <div className="text-xs font-semibold mb-1">Authorized services</div>
+                  <div className="space-y-1 max-h-48 overflow-y-auto">
+                    {services.map((svc) => {
+                      const checked = editingServicesDraft.includes(svc.service_id)
+                      return (
+                        <label key={svc.service_id} className="flex items-center gap-2 text-sm cursor-pointer">
+                          <Checkbox
+                            checked={checked}
+                            onCheckedChange={(v) =>
+                              setEditingServicesDraft((prev) =>
+                                v ? [...prev, svc.service_id] : prev.filter((id) => id !== svc.service_id),
+                              )
+                            }
+                          />
+                          <span className="truncate">{svc.name}</span>
+                        </label>
+                      )
+                    })}
+                    {!services.length && <p className="text-xs text-muted-foreground">No services available.</p>}
+                  </div>
+                  <label className="flex items-center gap-2 text-sm cursor-pointer pt-2 mt-2 border-t">
+                    <Checkbox checked={editingMaskIps} onCheckedChange={(v) => setEditingMaskIps(!!v)} />
+                    <span>Anonymize client IPs (mask PII)</span>
+                  </label>
+                  <label className="flex items-center gap-2 text-sm cursor-pointer pt-2 mt-2 border-t">
+                    <Checkbox checked={editingAllowConcurrent} onCheckedChange={(v) => setEditingAllowConcurrent(!!v)} />
+                    <span>Allow shared logins (multiple people at once)</span>
+                  </label>
+                  <div className="flex justify-end gap-1 pt-2 border-t">
+                    <Button size="sm" variant="ghost" onClick={() => setEditingServicesFor(null)} disabled={savingServices}>
+                      Cancel
+                    </Button>
+                    <Button size="sm" onClick={() => handleSaveServices(invite.id)} disabled={savingServices}>
+                      {savingServices && <Loader2 className="h-3 w-3 mr-1 animate-spin" />}
+                      Save
+                    </Button>
+                  </div>
+                </PopoverContent>
+              </Popover>
+            )}
+            {!isPasskeyMode && invite.auth_method !== 'oauth' && (
               <Popover open={editingPasscodeFor === invite.id} onOpenChange={(o) => (o ? openEditPasscode(invite) : setEditingPasscodeFor(null))}>
                 <PopoverTrigger
                   render={(props: React.ComponentPropsWithRef<'button'>) => (

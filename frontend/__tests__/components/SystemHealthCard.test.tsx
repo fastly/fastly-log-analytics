@@ -69,7 +69,7 @@ describe('SystemHealthCard in Cloud mode', () => {
     setCloudModeRuntime(true)
     const staleProbeAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()
     server.use(
-      http.get('/api/sync-status', () =>
+      http.get('*/api/sync-status', () =>
         HttpResponse.json({
           configured: false,
           last_tick_at: staleProbeAt,
@@ -90,7 +90,7 @@ describe('SystemHealthCard in Cloud mode', () => {
     setCloudModeRuntime(true)
     const freshProbeAt = new Date(Date.now() - 30 * 1000).toISOString()
     server.use(
-      http.get('/api/sync-status', () =>
+      http.get('*/api/sync-status', () =>
         HttpResponse.json({
           configured: false,
           last_tick_at: freshProbeAt,
@@ -111,7 +111,7 @@ describe('SystemHealthCard in Cloud mode', () => {
     setCloudModeRuntime(true)
     const staleRunAt = new Date(Date.now() - 60 * 60 * 1000).toISOString()
     server.use(
-      http.get('/api/sync-status', () =>
+      http.get('*/api/sync-status', () =>
         HttpResponse.json({
           configured: true,
           last_tick_at: staleRunAt,
@@ -134,7 +134,7 @@ describe('SystemHealthCard in Cloud mode', () => {
     const lastTickAt = new Date(now - 90 * 1000).toISOString()
     const nextTickAt = new Date(now + 10 * 1000).toISOString()
     server.use(
-      http.get('/api/sync-status', () =>
+      http.get('*/api/sync-status', () =>
         HttpResponse.json({
           configured: true,
           last_tick_at: lastTickAt,

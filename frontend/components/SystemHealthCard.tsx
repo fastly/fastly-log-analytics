@@ -6,10 +6,10 @@ import { AnalyticsCard, type AnalyticsCardError } from '@/components/AnalyticsCa
 import { Badge } from '@/components/ui/badge'
 import { Sparkline } from '@/components/Sparkline'
 import { ELAPSED_AGE_COMPACT, formatCount, formatElapsed } from "@/lib/utils"
-import { useMounted } from '@/hooks/useBootstrap'
+import { useCapabilities, useMounted } from '@/hooks/useBootstrap'
+import { useSyncStatus } from '@/hooks/useSSE'
 import { client, unwrapClient, queryKeys } from "@/lib/api";
 import { isCloudMode } from '@/lib/cloud-engine/mode'
-import { useServiceStore } from '@/stores/filterStore'
 import type { components } from '@/types/api.generated'
 
 export const TICK_BACKEND_CALL_CEILING = 32
@@ -137,8 +137,8 @@ export function SystemHealthCard() {
   // hydration mismatch (#418, the /admin webkit failure). Force the first
   // client render to the server's loading state, then swap to data after mount.
   const mounted = useMounted()
-
-  const cloud = isCloudMode()
+  const capabilities = useCapabilities()
+  const cloud = capabilities.edition === 'cloud' || isCloudMode()
 
   // Freshness is driven by useAdminEventStream (mounted globally
   // in SyncStatusBadge, gated to /admin and /logs paths). The 5-min
@@ -175,25 +175,17 @@ export function SystemHealthCard() {
     refetchIntervalInBackground: false,
   })
 
-  const activeServiceId = useServiceStore((s) => s.activeServiceId)
-  const { data: cloudSync, dataUpdatedAt: cloudSyncUpdatedAt } = useQuery({
-    queryKey: activeServiceId ? queryKeys.syncStatus(activeServiceId) : ['cloud-system-health-sync'],
-    enabled: cloud,
-    queryFn: async () => {
-      const res = await fetch('/api/sync-status', { credentials: 'include' })
-      if (!res.ok) return null
-      return (await res.json()) as {
+  const { data: cloudSyncData, dataUpdatedAt: cloudSyncUpdatedAt } = useSyncStatus({ enabled: cloud })
+  const cloudSync = cloudSyncData as
+    | {
         configured?: boolean
         last_tick_at?: string | null
         next_tick_at?: string | null
         clock_interval_s?: number
         cron_runs?: CloudCronRunSummary[]
       }
-    },
-    staleTime: 60_000,
-    refetchInterval: 30_000,
-    refetchIntervalInBackground: false,
-  })
+    | null
+    | undefined
 
   if (cloud) {
     const runs = cloudSync?.cron_runs ?? []

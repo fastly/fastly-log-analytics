@@ -1069,6 +1069,33 @@ describe('CronLiveLog, LogSyncSection & LogsClient', () => {
     postSpy.mockRestore()
   })
 
+  test('QuickActionsBar View Recent Logs matches Cloud ingest task names', async () => {
+    const setDisplayedJobs = vi.fn()
+    const setSelectedConsoleJobId = vi.fn()
+    const setConsoleOpen = vi.fn()
+    const cloudRun = { id: 77, task: 'cloud_ingest_clock', started_at: '2026-11-26T00:00:00Z', status: 'success' }
+    renderWithQuery(
+      <QuickActionsBar
+        status={{}}
+        activeServiceId="svc"
+        recentCrons={{ entries: [cloudRun as never] }}
+        cronLogs={{}}
+        setSseTitle={vi.fn()}
+        setSseDescription={vi.fn()}
+        setIsSSEModalOpen={vi.fn()}
+        setIsSyncModalOpen={vi.fn()}
+        reset={vi.fn()}
+        start={vi.fn()}
+        setDisplayedJobs={setDisplayedJobs}
+        setSelectedConsoleJobId={setSelectedConsoleJobId}
+        setConsoleOpen={setConsoleOpen}
+      />,
+    )
+    await userEvent.click(screen.getByRole('button', { name: /view recent logs/i }))
+    expect(setSelectedConsoleJobId).toHaveBeenCalledWith(77)
+    expect(setConsoleOpen).toHaveBeenCalledWith(true)
+  })
+
   test('LogsClient shows the active service archive bucket and region', async () => {
     useServiceStore.setState({ activeServiceId: 'test-svc' })
     mocks.bootstrap.mockReturnValue({

@@ -1517,8 +1517,20 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
                     "initializing": false
                 },
                 "debug_state": {
+                    "debug_responses_enabled": true,
                     "query_debug_visibility": "disabled",
                     "api_call_debug_visibility": "disabled"
+                },
+                "capabilities": {
+                    "edition": "cloud",
+                    "auth_mode": "passkey",
+                    "alerts": false,
+                    "operational_logs": false,
+                    "postgres_metadata_storage": false,
+                    "ngwaf_workspaces": true,
+                    "sqlite_debug_profiler": false,
+                    "fos_multi_service_restore": false,
+                    "heartbeat_required": false
                 }
             }))
         };
@@ -1629,8 +1641,13 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
         };
 
         let ngwaf_configured = active
-            .and_then(|service| service["ngwaf_workspace_id"].as_str())
-            .is_some_and(|w| !w.trim().is_empty());
+            .and_then(|service| {
+                service["ngwaf_workspace_id"]
+                    .as_str()
+                    .map(|w| !w.trim().is_empty())
+                    .or_else(|| service["ngwaf_configured"].as_bool())
+            })
+            .unwrap_or(false);
 
         Ok(json_response(json!({
             "runtime_mode": "cloud",
@@ -1647,12 +1664,25 @@ impl<'a, R: Runtime, S: StateStore> Shell<'a, R, S> {
             "settings": {
                 "needs_login": false,
                 "is_remote_analyst": matches!(user.role, Role::Analyst | Role::AnalystNoPii),
+                "analyst_name": if matches!(user.role, Role::Analyst | Role::AnalystNoPii) { Some(&user.display_name) } else { None },
                 "mask_ips": user.role == Role::AnalystNoPii,
                 "initializing": false
             },
             "debug_state": {
+                "debug_responses_enabled": true,
                 "query_debug_visibility": settings.query_debug_visibility,
                 "api_call_debug_visibility": settings.api_call_debug_visibility
+            },
+            "capabilities": {
+                "edition": "cloud",
+                "auth_mode": "passkey",
+                "alerts": false,
+                "operational_logs": false,
+                "postgres_metadata_storage": false,
+                "ngwaf_workspaces": true,
+                "sqlite_debug_profiler": false,
+                "fos_multi_service_restore": false,
+                "heartbeat_required": false
             }
         })))
     }
@@ -2467,6 +2497,10 @@ fn redact_services(mut response: Response) -> Response {
                     .and_then(Value::as_bool)
                     .or_else(|| object.get("scoring_enabled").and_then(Value::as_bool))
                     .unwrap_or(false);
+                let ngwaf_configured = object
+                    .get("ngwaf_workspace_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|w| !w.trim().is_empty());
                 object.retain(|key, _| KEEP.contains(&key.as_str()));
                 if let Some(fields) = log_fields {
                     object.insert("log_fields".into(), fields);
@@ -2479,6 +2513,7 @@ fn redact_services(mut response: Response) -> Response {
                 object.insert("faro_version".into(), faro_version);
                 object.insert("cmcd".into(), json!({"enabled":cmcd_enabled}));
                 object.insert("scoring".into(), json!({"enabled":scoring_enabled}));
+                object.insert("ngwaf_configured".into(), json!(ngwaf_configured));
             }
         }
     }
@@ -2606,7 +2641,17 @@ mod tests {
             json!({"url":true})
         );
         assert_eq!(service["faro_version"], "1.0.0");
+        assert_eq!(service["ngwaf_configured"], false);
         assert!(!body.to_string().contains("PRIVATE_"));
+
+        let ngwaf_redacted = redact_services(json_response(serde_json::json!({"services":[{
+            "service_id":"fixture-service", "name":"Fixture", "ngwaf_workspace_id":"ws-123"
+        }]})));
+        let ngwaf_body: Value = serde_json::from_slice(&ngwaf_redacted.body).unwrap();
+        assert_eq!(ngwaf_body["services"][0]["ngwaf_configured"], true);
+        assert!(ngwaf_body["services"][0]
+            .get("ngwaf_workspace_id")
+            .is_none());
     }
 
     #[test]
@@ -3209,6 +3254,21 @@ mod tests {
             assert_eq!(body["services"], json!([]));
             assert_eq!(body["active_service_id"], Value::Null);
             assert_eq!(body["settings"]["needs_login"], true);
+            assert_eq!(body["debug_state"]["debug_responses_enabled"], true);
+            assert_eq!(
+                body["capabilities"],
+                json!({
+                    "edition": "cloud",
+                    "auth_mode": "passkey",
+                    "alerts": false,
+                    "operational_logs": false,
+                    "postgres_metadata_storage": false,
+                    "ngwaf_workspaces": true,
+                    "sqlite_debug_profiler": false,
+                    "fos_multi_service_restore": false,
+                    "heartbeat_required": false
+                })
+            );
             if cookie.is_some() {
                 assert_eq!(response.cookies().len(), 3);
             }
@@ -3238,11 +3298,27 @@ mod tests {
             .is_empty());
         assert_eq!(body["views"].as_array().unwrap().len(), 2);
         assert_eq!(body["settings"]["needs_login"], false);
+        assert_eq!(body["settings"]["analyst_name"], Value::Null);
         assert_eq!(body["ngwaf_configured"], false);
         assert_eq!(body["fastly_bots_available"], true);
         assert_eq!(
+            body["capabilities"],
+            json!({
+                "edition": "cloud",
+                "auth_mode": "passkey",
+                "alerts": false,
+                "operational_logs": false,
+                "postgres_metadata_storage": false,
+                "ngwaf_workspaces": true,
+                "sqlite_debug_profiler": false,
+                "fos_multi_service_restore": false,
+                "heartbeat_required": false
+            })
+        );
+        assert_eq!(
             body["debug_state"],
             json!({
+                "debug_responses_enabled": true,
                 "query_debug_visibility":"both",
                 "api_call_debug_visibility":"admins"
             })
@@ -3272,6 +3348,8 @@ mod tests {
             assert_eq!(service["service_id"], "fixtureService");
             assert_eq!(service["cmcd"]["enabled"], false);
             assert_eq!(service["cmcd_enabled"], false);
+            assert_eq!(service["ngwaf_configured"], false);
+            assert_eq!(body["settings"]["analyst_name"], "Bootstrap User");
             assert!(body["header_badge"].is_object());
             assert!(!service["active_log_field_ids"]
                 .as_array()

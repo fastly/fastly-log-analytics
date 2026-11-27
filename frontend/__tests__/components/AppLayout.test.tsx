@@ -201,6 +201,40 @@ test('hides restricted items for analysts', async () => {
   expect(screen.queryByText('Usage & Cost')).not.toBeInTheDocument()
 })
 
+test('blocks /logs for analysts in both High-Scale and Cloud modes and disables heartbeat when heartbeat_required is false', async () => {
+  const { useIsAnalyst } = await import('@/hooks/useBootstrap')
+  vi.mocked(useIsAnalyst).mockReturnValue(true)
+  vi.mocked(usePathname).mockReturnValue('/logs')
+
+  const replaceLocation = vi.fn()
+  const origLocation = window.location
+  Object.defineProperty(window, 'location', {
+    configurable: true,
+    value: { ...origLocation, pathname: '/logs', search: '', replace: replaceLocation },
+  })
+
+  try {
+    setCloudModeRuntime(true)
+    vi.mocked(useBootstrap).mockReturnValue(partial<ReturnType<typeof useBootstrap>>({
+      data: partial<BootstrapData>({
+        services: [{ service_id: 'test-svc', name: 'Test Service' }],
+        settings: { is_remote_analyst: true, analyst_name: 'Cloud Analyst' },
+      }),
+      isSuccess: true,
+      isLoading: false,
+    }))
+    renderWithQueryClient(<AppLayout><div>Logs Content</div></AppLayout>)
+    await waitFor(() => expect(replaceLocation).toHaveBeenCalledWith('/dashboard?service=test-svc'))
+    expect(screen.queryByRole('link', { name: 'Data Management' })).not.toBeInTheDocument()
+  } finally {
+    setCloudModeRuntime(false)
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: origLocation,
+    })
+  }
+})
+
 test('renders analyst watermark when bootstrap reports remote analyst', async () => {
   vi.mocked(useBootstrap).mockReturnValue(partial<ReturnType<typeof useBootstrap>>({
     data: partial<BootstrapData>({

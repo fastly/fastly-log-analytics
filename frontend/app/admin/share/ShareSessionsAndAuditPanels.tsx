@@ -108,6 +108,10 @@ export function SessionsPanel({ status, onRefresh, onError }: SessionsPanelProps
             <Badge variant="outline" className="text-[10px] font-normal">
               SSO{s.oauth_provider ? ` · ${s.oauth_provider}` : ''}
             </Badge>
+          ) : s.auth_method && s.auth_method !== 'passcode' ? (
+            <Badge variant="outline" className="text-[10px] font-normal">
+              {s.auth_method}
+            </Badge>
           ) : (
             <span className="text-[10px] text-muted-foreground">Passcode</span>
           )

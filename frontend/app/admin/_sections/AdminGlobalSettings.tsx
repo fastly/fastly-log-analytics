@@ -9,11 +9,11 @@ import { useRouter } from 'next/navigation'
 import { AlertCircle, CheckCircle2, DollarSign, ExternalLink, Loader2, MapPin, Pencil, RefreshCw, Save } from 'lucide-react'
 import type { components } from '@/types/api.generated'
 import { client, extractApiError, unwrapClient, queryKeys } from '@/lib/api'
-import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { LIST_RATES } from '@/lib/cloud-engine/usage/rates'
 import { SERVICE_DEFAULTS } from '@/lib/serviceDefaults'
 import { buildServiceHref, cn, panelDialogContent, panelDialogFooter, panelDialogHeaderMuted } from '@/lib/utils'
-import { useBootstrap, useMounted } from '@/hooks/useBootstrap'
+import { useBootstrap, useCapabilities, useMounted } from '@/hooks/useBootstrap'
 import { useServiceStore } from '@/stores/filterStore'
 import { AnalyticsCard } from '@/components/AnalyticsCard'
 import { Badge } from '@/components/ui/badge'
@@ -130,10 +130,12 @@ export function DiagnosticsPanel() {
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: queryKeys.admin.debugSettings() }); queryClient.invalidateQueries({ queryKey: queryKeys.bootstrap() }) },
   })
   const { data: bootstrapData } = useBootstrap()
+  const capabilities = useCapabilities(bootstrapData)
+  const cloudMode = capabilities.edition === 'cloud' || isCloudMode()
   const debugBackendOn = (bootstrapData as { debug_state?: { debug_responses_enabled?: boolean } } | undefined)?.debug_state?.debug_responses_enabled !== false
   const debugDisabledTooltip = !debugBackendOn ? 'Backend debug responses are disabled — set DEBUG_RESPONSES=true in the server env (or .env file) and restart to see data here.' : undefined
   const panels = [
-    { id: 'diag-query-debug-label', title: 'Query debugging panel', desc: IS_CLOUD_MODE ? 'Bottom-of-screen panel with DuckDB-Wasm SQL queries and execution times.' : 'Bottom-of-screen panel with ClickHouse SQL queries and execution times.', value: settings?.query_debug_visibility ?? 'disabled', onChange: (val: string | null) => val && updateSettingsMutation.mutate({ query_debug_visibility: val }) },
+    { id: 'diag-query-debug-label', title: 'Query debugging panel', desc: cloudMode ? 'Bottom-of-screen panel with DuckDB-Wasm SQL queries and execution times.' : 'Bottom-of-screen panel with ClickHouse SQL queries and execution times.', value: settings?.query_debug_visibility ?? 'disabled', onChange: (val: string | null) => val && updateSettingsMutation.mutate({ query_debug_visibility: val }) },
     { id: 'diag-api-panel-label', title: 'API call panel', desc: 'Bottom-of-screen panel with all Fastly API calls and FOS operations per request.', value: settings?.api_call_debug_visibility ?? 'disabled', onChange: (val: string | null) => val && updateSettingsMutation.mutate({ api_call_debug_visibility: val }) },
   ]
   return (
@@ -249,10 +251,12 @@ type PricingFormValues = z.infer<typeof pricingSchema>
 export const PricingSettings = () => {
   const queryClient = useQueryClient()
   const mounted = useMounted()
+  const capabilities = useCapabilities()
+  const cloudMode = capabilities.edition === 'cloud' || isCloudMode()
   const [editing, setEditing] = useState(false)
   const visibleFields = useMemo(
-    () => PRICING_FIELDS.filter((f) => !f.cloudOnly || IS_CLOUD_MODE),
-    [],
+    () => PRICING_FIELDS.filter((f) => !f.cloudOnly || cloudMode),
+    [cloudMode],
   )
   const { data: settings, isLoading } = useQuery({ queryKey: ['usage-logging-settings'], queryFn: async () => (await unwrapClient(client.GET('/api/admin/usage-logging'))) ?? null })
   const serverForm = useMemo<PricingFormValues>(() => {
@@ -354,6 +358,8 @@ export function GlobalSettings() {
   const queryClient = useQueryClient()
   const router = useRouter()
   const mounted = useMounted()
+  const capabilities = useCapabilities()
+  const cloudMode = capabilities.edition === 'cloud' || isCloudMode()
   const storeServiceId = useServiceStore((s) => s.activeServiceId)
   const activeServiceId = mounted ? storeServiceId : null
   const [popLocationsOpen, setPopLocationsOpen] = useState(false)
@@ -392,7 +398,7 @@ export function GlobalSettings() {
                 <Switch aria-labelledby="gs-usage-log-label" checked={usageLoggingEnabled} onCheckedChange={(enabled) => toggleMutation.mutate(enabled)} disabled={toggleMutation.isPending} />
               </div>
             </div>
-            {!IS_CLOUD_MODE && (
+            {!cloudMode && (
               <div className="flex flex-col p-3 border rounded-lg gap-3">
                 <div className="min-w-0 space-y-0.5">
                   <Label className="text-sm font-medium">POP location data</Label>
@@ -404,10 +410,10 @@ export function GlobalSettings() {
               </div>
             )}
           </div>
-          {!IS_CLOUD_MODE && <BotSourcesPanel />}
+          {!cloudMode && <BotSourcesPanel />}
         </div>
       </AnalyticsCard>
-      {!IS_CLOUD_MODE && <PopLocationsModal open={popLocationsOpen} onOpenChange={setPopLocationsOpen} />}
+      {!cloudMode && <PopLocationsModal open={popLocationsOpen} onOpenChange={setPopLocationsOpen} />}
     </>
   )
 }

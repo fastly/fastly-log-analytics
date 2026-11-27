@@ -244,11 +244,13 @@ const LAST_SYNC_SEED_KEYS = [queryKeys.lastSync] as const
 type CronRunEntry = Schema<'CronRunEntry'>
 type LastSyncInfo = { [K in 'started_at' | 'status' | 'duration_s']: CronRunEntry[K] | null }
 
-export function useSyncStatus() {
+export function useSyncStatus(opts?: { enabled?: boolean }) {
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
   const bootstrapPending = useBootstrapPending()
   const isAnalyst = useIsAnalyst()
-  const ready = useSeededReady(activeServiceId, SEED_KEYS)
+  const cloudMode = IS_CLOUD_MODE || isCloudMode()
+  const ready = useSeededReady(activeServiceId, SEED_KEYS, cloudMode)
+  const callerEnabled = opts?.enabled ?? true
 
   return useQuery({
     queryKey: queryKeys.syncStatus(activeServiceId),
@@ -256,7 +258,7 @@ export function useSyncStatus() {
       (await unwrapClient(
         client.GET('/api/sync-status', { signal, params: { query: { skip_fos: true } } }),
       )) as SyncStatus,
-    enabled: !!activeServiceId && !bootstrapPending && !isAnalyst && ready,
+    enabled: callerEnabled && (!!activeServiceId || cloudMode) && !bootstrapPending && !isAnalyst && ready,
     staleTime: 60_000,
     refetchInterval: 5 * 60_000,
     refetchIntervalInBackground: false,

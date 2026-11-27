@@ -215,9 +215,16 @@ async function handleApiStatusSideEffects(
   const errorCode =
     (error as { detail?: { error?: string }; error?: string })?.detail?.error ??
     (error as { error?: string })?.error;
+  const isCloudPlain403 =
+    (IS_CLOUD_MODE || isCloudMode()) &&
+    status === 403 &&
+    (msg === "Forbidden" || msg === "Front authentication required");
   const isDead403 =
-    status === 403 && typeof errorCode === "string" && SESSION_DEAD_403_ERRORS.has(errorCode);
-  if (status === 401 || isDead403) await redirectToShareLoginIfSessionDead(status === 401);
+    status === 403 &&
+    ((typeof errorCode === "string" && SESSION_DEAD_403_ERRORS.has(errorCode)) || isCloudPlain403);
+  if (status === 401 || isDead403) {
+    await redirectToShareLoginIfSessionDead(status === 401 || isCloudPlain403);
+  }
   if (status === 403 && msg === "read_only") showReadOnlyToast();
   const isBusy503 = status === 503 && (error as { detail?: { busy?: boolean } })?.detail?.busy === true;
   if (isBusy503) showBusyToast();
@@ -391,8 +398,11 @@ client.use({
       }
     }
     if (!response.ok) {
-      const error = await response.json().catch(() => ({ message: "An unknown error occurred" }));
-      const { msg, isBusy503 } = await handleApiStatusSideEffects(response.status, error, request.method);
+      const errorBody =
+        typeof response.text === "function"
+          ? await response.text().catch(() => "")
+          : await response.json().catch(() => ({ message: "An unknown error occurred" }));
+      const { msg, isBusy503 } = await handleApiStatusSideEffects(response.status, errorBody, request.method);
       const err = new Error(msg) as Error & { status?: number; response?: { status: number }; busy?: boolean };
       err.status = response.status;
       err.response = { status: response.status };

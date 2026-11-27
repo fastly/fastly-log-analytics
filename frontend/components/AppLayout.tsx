@@ -15,11 +15,11 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { ServiceSwitcher, SyncStatusBadge } from '@/components/SyncStatusBadge/SyncStatusBadge'
 import { useDebugStore, useServiceStore } from '@/stores/filterStore'
 import {
-  cloudCacheIdentity, useBootstrap, useBootstrapSyncEffects, useIsAnalyst,
+  cloudCacheIdentity, useBootstrap, useBootstrapSyncEffects, useCapabilities, useIsAnalyst,
   useEnforceMaskedFilters, useAnalystHeartbeat, useAnalystLogout,
 } from '@/hooks/useBootstrap'
 import { PlotlyPrewarm, MapPrewarm } from '@/components/PlotlyChart'
-import { IS_CLOUD_MODE } from '@/lib/cloud-engine/mode'
+import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { CLOUD_RAW_SCAN_PREFIXES, matchesCloudRoute } from '@/lib/cloud-engine/boot-routes'
 import { CloudLoadingProgress } from '@/components/LoadingProgress'
 import packageJson from '../package.json'
@@ -30,7 +30,7 @@ import {
   TimezoneSwitcher,
   useShareStatusBanner,
   SERVICE_NAVIGATION,
-  SYSTEM_NAVIGATION,
+  getSystemNavigation,
   CLOUD_PRUNED_NAV_HREFS,
   CLOUD_PRUNED_ADMIN_HREFS,
   UrlServiceSync,
@@ -158,8 +158,13 @@ export function AppLayout({
   const analystEmail = (bootstrapSettings?.analyst_email as string | undefined) || undefined
   const analystName = (bootstrapSettings?.analyst_name as string | undefined) || undefined
 
+  const capabilities = useCapabilities(bootstrapData)
+  const cloudMode = capabilities.edition === 'cloud' || isCloudMode()
+
   const shareBanner = useShareStatusBanner({ enabled: isSuccess && !isAnalyst })
-  const { disconnected } = useAnalystHeartbeat({ enabled: isAnalyst && !pathname.startsWith('/share-login') })
+  const { disconnected } = useAnalystHeartbeat({
+    enabled: isAnalyst && capabilities.heartbeat_required && !pathname.startsWith('/share-login'),
+  })
   const { logout, isLoggingOut } = useAnalystLogout()
 
   const currentServiceId = activeServiceId || ssrActiveServiceId || bootstrapData?.active_service_id
@@ -170,14 +175,18 @@ export function AppLayout({
   const navActiveServiceId = activeServiceId || ssrActiveServiceId || null
 
   const visibleNav = SERVICE_NAVIGATION.filter(item => {
-    if (IS_CLOUD_MODE && CLOUD_PRUNED_NAV_HREFS.has(item.href)) return false
+    if (cloudMode && CLOUD_PRUNED_NAV_HREFS.has(item.href)) return false
     if (item.requiresCmcd && !hasCmcd) return false
     if (item.requiresRum && !hasRum) return false
-    if (isShareAnalyst) return item.shareAnalystVisible ?? item.analystVisible ?? false
+    if (isShareAnalyst) {
+      if (item.href === '/usage') return cloudMode
+      return item.shareAnalystVisible ?? item.analystVisible ?? false
+    }
     if (isAnalyst) return item.analystVisible
     return true
   })
-  const visibleSystemNav = isAnalyst ? SYSTEM_NAVIGATION.filter(item => item.href !== '/admin') : SYSTEM_NAVIGATION
+  const systemNavigation = getSystemNavigation(cloudMode)
+  const visibleSystemNav = isAnalyst ? systemNavigation.filter(item => item.href !== '/admin') : systemNavigation
 
   const hasServices = isSuccess
     ? !!(bootstrapData?.services?.length)
@@ -186,8 +195,8 @@ export function AppLayout({
   const needsLogin = bootstrapSettings?.needs_login === true
   const isPublicPage = pathname.startsWith('/how-it-works')
   const analystBlocked =
-    (isAnalyst && matchesPrefix(pathname, IS_CLOUD_MODE ? ['/admin', '/alerts', '/high-scale'] : ['/admin', '/usage', '/alerts', '/high-scale'])) ||
-    (!IS_CLOUD_MODE && (isAnalyst || isShareAnalyst) && pathname.startsWith('/logs'))
+    (isAnalyst && matchesPrefix(pathname, cloudMode ? ['/admin', '/alerts', '/high-scale'] : ['/admin', '/usage', '/alerts', '/high-scale'])) ||
+    ((isAnalyst || isShareAnalyst) && pathname.startsWith('/logs'))
   const needsSignIn = needsLogin && !isPublicPage && !pathname.startsWith('/share-login')
   const needsWizard = !needsLogin && !isAnalyst && !hasServices && !isPublicPage && !pathname.startsWith('/admin') && !pathname.startsWith('/cache') && !pathname.startsWith('/share-login')
 
@@ -222,7 +231,7 @@ export function AppLayout({
       React.startTransition(() => router.replace('/admin'))
       return
     }
-    if (IS_CLOUD_MODE) {
+    if (cloudMode) {
       if (CLOUD_PRUNED_ADMIN_HREFS.has(pathname)) {
         React.startTransition(() => router.replace('/admin'))
         return
@@ -232,7 +241,7 @@ export function AppLayout({
         React.startTransition(() => router.replace(target))
       }
     }
-  }, [isLoading, needsSignIn, analystBlocked, needsWizard, router, activeServiceId, pathname])
+  }, [isLoading, needsSignIn, analystBlocked, needsWizard, router, activeServiceId, pathname, cloudMode])
 
   const needsPlotlyPrewarm = matchesPrefix(pathname, PLOTLY_PREWARM_PREFIXES)
   // Other analytical routes scan in the page's own DuckDB; a dashboard worker
@@ -241,7 +250,7 @@ export function AppLayout({
   const needsCloudBoot = needsPlotlyPrewarm || matchesCloudRoute(pathname, CLOUD_RAW_SCAN_PREFIXES)
   const cloudIdentity = isSuccess && bootstrapData ? cloudCacheIdentity(bootstrapData) : null
   React.useEffect(() => {
-    if (!IS_CLOUD_MODE || !needsCloudBoot || needsLogin || cloudIdentity === null) return
+    if (!cloudMode || !needsCloudBoot || needsLogin || cloudIdentity === null) return
     // Setting a new session identity terminates the engine worker, so a worker
     // prewarmed before it would be killed mid-download.
     void import('@/lib/cloud-engine/dashboard/client').then(async ({ setDashboardCacheIdentity, prewarmDashboardEngine }) => {
@@ -250,7 +259,7 @@ export function AppLayout({
       const { bootCloudEngine } = await import('@/lib/cloud-engine/boot')
       bootCloudEngine(pathname)
     })
-  }, [needsCloudBoot, needsDashboardEngine, needsLogin, cloudIdentity, pathname])
+  }, [cloudMode, needsCloudBoot, needsDashboardEngine, needsLogin, cloudIdentity, pathname])
 
   const isLoginPage = pathname.startsWith('/share-login')
   if (isLoginPage || needsLogin) {
@@ -473,7 +482,7 @@ export function AppLayout({
         </TooltipProvider>
       </div>
 
-      {IS_CLOUD_MODE && <CloudLoadingProgress />}
+      {cloudMode && <CloudLoadingProgress />}
       <MobileNavDrawer
         open={mobileNavOpen}
         onOpenChange={setMobileNavOpen}
