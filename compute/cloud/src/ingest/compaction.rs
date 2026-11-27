@@ -819,11 +819,7 @@ pub fn compact_pass<R: Runtime>(
                 run.report.more_pending = true;
                 run.report.stopped = Some("call_budget".into());
             }
-            Err(error)
-                if error == STATE_LAG
-                    || error == "compact_state_conflict"
-                    || error == "admin_state_write_failed" =>
-            {
+            Err(error) if error == STATE_LAG || error == "admin_state_write_failed" => {
                 run.report.more_pending = true;
                 run.report.stopped = Some("state_lag".into());
             }
