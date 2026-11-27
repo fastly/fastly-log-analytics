@@ -124,6 +124,8 @@ def _cmcd_sample_stride(span_s: float) -> int:
     if span_s >= 1209600:
         return 10
     if span_s >= 604800:
+        return 8
+    if span_s >= 86400:
         return 4
     return 1
 

@@ -105,7 +105,9 @@ function defaultStepSecondsForWindow(startIso?: string | null, endIso?: string |
   if (windowSecs <= 1800) return 60
   if (windowSecs <= 7200) return 300
   if (windowSecs <= 21600) return 900
-  return 3600
+  if (windowSecs <= 86400) return 3600
+  if (windowSecs <= 345600) return 7200
+  return 14400
 }
 
 export function NetworkClient() {
@@ -147,7 +149,7 @@ function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: Rep
     if (recommended != null && startTime && endTime) {
       const windowSecs = Math.max(1, (Date.parse(endTime) - Date.parse(startTime)) / 1000)
       const estBuckets = windowSecs / animBucketSeconds
-      if (estBuckets < 4 || estBuckets > 750) {
+      if (estBuckets < 4 || estBuckets > 180) {
         setAnimBucketSeconds(recommended)
       }
     }

@@ -45,7 +45,8 @@ def _service(client: Any, sid: str = "svc-opt30-sec") -> HighScaleService:
 
 def test_security_sample_stride_tiers() -> None:
     assert _security_sample_stride(3600) == 1
-    assert _security_sample_stride(86_400) == 1
+    assert _security_sample_stride(43_200) == 1
+    assert _security_sample_stride(86_400) == 4
     assert _security_sample_stride(259_200) == 10
     assert _security_sample_stride(604_800) == 40
     assert _security_sample_stride(1_209_600) == 100
@@ -144,13 +145,13 @@ def test_security_aggregates_samples_30d_and_leaves_24h_unsampled(monkeypatch: p
         {"label": "Active Tunnel / Proxy", "value": 10.0},
     ]
 
-    # 24h window remains completely unsampled.
+    # Sub-24h (6h) window remains completely unsampled.
     client.calls.clear()
-    start_24h = end - timedelta(hours=24)
-    res_24h = hs_security.security_aggregates(
-        _service(client, "svc-opt30-24h"),
+    start_6h = end - timedelta(hours=6)
+    res_6h = hs_security.security_aggregates(
+        _service(client, "svc-opt30-6h"),
         req,
-        start_24h.isoformat(),
+        start_6h.isoformat(),
         end.isoformat(),
         sections={
             "tls_fingerprints",
@@ -166,5 +167,5 @@ def test_security_aggregates_samples_30d_and_leaves_24h_unsampled(monkeypatch: p
     for q, _ in client.calls:
         assert "line_ordinal %" not in q
         assert "toDateTime(" not in q
-    assert res_24h["req_size_dist"] == [{"bucket": "0-256B", "count": 100}]
-    assert res_24h["tls_fingerprints"] == [{"fingerprint": "sha-1", "ip_count": 4, "request_count": 50}]
+    assert res_6h["req_size_dist"] == [{"bucket": "0-256B", "count": 100}]
+    assert res_6h["tls_fingerprints"] == [{"fingerprint": "sha-1", "ip_count": 4, "request_count": 50}]

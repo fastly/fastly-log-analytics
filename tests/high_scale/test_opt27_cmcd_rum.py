@@ -87,10 +87,11 @@ def _stub_and_clear_caches(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_cmcd_sample_stride_tiers() -> None:
-    assert hs_cmcd._cmcd_sample_stride(86400) == 1
-    assert hs_cmcd._cmcd_sample_stride(604799) == 1
-    assert hs_cmcd._cmcd_sample_stride(604800) == 4
-    assert hs_cmcd._cmcd_sample_stride(1209599) == 4
+    assert hs_cmcd._cmcd_sample_stride(43200) == 1
+    assert hs_cmcd._cmcd_sample_stride(86400) == 4
+    assert hs_cmcd._cmcd_sample_stride(604799) == 4
+    assert hs_cmcd._cmcd_sample_stride(604800) == 8
+    assert hs_cmcd._cmcd_sample_stride(1209599) == 8
     assert hs_cmcd._cmcd_sample_stride(1209600) == 10
     assert hs_cmcd._cmcd_sample_stride(2592000) == 10
 

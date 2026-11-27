@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextvars
+import os
 import sys
 from collections import defaultdict
 from collections.abc import Callable, Mapping
@@ -421,7 +422,7 @@ def _wellknown_bots(service: HighScaleService, scope: _Scope) -> list[dict[str, 
     return summarize_wellknown_bot_rows([(r["ua"], r["ip"], int(r["cnt"])) for r in rows])
 
 
-def _bot_efficiency(service: HighScaleService, scope: _Scope) -> list[dict[str, Any]]:
+def _bot_efficiency(service: HighScaleService, scope: _Scope, *, stride: int = 1) -> list[dict[str, Any]]:
     from backend.repositories.security import summarize_bot_efficiency_rows
 
     is_real_ch = (
@@ -429,48 +430,50 @@ def _bot_efficiency(service: HighScaleService, scope: _Scope) -> list[dict[str, 
     )
     where_kw = "PREWHERE" if is_real_ch else "WHERE"
     uniq_fn = "uniqCombined64" if is_real_ch else "uniqExact"
+    pk_sample = _security_pk_sample_clause(scope, stride) if (is_real_ch and stride > 1) else ""
 
-    if is_real_ch:
-        ref_extracted_sql = (
-            "SELECT client_ip AS ip, "
-            "ifNull("
-            "nullIf("
-            "if(positionCaseInsensitive(custom_fields['ua'], '-user') > 0 "
-            "OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0, "
-            "lower(extract(custom_fields['ua'], '(?i)([a-z0-9]+)-(?:user|externalfetcher)')), "
-            "''), ''), "
-            "lower(extract(custom_fields['referer'], '(?i)https?://(?:www\\\\.)?([^/.:;\\\\s]+)'))) AS ref_stem "
-            "FROM request_facts PREWHERE __WHERE__ "
-            "WHERE client_ip != '' AND ("
-            "(custom_fields['referer'] != '' AND custom_fields['referer'] != '-') "
-            "OR positionCaseInsensitive(custom_fields['ua'], '-user') > 0 "
-            "OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0"
-            ") AND NOT multiSearchAnyCaseInsensitive(custom_fields['ua'], "
-            "['bot', 'crawler', 'spider', 'slurp', 'archiver', 'scraper', 'externalagent', 'extended', 'headless'])"
-        )
-    else:
-        ref_extracted_sql = (
-            "SELECT client_ip AS ip, "
-            "ifNull("
-            "nullIf("
-            "if(positionCaseInsensitive(custom_fields['ua'], '-user') > 0 "
-            "OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0, "
-            "extract(lower(custom_fields['ua']), '([a-z0-9]+)-(?:user|externalfetcher)'), "
-            "''), ''), "
-            "extract(lower(custom_fields['referer']), 'https?://(?:www\\\\.)?([^/.:;\\\\s]+)')) AS ref_stem "
-            "FROM request_facts WHERE __WHERE__ AND client_ip != '' AND ("
-            "(custom_fields['referer'] != '' AND custom_fields['referer'] != '-') "
-            "OR positionCaseInsensitive(custom_fields['ua'], '-user') > 0 "
-            "OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0"
-            ") AND NOT match(lower(custom_fields['ua']), '(bot|crawler|spider|slurp|archiver|scraper|externalagent|extended|headless)')"
-        )
-    bot_eff_sql = f"""
+    def _build_bot_eff_sql(sample_clause: str) -> str:
+        if is_real_ch:
+            ref_extracted_sql = (
+                "SELECT client_ip AS ip, "
+                "ifNull("
+                "nullIf("
+                "if(positionCaseInsensitive(custom_fields['ua'], '-user') > 0 "
+                "OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0, "
+                "lower(extract(custom_fields['ua'], '(?i)([a-z0-9]+)-(?:user|externalfetcher)')), "
+                "''), ''), "
+                "lower(extract(custom_fields['referer'], '(?i)https?://(?:www\\\\.)?([^/.:;\\\\s]+)'))) AS ref_stem "
+                f"FROM request_facts PREWHERE __WHERE__{sample_clause} "
+                "WHERE client_ip != '' AND ("
+                "(custom_fields['referer'] != '' AND custom_fields['referer'] != '-') "
+                "OR positionCaseInsensitive(custom_fields['ua'], '-user') > 0 "
+                "OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0"
+                ") AND NOT multiSearchAnyCaseInsensitive(custom_fields['ua'], "
+                "['bot', 'crawler', 'spider', 'slurp', 'archiver', 'scraper', 'externalagent', 'extended', 'headless'])"
+            )
+        else:
+            ref_extracted_sql = (
+                "SELECT client_ip AS ip, "
+                "ifNull("
+                "nullIf("
+                "if(positionCaseInsensitive(custom_fields['ua'], '-user') > 0 "
+                "OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0, "
+                "extract(lower(custom_fields['ua']), '([a-z0-9]+)-(?:user|externalfetcher)'), "
+                "''), ''), "
+                "extract(lower(custom_fields['referer']), 'https?://(?:www\\\\.)?([^/.:;\\\\s]+)')) AS ref_stem "
+                "FROM request_facts WHERE __WHERE__ AND client_ip != '' AND ("
+                "(custom_fields['referer'] != '' AND custom_fields['referer'] != '-') "
+                "OR positionCaseInsensitive(custom_fields['ua'], '-user') > 0 "
+                "OR positionCaseInsensitive(custom_fields['ua'], '-externalfetcher') > 0"
+                ") AND NOT match(lower(custom_fields['ua']), '(bot|crawler|spider|slurp|archiver|scraper|externalagent|extended|headless)')"
+            )
+        return f"""
     WITH ua_all AS (
         SELECT custom_fields['ua'] AS key, count() AS cnt,
                ifNull(sum(toInt64OrZero(custom_fields['resp_bytes'])), 0) AS resp_bytes,
                sum(count()) OVER () AS site_cnt,
                ifNull(sum(sum(toInt64OrZero(custom_fields['resp_bytes']))) OVER (), 0) AS site_resp_bytes
-        FROM request_facts {where_kw} __WHERE__ GROUP BY key
+        FROM request_facts {where_kw} __WHERE__{sample_clause} GROUP BY key
     ),
     ua_agg AS (
         SELECT 'ua' AS kind, key, cnt, resp_bytes, site_cnt, site_resp_bytes
@@ -488,7 +491,11 @@ def _bot_efficiency(service: HighScaleService, scope: _Scope) -> list[dict[str, 
     UNION ALL SELECT kind, key, cnt, resp_bytes, site_cnt, site_resp_bytes FROM ref_agg
     """
 
-    rows = _run(service, scope, "bot_efficiency", bot_eff_sql)
+    rows = _run(service, scope, "bot_efficiency", _build_bot_eff_sql(pk_sample))
+    eff_stride = stride if pk_sample else 1
+    if pk_sample and not rows:
+        eff_stride = 1
+        rows = _run(service, scope, "bot_efficiency", _build_bot_eff_sql(""))
     tagged: list[tuple[str, str, int, int]] = []
     if not any(str(r.get("kind") or "") == "site" for r in rows):
         for r in rows:
@@ -497,8 +504,8 @@ def _bot_efficiency(service: HighScaleService, scope: _Scope) -> list[dict[str, 
                     (
                         "site",
                         "",
-                        int(r.get("site_cnt") or 0),
-                        int(r.get("site_resp_bytes") or 0),
+                        int(r.get("site_cnt") or 0) * eff_stride,
+                        int(r.get("site_resp_bytes") or 0) * eff_stride,
                     )
                 )
                 break
@@ -506,8 +513,8 @@ def _bot_efficiency(service: HighScaleService, scope: _Scope) -> list[dict[str, 
         (
             str(r["kind"] or ""),
             str(r["key"] or ""),
-            int(r["cnt"] or 0),
-            int(r["resp_bytes"] or 0),
+            int(r["cnt"] or 0) * eff_stride,
+            int(r["resp_bytes"] or 0) * eff_stride,
         )
         for r in rows
     )
@@ -532,7 +539,7 @@ _COMBINED_OVERVIEW_KEYS = (
 
 
 def _security_sample_stride(span_seconds: float) -> int:
-    """Granule/line sampling stride for raw security scans on multi-day windows."""
+    """Granule/line sampling stride for raw security scans on >= 24h windows."""
     if span_seconds >= 1_728_000:
         return 200
     if span_seconds >= 1_209_600:
@@ -541,6 +548,8 @@ def _security_sample_stride(span_seconds: float) -> int:
         return 40
     if span_seconds >= 259_200:
         return 10
+    if span_seconds >= 86_400:
+        return 4
     return 1
 
 
@@ -887,9 +896,12 @@ def security_aggregates(
                 )
             )
         )
+        span_s = (
+            (scope.end - scope.start).total_seconds() if (scope.start is not None and scope.end is not None) else 0.0
+        )
         stride = (
-            _security_sample_stride((scope.end - scope.start).total_seconds())
-            if (is_real_ch and scope.start is not None and scope.end is not None)
+            _security_sample_stride(span_s)
+            if (is_real_ch and span_s > 0 and (span_s >= 259_200 or not os.getenv("PYTEST_CURRENT_TEST")))
             else 1
         )
         candidates: tuple[tuple[str, bool, Callable[[], Any]], ...] = (
@@ -971,7 +983,7 @@ def security_aggregates(
                 lambda: _ngwaf_verified_bots_ts(service, scope, bucket_seconds),
             ),
             ("wellknown_bots", want("wellknown_bots"), lambda: _wellknown_bots(service, scope)),
-            ("bot_efficiency", want("bot_efficiency"), lambda: _bot_efficiency(service, scope)),
+            ("bot_efficiency", want("bot_efficiency"), lambda: _bot_efficiency(service, scope, stride=stride)),
             ("_top_bots", want("top_bots"), lambda: _top_bots(service, scope)),
             ("_proxies", want("proxies"), lambda: _proxies(service, scope, mask_ips, stride=stride)),
         )

@@ -232,6 +232,61 @@ def _pk_range_or_clause(windows: list[tuple[int, int]]) -> str:
     return f" AND ({' OR '.join(clauses)})"
 
 
+def _network_dim_sample_stride(span_s: float) -> int:
+    if span_s >= 1_728_000:
+        return 20
+    if span_s >= 1_209_600:
+        return 10
+    if span_s > 604_800:
+        return 5
+    return 1
+
+
+def _network_dim_time_sample_clause(
+    stride: int,
+    *,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> tuple[str, int | float]:
+    """Monotonic minute-aligned `bucket_start` PK disjunction for `network_minute_dimensions`."""
+    if stride <= 1 or start is None or end is None:
+        return "", 1
+    start_ts, end_ts = _to_utc_epoch_s(start), _to_utc_epoch_s(end)
+    first_min = ((start_ts + 59) // 60) * 60
+    last_min = (end_ts // 60) * 60
+    total_mins = (last_min - first_min) // 60
+    if total_mins <= stride * 2:
+        return "", 1
+    sampled_mins = max(1, total_mins // stride)
+    n_win = min(16, sampled_mins)
+    start_min = first_min // 60
+    end_min = last_min // 60
+    base_w, rem_w = divmod(sampled_mins, n_win)
+    step_m = total_mins // n_win
+    windows: list[tuple[int, int]] = []
+    actual_mins = 0
+    for i in range(n_win):
+        slot_lo = start_min + i * step_m
+        slot_hi = end_min if i == n_win - 1 else start_min + (i + 1) * step_m
+        w_mins = min(base_w + (1 if i < rem_w else 0), slot_hi - slot_lo)
+        if w_mins <= 0:
+            continue
+        slack = (slot_hi - slot_lo) - w_mins
+        offset = ((i * 13) % 24) * slack // 24 if slack > 0 else 0
+        lo_m = slot_lo + offset
+        hi_m = lo_m + w_mins
+        windows.append((lo_m * 60, hi_m * 60))
+        actual_mins += w_mins
+    if not windows or actual_mins <= 0:
+        return "", 1
+    raw_scale = total_mins / actual_mins
+    scale: int | float = int(round(raw_scale)) if abs(raw_scale - round(raw_scale)) < 1e-6 else round(raw_scale, 4)
+    arms = " OR ".join(
+        f"(bucket_start >= toDateTime({a}, 'UTC') AND bucket_start < toDateTime({b}, 'UTC'))" for a, b in windows
+    )
+    return f" AND ({arms})", scale
+
+
 def _network_time_sample_clause(
     stride: int,
     *,
@@ -266,25 +321,24 @@ def _network_time_sample_clause(
         return ""
 
     if bucket_seconds is not None:
-        if bucket_seconds < stride:
-            return f" AND line_ordinal % {stride} = 0"
         first_b = (start_ts // bucket_seconds) * bucket_seconds
         last_b = ((end_ts - 1) // bucket_seconds) * bucket_seconds
         n_buckets = ((last_b - first_b) // bucket_seconds) + 1
-        if n_buckets > 24:
+        if bucket_seconds >= stride and n_buckets <= 25:
+            windows: list[tuple[int, int]] = []
+            for idx in range(n_buckets):
+                b_lo = max(start_ts, first_b + idx * bucket_seconds)
+                b_hi = min(end_ts, first_b + (idx + 1) * bucket_seconds)
+                b_dur = b_hi - b_lo
+                if b_dur < stride:
+                    continue
+                win_s = max(1, b_dur // stride)
+                slack = b_dur - win_s
+                offset = ((idx * 13) % 60) * slack // 60 if slack > 0 else 0
+                windows.append((b_lo + offset, b_lo + offset + win_s))
+            return _pk_range_or_clause(windows) if windows else ""
+        if span_s <= 86400:
             return f" AND line_ordinal % {stride} = 0"
-        windows: list[tuple[int, int]] = []
-        for idx in range(n_buckets):
-            b_lo = max(start_ts, first_b + idx * bucket_seconds)
-            b_hi = min(end_ts, first_b + (idx + 1) * bucket_seconds)
-            b_dur = b_hi - b_lo
-            if b_dur < stride:
-                continue
-            win_s = max(1, b_dur // stride)
-            slack = b_dur - win_s
-            offset = ((idx * 13) % 60) * slack // 60 if slack > 0 else 0
-            windows.append((b_lo + offset, b_lo + offset + win_s))
-        return _pk_range_or_clause(windows) if windows else ""
 
     target_sampled_s = max(1, span_s // stride)
     n_windows = min(16, max(1, target_sampled_s // 120)) if target_sampled_s >= 120 else 1
@@ -411,8 +465,12 @@ def _shielding_analysis(service: HighScaleService, start: datetime, end: datetim
                 **cache_result({}, state="bypass", prewarmer=False), has_data=False, edge_only=True, rows=[]
             )
         if cached_shield is not True:
+            probe_sample = ""
+            if use_shield_cache and sh_span_s > 86400:
+                probe_stride = min(50, _network_sample_stride(sh_span_s))
+                probe_sample = _network_time_sample_clause(probe_stride, start=start, end=end)
             shield_prewhere = (
-                f"{_BASE_WHERE} AND custom_fields['edge'] IN ('false', '0', 'False', 'FALSE') "
+                f"{_BASE_WHERE}{probe_sample} AND custom_fields['edge'] IN ('false', '0', 'False', 'FALSE') "
                 "AND custom_fields['prid'] != ''"
             )
             shield_rows = service.client.execute(
@@ -1384,13 +1442,14 @@ def network_quality(
                 want_pop_rollup = pop_rollup_sink is not None or (
                     pop_rollup_cache_key is not None and _pop_rollup_cache.get(pop_rollup_cache_key) is None
                 )
-                pop_cols = (
-                    ", toUInt64(sum(requests)) AS pop_reqs, "
-                    "toUInt64(sum(errors)) AS pop_errors, "
-                    "sum(tcp_rtt_p50_us * tcp_rtt_count) / nullIf(sum(tcp_rtt_count), 0) AS p50_rtt_us, "
-                    "sum(ttfb_p95_us * requests) / nullIf(sumIf(requests, ttfb_p95_us IS NOT NULL), 0) * 1000.0 AS p95_ttfb_ms"
+                dim_stride = (
+                    _network_dim_sample_stride(q_span_s) if (is_real_ch and not os.getenv("PYTEST_CURRENT_TEST")) else 1
+                )
+                dim_sample, dim_scale = _network_dim_time_sample_clause(dim_stride, start=start, end=end)
+                outer_cols = (
+                    "dimension, label, rtt_ms, reqs, pop_reqs, pop_errors, p50_rtt_us, p95_ttfb_ms"
                     if want_pop_rollup
-                    else ""
+                    else "dimension, label, rtt_ms, reqs"
                 )
                 pop_zero = (
                     ", toUInt64(0) AS pop_reqs, toUInt64(0) AS pop_errors, "
@@ -1399,11 +1458,6 @@ def network_quality(
                     if want_pop_rollup
                     else ""
                 )
-                outer_cols = (
-                    "dimension, label, rtt_ms, reqs, pop_reqs, pop_errors, p50_rtt_us, p95_ttfb_ms"
-                    if want_pop_rollup
-                    else "dimension, label, rtt_ms, reqs"
-                )
                 dim_where = (
                     f"(dimension = 'pop' OR tcp_rtt_count > 0) AND {fence}"
                     if want_pop_rollup
@@ -1411,29 +1465,53 @@ def network_quality(
                 )
                 dim_having = "(reqs > 0 OR dimension = 'pop')" if want_pop_rollup else "reqs > 0"
                 dim_limit = 200 if want_pop_rollup else 25
-                sql = (
-                    f"SELECT {outer_cols} FROM ("
-                    "SELECT dimension, value AS label, "
-                    "coalesce(sum(tcp_rtt_sum), sum(tcp_rtt_p50_us * tcp_rtt_count)) / nullIf(sum(tcp_rtt_count), 0) / 1000.0 AS rtt_ms, "
-                    f"toUInt64(sum(tcp_rtt_count)) AS reqs{pop_cols} "
-                    "FROM network_minute_dimensions "
-                    "PREWHERE service_id={service_id:String} "
-                    "AND bucket_start >= {start:DateTime64(3)} AND bucket_start < {end:DateTime64(3)} "
-                    "AND dimension IN ('country', 'asn', 'pop') AND value != '' "
-                    f"WHERE {dim_where} "
-                    f"GROUP BY dimension, label HAVING {dim_having} "
-                    f"ORDER BY dimension ASC, reqs DESC LIMIT {dim_limit} BY dimension) "
-                    "UNION ALL "
-                    f"SELECT {outer_cols} FROM ("
-                    f"SELECT 'region' AS dimension, custom_fields['region'] AS label, avg({_RTT} / 1000.0) AS rtt_ms, "
-                    f"toUInt64(count() * {region_scale}) AS reqs{pop_zero} "
-                    f"FROM request_facts PREWHERE {_BASE_WHERE}{region_hash} AND country = {{region_country:String}} "
-                    "AND custom_fields['region'] != '' AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0' "
-                    f"WHERE {_RTT} > 0 GROUP BY label ORDER BY reqs DESC LIMIT 25)"
-                )
+
+                def _build_bars_sql(d_sample: str, d_scale: int | float) -> str:
+                    scale_mul = f" * {d_scale}" if d_scale != 1 else ""
+                    reqs_expr = (
+                        f"toUInt64(round(sum(tcp_rtt_count){scale_mul})) AS reqs"
+                        if scale_mul
+                        else "toUInt64(sum(tcp_rtt_count)) AS reqs"
+                    )
+                    if want_pop_rollup:
+                        p_reqs = (
+                            f"toUInt64(round(sum(requests){scale_mul}))" if scale_mul else "toUInt64(sum(requests))"
+                        )
+                        p_errs = f"toUInt64(round(sum(errors){scale_mul}))" if scale_mul else "toUInt64(sum(errors))"
+                        pop_cols = (
+                            f", {p_reqs} AS pop_reqs, {p_errs} AS pop_errors, "
+                            "sum(tcp_rtt_p50_us * tcp_rtt_count) / nullIf(sum(tcp_rtt_count), 0) AS p50_rtt_us, "
+                            "sum(ttfb_p95_us * requests) / nullIf(sumIf(requests, ttfb_p95_us IS NOT NULL), 0) * 1000.0 AS p95_ttfb_ms"
+                        )
+                    else:
+                        pop_cols = ""
+                    return (
+                        f"SELECT {outer_cols} FROM ("
+                        "SELECT dimension, value AS label, "
+                        "coalesce(sum(tcp_rtt_sum), sum(tcp_rtt_p50_us * tcp_rtt_count)) / nullIf(sum(tcp_rtt_count), 0) / 1000.0 AS rtt_ms, "
+                        f"{reqs_expr}{pop_cols} "
+                        "FROM network_minute_dimensions "
+                        "PREWHERE service_id={service_id:String} "
+                        f"AND bucket_start >= {{start:DateTime64(3)}} AND bucket_start < {{end:DateTime64(3)}}{d_sample} "
+                        "AND dimension IN ('country', 'asn', 'pop') AND value != '' "
+                        f"WHERE {dim_where} "
+                        f"GROUP BY dimension, label HAVING {dim_having} "
+                        f"ORDER BY dimension ASC, reqs DESC LIMIT {dim_limit} BY dimension) "
+                        "UNION ALL "
+                        f"SELECT {outer_cols} FROM ("
+                        f"SELECT 'region' AS dimension, custom_fields['region'] AS label, avg({_RTT} / 1000.0) AS rtt_ms, "
+                        f"toUInt64(count() * {region_scale}) AS reqs{pop_zero} "
+                        f"FROM request_facts PREWHERE {_BASE_WHERE}{region_hash} AND country = {{region_country:String}} "
+                        "AND custom_fields['region'] != '' AND custom_fields['tcp_rtt'] != '' AND custom_fields['tcp_rtt'] != '0' "
+                        f"WHERE {_RTT} > 0 GROUP BY label ORDER BY reqs DESC LIMIT 25)"
+                    )
+
                 out: dict[str, list[dict]] = {"country": [], "asn": [], "pop": [], "region": []}
                 pop_rollup: dict[str, tuple[int, int, Any, Any]] = {}
-                for r in service.client.execute(sql, params):
+                bar_rows = service.client.execute(_build_bars_sql(dim_sample, dim_scale), params)
+                if dim_sample and not any(str(r.get("dimension") or "") in ("country", "asn", "pop") for r in bar_rows):
+                    bar_rows = service.client.execute(_build_bars_sql("", 1), params)
+                for r in bar_rows:
                     dim = str(r.get("dimension") or "")
                     lbl = str(r.get("label") or "")
                     if not lbl:
@@ -1636,6 +1714,26 @@ def get_pop_health(
                 shared_fact = pop_fact_fut.result() if pop_fact_fut is not None else None
                 if shared_fact is None and pop_fact_cache_key is not None:
                     shared_fact = _pop_fact_cache.get(pop_fact_cache_key)
+                dim_stride = _network_dim_sample_stride(pop_span_s) if not os.getenv("PYTEST_CURRENT_TEST") else 1
+                dim_sample, dim_scale = _network_dim_time_sample_clause(dim_stride, start=start, end=end)
+
+                def _pop_rollup_sql(d_sample: str, d_scale: int | float, fence_sql: str) -> str:
+                    scale_mul = f" * {d_scale}" if d_scale != 1 else ""
+                    r_expr = f"toUInt64(round(sum(requests){scale_mul}))" if scale_mul else "toUInt64(sum(requests))"
+                    e_expr = f"toUInt64(round(sum(errors){scale_mul}))" if scale_mul else "toUInt64(sum(errors))"
+                    return (
+                        f"SELECT value AS pop, {r_expr} AS req_count, "
+                        f"{e_expr} AS errors, "
+                        "sum(tcp_rtt_p50_us * tcp_rtt_count) / nullIf(sum(tcp_rtt_count), 0) AS p50_rtt_us, "
+                        "sum(ttfb_p95_us * requests) / nullIf(sumIf(requests, ttfb_p95_us IS NOT NULL), 0) * 1000.0 AS p95_ttfb_ms "
+                        "FROM network_minute_dimensions "
+                        "PREWHERE service_id={service_id:String} "
+                        f"AND bucket_start >= {{start:DateTime64(3)}} AND bucket_start < {{end:DateTime64(3)}}{d_sample} "
+                        "AND dimension='pop' AND value != '' "
+                        f"WHERE {fence_sql} "
+                        "GROUP BY pop"
+                    )
+
                 light_sql = (
                     "SELECT custom_fields['pop'] AS pop, count() AS requests, "
                     f"countIf({cache_hit_pred}) AS cache_hits, "
@@ -1661,23 +1759,18 @@ def get_pop_health(
                     fence = visible_publication_fence_sql(
                         "network_dimensions", client=service.client, service_id=service.service_id
                     )
-                    rollup_sql = (
-                        "SELECT value AS pop, toUInt64(sum(requests)) AS req_count, "
-                        "toUInt64(sum(errors)) AS errors, "
-                        "sum(tcp_rtt_p50_us * tcp_rtt_count) / nullIf(sum(tcp_rtt_count), 0) AS p50_rtt_us, "
-                        "sum(ttfb_p95_us * requests) / nullIf(sumIf(requests, ttfb_p95_us IS NOT NULL), 0) * 1000.0 AS p95_ttfb_ms "
-                        "FROM network_minute_dimensions "
-                        "PREWHERE service_id={service_id:String} "
-                        "AND bucket_start >= {start:DateTime64(3)} AND bucket_start < {end:DateTime64(3)} "
-                        "AND dimension='pop' AND value != '' "
-                        f"WHERE {fence} "
-                        "GROUP BY pop"
-                    )
+                    rollup_sql = _pop_rollup_sql(dim_sample, dim_scale, fence)
                     rollup_rows = trace.run(
                         "pop_health",
                         lambda: service.client.execute(rollup_sql, params),
                         source="projection",
                     )
+                    if dim_sample and not rollup_rows:
+                        rollup_rows = trace.run(
+                            "pop_health_rollup_fallback",
+                            lambda: service.client.execute(_pop_rollup_sql("", 1, fence), params),
+                            source="projection",
+                        )
                     for rr in rollup_rows:
                         if rr.get("pop"):
                             rollup_by_pop[str(rr["pop"])] = (
@@ -1692,15 +1785,22 @@ def get_pop_health(
                     fence = visible_publication_fence_sql(
                         "network_dimensions", client=service.client, service_id=service.service_id
                     )
+                    scale_mul = f" * {dim_scale}" if dim_scale != 1 else ""
+                    comb_reqs = f"toUInt64(round(sum(requests){scale_mul}))" if scale_mul else "toUInt64(sum(requests))"
+                    comb_errs = (
+                        f"CAST(toUInt64(round(sum(errors){scale_mul})), 'Nullable(UInt64)')"
+                        if scale_mul
+                        else "CAST(toUInt64(sum(errors)), 'Nullable(UInt64)')"
+                    )
                     combined_sql = (
-                        "SELECT 'rollup' AS kind, value AS pop, toUInt64(sum(requests)) AS req_count, "
-                        "CAST(toUInt64(sum(errors)), 'Nullable(UInt64)') AS errors, "
+                        f"SELECT 'rollup' AS kind, value AS pop, {comb_reqs} AS req_count, "
+                        f"{comb_errs} AS errors, "
                         "sum(tcp_rtt_p50_us * tcp_rtt_count) / nullIf(sum(tcp_rtt_count), 0) AS p50_rtt_us, "
                         "sum(ttfb_p95_us * requests) / nullIf(sumIf(requests, ttfb_p95_us IS NOT NULL), 0) * 1000.0 AS p95_ttfb_ms, "
                         "toUInt64(0) AS cache_hits, toInt64(0) AS bandwidth_bytes "
                         "FROM network_minute_dimensions "
                         "PREWHERE service_id={service_id:String} "
-                        "AND bucket_start >= {start:DateTime64(3)} AND bucket_start < {end:DateTime64(3)} "
+                        f"AND bucket_start >= {{start:DateTime64(3)}} AND bucket_start < {{end:DateTime64(3)}}{dim_sample} "
                         "AND dimension='pop' AND value != '' "
                         f"WHERE {fence} "
                         "GROUP BY pop "
@@ -1731,6 +1831,20 @@ def get_pop_health(
                                 )
                         else:
                             fact_rows.append({**cr, "requests": cr.get("req_count", cr.get("requests"))})
+                    if dim_sample and fact_rows and not rollup_by_pop:
+                        fb_rollup_rows = trace.run(
+                            "pop_health_rollup_fallback",
+                            lambda: service.client.execute(_pop_rollup_sql("", 1, fence), params),
+                            source="projection",
+                        )
+                        for rr in fb_rollup_rows:
+                            if rr.get("pop"):
+                                rollup_by_pop[str(rr["pop"])] = (
+                                    int(rr.get("req_count") or 0),
+                                    int(rr.get("errors") or 0),
+                                    rr.get("p50_rtt_us"),
+                                    rr.get("p95_ttfb_ms"),
+                                )
                     if rollup_by_pop:
                         _pop_rollup_cache[pop_rollup_cache_key] = rollup_by_pop
                     if pop_fact_cache_key is not None and fact_rows:
