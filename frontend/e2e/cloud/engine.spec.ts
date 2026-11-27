@@ -42,14 +42,20 @@ test("Cloud origin buckets use UTC without timezone extensions", async ({
   const extensions: number[] = [];
   const from = "2026-01-01T00:00:00Z";
   const to = "2026-01-01T01:00:00Z";
+  const fixtureRows = 50;
+  const fromMs = Date.parse(from);
   const bytes = Buffer.from(
     parquetWriteBuffer({
       columnData: [
-        { name: "timestamp", type: "TIMESTAMP", data: [new Date(from)] },
-        { name: "cache", type: "STRING", data: ["MISS"] },
-        { name: "url", type: "STRING", data: ["/fixture-origin.css"] },
-        { name: "ttfb", type: "DOUBLE", data: [0.02] },
-        { name: "status", type: "INT32", data: [200] },
+        {
+          name: "timestamp",
+          type: "TIMESTAMP",
+          data: Array.from({ length: fixtureRows }, (_, i) => new Date(fromMs + i * 1_000)),
+        },
+        { name: "cache", type: "STRING", data: Array(fixtureRows).fill("MISS") },
+        { name: "url", type: "STRING", data: Array(fixtureRows).fill("/fixture-origin.css") },
+        { name: "ttfb", type: "DOUBLE", data: Array(fixtureRows).fill(0.02) },
+        { name: "status", type: "INT32", data: Array(fixtureRows).fill(200) },
       ],
     }),
   );
@@ -129,7 +135,7 @@ test("Cloud origin buckets use UTC without timezone extensions", async ({
                 key: "pq/origin-buckets.parquet",
                 start: from,
                 end: to,
-                rows: 1,
+                rows: fixtureRows,
                 size: bytes.length,
               },
             ],
@@ -153,10 +159,10 @@ test("Cloud origin buckets use UTC without timezone extensions", async ({
             busy: false,
             earliest_log_at: from,
             latest_log_at: to,
-            local_rows: 1,
+            local_rows: fixtureRows,
             request: {
               latest_log_at: to,
-              total_rows: 1,
+              total_rows: fixtureRows,
               total_rows_partial: false,
               last_sync_at: to,
             },
