@@ -53,7 +53,7 @@ try {
     if (existsSync(file)) unlinkSync(file);
 }
 
-createServer(credentials, (incoming, outgoing) => {
+createServer({ ...credentials, maxHeaderSize: 65536 }, (incoming, outgoing) => {
   const omitFrontKey = incoming.headers["x-flp-test-omit-front-key"] === "1";
   const frontRateLimit = incoming.headers["x-flp-test-front-rl"] === "1" ? "1" : "0";
   const headers = {
@@ -70,6 +70,7 @@ createServer(credentials, (incoming, outgoing) => {
     backend,
     {
       agent: false,
+      maxHeaderSize: 65536,
       path: incoming.url,
       method: incoming.method,
       headers,
@@ -85,6 +86,7 @@ createServer(credentials, (incoming, outgoing) => {
     if (!outgoing.writableFinished) upstream.destroy();
   });
   upstream.on("error", (error) => {
+    console.error("Native proxy upstream error:", error.code || error.message);
     if (outgoing.headersSent) {
       outgoing.destroy(error);
       return;

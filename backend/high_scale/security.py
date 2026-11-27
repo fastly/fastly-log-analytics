@@ -531,6 +531,37 @@ _COMBINED_OVERVIEW_KEYS = (
 )
 
 
+def _security_sample_stride(span_seconds: float) -> int:
+    """Granule/line sampling stride for raw security scans on multi-day windows."""
+    if span_seconds >= 1_728_000:
+        return 200
+    if span_seconds >= 1_209_600:
+        return 100
+    if span_seconds >= 604_800:
+        return 40
+    if span_seconds >= 259_200:
+        return 10
+    return 1
+
+
+def _security_pk_sample_clause(scope: _Scope, stride: int) -> str:
+    if stride <= 1 or scope.start is None or scope.end is None:
+        return ""
+    start_ts = int(scope.start.timestamp())
+    end_ts = int(scope.end.timestamp())
+    if end_ts <= start_ts:
+        return ""
+    from backend.high_scale.insights.sql_queries import _pk_range_windows
+
+    windows = _pk_range_windows(start_ts, end_ts, stride)
+    if not windows:
+        return f" AND line_ordinal % {stride} = 0"
+    arms = " OR ".join(
+        f"(event_timestamp >= toDateTime({a}, 'UTC') AND event_timestamp < toDateTime({b}, 'UTC'))" for a, b in windows
+    )
+    return f" AND ({arms})"
+
+
 def _populate_sec_memo_bundle(sec_base_key: str | None, bundle: dict[str, Any]) -> None:
     if sec_base_key is None:
         return
@@ -605,6 +636,7 @@ def _sec_combined_overview(
     *,
     bucket_seconds: int = 3600,
     include_verified_bots: bool = False,
+    stride: int = 1,
 ) -> dict[str, Any]:
     h_case = _bucket_case("h", _REQ_HEADER_BUCKETS, _REQ_HEADER_LAST)
     c_case = _bucket_case("c", _CONN_REUSE_BUCKETS, _CONN_REUSE_LAST)
@@ -622,6 +654,7 @@ def _sec_combined_overview(
         if include_verified_bots
         else ""
     )
+    sample_clause = f" AND line_ordinal % {stride} = 0" if stride > 1 else ""
     overview_sql = (
         f"SELECT {bucket_expr} AS bucket_ts, "
         "count() AS total_rows, "
@@ -633,7 +666,7 @@ def _sec_combined_overview(
         "FROM (SELECT event_timestamp, custom_fields['tls_ciphers_sha'], custom_fields['is_ipv6'], "
         "custom_fields['p_type'] AS p_t, toUInt64OrNull(custom_fields['req_header_bytes']) AS h, "
         f"{h_case} AS h_b, toUInt64OrNull(custom_fields['conn_requests']) AS c, {c_case} AS c_b{vb_inner} "
-        "FROM request_facts PREWHERE __WHERE__) GROUP BY bucket_ts ORDER BY bucket_ts"
+        f"FROM request_facts PREWHERE __WHERE__{sample_clause}) GROUP BY bucket_ts ORDER BY bucket_ts"
     )
     rows = _run(service, scope, "overview_5in1", overview_sql)
     total_rows = 0
@@ -644,28 +677,28 @@ def _sec_combined_overview(
     p_counts: dict[str, int] = defaultdict(int)
     vb_entries: list[tuple[int, str, int]] = []
     for r in rows:
-        tr = int(r.get("total_rows") or 0)
+        tr = int(r.get("total_rows") or 0) * stride
         total_rows += tr
-        tls_pop += int(r.get("tls_populated") or 0)
+        tls_pop += int(r.get("tls_populated") or 0) * stride
         b_ts = int(r["bucket_ts"])
         if tr > 0:
             hr_ts = (b_ts // 3600) * 3600
             acc = ipv6_by_hour.setdefault(hr_ts, [0, 0])
-            acc[0] += int(r.get("ipv6_rows") or 0)
+            acc[0] += int(r.get("ipv6_rows") or 0) * stride
             acc[1] += tr
         for k, v in _unpack_summap(r.get("h_map")):
             if k:
-                h_counts[str(k)] += v
+                h_counts[str(k)] += v * stride
         for k, v in _unpack_summap(r.get("c_map")):
             if k:
-                c_counts[str(k)] += v
+                c_counts[str(k)] += v * stride
         for k, v in _unpack_summap(r.get("p_map")):
             if k:
-                p_counts[_normalize_proxy_type(k)] += v
+                p_counts[_normalize_proxy_type(k)] += v * stride
         if include_verified_bots:
             for k, v in _unpack_summap(r.get("vb_map")):
                 if k and v > 0:
-                    vb_entries.append((b_ts, str(k), v))
+                    vb_entries.append((b_ts, str(k), v * stride))
     ipv6_list = [
         {"time": _sec_iso(hr_ts), "pct": ipv6_cnt * 100.0 / tot_cnt}
         for hr_ts, (ipv6_cnt, tot_cnt) in sorted(ipv6_by_hour.items())
@@ -692,24 +725,27 @@ def _sec_combined_overview(
 
 
 def _sec_combined_tls_ips(
-    service: HighScaleService, scope: _Scope, mask_ips: bool, sec_base_key: str | None
+    service: HighScaleService, scope: _Scope, mask_ips: bool, sec_base_key: str | None, *, stride: int = 1
 ) -> dict[str, Any]:
+    pk_sample = _security_pk_sample_clause(scope, stride)
     sql = (
         "SELECT kind, k, v1, v2 FROM ("
         "SELECT 'fp' AS kind, custom_fields['tls_ciphers_sha'] AS k, "
         "toUInt64(uniqCombined64(client_ip)) AS v1, toUInt64(count()) AS v2 "
-        "FROM request_facts PREWHERE __WHERE__ AND custom_fields['tls_ciphers_sha'] != '' "
+        f"FROM request_facts PREWHERE __WHERE__{pk_sample} AND custom_fields['tls_ciphers_sha'] != '' "
         "GROUP BY k ORDER BY v2 DESC LIMIT 20"
         ") UNION ALL "
         "SELECT kind, k, v1, v2 FROM ("
         "SELECT 'ip' AS kind, client_ip AS k, toUInt64(max(h)) AS v1, toUInt64(0) AS v2 FROM ("
         "SELECT client_ip, toUInt64OrNull(custom_fields['req_header_bytes']) AS h "
-        "FROM request_facts PREWHERE __WHERE__ AND client_ip != '' AND custom_fields['req_header_bytes'] != ''"
+        f"FROM request_facts PREWHERE __WHERE__{pk_sample} AND client_ip != '' AND custom_fields['req_header_bytes'] != ''"
         ") WHERE h IS NOT NULL GROUP BY k ORDER BY v1 DESC LIMIT 10)"
     )
     rows = _run(service, scope, "tls_and_ips", sql)
     fps = [
-        shape_security_fingerprint_row(r["k"], r["v1"], int(r["v2"])) for r in rows if str(r.get("kind") or "") == "fp"
+        shape_security_fingerprint_row(r["k"], r["v1"], int(r["v2"]) * stride)
+        for r in rows
+        if str(r.get("kind") or "") == "fp"
     ]
     ips = [
         shape_security_top_ip_header_row(r["k"], r["v1"], mask_ips=mask_ips)
@@ -851,11 +887,16 @@ def security_aggregates(
                 )
             )
         )
+        stride = (
+            _security_sample_stride((scope.end - scope.start).total_seconds())
+            if (is_real_ch and scope.start is not None and scope.end is not None)
+            else 1
+        )
         candidates: tuple[tuple[str, bool, Callable[[], Any]], ...] = (
             (
                 "_combined_tls_ips",
                 use_combined_tls_ips,
-                lambda: _sec_combined_tls_ips(service, scope, mask_ips, sec_base_key),
+                lambda: _sec_combined_tls_ips(service, scope, mask_ips, sec_base_key, stride=stride),
             ),
             (
                 "tls_fingerprints",
@@ -871,6 +912,7 @@ def security_aggregates(
                     sec_base_key,
                     bucket_seconds=bucket_seconds,
                     include_verified_bots=fold_vb_in_overview,
+                    stride=stride,
                 ),
             ),
             (
@@ -931,7 +973,7 @@ def security_aggregates(
             ("wellknown_bots", want("wellknown_bots"), lambda: _wellknown_bots(service, scope)),
             ("bot_efficiency", want("bot_efficiency"), lambda: _bot_efficiency(service, scope)),
             ("_top_bots", want("top_bots"), lambda: _top_bots(service, scope)),
-            ("_proxies", want("proxies"), lambda: _proxies(service, scope, mask_ips)),
+            ("_proxies", want("proxies"), lambda: _proxies(service, scope, mask_ips, stride=stride)),
         )
         tasks = [
             (k, fn if k in ("_combined_overview", "_combined_ngwaf", "_combined_tls_ips") else _wrap_sec(k, fn))
@@ -1122,7 +1164,7 @@ _PROXY_SOURCE = (
 )
 
 
-def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[str, Any]:
+def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool, *, stride: int = 1) -> dict[str, Any]:
     is_real_ch = (
         hasattr(service.client, "_http") and "MockTransport" not in type(service.client._http._transport).__name__
     )
@@ -1144,6 +1186,7 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
             return cached
 
     if is_real_ch:
+        pk_sample = _security_pk_sample_clause(scope, stride)
         need_geo = "rtt_min IS NOT NULL AND (rtt_min < 200000 OR (tcp_rtt > 0 AND rtt_min / tcp_rtt < 0.2))"
         proxies_sql = (
             "SELECT "
@@ -1152,7 +1195,7 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
             "uniqCombined64If(ip, is_imp) AS distance_mismatches_count, "
             "countIf(is_tunnel) AS q_tunnel, "
             "countIf(NOT is_tunnel AND tcp_rtt > 0 AND rtt_min IS NOT NULL AND rtt_min / tcp_rtt < 0.7) AS q_wifi, "
-            "(SELECT count() FROM request_facts PREWHERE __WHERE__) AS q_total, "
+            f"(SELECT count() FROM request_facts PREWHERE __WHERE__{pk_sample}) AS q_total, "
             "sumMap(if(is_tunnel, [ifNull(asn, -1)], []), if(is_tunnel, [toUInt64(1)], [])) AS isp_map, "
             "groupArraySortedIf(100)("
             "tuple("
@@ -1181,19 +1224,19 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
             f"if({need_geo}, toInt64OrNull(custom_fields['asn']), NULL) AS asn, "
             f"if({need_geo}, {_POP_LAT_FAST}, NULL) AS pop_lat, "
             f"if({need_geo}, {_POP_LON_FAST}, NULL) AS pop_lon "
-            "FROM request_facts PREWHERE __WHERE__ AND custom_fields['rtt_min'] != ''"
+            f"FROM request_facts PREWHERE __WHERE__{pk_sample} AND custom_fields['rtt_min'] != ''"
             ")))"
         )
         comb_rows = _run(service, scope, "proxies_combined", proxies_sql)
         comb = comb_rows[0] if comb_rows else {}
         stat = {
             "active_proxies_count": int(comb.get("active_proxies_count") or 0),
-            "total_requests_count": int(comb.get("total_requests_count") or 0),
+            "total_requests_count": int(comb.get("total_requests_count") or 0) * stride,
             "distance_mismatches_count": int(comb.get("distance_mismatches_count") or 0),
         }
-        q_tunnel = int(comb.get("q_tunnel") or 0)
-        q_wifi = int(comb.get("q_wifi") or 0)
-        q_total = int(comb.get("q_total") or 0)
+        q_tunnel = int(comb.get("q_tunnel") or 0) * stride
+        q_wifi = int(comb.get("q_wifi") or 0) * stride
+        q_total = int(comb.get("q_total") or 0) * stride
         q_direct = max(0, q_total - q_tunnel - q_wifi)
         q_candidates: list[dict[str, Any]] = [
             {"type": "Direct Connection", "count": q_direct},
@@ -1206,7 +1249,7 @@ def _proxies(service: HighScaleService, scope: _Scope, mask_ips: bool) -> dict[s
             reverse=True,
         )
         isp_rows = [
-            {"asn": None if int(a) == -1 else int(a), "count": int(cnt)}
+            {"asn": None if int(a) == -1 else int(a), "count": int(cnt) * stride}
             for a, cnt in sorted(_unpack_summap(comb.get("isp_map")), key=lambda kv: kv[1], reverse=True)[:10]
             if cnt > 0
         ]

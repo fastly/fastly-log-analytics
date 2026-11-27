@@ -59,4 +59,11 @@ describe("LoadingProgress", () => {
     expect(screen.getByText("Checking cached data")).toBeInTheDocument();
     expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
   });
+
+  it("splits detail text into inline word spans so the toast does not become a large LCP block", () => {
+    render(<LoadingProgress stage="files" />);
+    const detail = screen.getByTestId("loading-progress-detail");
+    expect(detail.children.length).toBeGreaterThan(4);
+    expect(detail.textContent).toBe("Starting the query and checking reusable data in your browser.");
+  });
 });

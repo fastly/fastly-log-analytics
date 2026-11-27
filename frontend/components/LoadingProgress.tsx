@@ -36,18 +36,22 @@ export function LoadingProgress({
     ? Math.max(0, Math.min(100, Math.round((progress!.done / work) * 100))) : null;
 
   return (
-    <section role="region" aria-label="Dashboard loading progress" className="fixed bottom-4 right-4 left-4 z-40 overflow-hidden rounded-xl border border-primary/20 bg-popover text-popover-foreground shadow-xl sm:bottom-6 sm:right-6 sm:left-auto sm:w-96">
-      <div className="border-b border-border/60 bg-primary/5 px-5 py-3">
+    <section role="region" aria-label="Dashboard loading progress" className="fixed bottom-4 right-4 left-4 z-40 overflow-hidden rounded-xl border border-primary/20 bg-popover text-popover-foreground shadow-xl sm:bottom-6 sm:right-6 sm:left-auto sm:w-72">
+      <div className="border-b border-border/60 bg-primary/5 px-3.5 py-2.5">
         <div className="flex items-center gap-2 text-xs font-medium">
           <Loader2 aria-hidden="true" className="size-3.5 text-primary motion-safe:animate-spin" />
           {refreshing ? "Updating dashboard" : "Loading dashboard"}
           <span className="ml-auto font-mono text-[10px] text-muted-foreground">{active.step + 1} / 4 stages</span>
         </div>
       </div>
-      <div className="space-y-4 p-5">
+      <div className="space-y-3 p-3.5">
         <div role="status" aria-live="polite" aria-atomic="true">
-          <p className="text-sm font-semibold">{title}</p>
-          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{detail}</p>
+          <p className="text-xs font-semibold leading-tight">{title}</p>
+          <p data-testid="loading-progress-detail" className="mt-1 text-[11px] leading-tight text-muted-foreground">
+            {detail.split(" ").map((word, idx, arr) => (
+              <span key={idx}>{word}{idx < arr.length - 1 ? " " : ""}</span>
+            ))}
+          </p>
         </div>
         <ol aria-label="Loading stages" className="grid grid-cols-4 gap-2">
           {["Account", "Log range", "File list", "Analysis"].map((label, index) => (
@@ -72,13 +76,13 @@ export function LoadingProgress({
                 </div>
               </>
             )}
-            <p>
+            <p className="truncate text-[11px] leading-tight text-muted-foreground">
               {formatBytes(progress.downloadedBytes)} downloaded · {formatBytes(progress.cachedBytes)} from cache
               {progress.rangedFiles ? ` · ${formatCount(progress.rangedFiles)} files read in ranges (bytes not counted)` : null}
             </p>
           </div>
         )}
-        {refreshing && <p className="text-xs text-muted-foreground">Your previous results stay visible while this finishes.</p>}
+        {refreshing && <p className="truncate text-[11px] leading-tight text-muted-foreground">Your previous results stay visible while this finishes.</p>}
       </div>
     </section>
   );
