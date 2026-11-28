@@ -1289,6 +1289,10 @@ impl SummaryBatchWriter {
         self.writer.flush().map_err(|_| "parquet_flush".to_owned())
     }
 
+    pub(crate) fn append_metadata(&mut self, kv: KeyValue) {
+        self.writer.append_key_value_metadata(kv);
+    }
+
     pub(crate) fn finish(self) -> Result<Vec<u8>, String> {
         self.writer
             .into_inner()

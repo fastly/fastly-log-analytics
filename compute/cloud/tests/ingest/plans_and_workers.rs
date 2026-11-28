@@ -3094,6 +3094,44 @@ mod summary_bundles {
         settle(&fake);
         assert!(of(&fake, "open_bundle=").is_empty());
     }
+
+    #[test]
+    fn open_bundle_defers_snapshot_under_high_linear_memory_and_publishes_next_pass() {
+        let fake = Fake::new(BASE + 30 * 60);
+        watermark(&fake, BASE + 30 * 60);
+        for m in 0..8 {
+            window(&fake, BASE + m * 60, (m * 100) as u32, 10);
+        }
+        // High linear memory high-water mark (even when live heap_mib is unreported) must stop
+        // folding early, save the partial with an owned encode, and defer open_bundle= until the
+        // next fresh pass (where done == resumed and linear memory is low).
+        fake.linear_memory_high_water_bytes
+            .set(Some(bundle::FINAL_LINEAR_MEMORY_STOP_BYTES));
+        let first = run(&fake);
+        assert_eq!(first.stopped, Some("heap"), "{first:?}");
+        assert!(first.partials >= 1, "{first:?}");
+        assert!(
+            of(&fake, "open_bundle=").is_empty(),
+            "open_bundle= must wait for a fresh pass when linear memory is high"
+        );
+        assert!(
+            !fake
+                .keys(WINDOWS)
+                .into_iter()
+                .filter(|k| k.contains("partial="))
+                .collect::<Vec<_>>()
+                .is_empty(),
+            "expected resumed partial to be persisted"
+        );
+
+        // Fresh worker turn: resume partial and publish open_bundle= even if no new windows arrived.
+        fake.linear_memory_high_water_bytes
+            .set(Some(20 * 1024 * 1024));
+        settle(&fake);
+        let open_keys = of(&fake, "open_bundle=");
+        assert_eq!(open_keys.len(), 1, "{open_keys:?}");
+        assert_eq!(bundle::parse_name(&open_keys[0]).unwrap().count, 8);
+    }
 }
 
 /// Native decode cost per decompressed MB, for comparing converter changes (wasm differs).

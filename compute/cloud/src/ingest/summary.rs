@@ -452,6 +452,10 @@ impl Out {
         self.rows == 0
     }
 
+    pub(super) fn len(&self) -> usize {
+        self.rows
+    }
+
     pub(super) fn finish(mut self) -> Result<RecordBatch, String> {
         for (col, len) in self.cols.iter_mut().zip(self.lens) {
             col.append_nulls(self.rows - len);

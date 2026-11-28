@@ -397,6 +397,9 @@ def _evaluate(
                 baseline_hours=baseline_hours,
                 window_hours=window_hours,
                 rollup_span=span,
+                baseline_start=baseline_start,
+                window_start=window_start,
+                window_end=now,
             )
             query_params = {**params, "rollup_start": span[0], "rollup_end": span[1]}
             source = "mixed"

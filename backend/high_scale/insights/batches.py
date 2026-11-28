@@ -1667,7 +1667,12 @@ def _build_network_asn(
         if isinstance(asn_cands, list) and asn_cands:
             asn_in = _candidate_in_clause("custom_fields['asn']", asn_cands, "cand_asn", candidate_params)
             prewhere_preds.append(f"({asn_in})")
-            proj.append(("asn_str", f"if(custom_fields['asn'] != '' AND {asn_in}, custom_fields['asn'], '')"))
+            proj.append(
+                (
+                    "asn_str",
+                    f"if({asn_in}, custom_fields['asn'], '')" if has_metro else "custom_fields['asn']",
+                )
+            )
         else:
             asn_win_from = _window_from(
                 filter_clause=filter_clause,
@@ -1692,7 +1697,12 @@ def _build_network_asn(
         if isinstance(metro_cands, list) and metro_cands:
             metro_in = _candidate_in_clause(metro_col, metro_cands, "cand_metro", candidate_params)
             prewhere_preds.append(f"({metro_in})")
-            proj.append(("metro", f"if({metro_col} != '' AND {metro_in}, {metro_col}, '')"))
+            proj.append(
+                (
+                    "metro",
+                    f"if({metro_in}, {metro_col}, '')" if has_asn else metro_col,
+                )
+            )
         else:
             metro_win_from = _window_from(
                 filter_clause=filter_clause,
@@ -1713,7 +1723,12 @@ def _build_network_asn(
         proj.extend([("ploss", COLUMNS["ploss"]), ("rtt_var", COLUMNS["rtt_var"]), ("retrans", COLUMNS["retrans"])])
         sets.append("(asn_str)")
     if "asn_metro_performance" in effective_active:
-        proj.extend([("tcp_rtt", COLUMNS["tcp_rtt"]), ("country", COLUMNS["country"])])
+        proj.extend(
+            [
+                ("tcp_rtt", f"if({COLUMNS['country']} = 'US', {COLUMNS['tcp_rtt']}, NULL)"),
+                ("country", COLUMNS["country"]),
+            ]
+        )
         sets.append("(asn_str, metro)")
     if "metro_delivery_degradation" in effective_active:
         proj.append(("delivery_rate", COLUMNS["delivery_rate"]))
@@ -1747,8 +1762,8 @@ def _build_network_asn(
             [
                 "avgIf(ploss, is_w) AS w_ploss",
                 "avgIf(ploss, is_b) AS b_ploss",
-                f"{_P95}(rtt_var, is_w) AS w_jitter",
-                f"{_P95}(rtt_var, is_b) AS b_jitter",
+                "quantileIf(0.95)(rtt_var, is_w AND asn_str != '') AS w_jitter",
+                "quantileIf(0.95)(rtt_var, is_b AND asn_str != '') AS b_jitter",
                 "avgIf(retrans, is_w) AS w_retrans",
                 "avgIf(retrans, is_b) AS b_retrans",
                 f"countIf(is_w){w_scale} AS nah_w_total",
@@ -1765,8 +1780,8 @@ def _build_network_asn(
         amp = "tcp_rtt > 0 AND country = 'US'"
         sel.extend(
             [
-                f"quantileTDigestIf(0.50)(tcp_rtt, is_w AND {amp}) / 1000.0 AS amp_w_med",
-                f"quantileTDigestIf(0.50)(tcp_rtt, is_b AND {amp}) / 1000.0 AS amp_b_med",
+                f"quantileIf(0.50)(tcp_rtt, is_w AND asn_str != '' AND metro != '' AND {amp}) / 1000.0 AS amp_w_med",
+                f"quantileIf(0.50)(tcp_rtt, is_b AND asn_str != '' AND metro != '' AND {amp}) / 1000.0 AS amp_b_med",
                 f"countIf(is_w AND {amp}){w_scale} AS amp_w_total",
                 f"countIf(is_b AND {amp}){b_scale} AS amp_b_total",
             ]
@@ -1778,8 +1793,8 @@ def _build_network_asn(
     if "metro_delivery_degradation" in effective_active:
         sel.extend(
             [
-                "quantileTDigestIf(0.5)(delivery_rate, is_w AND delivery_rate > 0) AS mdd_w_med",
-                "quantileTDigestIf(0.5)(delivery_rate, is_b AND delivery_rate > 0) AS mdd_b_med",
+                "quantileIf(0.5)(delivery_rate, is_w AND metro != '' AND delivery_rate > 0) AS mdd_w_med",
+                "quantileIf(0.5)(delivery_rate, is_b AND metro != '' AND delivery_rate > 0) AS mdd_b_med",
                 f"countIf(is_w AND delivery_rate > 0){w_scale} AS mdd_w_total",
                 f"countIf(is_b AND delivery_rate > 0){b_scale} AS mdd_b_total",
             ]

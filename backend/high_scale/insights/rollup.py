@@ -18,7 +18,13 @@ from datetime import UTC, datetime, timedelta
 
 from backend.high_scale._common import visible_fact_clauses
 
-from .sql_queries import COLUMNS, Detection, baseline_sample_stride, window_sample_stride
+from .sql_queries import (
+    COLUMNS,
+    Detection,
+    baseline_sample_stride,
+    build_pk_time_sample_clause,
+    window_sample_stride,
+)
 
 ROLLUP_TABLE = "request_insight_hourly"
 
@@ -224,6 +230,9 @@ def rollup_base_sql(
     baseline_hours: float = 0.0,
     window_hours: float = 0.0,
     rollup_span: tuple[datetime, datetime] | None = None,
+    baseline_start: datetime | None = None,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
 ) -> str:
     """Like ``_base_sql`` but baseline hours in [rollup_start, rollup_end) come from the rollup."""
     if problems := rollup_problems(detection, shape):
@@ -236,17 +245,14 @@ def rollup_base_sql(
     sampled = insight_id in SAMPLED_ROLLUP_DETECTIONS
     w_stride = window_sample_stride(window_hours) if sampled else 1
     b_stride = baseline_sample_stride(baseline_hours) if sampled else 1
-    if w_stride > 1 and b_stride > 1:
-        sample_clause = (
-            f"((event_timestamp >= {{window_start:DateTime64(3)}} AND intDiv(toUnixTimestamp(event_timestamp), 300) % {w_stride} = 0)"
-            f" OR (event_timestamp < {{window_start:DateTime64(3)}} AND intDiv(toUnixTimestamp(event_timestamp), 300) % {b_stride} = 0))"
-        )
-    elif b_stride > 1:
-        sample_clause = f"(event_timestamp >= {{window_start:DateTime64(3)}} OR intDiv(toUnixTimestamp(event_timestamp), 300) % {b_stride} = 0)"
-    elif w_stride > 1:
-        sample_clause = f"(event_timestamp < {{window_start:DateTime64(3)}} OR intDiv(toUnixTimestamp(event_timestamp), 300) % {w_stride} = 0)"
-    else:
-        sample_clause = ""
+    sample_clause = build_pk_time_sample_clause(
+        b_stride=b_stride,
+        w_stride=w_stride,
+        baseline_start=baseline_start,
+        window_start=window_start,
+        window_end=window_end,
+        rollup_span=rollup_span,
+    ).removeprefix(" AND ")
     if detection.prewhere:
         raw_prewhere = f" PREWHERE {detection.prewhere}"
         raw_sample = f" AND {sample_clause}" if sample_clause else ""
