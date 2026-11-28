@@ -129,6 +129,8 @@ const WALL_STOP: std::time::Duration = std::time::Duration::from_secs(40);
 pub const VCPU_STOP_MS: u64 = 600;
 /// Start a final serialization (~250ms plus the tail) only below this, keeping it under 900ms.
 pub const WRITE_VCPU_STOP_MS: u64 = 630;
+/// Stop folding and defer final serialization once Wasm heap reaches this threshold (of 128 MiB).
+const HEAP_STOP_MIB: u32 = 88;
 const PARTIAL_MAGIC: &[u8; 5] = b"FLPB\x0a";
 /// A packed partial: [`PACKED_MAGIC`], the object count (u32 LE) and the raw length (u64 LE),
 /// then the first slice of the zstd-compressed [`PARTIAL_MAGIC`] body; the rest follows in
@@ -178,6 +180,95 @@ fn pack_partial_owned(raw: Vec<u8>, limit: usize) -> Result<Vec<Vec<u8>>, String
     let packed = zstd::bulk::compress(&raw, 1).map_err(|_| "partial_encode_failed")?;
     drop(raw);
     pack_partial_split(raw_len, packed, limit)
+}
+
+trait PartialSink {
+    fn put(&mut self, bytes: &[u8]) -> Result<(), String>;
+}
+
+impl PartialSink for Vec<u8> {
+    fn put(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.extend_from_slice(bytes);
+        Ok(())
+    }
+}
+
+struct CountingZstdWriter {
+    encoder: zstd::stream::write::Encoder<'static, Vec<u8>>,
+    raw_len: usize,
+}
+
+impl CountingZstdWriter {
+    fn new() -> Result<Self, String> {
+        let encoder = zstd::stream::write::Encoder::new(Vec::new(), 1)
+            .map_err(|_| "partial_encode_failed")?;
+        Ok(Self {
+            encoder,
+            raw_len: 0,
+        })
+    }
+
+    fn finish_split(self, limit: usize) -> Result<Vec<Vec<u8>>, String> {
+        use std::io::Write;
+        let mut encoder = self.encoder;
+        encoder.flush().map_err(|_| "partial_encode_failed")?;
+        let packed = encoder.finish().map_err(|_| "partial_encode_failed")?;
+        pack_partial_split(self.raw_len, packed, limit)
+    }
+}
+
+impl PartialSink for CountingZstdWriter {
+    fn put(&mut self, bytes: &[u8]) -> Result<(), String> {
+        use std::io::Write;
+        self.encoder
+            .write_all(bytes)
+            .map_err(|_| "partial_encode_failed")?;
+        self.raw_len = self
+            .raw_len
+            .checked_add(bytes.len())
+            .ok_or("partial_encode_failed")?;
+        Ok(())
+    }
+}
+
+struct SliceChainReader<'a> {
+    head: &'a [u8],
+    rest: &'a [Vec<u8>],
+    idx: usize,
+    pos: usize,
+}
+
+impl<'a> SliceChainReader<'a> {
+    fn new(head: &'a [u8], rest: &'a [Vec<u8>]) -> Self {
+        Self {
+            head,
+            rest,
+            idx: 0,
+            pos: 0,
+        }
+    }
+}
+
+impl std::io::Read for SliceChainReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            let chunk = if self.idx == 0 {
+                self.head
+            } else if let Some(slice) = self.rest.get(self.idx - 1) {
+                slice.as_slice()
+            } else {
+                return Ok(0);
+            };
+            if self.pos < chunk.len() {
+                let n = (chunk.len() - self.pos).min(buf.len());
+                buf[..n].copy_from_slice(&chunk[self.pos..self.pos + n]);
+                self.pos += n;
+                return Ok(n);
+            }
+            self.idx += 1;
+            self.pos = 0;
+        }
+    }
 }
 
 /// The object count of a packed partial head.
@@ -1944,212 +2035,382 @@ impl Acc {
         }
     }
 
+    fn put_u32(out: &mut impl PartialSink, v: u32) -> Result<(), String> {
+        out.put(&v.to_le_bytes())
+    }
+    fn put_u64(out: &mut impl PartialSink, v: u64) -> Result<(), String> {
+        out.put(&v.to_le_bytes())
+    }
+    fn put_i64(out: &mut impl PartialSink, v: i64) -> Result<(), String> {
+        out.put(&v.to_le_bytes())
+    }
+    fn put_str(out: &mut impl PartialSink, s: &str) -> Result<(), String> {
+        Self::put_u32(out, s.len() as u32)?;
+        out.put(s.as_bytes())
+    }
+    fn put_cells(out: &mut impl PartialSink, cells: &[Cell]) -> Result<(), String> {
+        Self::put_u32(out, cells.len() as u32)?;
+        for c in cells {
+            match c {
+                Cell::Null => out.put(&[0])?,
+                Cell::I(i) => {
+                    out.put(&[1])?;
+                    Self::put_i64(out, *i)?;
+                }
+                Cell::F(f) => {
+                    out.put(&[2])?;
+                    out.put(&f.to_le_bytes())?;
+                }
+                Cell::S(s) => {
+                    out.put(&[3])?;
+                    Self::put_str(out, s)?;
+                }
+                Cell::H(h) => match h.to_bytes() {
+                    Some(bytes) => {
+                        out.put(&[4])?;
+                        Self::put_u32(out, bytes.len() as u32)?;
+                        out.put(&bytes)?;
+                    }
+                    None => out.put(&[0])?,
+                },
+            }
+        }
+        Ok(())
+    }
+    fn put_hll(out: &mut impl PartialSink, hll: &Hll) -> Result<(), String> {
+        let bytes = hll.to_bytes();
+        Self::put_u32(out, bytes.len() as u32)?;
+        out.put(&bytes)
+    }
+
+    fn write_overview_section(
+        out: &mut impl PartialSink,
+        overview: &BTreeMap<i64, (Vec<Cell>, Hll, bool)>,
+    ) -> Result<(), String> {
+        Self::put_u32(out, overview.len() as u32)?;
+        for (hour, (cells, hll, capped)) in overview {
+            Self::put_i64(out, *hour)?;
+            Self::put_cells(out, cells)?;
+            Self::put_hll(out, hll)?;
+            out.put(&[u8::from(*capped)])?;
+        }
+        Ok(())
+    }
+
+    fn write_minutes_section(
+        out: &mut impl PartialSink,
+        minutes: &BTreeMap<i64, Vec<Cell>>,
+    ) -> Result<(), String> {
+        Self::put_u32(out, minutes.len() as u32)?;
+        for (minute, cells) in minutes {
+            Self::put_i64(out, *minute)?;
+            Self::put_cells(out, cells)?;
+        }
+        Ok(())
+    }
+
+    fn write_fields_section(
+        out: &mut impl PartialSink,
+        fields: &BTreeMap<String, FieldAcc>,
+    ) -> Result<(), String> {
+        Self::put_u32(out, fields.len() as u32)?;
+        for (field, acc) in fields {
+            Self::put_str(out, field)?;
+            Self::put_i64(out, acc.total)?;
+            out.put(&[u8::from(acc.truncated)])?;
+            Self::put_u64(out, acc.sources)?;
+            Self::put_u32(out, acc.values.len() as u32)?;
+            for (val, v) in &acc.values {
+                Self::put_str(out, val)?;
+                Self::put_i64(out, v.count)?;
+                Self::put_i64(out, v.ip_rows)?;
+                out.put(&[u8::from(v.capped)])?;
+                match &v.sketch {
+                    Some(hll) => {
+                        out.put(&[1])?;
+                        Self::put_hll(out, hll)?;
+                    }
+                    None => out.put(&[0])?,
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn write_sessions_section(
+        out: &mut impl PartialSink,
+        sessions: &HashMap<SessionKey, Vec<Cell>>,
+    ) -> Result<(), String> {
+        Self::put_u32(out, sessions.len() as u32)?;
+        for ((ip, ja4), cells) in sessions {
+            Self::put_str(out, ip)?;
+            match ja4 {
+                Some(j) => {
+                    out.put(&[1])?;
+                    Self::put_str(out, j)?;
+                }
+                None => out.put(&[0])?,
+            }
+            Self::put_cells(out, cells)?;
+        }
+        Ok(())
+    }
+
+    fn write_group_section(
+        out: &mut impl PartialSink,
+        fields: &BTreeMap<String, GroupAcc>,
+    ) -> Result<(), String> {
+        Self::put_u32(out, fields.len() as u32)?;
+        for (field, acc) in fields {
+            Self::put_str(out, field)?;
+            Self::put_i64(out, acc.total)?;
+            out.put(&[u8::from(acc.truncated)])?;
+            Self::put_u64(out, acc.sources)?;
+            Self::put_u32(out, acc.values.len() as u32)?;
+            for (val, rows) in &acc.values {
+                Self::put_str(out, val)?;
+                Self::put_u32(out, rows.len() as u32)?;
+                for (bucket, cells) in rows {
+                    Self::put_i64(out, *bucket)?;
+                    Self::put_cells(out, cells)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn write_sample_section(
+        out: &mut impl PartialSink,
+        sample: &[SampleRow],
+    ) -> Result<(), String> {
+        Self::put_u32(out, sample.len() as u32)?;
+        for (key, ts, cells) in sample {
+            Self::put_i64(out, *key)?;
+            Self::put_i64(out, *ts)?;
+            Self::put_cells(out, cells)?;
+        }
+        Ok(())
+    }
+
+    fn write_pivots_section(
+        out: &mut impl PartialSink,
+        pivots: &BTreeMap<String, PivotAcc>,
+    ) -> Result<(), String> {
+        Self::put_u32(out, pivots.len() as u32)?;
+        for (pivot, acc) in pivots {
+            Self::put_str(out, pivot)?;
+            Self::put_i64(out, acc.total)?;
+            out.put(&[u8::from(acc.truncated)])?;
+            Self::put_u64(out, acc.sources)?;
+            Self::put_u32(out, acc.values.len() as u32)?;
+            for (value, slice) in &acc.values {
+                Self::put_str(out, value)?;
+                Self::put_i64(out, slice.requests)?;
+                Self::put_hll(out, &slice.ips)?;
+                Self::put_u32(out, slice.minutes.len() as u32)?;
+                for (minute, cells) in &slice.minutes {
+                    Self::put_i64(out, *minute)?;
+                    Self::put_cells(out, cells)?;
+                }
+                Self::put_u32(out, slice.fields.len() as u32)?;
+                for (field, f) in &slice.fields {
+                    Self::put_str(out, field)?;
+                    Self::put_i64(out, f.total)?;
+                    out.put(&[u8::from(f.truncated)])?;
+                    Self::put_u32(out, f.values.len() as u32)?;
+                    for (v, n) in &f.values {
+                        Self::put_str(out, v)?;
+                        Self::put_i64(out, *n)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn encode_partial_ref_to(&self, out: &mut impl PartialSink) -> Result<(), String> {
+        out.put(PARTIAL_MAGIC)?;
+        Self::put_u64(out, self.sources)?;
+        Self::write_overview_section(out, &self.overview)?;
+        Self::write_minutes_section(out, &self.minutes)?;
+        Self::write_fields_section(out, &self.fields)?;
+        Self::write_sessions_section(out, &self.sessions)?;
+        for fields in &self.groups {
+            Self::write_group_section(out, fields)?;
+        }
+        Self::write_sample_section(out, &self.sample)?;
+        Self::write_pivots_section(out, &self.pivots)?;
+        out.put(&[u8::from(self.foreign)])
+    }
+
+    fn encode_partial_owned_to(mut self, out: &mut impl PartialSink) -> Result<(), String> {
+        out.put(PARTIAL_MAGIC)?;
+        Self::put_u64(out, self.sources)?;
+        {
+            let overview = std::mem::take(&mut self.overview);
+            Self::write_overview_section(out, &overview)?;
+        }
+        {
+            let minutes = std::mem::take(&mut self.minutes);
+            Self::write_minutes_section(out, &minutes)?;
+        }
+        {
+            let fields = std::mem::take(&mut self.fields);
+            Self::write_fields_section(out, &fields)?;
+        }
+        {
+            let sessions = std::mem::take(&mut self.sessions);
+            Self::write_sessions_section(out, &sessions)?;
+        }
+        for group in &mut self.groups {
+            let fields = std::mem::take(group);
+            Self::write_group_section(out, &fields)?;
+        }
+        {
+            let sample = std::mem::take(&mut self.sample);
+            Self::write_sample_section(out, &sample)?;
+        }
+        {
+            let pivots = std::mem::take(&mut self.pivots);
+            Self::write_pivots_section(out, &pivots)?;
+        }
+        out.put(&[u8::from(self.foreign)])
+    }
+
     /// Encodes the full intermediate `Acc` state in a compact binary format (`PARTIAL_MAGIC`) so
     /// resuming across ticks takes `< 1 ms` of vCPU instead of a 73-column ZSTD Parquet round-trip.
     fn encode_partial(&self) -> Vec<u8> {
-        fn put_u32(out: &mut Vec<u8>, v: u32) {
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        fn put_u64(out: &mut Vec<u8>, v: u64) {
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        fn put_i64(out: &mut Vec<u8>, v: i64) {
-            out.extend_from_slice(&v.to_le_bytes());
-        }
-        fn put_str(out: &mut Vec<u8>, s: &str) {
-            put_u32(out, s.len() as u32);
-            out.extend_from_slice(s.as_bytes());
-        }
-        fn put_cells(out: &mut Vec<u8>, cells: &[Cell]) {
-            put_u32(out, cells.len() as u32);
-            for c in cells {
-                match c {
-                    Cell::Null => out.push(0),
-                    Cell::I(i) => {
-                        out.push(1);
-                        put_i64(out, *i);
-                    }
-                    Cell::F(f) => {
-                        out.push(2);
-                        out.extend_from_slice(&f.to_le_bytes());
-                    }
-                    Cell::S(s) => {
-                        out.push(3);
-                        put_str(out, s);
-                    }
-                    Cell::H(h) => match h.to_bytes() {
-                        Some(bytes) => {
-                            out.push(4);
-                            put_u32(out, bytes.len() as u32);
-                            out.extend_from_slice(&bytes);
-                        }
-                        None => out.push(0),
-                    },
-                }
-            }
-        }
-        fn put_hll(out: &mut Vec<u8>, hll: &Hll) {
-            let bytes = hll.to_bytes();
-            put_u32(out, bytes.len() as u32);
-            out.extend_from_slice(&bytes);
-        }
-
         let mut out = Vec::with_capacity(64 * 1024);
-        out.extend_from_slice(PARTIAL_MAGIC);
-        put_u64(&mut out, self.sources);
-
-        put_u32(&mut out, self.overview.len() as u32);
-        for (hour, (cells, hll, capped)) in &self.overview {
-            put_i64(&mut out, *hour);
-            put_cells(&mut out, cells);
-            put_hll(&mut out, hll);
-            out.push(u8::from(*capped));
-        }
-
-        put_u32(&mut out, self.minutes.len() as u32);
-        for (minute, cells) in &self.minutes {
-            put_i64(&mut out, *minute);
-            put_cells(&mut out, cells);
-        }
-
-        put_u32(&mut out, self.fields.len() as u32);
-        for (field, acc) in &self.fields {
-            put_str(&mut out, field);
-            put_i64(&mut out, acc.total);
-            out.push(u8::from(acc.truncated));
-            put_u64(&mut out, acc.sources);
-            put_u32(&mut out, acc.values.len() as u32);
-            for (val, v) in &acc.values {
-                put_str(&mut out, val);
-                put_i64(&mut out, v.count);
-                put_i64(&mut out, v.ip_rows);
-                out.push(u8::from(v.capped));
-                match &v.sketch {
-                    Some(hll) => {
-                        out.push(1);
-                        put_hll(&mut out, hll);
-                    }
-                    None => out.push(0),
-                }
-            }
-        }
-
-        put_u32(&mut out, self.sessions.len() as u32);
-        for ((ip, ja4), cells) in &self.sessions {
-            put_str(&mut out, ip);
-            match ja4 {
-                Some(j) => {
-                    out.push(1);
-                    put_str(&mut out, j);
-                }
-                None => out.push(0),
-            }
-            put_cells(&mut out, cells);
-        }
-
-        for fields in &self.groups {
-            put_u32(&mut out, fields.len() as u32);
-            for (field, acc) in fields {
-                put_str(&mut out, field);
-                put_i64(&mut out, acc.total);
-                out.push(u8::from(acc.truncated));
-                put_u64(&mut out, acc.sources);
-                put_u32(&mut out, acc.values.len() as u32);
-                for (val, rows) in &acc.values {
-                    put_str(&mut out, val);
-                    put_u32(&mut out, rows.len() as u32);
-                    for (bucket, cells) in rows {
-                        put_i64(&mut out, *bucket);
-                        put_cells(&mut out, cells);
-                    }
-                }
-            }
-        }
-
-        put_u32(&mut out, self.sample.len() as u32);
-        for (key, ts, cells) in &self.sample {
-            put_i64(&mut out, *key);
-            put_i64(&mut out, *ts);
-            put_cells(&mut out, cells);
-        }
-        put_u32(&mut out, self.pivots.len() as u32);
-        for (pivot, acc) in &self.pivots {
-            put_str(&mut out, pivot);
-            put_i64(&mut out, acc.total);
-            out.push(u8::from(acc.truncated));
-            put_u64(&mut out, acc.sources);
-            put_u32(&mut out, acc.values.len() as u32);
-            for (value, slice) in &acc.values {
-                put_str(&mut out, value);
-                put_i64(&mut out, slice.requests);
-                put_hll(&mut out, &slice.ips);
-                put_u32(&mut out, slice.minutes.len() as u32);
-                for (minute, cells) in &slice.minutes {
-                    put_i64(&mut out, *minute);
-                    put_cells(&mut out, cells);
-                }
-                put_u32(&mut out, slice.fields.len() as u32);
-                for (field, f) in &slice.fields {
-                    put_str(&mut out, field);
-                    put_i64(&mut out, f.total);
-                    out.push(u8::from(f.truncated));
-                    put_u32(&mut out, f.values.len() as u32);
-                    for (v, n) in &f.values {
-                        put_str(&mut out, v);
-                        put_i64(&mut out, *n);
-                    }
-                }
-            }
-        }
-        out.push(u8::from(self.foreign));
+        let _ = self.encode_partial_ref_to(&mut out);
         out
     }
 
+    fn encode_packed_ref(&self, limit: usize) -> Result<Vec<Vec<u8>>, String> {
+        let mut writer = CountingZstdWriter::new()?;
+        self.encode_partial_ref_to(&mut writer)?;
+        writer.finish_split(limit)
+    }
+
+    fn encode_packed_owned(self, limit: usize) -> Result<Vec<Vec<u8>>, String> {
+        let mut writer = CountingZstdWriter::new()?;
+        self.encode_partial_owned_to(&mut writer)?;
+        writer.finish_split(limit)
+    }
+
     fn decode_partial(bytes: &[u8], unit: Unit) -> Result<Self, String> {
-        struct Cur<'a>(&'a [u8]);
-        impl<'a> Cur<'a> {
-            fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
-                if self.0.len() < n {
+        Self::decode_partial_reader(std::io::Cursor::new(bytes), bytes.len(), unit)
+    }
+
+    fn decode_packed_partial(objects: &[Vec<u8>], unit: Unit) -> Result<Self, String> {
+        let head = objects.first().ok_or("partial_unreadable")?;
+        if packed_parts(head) != Some(objects.len()) {
+            return Err("partial_unreadable".into());
+        }
+        let raw_len = u64::from_le_bytes(
+            head[PACKED_MAGIC.len() + 4..PACKED_HEAD]
+                .try_into()
+                .unwrap(),
+        );
+        if raw_len > PARTIAL_RAW_MAX {
+            return Err("partial_unreadable".into());
+        }
+        let raw_len = usize::try_from(raw_len).map_err(|_| "partial_unreadable".to_string())?;
+        let decoder = zstd::stream::read::Decoder::new(SliceChainReader::new(
+            &head[PACKED_HEAD..],
+            &objects[1..],
+        ))
+        .map_err(|_| "partial_unreadable".to_string())?;
+        Self::decode_partial_reader(decoder, raw_len, unit)
+    }
+
+    fn decode_partial_reader<R: std::io::Read>(
+        reader: R,
+        raw_len: usize,
+        unit: Unit,
+    ) -> Result<Self, String> {
+        struct StreamCur<R> {
+            reader: R,
+            remaining: usize,
+            scratch: Vec<u8>,
+        }
+        impl<R: std::io::Read> StreamCur<R> {
+            fn new(reader: R, remaining: usize) -> Self {
+                Self {
+                    reader,
+                    remaining,
+                    scratch: Vec::new(),
+                }
+            }
+            fn read_exact_slice(&mut self, dst: &mut [u8]) -> Result<(), String> {
+                if self.remaining < dst.len() {
                     return Err("partial_unreadable".to_string());
                 }
-                let (head, tail) = self.0.split_at(n);
-                self.0 = tail;
-                Ok(head)
+                self.reader
+                    .read_exact(dst)
+                    .map_err(|_| "partial_unreadable".to_string())?;
+                self.remaining -= dst.len();
+                Ok(())
+            }
+            fn read_temp(&mut self, n: usize) -> Result<&[u8], String> {
+                if n > self.remaining {
+                    return Err("partial_unreadable".to_string());
+                }
+                self.scratch.resize(n, 0);
+                self.reader
+                    .read_exact(&mut self.scratch[..n])
+                    .map_err(|_| "partial_unreadable".to_string())?;
+                self.remaining -= n;
+                Ok(&self.scratch[..n])
             }
             fn u8(&mut self) -> Result<u8, String> {
-                Ok(self.take(1)?[0])
+                let mut b = [0u8; 1];
+                self.read_exact_slice(&mut b)?;
+                Ok(b[0])
             }
             fn u32(&mut self) -> Result<u32, String> {
-                Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+                let mut b = [0u8; 4];
+                self.read_exact_slice(&mut b)?;
+                Ok(u32::from_le_bytes(b))
             }
             fn u64(&mut self) -> Result<u64, String> {
-                Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+                let mut b = [0u8; 8];
+                self.read_exact_slice(&mut b)?;
+                Ok(u64::from_le_bytes(b))
             }
             fn i64(&mut self) -> Result<i64, String> {
-                Ok(i64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+                let mut b = [0u8; 8];
+                self.read_exact_slice(&mut b)?;
+                Ok(i64::from_le_bytes(b))
+            }
+            fn f64(&mut self) -> Result<f64, String> {
+                let mut b = [0u8; 8];
+                self.read_exact_slice(&mut b)?;
+                Ok(f64::from_le_bytes(b))
             }
             fn str(&mut self) -> Result<String, String> {
                 let len = self.u32()? as usize;
-                let s = std::str::from_utf8(self.take(len)?)
-                    .map_err(|_| "partial_unreadable".to_string())?;
-                Ok(s.to_owned())
+                let bytes = self.read_temp(len)?;
+                std::str::from_utf8(bytes)
+                    .map(str::to_owned)
+                    .map_err(|_| "partial_unreadable".to_string())
             }
             fn cells(&mut self) -> Result<Vec<Cell>, String> {
                 let len = self.u32()? as usize;
-                if len > self.0.len() {
+                if len > self.remaining {
                     return Err("partial_unreadable".to_string());
                 }
-                let mut out = Vec::with_capacity(len);
+                let mut out = Vec::with_capacity(len.min(64));
                 for _ in 0..len {
                     let cell = match self.u8()? {
                         0 => Cell::Null,
                         1 => Cell::I(self.i64()?),
-                        2 => Cell::F(f64::from_le_bytes(self.take(8)?.try_into().unwrap())),
+                        2 => Cell::F(self.f64()?),
                         3 => Cell::S(self.str()?),
                         4 => {
                             let len = self.u32()? as usize;
+                            let bytes = self.read_temp(len)?;
                             Cell::H(Box::new(
-                                Hist::from_bytes(self.take(len)?)
+                                Hist::from_bytes(bytes)
                                     .ok_or_else(|| "partial_unreadable".to_string())?,
                             ))
                         }
@@ -2161,17 +2422,23 @@ impl Acc {
             }
             fn hll(&mut self) -> Result<Hll, String> {
                 let len = self.u32()? as usize;
-                Hll::from_bytes(self.take(len)?).ok_or_else(|| "partial_unreadable".to_string())
+                let bytes = self.read_temp(len)?;
+                Hll::from_bytes(bytes).ok_or_else(|| "partial_unreadable".to_string())
             }
         }
 
-        let Some(rest) = bytes.strip_prefix(PARTIAL_MAGIC) else {
+        let mut cur = StreamCur::new(reader, raw_len);
+        let mut magic = [0u8; PARTIAL_MAGIC.len()];
+        cur.read_exact_slice(&mut magic)?;
+        if &magic != PARTIAL_MAGIC {
             return Err("partial_unreadable".to_string());
-        };
-        let mut cur = Cur(rest);
+        }
         let sources = cur.u64()?;
 
         let ov_len = cur.u32()? as usize;
+        if ov_len > cur.remaining / 16 {
+            return Err("partial_unreadable".to_string());
+        }
         let mut overview = BTreeMap::new();
         for _ in 0..ov_len {
             let hour = cur.i64()?;
@@ -2182,6 +2449,9 @@ impl Acc {
         }
 
         let min_len = cur.u32()? as usize;
+        if min_len > cur.remaining / 12 {
+            return Err("partial_unreadable".to_string());
+        }
         let mut minutes = BTreeMap::new();
         for _ in 0..min_len {
             let minute = cur.i64()?;
@@ -2190,6 +2460,9 @@ impl Acc {
         }
 
         let fld_len = cur.u32()? as usize;
+        if fld_len > cur.remaining / 17 {
+            return Err("partial_unreadable".to_string());
+        }
         let mut fields = BTreeMap::new();
         for _ in 0..fld_len {
             let field = cur.str()?;
@@ -2197,7 +2470,7 @@ impl Acc {
             let truncated = cur.u8()? != 0;
             let f_sources = cur.u64()?;
             let val_len = cur.u32()? as usize;
-            if val_len > cur.0.len() / 22 {
+            if val_len > cur.remaining / 22 {
                 return Err("partial_unreadable".to_string());
             }
             let mut values = HashMap::with_capacity(val_len);
@@ -2233,7 +2506,7 @@ impl Acc {
         }
 
         let ses_len = cur.u32()? as usize;
-        if ses_len > cur.0.len() / 9 {
+        if ses_len > cur.remaining / 9 {
             return Err("partial_unreadable".to_string());
         }
         let mut sessions = HashMap::with_capacity(ses_len);
@@ -2251,19 +2524,25 @@ impl Acc {
         let mut acc = Self::new(unit);
         for fields in &mut acc.groups {
             let f_len = cur.u32()? as usize;
+            if f_len > cur.remaining / 5 {
+                return Err("partial_unreadable".to_string());
+            }
             for _ in 0..f_len {
                 let field = cur.str()?;
                 let total = cur.i64()?;
                 let truncated = cur.u8()? != 0;
                 let sources = cur.u64()?;
                 let v_len = cur.u32()? as usize;
-                if v_len > cur.0.len() / 8 {
+                if v_len > cur.remaining / 8 {
                     return Err("partial_unreadable".to_string());
                 }
                 let mut values = HashMap::with_capacity(v_len);
                 for _ in 0..v_len {
                     let val = cur.str()?;
                     let r_len = cur.u32()? as usize;
+                    if r_len > cur.remaining / 12 {
+                        return Err("partial_unreadable".to_string());
+                    }
                     let mut rows = BTreeMap::new();
                     for _ in 0..r_len {
                         let bucket = cur.i64()?;
@@ -2284,19 +2563,25 @@ impl Acc {
         }
 
         let s_len = cur.u32()? as usize;
+        if s_len > cur.remaining / 20 {
+            return Err("partial_unreadable".to_string());
+        }
         for _ in 0..s_len {
             let key = cur.i64()?;
             let ts = cur.i64()?;
             acc.sample.push((key, ts, cur.cells()?));
         }
         let p_len = cur.u32()? as usize;
+        if p_len > cur.remaining / 17 {
+            return Err("partial_unreadable".to_string());
+        }
         for _ in 0..p_len {
             let pivot = cur.str()?;
             let total = cur.i64()?;
             let truncated = cur.u8()? != 0;
             let sources = cur.u64()?;
             let v_len = cur.u32()? as usize;
-            if v_len > cur.0.len() / 24 {
+            if v_len > cur.remaining / 24 {
                 return Err("partial_unreadable".to_string());
             }
             let mut values = FastMap::with_capacity_and_hasher(v_len, Default::default());
@@ -2305,19 +2590,25 @@ impl Acc {
                 let requests = cur.i64()?;
                 let ips = cur.hll()?;
                 let m_len = cur.u32()? as usize;
+                if m_len > cur.remaining / 12 {
+                    return Err("partial_unreadable".to_string());
+                }
                 let mut minutes = BTreeMap::new();
                 for _ in 0..m_len {
                     let minute = cur.i64()?;
                     minutes.insert(minute, cur.cells()?);
                 }
                 let f_len = cur.u32()? as usize;
+                if f_len > cur.remaining / 5 {
+                    return Err("partial_unreadable".to_string());
+                }
                 let mut fields = BTreeMap::new();
                 for _ in 0..f_len {
                     let field = cur.str()?;
                     let total = cur.i64()?;
                     let truncated = cur.u8()? != 0;
                     let n_len = cur.u32()? as usize;
-                    if n_len > cur.0.len() / 12 {
+                    if n_len > cur.remaining / 12 {
                         return Err("partial_unreadable".to_string());
                     }
                     let mut counts = FastMap::with_capacity_and_hasher(n_len, Default::default());
@@ -2355,8 +2646,13 @@ impl Acc {
             );
         }
         acc.foreign = cur.u8()? != 0;
-        if !cur.0.is_empty() {
+        if cur.remaining != 0 {
             return Err("partial_unreadable".to_string());
+        }
+        let mut trailing = [0u8; 1];
+        match cur.reader.read(&mut trailing) {
+            Ok(0) => {}
+            _ => return Err("partial_unreadable".to_string()),
         }
 
         Ok(Self {
@@ -2775,6 +3071,15 @@ trait Fold: Sized {
     /// A raw partial, starting with [`PARTIAL_MAGIC`].
     fn encode(&self) -> Result<Vec<u8>, String>;
     fn decode(raw: &[u8], unit: Unit) -> Result<Self, String>;
+    fn encode_packed_ref(&self, limit: usize) -> Result<Vec<Vec<u8>>, String> {
+        pack_partial_owned(self.encode()?, limit)
+    }
+    fn encode_packed_owned(self, limit: usize) -> Result<Vec<Vec<u8>>, String> {
+        self.encode_packed_ref(limit)
+    }
+    fn decode_packed(objects: &[Vec<u8>], unit: Unit) -> Result<Self, String> {
+        Self::decode(&unpack_partial(objects)?, unit)
+    }
     fn finish(self, start: i64, unit: Unit) -> Result<Vec<u8>, String>;
     /// What a partial's bytes mean; it names the partial (see [`partial_fp`]).
     fn layout() -> String;
@@ -2795,6 +3100,15 @@ impl Fold for Acc {
     }
     fn decode(raw: &[u8], unit: Unit) -> Result<Self, String> {
         Acc::decode_partial(raw, unit)
+    }
+    fn encode_packed_ref(&self, limit: usize) -> Result<Vec<Vec<u8>>, String> {
+        Acc::encode_packed_ref(self, limit)
+    }
+    fn encode_packed_owned(self, limit: usize) -> Result<Vec<Vec<u8>>, String> {
+        Acc::encode_packed_owned(self, limit)
+    }
+    fn decode_packed(objects: &[Vec<u8>], unit: Unit) -> Result<Self, String> {
+        Acc::decode_packed_partial(objects, unit)
     }
     fn finish(self, start: i64, unit: Unit) -> Result<Vec<u8>, String> {
         self.write(start, Some(unit), unit.label())
@@ -3243,9 +3557,20 @@ impl<R: Runtime> Ctx<'_, '_, R> {
         } else {
             sources.len()
         };
-        let (mut fold_ms, mut fold_from) = (0, None);
+        let mut fold_ms = 0;
+        let mut fold_from = None;
         while done < limit {
             if done - resumed >= MAX_SOURCES || self.stop() {
+                break;
+            }
+            if done > resumed
+                && self
+                    .store
+                    .runtime
+                    .heap_mib()
+                    .is_some_and(|m| m >= HEAP_STOP_MIB)
+            {
+                self.report.stopped = Some("heap");
                 break;
             }
             if let Some(from) = fold_from {
@@ -3292,9 +3617,16 @@ impl<R: Runtime> Ctx<'_, '_, R> {
             self.report.sources += 1;
         }
         let rows: u64 = sources[..done].iter().map(|k| name_rows(k)).sum();
-        let defer_final = job.final_key.is_some() && done == sources.len() && self.write_stop();
+        let heap_defer = done > resumed
+            && self
+                .store
+                .runtime
+                .heap_mib()
+                .is_some_and(|m| m >= HEAP_STOP_MIB);
+        let defer_final =
+            job.final_key.is_some() && done == sources.len() && (self.write_stop() || heap_defer);
         if defer_final && self.report.stopped.is_none() {
-            self.report.stopped = Some("vcpu");
+            self.report.stopped = Some(if heap_defer { "heap" } else { "vcpu" });
         }
         let mut acc = Some(acc);
         let mut wrote_partial = false;
@@ -3310,11 +3642,15 @@ impl<R: Runtime> Ctx<'_, '_, R> {
                 (Some(final_key.to_owned()), vec![body], true)
             }
             None if done > resumed => {
-                let raw = acc.as_ref().ok_or("bundle_acc_missing")?.encode()?;
-                if open.is_none() {
-                    acc = None;
-                }
-                let objects = pack_partial_owned(raw, CDN_READ_LIMIT)?;
+                let objects = if open.is_none() {
+                    acc.take()
+                        .ok_or("bundle_acc_missing")?
+                        .encode_packed_owned(CDN_READ_LIMIT)?
+                } else {
+                    acc.as_ref()
+                        .ok_or("bundle_acc_missing")?
+                        .encode_packed_ref(CDN_READ_LIMIT)?
+                };
                 if !self.room(objects.len() as u32) {
                     return Ok(Step::Pending);
                 }
@@ -3456,9 +3792,10 @@ impl<R: Runtime> Ctx<'_, '_, R> {
             Ok(head) => head,
             Err(error) => return Ok(Some(Err(error))),
         };
-        let (raw, parts) = if head.starts_with(PARTIAL_MAGIC) {
-            (head, 1)
-        } else if let Some(parts) = packed_parts(&head) {
+        let parts = packed_parts(&head).unwrap_or(1);
+        let objects = if head.starts_with(PARTIAL_MAGIC) {
+            return Ok(Some(A::decode(&head, unit).map(|acc| (acc, 1))));
+        } else if packed_parts(&head).is_some() {
             let mut objects = vec![head];
             for i in 1..parts {
                 if !self.room(3) {
@@ -3469,14 +3806,13 @@ impl<R: Runtime> Ctx<'_, '_, R> {
                     Err(error) => return Ok(Some(Err(error))),
                 }
             }
-            match unpack_partial(&objects) {
-                Ok(raw) => (raw, parts),
-                Err(error) => return Ok(Some(Err(error))),
-            }
+            objects
         } else {
             return Ok(Some(Err("partial_unreadable".into())));
         };
-        Ok(Some(A::decode(&raw, unit).map(|acc| (acc, parts))))
+        Ok(Some(
+            A::decode_packed(&objects, unit).map(|acc| (acc, parts)),
+        ))
     }
 
     fn retire(&self, state: &mut State, old: Option<String>, new: Option<&str>) {
@@ -5123,56 +5459,57 @@ mod tests {
         assert!(parse_name("x/summary=1-2-p1s0-n1.parquet").is_none());
     }
 
+    use std::alloc::{GlobalAlloc, Layout, System};
+
+    thread_local! {
+        static ALLOC_CAP: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
+    }
+
+    struct CappedAlloc;
+
+    // SAFETY: Delegates directly to `std::alloc::System` with unmodified `layout`/`ptr`
+    // arguments when within the thread-local test cap, or returns `null_mut()` per the
+    // `GlobalAlloc` contract when a single allocation exceeds the Wasm memory ceiling.
+    unsafe impl GlobalAlloc for CappedAlloc {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            if ALLOC_CAP.with(|cap| layout.size() > cap.get()) {
+                return std::ptr::null_mut();
+            }
+            // SAFETY: Caller upholds `GlobalAlloc::alloc` preconditions (`layout.size() > 0`).
+            unsafe { System.alloc(layout) }
+        }
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            if ALLOC_CAP.with(|cap| layout.size() > cap.get()) {
+                return std::ptr::null_mut();
+            }
+            // SAFETY: Caller upholds `GlobalAlloc::alloc_zeroed` preconditions.
+            unsafe { System.alloc_zeroed(layout) }
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            if ALLOC_CAP.with(|cap| new_size > cap.get()) {
+                return std::ptr::null_mut();
+            }
+            // SAFETY: Caller upholds `GlobalAlloc::realloc` preconditions.
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: Caller upholds `GlobalAlloc::dealloc` preconditions.
+            unsafe { System.dealloc(ptr, layout) }
+        }
+    }
+
+    #[global_allocator]
+    static TEST_ALLOC: CappedAlloc = CappedAlloc;
+
+    struct CapGuard;
+    impl Drop for CapGuard {
+        fn drop(&mut self) {
+            ALLOC_CAP.with(|cap| cap.set(usize::MAX));
+        }
+    }
+
     #[test]
     fn decode_partial_rejects_oversized_element_counts_without_oom_and_preserves_valid_roundtrip() {
-        use std::alloc::{GlobalAlloc, Layout, System};
-
-        thread_local! {
-            static ALLOC_CAP: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
-        }
-
-        struct CappedAlloc;
-
-        // SAFETY: Delegates directly to `std::alloc::System` with unmodified `layout`/`ptr`
-        // arguments when within the thread-local test cap, or returns `null_mut()` per the
-        // `GlobalAlloc` contract when a single allocation exceeds the Wasm memory ceiling.
-        unsafe impl GlobalAlloc for CappedAlloc {
-            unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-                if ALLOC_CAP.with(|cap| layout.size() > cap.get()) {
-                    return std::ptr::null_mut();
-                }
-                // SAFETY: Caller upholds `GlobalAlloc::alloc` preconditions (`layout.size() > 0`).
-                unsafe { System.alloc(layout) }
-            }
-            unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-                if ALLOC_CAP.with(|cap| layout.size() > cap.get()) {
-                    return std::ptr::null_mut();
-                }
-                // SAFETY: Caller upholds `GlobalAlloc::alloc_zeroed` preconditions.
-                unsafe { System.alloc_zeroed(layout) }
-            }
-            unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-                if ALLOC_CAP.with(|cap| new_size > cap.get()) {
-                    return std::ptr::null_mut();
-                }
-                // SAFETY: Caller upholds `GlobalAlloc::realloc` preconditions.
-                unsafe { System.realloc(ptr, layout, new_size) }
-            }
-            unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-                // SAFETY: Caller upholds `GlobalAlloc::dealloc` preconditions.
-                unsafe { System.dealloc(ptr, layout) }
-            }
-        }
-
-        #[global_allocator]
-        static TEST_ALLOC: CappedAlloc = CappedAlloc;
-
-        struct CapGuard;
-        impl Drop for CapGuard {
-            fn drop(&mut self) {
-                ALLOC_CAP.with(|cap| cap.set(usize::MAX));
-            }
-        }
         ALLOC_CAP.with(|cap| cap.set(64 * 1024 * 1024));
         let _guard = CapGuard;
 
@@ -5668,5 +6005,90 @@ mod tests {
                 reader.metadata().num_row_groups()
             );
         }
+    }
+
+    #[test]
+    fn streaming_partial_roundtrips_and_matches_legacy_pack() {
+        let win = rich_window(0);
+        let start = 1_800_000_000;
+        let mut acc = Acc::new(Unit::Hour);
+        acc.fold(win, 1).unwrap();
+        acc.prune();
+
+        let expected_sha = hex::encode(Sha256::digest(
+            Acc::decode_partial(&acc.encode_partial(), Unit::Hour)
+                .unwrap()
+                .write(start, Some(Unit::Hour), "hour")
+                .unwrap(),
+        ));
+
+        let packed_ref = acc.encode_packed_ref(4096).unwrap();
+        assert!(packed_ref.len() > 1);
+        let legacy_packed = pack_partial(&acc.encode_partial(), 4096).unwrap();
+        assert_eq!(
+            hex::encode(Sha256::digest(
+                Acc::decode_packed_partial(&packed_ref, Unit::Hour)
+                    .unwrap()
+                    .write(start, Some(Unit::Hour), "hour")
+                    .unwrap()
+            )),
+            expected_sha
+        );
+        assert_eq!(
+            hex::encode(Sha256::digest(
+                Acc::decode_packed_partial(&legacy_packed, Unit::Hour)
+                    .unwrap()
+                    .write(start, Some(Unit::Hour), "hour")
+                    .unwrap()
+            )),
+            expected_sha
+        );
+
+        let packed_owned = acc.encode_packed_owned(4096).unwrap();
+        assert_eq!(packed_owned, packed_ref);
+
+        let mut truncated = packed_ref.clone();
+        truncated.last_mut().unwrap().truncate(1);
+        assert_eq!(
+            Acc::decode_packed_partial(&truncated, Unit::Hour)
+                .err()
+                .as_deref(),
+            Some("partial_unreadable")
+        );
+
+        let mut with_trailing = packed_ref;
+        with_trailing
+            .last_mut()
+            .unwrap()
+            .extend_from_slice(b"corrupt-trailing-frame");
+        assert_eq!(
+            Acc::decode_packed_partial(&with_trailing, Unit::Hour)
+                .err()
+                .as_deref(),
+            Some("partial_unreadable")
+        );
+    }
+
+    #[test]
+    fn streaming_partial_avoids_large_contiguous_raw_buffer_under_alloc_cap() {
+        let mut acc = Acc::new(Unit::Hour);
+        let urls_idx = GROUPS.iter().position(|g| g.name == "urls").unwrap();
+        let entry = acc.group_acc(urls_idx, "url");
+        for i in 0..25_000 {
+            entry.values.insert(
+                format!("/synthetic/path/with/some/length/item/{i:05}"),
+                BTreeMap::from([(0, vec![Cell::I(1), Cell::I(2), Cell::I(3), Cell::I(4)])]),
+            );
+        }
+        acc.sources = 1;
+        let raw_len = acc.encode_partial().len();
+        assert!(raw_len > 2 * 1024 * 1024);
+
+        ALLOC_CAP.with(|cap| cap.set(raw_len - 1));
+        let _guard = CapGuard;
+
+        let packed = acc.encode_packed_owned(256 * 1024).unwrap();
+        let decoded = Acc::decode_packed_partial(&packed, Unit::Hour).unwrap();
+        assert_eq!(decoded.groups[urls_idx]["url"].values.len(), 25_000);
     }
 }
