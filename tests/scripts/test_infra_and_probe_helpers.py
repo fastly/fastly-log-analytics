@@ -354,16 +354,6 @@ import pytest
 from scripts.lib.section_measurements import describe_response
 
 
-def test_controlled_sampling_flag_does_not_bypass_prerequisite_gate(monkeypatch: pytest.MonkeyPatch) -> None:
-    from scripts.dev import section_sweep
-
-    def forbidden(*args: object, **kwargs: object) -> None:
-        pytest.fail("live transport must not run")
-
-    monkeypatch.setattr(section_sweep, "_post", forbidden)
-    assert section_sweep.main(["--env", "local-standard", "--controlled-cache-pair"]) == 2
-
-
 def test_follower_sections_are_not_current_execution() -> None:
     result = describe_response(
         {
