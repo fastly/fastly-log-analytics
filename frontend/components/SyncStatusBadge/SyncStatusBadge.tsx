@@ -351,6 +351,13 @@ export function SyncStatusBadge() {
 function SyncStatusBadgeInner() {
   const activeServiceId = useServiceStore(s => s.activeServiceId)
   const pathname = usePathname()
+
+  // Bootstrap runs before header queries/streams so `['bootstrap']` is always registered in
+  // QueryClient before `useSyncStatus` inspects its pending/settled state, and provides the
+  // analyst-safe `header_badge` fallback (/api/sync-status is admin-only -> 403 for analysts).
+  const { data: bootstrap } = useBootstrap()
+  const headerBadge = bootstrap?.header_badge
+
   const { data: status } = useSyncStatus()
   const { data: lastSync } = useLastSync()
 
@@ -398,16 +405,6 @@ function SyncStatusBadgeInner() {
     return ch
   }, [adminPageMounted, sharePageMounted])
   useAdminEventStream(streamsEnabled && !isAnalyst, adminChannels)
-
-  // Bootstrap fallback for analyst sessions — /api/sync-status is
-  // admin-only (RemoteAccessMiddleware blocks analysts → 403), so
-  // useSyncStatus returns no data for them. Bootstrap exposes an
-  // analyst-safe `header_badge` with the two fields this badge
-  // renders so analysts see Latest Log / Total Logs the same way
-  // admins do. Refreshes at bootstrap's 5-min staleTime — fine for an
-  // at-a-glance header.
-  const { data: bootstrap } = useBootstrap()
-  const headerBadge = bootstrap?.header_badge
 
   // a11y (WCAG 4.1.2): announce sync state transitions to screen readers
   // via an sr-only role="status" live region. We only fire on actual

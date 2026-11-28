@@ -301,4 +301,67 @@ describe('Cloud header ingest events', () => {
       'x-service-id': 'svc-1',
     })
   })
+
+  it('does not abort or re-fetch /api/ingest/events when bootstrap transitions from pending to settled for an already-known service', async () => {
+    mocks.service.activeServiceId = 'svc-1'
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: Infinity } },
+    })
+    let resolveBootstrap!: (v: unknown) => void
+    void queryClient.prefetchQuery({
+      queryKey: queryKeys.bootstrap(),
+      queryFn: () => new Promise((resolve) => { resolveBootstrap = resolve }),
+    })
+
+    const { rerender } = renderHook(({ enabled }) => useHeaderBadgeStream(enabled), {
+      initialProps: { enabled: true },
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+      ),
+    })
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(mocks.fetch).toHaveBeenCalledTimes(1)
+    const firstSignal = mocks.fetch.mock.calls[0]?.[1]?.signal
+
+    await act(async () => {
+      resolveBootstrap({
+        runtime_mode: 'cloud',
+        services: [{ service_id: 'svc-1', name: 'One' }],
+        active_service_id: 'svc-1',
+      })
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    rerender({ enabled: true })
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+
+    expect(firstSignal?.aborted).toBe(false)
+    expect(mocks.fetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not connect when activeServiceId is null even before bootstrap query is registered', async () => {
+    mocks.service.activeServiceId = null
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: Infinity } },
+    })
+
+    const { rerender } = renderHook(({ enabled }) => useHeaderBadgeStream(enabled), {
+      initialProps: { enabled: true },
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+      ),
+    })
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(mocks.fetch).not.toHaveBeenCalled()
+
+    mocks.service.activeServiceId = 'svc-1'
+    rerender({ enabled: true })
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+
+    expect(mocks.fetch).toHaveBeenCalledTimes(1)
+    expect(mocks.fetch.mock.calls[0]?.[1]?.headers).toMatchObject({
+      'x-service-id': 'svc-1',
+    })
+  })
 })

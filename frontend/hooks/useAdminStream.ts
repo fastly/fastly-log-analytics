@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { useBootstrapPending, useBootstrapSettled, useEffectiveServiceId } from '@/hooks/useBootstrap'
+import { useBootstrapSettled, useEffectiveServiceId } from '@/hooks/useBootstrap'
 import { queryKeys } from '@/lib/api'
 import { useServiceStore } from '@/stores/filterStore'
 import type { Schema } from '@/types/api'
@@ -130,12 +130,12 @@ export function useHeaderBadgeStream(enabled: boolean) {
   const queryClient = useQueryClient()
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
   const effectiveServiceId = useEffectiveServiceId() ?? activeServiceId ?? null
-  const bootstrapPending = useBootstrapPending()
   const cursorRef = useRef<string | null>(null)
   const cloudActive = IS_CLOUD_MODE || isCloudMode()
+  const canConnect = Boolean(enabled && cloudActive && effectiveServiceId)
 
   useEffect(() => {
-    if (!enabled || !cloudActive || (bootstrapPending && !effectiveServiceId)) return
+    if (!canConnect || !effectiveServiceId) return
     cursorRef.current = null
     const controller = new AbortController()
     let stopped = false
@@ -145,7 +145,7 @@ export function useHeaderBadgeStream(enabled: boolean) {
     let reconnectMs = 5_000
     const source = browserSource(
       typeof window !== 'undefined' ? window.location.origin : '',
-      { serviceId: effectiveServiceId ?? undefined },
+      { serviceId: effectiveServiceId },
     )
 
     const poll = async () => {
@@ -157,7 +157,7 @@ export function useHeaderBadgeStream(enabled: boolean) {
         const response = await fetch(url.toString(), {
           headers: {
             Accept: 'text/event-stream',
-            'x-service-id': effectiveServiceId ?? '',
+            'x-service-id': effectiveServiceId,
           },
           credentials: 'include',
           signal: controller.signal,
@@ -228,7 +228,7 @@ export function useHeaderBadgeStream(enabled: boolean) {
       controller.abort()
       cursorRef.current = null
     }
-  }, [enabled, cloudActive, bootstrapPending, effectiveServiceId, queryClient])
+  }, [canConnect, effectiveServiceId, queryClient])
 
   return useServiceStream(enabled && !cloudActive, '/api/log-extents/stream', (raw) => {
     const payload = parseSSEJson<BadgeStreamEvent>(raw)

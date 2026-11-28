@@ -1256,7 +1256,7 @@ pub fn reset_head(prev: &Head, now: u64, service_id: &str) -> (Head, Manifest) {
 }
 
 pub fn retry_ms(period_s: u32) -> u64 {
-    (u64::from(period_s) * 500).clamp(1000, 5000)
+    (u64::from(period_s) * 500).clamp(1000, 30_000)
 }
 
 pub fn events<R: Runtime>(runtime: &R, service: &Service, query: &str) -> Result<String, String> {

@@ -541,3 +541,91 @@ def test_fos_usage_utc_date_helpers_and_ratchet_compliance(monkeypatch: pytest.M
         proc = subprocess.run(["bash", str(ratchet_script)], cwd=str(repo_root), capture_output=True, text=True)
         assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
     assert naive_start.replace(tzinfo=UTC) < offset_end.astimezone(UTC)
+
+
+def test_get_usage_operation_buckets_uses_covering_index_and_bounded_earliest_probe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    """Operation buckets must avoid function_name heap predicates and full-table MIN(timestamp) scans."""
+    import sqlite3
+    from pathlib import Path
+
+    from backend.core.metadata import fos_usage
+
+    db_path = Path(str(tmp_path)) / "usage.db"
+    seed_con = sqlite3.connect(str(db_path))
+    for stmt in fos_usage._SCHEMA:
+        seed_con.execute(stmt)
+    seed_con.executemany(
+        """
+        INSERT INTO usage_log (timestamp, service_id, operation_class, operation_type, function_name, count, bytes)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            ("2026-06-04T23:15:00.000Z", "svc-fos", "A", "PUT", "sync", 4, 100),
+            ("2026-06-04T23:30:00.000Z", "svc-fos", "A", "RECONCILE_A", "fastly.reconciliation", 99, 0),
+            ("2026-06-05T02:10:00.000Z", "svc-fos", "B", "GET", "sync", 7, 200),
+            ("2026-06-05T02:15:00.000Z", "svc-fos", "B", "RECONCILE_B", "fastly.reconciliation", 88, 0),
+        ],
+    )
+    seed_con.executemany(
+        """
+        INSERT INTO usage_log_hourly_summary (service_id, hour, operation_class, operation_type, count, bytes)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        [
+            ("svc-fos", "2026-06-04T23", "A", "PUT", 50, 500),
+            ("svc-fos", "2026-06-05T00", "A", "PUT", 10, 100),
+            ("svc-fos", "2026-06-05T00", "A", "RECONCILE_A", 77, 0),
+            ("svc-fos", "2026-06-05T01", "B", "GET", 20, 200),
+            ("svc-fos", "2026-06-05T02", "B", "GET", 60, 600),
+        ],
+    )
+    seed_con.commit()
+    seed_con.close()
+
+    executed_sql: list[str] = []
+
+    def trace_open_readonly(_service_id: str) -> sqlite3.Connection:
+        con = sqlite3.connect(str(db_path))
+        con.set_trace_callback(executed_sql.append)
+        return con
+
+    monkeypatch.setattr(fos_usage, "open_readonly", trace_open_readonly)
+
+    hourly = fos_usage.get_usage_operation_buckets("svc-fos", "2026-06-04T23:05:00Z", "2026-06-05T02:30:00Z", "hour")
+    assert all("MIN(timestamp)" not in sql for sql in executed_sql), executed_sql
+    assert all("function_name" not in sql for sql in executed_sql), executed_sql
+    assert any("ORDER BY timestamp ASC" in sql and "LIMIT 1" in sql for sql in executed_sql), executed_sql
+    assert hourly["data"] == [
+        {"date": "2026-06-04T23:00", "class_a": 4, "class_b": 0},
+        {"date": "2026-06-05T00:00", "class_a": 10, "class_b": 0},
+        {"date": "2026-06-05T01:00", "class_a": 0, "class_b": 20},
+        {"date": "2026-06-05T02:00", "class_a": 0, "class_b": 7},
+    ]
+
+    # Purged start-boundary raw retention falls back to summary without double-counting retained end hour.
+    purged_con = sqlite3.connect(str(db_path))
+    purged_con.execute("DELETE FROM usage_log WHERE timestamp < '2026-06-05T00:00:00.000Z'")
+    purged_con.commit()
+    purged_con.close()
+    executed_sql.clear()
+
+    daily = fos_usage.get_usage_operation_buckets("svc-fos", "2026-06-04T23:05:00Z", "2026-06-05T02:30:00Z", "day")
+    assert daily["data"] == [
+        {"date": "2026-06-04", "class_a": 50, "class_b": 0},
+        {"date": "2026-06-05", "class_a": 10, "class_b": 27},
+    ]
+
+    # Empty raw usage_log still falls back cleanly for both boundary hours.
+    empty_con = sqlite3.connect(str(db_path))
+    empty_con.execute("DELETE FROM usage_log")
+    empty_con.commit()
+    empty_con.close()
+    daily_empty_raw = fos_usage.get_usage_operation_buckets(
+        "svc-fos", "2026-06-04T23:05:00Z", "2026-06-05T02:30:00Z", "day"
+    )
+    assert daily_empty_raw["data"] == [
+        {"date": "2026-06-04", "class_a": 50, "class_b": 0},
+        {"date": "2026-06-05", "class_a": 10, "class_b": 80},
+    ]

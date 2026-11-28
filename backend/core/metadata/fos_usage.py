@@ -795,10 +795,7 @@ def get_usage_operation_buckets(
     start_hour = (start_bound or "")[:13]
     end_hour = (end or "")[:13]
     bucket_len = 13 if by == "hour" else 10
-    raw_exclude = (
-        "AND COALESCE(function_name, '') <> 'fastly.reconciliation' "
-        "AND substr(COALESCE(operation_type, ''), 1, 10) <> 'RECONCILE_'"
-    )
+    raw_exclude = "AND substr(COALESCE(operation_type, ''), 1, 10) <> 'RECONCILE_'"
     summary_exclude = "AND substr(operation_type, 1, 10) <> 'RECONCILE_'"
 
     def _next_hour_start(hour_prefix: str) -> str:
@@ -913,18 +910,21 @@ def get_usage_operation_buckets(
             ]
 
         if candidate_hours:
+            unique_candidates = list(dict.fromkeys(candidate_hours))
+            max_candidate_end = max(_next_hour_start(h) for h in unique_candidates)
             min_rows = con.execute(
                 f"""
-                SELECT MIN(timestamp)
+                SELECT timestamp
                 FROM usage_log
-                WHERE service_id = ? AND operation_class IN ('A', 'B') {raw_exclude}
+                WHERE service_id = ? AND timestamp < ?
+                  AND operation_class IN ('A', 'B') {raw_exclude}
+                ORDER BY timestamp ASC
+                LIMIT 1
                 """,
-                [service_id],
+                [service_id, max_candidate_end],
             ).fetchall()
             min_ts = min_rows[0][0] if min_rows and min_rows[0] and min_rows[0][0] is not None else None
-            fallback_hours = [
-                h for h in dict.fromkeys(candidate_hours) if min_ts is None or _next_hour_start(h) <= str(min_ts)
-            ]
+            fallback_hours = [h for h in unique_candidates if min_ts is None or _next_hour_start(h) <= str(min_ts)]
             if fallback_hours:
                 hour_preds = " OR ".join("hour = ?" for _ in fallback_hours)
                 fallback_rows = con.execute(

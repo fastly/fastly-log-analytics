@@ -2696,7 +2696,7 @@ mod request_compaction {
             let fake = Fake::new(BASE);
             let service = service();
             let ready = catalog::events(&fake, &service, "").unwrap();
-            assert!(ready.contains("retry: 5000\n"));
+            assert!(ready.contains("retry: 30000\n"));
             assert!(ready.contains("event: ready\n"));
             let before = format!("{SID}:0");
             publish(&fake, "batch-a");
@@ -2708,7 +2708,7 @@ mod request_compaction {
             fake.new_request();
             let unchanged = catalog::events(&fake, &service, &format!("cursor={SID}:2")).unwrap();
             assert!(!unchanged.contains("event:"));
-            assert!(unchanged.contains("retry: 5000\n"));
+            assert!(unchanged.contains("retry: 30000\n"));
             fake.new_request();
             let resync = catalog::events(&fake, &service, "cursor=other-install:1").unwrap();
             assert!(resync.contains("event: resync\n"));
@@ -2747,6 +2747,11 @@ mod request_compaction {
             assert!(catalog::events(&fake, &service, "")
                 .unwrap()
                 .contains("retry: 1000\n"));
+            service.log_period = 120;
+            fake.new_request();
+            assert!(catalog::events(&fake, &service, "")
+                .unwrap()
+                .contains("retry: 30000\n"));
         }
 
         #[test]
