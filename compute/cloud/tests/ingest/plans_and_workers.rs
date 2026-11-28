@@ -3443,3 +3443,91 @@ fn coex_iter24_02_retention_sweeps_expired_cmcd_summary_windows_and_skips_prefix
         "fresh cmcd_summary window Parquet must survive retention_sweep"
     );
 }
+
+#[test]
+fn sweep_guard_allows_immediate_forward_ingest_until_starvation_threshold() {
+    let fake = Fake::new(BASE + 3600);
+    put_raw(&fake, BASE, "a", &[line(BASE, "a")]);
+    assert_eq!(sweep_tick(&fake).converted, 1);
+    // Idle sweep sets sweep.at = BASE + 3600.
+    sweep_tick(&fake);
+    assert_eq!(
+        fake.kv.borrow()[ingest::WATERMARK_KEY].1["sweep"]["at"],
+        BASE + 3600
+    );
+
+    // At +SWEEP_INTERVAL_S (120s), a new forward raw file must plan immediately rather than
+    // being preempted by routine sweep, even when a straggler exists below the watermark.
+    fake.now.set(BASE as u64 + 3600 + ingest::SWEEP_INTERVAL_S);
+    let late1 = put_raw(&fake, BASE, "0", &[line(BASE, "s1")]);
+    fake.mtimes
+        .borrow_mut()
+        .insert(late1, fake.now.get() as i64);
+    put_raw(&fake, BASE + 60, "b", &[line(BASE + 60, "b")]);
+    let fwd = sweep_tick(&fake);
+    assert_eq!(
+        fwd.stragglers, 0,
+        "routine 120s sweep must not preempt forward ingest"
+    );
+    assert_eq!(fwd.converted, 1);
+    assert!(processed_ips(&fake).contains(&"b".to_owned()));
+
+    // Once sweep age reaches 10 * SWEEP_INTERVAL_S (1200s), the starvation guard preempts
+    // even when a forward raw file is waiting.
+    fake.now
+        .set(BASE as u64 + 3600 + ingest::SWEEP_INTERVAL_S.saturating_mul(10));
+    put_raw(&fake, BASE + 120, "c", &[line(BASE + 120, "c")]);
+    let starved = sweep_tick(&fake);
+    assert_eq!(
+        starved.stragglers, 1,
+        "starvation >= 10 * SWEEP_INTERVAL_S must preempt"
+    );
+    assert!(starved.more_pending);
+    assert!(!processed_ips(&fake).contains(&"c".to_owned()));
+}
+
+#[test]
+fn plan_new_falls_back_to_forward_list_when_raw_scan_due_lacks_five_call_room() {
+    let fake = Fake::new(BASE + 600);
+    let wm_key = raw_key(BASE + 540, "a");
+    fake.kv.borrow_mut().insert(
+        ingest::WATERMARK_KEY.into(),
+        (
+            1,
+            json!({
+                "key": wm_key,
+                "run_id": "abcdefabcdef",
+                "raw_sources": {},
+                "raw_scan_due": true,
+                "raw_scan": raw_key(BASE + 480, "0"),
+                "sweep": {"after": "", "at": BASE + 600},
+            }),
+        ),
+    );
+    put_raw(&fake, BASE + 600, "fwd", &[line(BASE + 600, "fwd")]);
+
+    // Leave 12 calls remaining after the initial 2 KV reads (plan + watermark):
+    // width_room(5) = 12 - (5 + 3 + 4 + 1) = 0, while list() + width_room(1) still fits.
+    fake.new_request();
+    fake.calls.set(BUDGET - 10 - ingest::TICK_RESERVE);
+    let buffer = LogBuffer::new(SID, "req");
+    let mut opts = ingest::coordinator::Options::request(&fake);
+    opts.sweep = true;
+    let report = ingest::coordinator::coordinate(
+        &fake,
+        &service(),
+        "ak",
+        "sk",
+        Instant::now(),
+        &buffer,
+        &opts,
+    )
+    .unwrap();
+    assert_eq!(
+        report.listed, 1,
+        "should fall back to forward list instead of spinning idle"
+    );
+    assert_eq!(report.shards_dispatched, 1);
+    assert_eq!(sweep_tick(&fake).converted, 1);
+    assert_eq!(processed_ips(&fake), ["fwd"]);
+}

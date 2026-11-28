@@ -689,6 +689,7 @@ export function planCompactsFromWindows(
         }
       }
       const otherRaw = otherRawByHour.get(hourKey) ?? [];
+      let openUsed = false;
       for (const cluster of clusters) {
         if (
           !Number.isFinite(cluster.startMs) ||
@@ -744,6 +745,48 @@ export function planCompactsFromWindows(
             summaries.push({ file: w.file, covers });
           }
           for (const c of cluster.compacts) claimed.add(c.file.key);
+        } else {
+          const open = !openUsed ? openByHour.get(hourKey) : undefined;
+          if (open) {
+            const openStart = Date.parse(open.file.start);
+            const openEnd = Date.parse(open.file.end);
+            if (
+              Number.isFinite(openStart) &&
+              Number.isFinite(openEnd) &&
+              openEnd > openStart &&
+              openStart >= cluster.startMs &&
+              openEnd <= cluster.endMs &&
+              wCluster.every((w) => {
+                const wStart = Date.parse(w.file.start);
+                const wEnd = Date.parse(w.file.end);
+                return (
+                  wEnd <= openStart ||
+                  wStart >= openEnd ||
+                  (wStart >= openStart && wEnd <= openEnd)
+                );
+              })
+            ) {
+              const wDisjoint = wCluster.filter((w) => {
+                const ws = Date.parse(w.file.start);
+                const we = Date.parse(w.file.end);
+                return we <= openStart || ws >= openEnd;
+              });
+              if (
+                open.count + wDisjoint.length >= cluster.sources &&
+                open.rows + wDisjoint.reduce((sum, w) => sum + w.rows, 0) ===
+                  cluster.rows
+              ) {
+                const covers = cluster.compacts.map((c) => c.file);
+                summaries.push({ file: open.file, covers });
+                for (const w of wDisjoint) {
+                  w.used = true;
+                  summaries.push({ file: w.file, covers });
+                }
+                for (const c of cluster.compacts) claimed.add(c.file.key);
+                openUsed = true;
+              }
+            }
+          }
         }
       }
       continue;

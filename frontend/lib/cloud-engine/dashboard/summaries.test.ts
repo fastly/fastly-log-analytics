@@ -2094,4 +2094,101 @@ describe("projected dashboard summaries", () => {
       [straddling.key, tier2.key].sort(),
     );
   });
+
+  it("covers a compact merging open_bundle and newer window summaries in a partial hour alongside a tail window crossing toMs", () => {
+    const fromMs = Date.parse("2026-11-21T01:05:00Z");
+    const toMs = Date.parse("2026-11-21T01:21:00Z");
+    const dayDir = "year=2026/month=11/day=21/";
+    const hourDir = `processed/request/${dayDir}hour=01/`;
+    const sumDir = `processed/summary/request/${dayDir}hour=01/`;
+    const bundleDir = `processed/summary_bundle/request/${dayDir}`;
+
+    const earlyCompact: ManifestFile = {
+      key: `${hourDir}compact=1795222800-1795223160-c3-n300-11223344.parquet`,
+      start: "2026-11-21T01:00:00Z",
+      end: "2026-11-21T01:06:00Z", // crosses fromMs (01:05:00Z), marking hour=01 partial
+      size: 10_000,
+      rows: 300,
+      sources: 3,
+    };
+    const mergedCompact: ManifestFile = {
+      key: `${hourDir}compact=1795223160-1795223880-c6-n600-deadbeef.parquet`,
+      start: "2026-11-21T01:06:00Z",
+      end: "2026-11-21T01:18:00Z",
+      size: 30_000,
+      rows: 600,
+      sources: 6,
+    };
+    const tailLiveWindow: ManifestFile = {
+      key: `${hourDir}window=1795224000-1795224120-aaa-n50.parquet`,
+      start: "2026-11-21T01:20:00Z",
+      end: "2026-11-21T01:22:00Z", // crosses toMs (01:21:00Z)
+      size: 4_000,
+      rows: 50,
+    };
+    const openBundle: ManifestFile = {
+      key: `${bundleDir}open_bundle=01-1795223640-c4-n400-h0123456789abcdef.parquet`,
+      start: "2026-11-21T01:06:00Z",
+      end: "2026-11-21T01:14:00Z",
+      size: 16_000,
+      rows: 400,
+      kind: "hour",
+    };
+    const newerWin1: ManifestFile = {
+      key: `${sumDir}summary=1795223640-1795223760-w1-n100.parquet`,
+      start: "2026-11-21T01:14:00Z",
+      end: "2026-11-21T01:16:00Z",
+      size: 4_000,
+      rows: 100,
+      kind: "window",
+    };
+    const newerWin2: ManifestFile = {
+      key: `${sumDir}summary=1795223760-1795223880-w2-n100.parquet`,
+      start: "2026-11-21T01:16:00Z",
+      end: "2026-11-21T01:18:00Z",
+      size: 4_000,
+      rows: 100,
+      kind: "window",
+    };
+    const tailLiveWinSummary: ManifestFile = {
+      key: `${sumDir}summary=1795224000-1795224120-aaa-n50.parquet`,
+      start: "2026-11-21T01:20:00Z",
+      end: "2026-11-21T01:22:00Z",
+      size: 3_000,
+      rows: 50,
+      kind: "window",
+    };
+
+    const plan = planCompactsFromWindows(
+      [earlyCompact, mergedCompact, tailLiveWindow],
+      [openBundle, newerWin1, newerWin2, tailLiveWinSummary],
+      fromMs,
+      toMs,
+    );
+    expect(plan.raw.map((f) => f.key).sort()).toEqual(
+      [earlyCompact.key, tailLiveWindow.key].sort(),
+    );
+    expect(plan.summaries.map((s) => s.file.key).sort()).toEqual(
+      [openBundle.key, newerWin1.key, newerWin2.key].sort(),
+    );
+
+    // Partial overlap between a window summary and open_bundle fails closed.
+    const partialOverlapWin: ManifestFile = {
+      key: `${sumDir}summary=1795223580-1795223700-ov-n100.parquet`,
+      start: "2026-11-21T01:13:00Z",
+      end: "2026-11-21T01:15:00Z",
+      size: 4_000,
+      rows: 100,
+      kind: "window",
+    };
+    const overlapped = planCompactsFromWindows(
+      [earlyCompact, mergedCompact, tailLiveWindow],
+      [openBundle, partialOverlapWin, newerWin2, tailLiveWinSummary],
+      fromMs,
+      toMs,
+    );
+    expect(overlapped.raw.map((f) => f.key).sort()).toEqual(
+      [earlyCompact.key, mergedCompact.key, tailLiveWindow.key].sort(),
+    );
+  });
 });

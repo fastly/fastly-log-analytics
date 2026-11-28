@@ -20,7 +20,11 @@ import {
 } from '@/hooks/useBootstrap'
 import { PlotlyPrewarm, MapPrewarm } from '@/components/PlotlyChart'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
-import { CLOUD_RAW_SCAN_PREFIXES, matchesCloudRoute } from '@/lib/cloud-engine/boot-routes'
+import {
+  CLOUD_RAW_SCAN_PREFIXES,
+  CLOUD_ROLLUP_WORKER_PREFIXES,
+  matchesCloudRoute,
+} from '@/lib/cloud-engine/boot-routes'
 import { CloudLoadingProgress } from '@/components/LoadingProgress'
 import packageJson from '../package.json'
 import {
@@ -247,7 +251,10 @@ export function AppLayout({
   // Other analytical routes scan in the page's own DuckDB; a dashboard worker
   // there would download and compile a second copy of the WASM for nothing.
   const needsDashboardEngine = matchesPrefix(pathname, ['/dashboard'])
-  const needsCloudBoot = needsPlotlyPrewarm || matchesCloudRoute(pathname, CLOUD_RAW_SCAN_PREFIXES)
+  const needsCloudBoot =
+    needsPlotlyPrewarm ||
+    matchesCloudRoute(pathname, CLOUD_RAW_SCAN_PREFIXES) ||
+    matchesCloudRoute(pathname, CLOUD_ROLLUP_WORKER_PREFIXES)
   const cloudIdentity = isSuccess && bootstrapData ? cloudCacheIdentity(bootstrapData) : null
   React.useEffect(() => {
     if (!cloudMode || !needsCloudBoot || needsLogin || cloudIdentity === null) return

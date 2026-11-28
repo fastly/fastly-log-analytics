@@ -787,7 +787,7 @@ fn step<R: Runtime>(ctx: &mut Ctx<'_, '_, R>) -> Result<(), String> {
                     >= record.value["sweep"]["at"]
                         .as_u64()
                         .unwrap_or(0)
-                        .saturating_add(SWEEP_INTERVAL_S)
+                        .saturating_add(SWEEP_INTERVAL_S.saturating_mul(10))
         })
     {
         sweep(ctx, record.as_ref(), watermark.as_ref())?;
@@ -905,6 +905,7 @@ fn plan_new<R: Runtime>(
     let mut candidates = Vec::new();
     let recent_due = !ctx.rum()
         && ctx.options.sweep
+        && ctx.width_room(5) > 0
         && watermark.is_some_and(|r| r.value["raw_scan_due"] == true);
     let page = if recent_due {
         ctx.report.more_pending = true;

@@ -24,15 +24,20 @@ beforeEach(() => {
 });
 
 it("starts the range lookup, rollup worker, and DuckDB as soon as a raw-scan page boots", () => {
-  bootCloudEngine("/insights");
+  bootCloudEngine("/rum");
   expect(calls.metadata).toEqual(["/api/log-extents"]);
   expect(calls.prewarms).toBe(1);
   expect(calls.workerPrewarms).toBe(1);
 });
 
-it("leaves DuckDB cold on pages that summaries answer while still warming the rollup worker", () => {
-  bootCloudEngine("/network");
-  expect(calls.metadata).toEqual(["/api/log-extents"]);
-  expect(calls.prewarms).toBe(0);
-  expect(calls.workerPrewarms).toBe(1);
+it("leaves DuckDB cold on insights and rollup-worker routes while still warming the rollup worker", () => {
+  for (const route of ["/insights", "/assets-shield", "/network"]) {
+    calls.metadata = [];
+    calls.prewarms = 0;
+    calls.workerPrewarms = 0;
+    bootCloudEngine(route);
+    expect(calls.metadata).toEqual(["/api/log-extents"]);
+    expect(calls.prewarms).toBe(0);
+    expect(calls.workerPrewarms).toBe(1);
+  }
 });
