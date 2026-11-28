@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { useBootstrapSettled } from '@/hooks/useBootstrap'
+import { useBootstrapPending, useBootstrapSettled, useEffectiveServiceId } from '@/hooks/useBootstrap'
 import { queryKeys } from '@/lib/api'
 import { useServiceStore } from '@/stores/filterStore'
 import type { Schema } from '@/types/api'
@@ -129,11 +129,13 @@ async function notifyDashboardCatalogChanged(
 export function useHeaderBadgeStream(enabled: boolean) {
   const queryClient = useQueryClient()
   const activeServiceId = useServiceStore((s) => s.activeServiceId)
+  const effectiveServiceId = useEffectiveServiceId() ?? activeServiceId ?? null
+  const bootstrapPending = useBootstrapPending()
   const cursorRef = useRef<string | null>(null)
   const cloudActive = IS_CLOUD_MODE || isCloudMode()
 
   useEffect(() => {
-    if (!enabled || !cloudActive) return
+    if (!enabled || !cloudActive || (bootstrapPending && !effectiveServiceId)) return
     cursorRef.current = null
     const controller = new AbortController()
     let stopped = false
@@ -143,7 +145,7 @@ export function useHeaderBadgeStream(enabled: boolean) {
     let reconnectMs = 5_000
     const source = browserSource(
       typeof window !== 'undefined' ? window.location.origin : '',
-      { serviceId: activeServiceId ?? undefined },
+      { serviceId: effectiveServiceId ?? undefined },
     )
 
     const poll = async () => {
@@ -155,7 +157,7 @@ export function useHeaderBadgeStream(enabled: boolean) {
         const response = await fetch(url.toString(), {
           headers: {
             Accept: 'text/event-stream',
-            'x-service-id': activeServiceId ?? '',
+            'x-service-id': effectiveServiceId ?? '',
           },
           credentials: 'include',
           signal: controller.signal,
@@ -186,9 +188,9 @@ export function useHeaderBadgeStream(enabled: boolean) {
               ...commitEvent,
               manifest: typeof parsed.data?.manifest === 'string' ? parsed.data.manifest : undefined,
             })
-            void notifyDashboardCatalogChanged(commitEvent, activeServiceId)
+            void notifyDashboardCatalogChanged(commitEvent, effectiveServiceId)
             if (parsed.event !== 'ready') {
-              void queryClient.invalidateQueries({ queryKey: queryKeys.syncStatus(activeServiceId) })
+              void queryClient.invalidateQueries({ queryKey: queryKeys.syncStatus(effectiveServiceId) })
             }
           }
         }
@@ -226,7 +228,7 @@ export function useHeaderBadgeStream(enabled: boolean) {
       controller.abort()
       cursorRef.current = null
     }
-  }, [enabled, cloudActive, activeServiceId, queryClient])
+  }, [enabled, cloudActive, bootstrapPending, effectiveServiceId, queryClient])
 
   return useServiceStream(enabled && !cloudActive, '/api/log-extents/stream', (raw) => {
     const payload = parseSSEJson<BadgeStreamEvent>(raw)
@@ -289,6 +291,8 @@ export function useAdminEventStream(enabled: boolean, channels: AdminEventChanne
   }, [enabled, activeServiceId, channelsParam, queryClient])
 
   const cloudActive = IS_CLOUD_MODE || isCloudMode()
+  const bootstrapData = queryClient.getQueryData<{ services?: unknown[] }>(queryKeys.bootstrap())
+  const bootstrapHasServices = Array.isArray(bootstrapData?.services) && bootstrapData.services.length > 0
   return adminStreamHooks.useServiceStream(
     enabled && !cloudActive && bootstrapSettled && channelsParam.length > 0,
     `/api/admin/events/stream?channels=${channelsParam}`,
@@ -319,7 +323,7 @@ export function useAdminEventStream(enabled: boolean, channels: AdminEventChanne
       }
     },
     needsService
-      ? { cache: 'no-store', optionalService: true }
+      ? { cache: 'no-store', optionalService: !bootstrapHasServices }
       : { cache: 'no-store', optionalService: true, omitService: true },
   )
 }

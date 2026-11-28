@@ -3524,6 +3524,53 @@ def test_watermark_and_header_metrics_ttl_caches_reuse_results() -> None:
     assert len(calls) == 3
 
 
+@pytest.mark.no_postgres
+def test_header_metrics_default_ttl_and_swr_avoids_foreground_queries(monkeypatch: pytest.MonkeyPatch) -> None:
+    from backend.high_scale import dashboard as hs_dashboard
+    from backend.utils.bounded_cache import CacheRegistry
+    from backend.utils.telemetry.metrics import clear_queries, get_queries
+
+    CacheRegistry.clear_all()
+    assert hs_dashboard._HS_HEADER_METRICS_CACHE_TTL == 60.0
+
+    calls = {"count": 0}
+    refresh_done = Event()
+
+    class _SwrClient:
+        def execute(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+            calls["count"] += 1
+            get_queries().append({"sql": sql, "time_ms": 1.0, "engine": "ClickHouse"})
+            if calls["count"] > 3:
+                refresh_done.set()
+            return [
+                {
+                    "total_rows": 100 if calls["count"] <= 3 else 250,
+                    "earliest_log_at": "2026-01-01T00:00:00Z",
+                    "latest_log_at": "2026-01-02T00:00:00Z",
+                }
+            ]
+
+    svc = SimpleNamespace(service_id="svc-swr", client=_SwrClient())
+    hm_cold = header_metrics(svc)  # type: ignore[arg-type]
+    assert hm_cold["request"]["total_rows"] == 100
+    assert calls["count"] == 3
+
+    # Expire only the primary fresh TTL cache while leaving stale cache intact
+    monkeypatch.setattr(hs_dashboard, "_FORCE_SWR_IN_TESTS", True)
+    hs_dashboard._header_metrics_cache._cache.clear()
+
+    clear_queries()
+    hm_swr = header_metrics(svc)  # type: ignore[arg-type]
+    fg_queries = list(get_queries())
+
+    assert hm_swr["request"]["total_rows"] == 100
+    assert len(fg_queries) == 0
+    assert refresh_done.wait(timeout=2.0)
+    sleep(0.05)
+    hm_fresh = header_metrics(svc)  # type: ignore[arg-type]
+    assert hm_fresh["request"]["total_rows"] == 250
+
+
 def test_resolve_window_only_fetches_status_for_auto_range() -> None:
     from backend.core.request_context import RequestContext
 

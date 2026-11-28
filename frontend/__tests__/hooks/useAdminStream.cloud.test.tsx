@@ -262,4 +262,43 @@ describe('Cloud header ingest events', () => {
     })
     expect(mocks.fetch.mock.calls[2][0]).toMatch(/\/api\/ingest\/events$/)
   })
+
+  it('waits while bootstrap is pending with no resolved service id and connects only once after resolve', async () => {
+    mocks.service.activeServiceId = null
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: Infinity } },
+    })
+    let resolveBootstrap!: (v: unknown) => void
+    void queryClient.prefetchQuery({
+      queryKey: queryKeys.bootstrap(),
+      queryFn: () => new Promise((resolve) => { resolveBootstrap = resolve }),
+    })
+
+    const { rerender } = renderHook(({ enabled }) => useHeaderBadgeStream(enabled), {
+      initialProps: { enabled: true },
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+      ),
+    })
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(mocks.fetch).not.toHaveBeenCalled()
+
+    mocks.service.activeServiceId = 'svc-1'
+    await act(async () => {
+      resolveBootstrap({
+        runtime_mode: 'cloud',
+        services: [{ service_id: 'svc-1', name: 'One' }],
+        active_service_id: 'svc-1',
+      })
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    rerender({ enabled: true })
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+
+    expect(mocks.fetch).toHaveBeenCalledTimes(1)
+    expect(mocks.fetch.mock.calls[0]?.[1]?.headers).toMatchObject({
+      'x-service-id': 'svc-1',
+    })
+  })
 })

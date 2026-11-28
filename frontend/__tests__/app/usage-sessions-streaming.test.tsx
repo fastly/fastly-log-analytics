@@ -537,6 +537,16 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
     expect(screen.getByText('7 reqs')).toBeInTheDocument()
   })
 
+  test('Cloud UsageStatCards reserves Cloud card height on initial loading render to avoid CLS', () => {
+    setCloudModeRuntime(true)
+    const pendingStorage = new Promise<never>(() => {})
+    mockGet.mockImplementation(() => pendingStorage)
+
+    const { container } = renderWithQuery(<UsagePage />, { queryClient })
+    expect(container.querySelector('.min-h-\\[420px\\]')).not.toBeNull()
+    expect(container.querySelector('.min-h-\\[320px\\]')).not.toBeNull()
+  })
+
   test('High-Scale missing traffic is labelled reference rather than measured service traffic', async () => {
     mockGet.mockImplementation(async (path: string) => {
       if (path === '/api/usage/prefill/rates' || path === '/api/usage/prefill')

@@ -218,8 +218,11 @@ export function useBootstrapResolved(): boolean {
 
 export function useBootstrapPending(): boolean {
   const queryClient = useQueryClient()
-  const s = queryClient.getQueryState(queryKeys.bootstrap())
-  return s !== undefined && s.status === 'pending'
+  return useSyncExternalStore(
+    (onChange) => queryClient.getQueryCache().subscribe(onChange),
+    () => queryClient.getQueryState(queryKeys.bootstrap())?.status === 'pending',
+    () => false,
+  )
 }
 
 export function useBootstrapSettled(): boolean {
@@ -376,6 +379,32 @@ export function useBootstrapSyncEffects(
   }, [data, bootstrapIsStale, resolvedActiveServiceId, isRealQueryResult])
 }
 
+function syncBootstrapServiceStore(data: {
+  services?: Parameters<typeof toService>[0][]
+  active_service_id?: string | null
+} | null | undefined): void {
+  if (!data) return
+  const services = (data.services ?? []).map(toService)
+  const store = useServiceStore.getState()
+  store.setServices(services)
+  store.setInitialized(true)
+
+  const currentId = store.activeServiceId
+  const urlServiceId =
+    typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('service') : null
+  const defaultId =
+    services.length > 0
+      ? urlServiceId && services.some((s) => s.id === urlServiceId)
+        ? urlServiceId
+        : data.active_service_id && services.some((s) => s.id === data.active_service_id)
+          ? data.active_service_id
+          : (services[0]?.id ?? null)
+      : null
+  if ((!currentId && defaultId) || (currentId && !services.some((s) => s.id === currentId))) {
+    store.setActiveServiceId(defaultId)
+  }
+}
+
 function useBootstrapQuery() {
   const queryClient = useQueryClient()
   useEffect(() => subscribeCloudMetadataInvalidation(() => {
@@ -394,6 +423,7 @@ function useBootstrapQuery() {
       useSessionRoleStore.getState().setIsRemoteAnalyst(
         data?.settings?.is_remote_analyst === true,
       )
+      syncBootstrapServiceStore(data)
       seedBootstrapDependentCaches(queryClient, data)
       return data
     },

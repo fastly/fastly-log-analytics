@@ -1438,4 +1438,73 @@ describe("Feature F24 — CMCD Streaming Media cloud-engine", () => {
     expect(isCmcdPartial(partialRollup)).toBe(true);
     expect(getCmcdResidualSections(partialRollup)).toEqual(["bitrate_ladder", "stream_type_dist"]);
   });
+
+  it("answers emptyCmcdAggregates without raw fallback when cmcd_summary is empty and raw files are all cataloged", async () => {
+    const t0 = 1_800_000_000_000;
+    const t1 = t0 + 300_000;
+    const hex64 = "a".repeat(64);
+    const catalogedResult = await cmcdFromRollup(
+      {
+        start_time: new Date(t0).toISOString(),
+        end_time: new Date(t1).toISOString(),
+        available: true,
+      },
+      {
+        async fetchJson(url) {
+          if (url.includes("dataset=cmcd_summary")) {
+            return { files: [], next_cursor: null, complete: true };
+          }
+          return {
+            files: [
+              {
+                key: `processed/_catalog/catalog0/${hex64}/00001.parquet`,
+                start: new Date(t0).toISOString(),
+                end: new Date(t1).toISOString(),
+                size: 1024,
+                rows: 50,
+              },
+            ],
+            next_cursor: null,
+            complete: true,
+          };
+        },
+        async fetchFile() {
+          throw new Error("should not fetch any file");
+        },
+      },
+    );
+    expect(catalogedResult).toEqual(emptyCmcdAggregates(true));
+
+    const legacyResult = await cmcdFromRollup(
+      {
+        start_time: new Date(t0).toISOString(),
+        end_time: new Date(t1).toISOString(),
+        available: true,
+      },
+      {
+        async fetchJson(url) {
+          if (url.includes("dataset=cmcd_summary")) {
+            return { files: [], next_cursor: null, complete: true };
+          }
+          return {
+            files: [
+              {
+                key: "processed/request/window=legacy.parquet",
+                start: new Date(t0).toISOString(),
+                end: new Date(t1).toISOString(),
+                size: 1024,
+                rows: 50,
+              },
+            ],
+            next_cursor: null,
+            complete: true,
+          };
+        },
+        async fetchFile() {
+          throw new Error("should not fetch any file");
+        },
+      },
+    );
+    expect(legacyResult).toBeNull();
+  });
 });

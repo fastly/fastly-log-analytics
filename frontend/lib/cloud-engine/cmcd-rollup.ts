@@ -5,7 +5,8 @@ import { Histogram } from "./dashboard/histogram";
 import { MissingCloudFileError } from "./dashboard/file-errors";
 import { Hll } from "./dashboard/hll";
 import { mergeHistogramBytes, mergeHllBytes } from "./rollup-merge";
-import { filesOverlapping, type ManifestFile } from "./dashboard/manifest";
+import { filesOverlapping, fetchManifest, type ManifestFile } from "./dashboard/manifest";
+import { hasLegacyUncatalogedFiles } from "./dashboard/catalog-manifest";
 import { readColumns } from "./dashboard/parquet";
 import { mapLimit } from "./dashboard/sources";
 import { parseEpochMs, roundTo } from "./engine-utils";
@@ -365,7 +366,16 @@ export async function cmcdFromRollup(
     toMs,
     signal,
   );
-  if (!files || files.length === 0) return null;
+  if (!files) return null;
+  if (files.length === 0) {
+    const available = typeof params.available === "boolean" ? params.available : true;
+    if (!available) return emptyCmcdAggregates(false);
+    const raw = await fetchManifest(source.fetchJson, fromIso, toIso, signal, "request", "raw");
+    if (raw.complete && !hasLegacyUncatalogedFiles(raw.files)) {
+      return emptyCmcdAggregates(available);
+    }
+    return null;
+  }
   try {
     return await cmcdFromFiles(files, params, fromMs, toMs, source, signal);
   } catch (error) {

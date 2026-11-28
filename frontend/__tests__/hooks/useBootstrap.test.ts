@@ -211,6 +211,35 @@ describe('useBootstrap (MSW)', () => {
     expect(mockSetInitialized).toHaveBeenCalledWith(true)
   })
 
+  it('syncs activeServiceId and services synchronously before bootstrap success is observable', async () => {
+    server.use(
+      http.get(`${API_BASE}/api/bootstrap`, () =>
+        HttpResponse.json({
+          runtime_mode: 'high_scale',
+          services: [{ service_id: 'svc-1', name: 'My CDN' }],
+          active_service_id: 'svc-1',
+        }),
+      ),
+    )
+    const queryClient = createTestQueryClient({ queries: { gcTime: 0 } })
+    let serviceCallsAtSuccess = -1
+    const unsubscribe = queryClient.getQueryCache().subscribe((event) => {
+      if (event.query.queryKey[0] === 'bootstrap' && event.query.state.status === 'success') {
+        serviceCallsAtSuccess = mockSetActiveServiceId.mock.calls.length
+      }
+    })
+    try {
+      const { result } = renderHook(() => useBootstrap(), {
+        wrapper: makeQueryWrapper(queryClient),
+      })
+      await waitFor(() => expect(result.current.isSuccess).toBe(true))
+      expect(serviceCallsAtSuccess).toBeGreaterThan(0)
+      expect(mockSetActiveServiceId).toHaveBeenCalledWith('svc-1')
+    } finally {
+      unsubscribe()
+    }
+  })
+
   it('sets Cloud runtime mode before bootstrap success is observable', async () => {
     server.use(
       http.get(`${API_BASE}/api/bootstrap`, () =>
@@ -956,6 +985,46 @@ describe('useSyncStatus, useLastSync & useHeaderBadgeStream', () => {
     await act(async () => { await new Promise((r) => setTimeout(r, 30)) })
     expect(calls).toBe(0)
     expect(analystRes.current.data).toBeNull()
+  })
+
+  it('useSyncStatus in Cloud mode waits while bootstrap is pending so it does not fetch before activeServiceId resolves', async () => {
+    setCloudModeRuntime(true)
+    mockServiceState.activeServiceId = null
+    mockServiceState.services = []
+    mockServiceState.isInitialized = false
+    const seenKeys: Array<string | null> = []
+    server.use(
+      http.get(`${API_BASE}/api/sync-status`, ({ request }) => {
+        seenKeys.push(request.headers.get('x-service-id'))
+        return HttpResponse.json({
+          latest_log_at: '2026-06-14T00:00:00Z', local_rows: 10, fos_rows: null, last_sync_at: '2026-06-14T00:01:00Z',
+        })
+      }),
+    )
+    const qc = createTestQueryClient({ queries: { gcTime: Infinity, staleTime: 0 } })
+    let resolveBootstrap!: (v: unknown) => void
+    void qc.prefetchQuery({
+      queryKey: queryKeys.bootstrap(),
+      queryFn: () => new Promise((resolve) => { resolveBootstrap = resolve }),
+    })
+
+    try {
+      const { rerender } = renderHook(() => useSyncStatus(), { wrapper: makeQueryWrapper(qc) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 30)) })
+      expect(seenKeys).toHaveLength(0)
+
+      mockServiceState.activeServiceId = 'svc-1'
+      mockServiceState.isInitialized = true
+      resolveBootstrap({
+        runtime_mode: 'cloud',
+        services: [{ service_id: 'svc-1', name: 'My CDN' }],
+        active_service_id: 'svc-1',
+      })
+      rerender()
+      await waitFor(() => expect(seenKeys.length).toBe(1))
+    } finally {
+      setCloudModeRuntime(false)
+    }
   })
 
   it('useLastSync returns latest log_discovery run, handles empty entries, and skips for analysts', async () => {
@@ -2518,6 +2587,18 @@ describe('runEventStream, useEventStream, useServiceStream & useAdminEventStream
         expect.any(Function),
         { cache: 'no-store', optionalService: true, omitService: true },
       )
+    })
+
+    it('sets optionalService=false for service-scoped channels when bootstrap lists services', () => {
+      const qc = makeQc()
+      qc.setQueryData(queryKeys.bootstrap(), {
+        services: [{ service_id: 'svc-1', name: 'One' }],
+        active_service_id: 'svc-1',
+      })
+      renderHook(() => useAdminEventStream(true, ['cron-runs', 'sync-status']), {
+        wrapper: makeQueryWrapper(qc),
+      })
+      expect(lastOpts).toMatchObject({ optionalService: false, cache: 'no-store' })
     })
   })
 

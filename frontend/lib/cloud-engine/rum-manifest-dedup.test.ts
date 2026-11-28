@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { handleCloudAnalyticalRequest, resetCloudMetadataCache } from "./adapter";
 import { getDuckDBEngine } from "./dashboard/duckdb";
-import { clearManifestCache } from "./dashboard/manifest";
+import { clearManifestCache, fetchManifest, observeManifestCommit } from "./dashboard/manifest";
 import { resetRangeLoaderCache } from "./range-loader";
 
 describe("RUM concurrent analytics + live-events manifest deduplication", () => {
@@ -73,5 +73,45 @@ describe("RUM concurrent analytics + live-events manifest deduplication", () => 
     expect(liveEventsRes?.status).toBe(200);
     expect(rawListingRequests).toHaveLength(1);
     expect(new URL(rawListingRequests[0], "http://localhost").searchParams.get("service_id")).toBe("svc-1");
+  });
+
+  it("reuses recent dataset=rum manifest across a ready catalog event, and invalidates on commit", async () => {
+    let calls = 0;
+    const fetchJson = vi.fn(async () => {
+      calls += 1;
+      return { files: [], next_cursor: null, complete: true };
+    });
+
+    await fetchManifest(
+      fetchJson,
+      "2027-01-15T08:00:00.000Z",
+      "2027-01-15T09:00:00.000Z",
+      undefined,
+      "rum",
+      "raw",
+    );
+    expect(calls).toBe(1);
+
+    observeManifestCommit(fetchJson, { type: "ready", generation: 10 });
+    await fetchManifest(
+      fetchJson,
+      "2027-01-15T08:00:00.000Z",
+      "2027-01-15T09:00:00.000Z",
+      undefined,
+      "rum",
+      "raw",
+    );
+    expect(calls).toBe(1);
+
+    observeManifestCommit(fetchJson, { type: "commit", generation: 11 });
+    await fetchManifest(
+      fetchJson,
+      "2027-01-15T08:00:00.000Z",
+      "2027-01-15T09:00:00.000Z",
+      undefined,
+      "rum",
+      "raw",
+    );
+    expect(calls).toBe(2);
   });
 });

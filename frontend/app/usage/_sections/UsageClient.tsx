@@ -7,6 +7,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Activity as ActivityIcon } from 'lucide-react'
 import { useTheme } from 'next-themes'
 import { AnalyticsCard, useInViewOnce } from '@/components/AnalyticsCard'
+import { IS_CLOUD_MODE, isCloudMode } from '@/lib/cloud-engine/mode'
 import type { EstimateRates } from '@/lib/cloud-engine/usage/estimate'
 import type { ComputeUsageResponse } from '@/lib/cloud-engine/usage/computeSeries'
 import type { MeasuredEstimate } from '@/lib/cloud-engine/usage/estimatePrefill'
@@ -352,6 +353,8 @@ export function UsagePageContent({
   const hasCloudRates = prefillRatesWire?.compute_request_rate_per_million !== undefined
   const showCompute = Boolean(compute && compute.source !== 'not_applicable')
   const useCloudEstimator = Boolean(
+    IS_CLOUD_MODE ||
+    isCloudMode() ||
     cloudPrefill ||
     hasCloudRates ||
     showCompute ||

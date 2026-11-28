@@ -2,7 +2,12 @@
 
 import { useState, useEffect, useEffectEvent } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useBootstrapPending, useIsAnalyst } from '@/hooks/useBootstrap'
+import {
+  useBootstrapPending,
+  useBootstrapSettled,
+  useEffectiveServiceId,
+  useIsAnalyst,
+} from '@/hooks/useBootstrap'
 import { client, extractApiError, unwrapClient, queryKeys } from '@/lib/api'
 import { useServiceStore } from '@/stores/filterStore'
 import type { Schema } from '@/types/api'
@@ -245,12 +250,17 @@ type CronRunEntry = Schema<'CronRunEntry'>
 type LastSyncInfo = { [K in 'started_at' | 'status' | 'duration_s']: CronRunEntry[K] | null }
 
 export function useSyncStatus(opts?: { enabled?: boolean }) {
-  const activeServiceId = useServiceStore((s) => s.activeServiceId)
+  const activeServiceId = useEffectiveServiceId() ?? null
+  const queryClient = useQueryClient()
   const bootstrapPending = useBootstrapPending()
+  const bootstrapSettled = useBootstrapSettled()
+  const hasBootstrapQuery = queryClient.getQueryState(queryKeys.bootstrap()) !== undefined
   const isAnalyst = useIsAnalyst()
   const cloudMode = IS_CLOUD_MODE || isCloudMode()
   const ready = useSeededReady(activeServiceId, SEED_KEYS, cloudMode)
   const callerEnabled = opts?.enabled ?? true
+  const waitingForBootstrapService =
+    !activeServiceId && (bootstrapPending || (hasBootstrapQuery && !bootstrapSettled))
 
   return useQuery({
     queryKey: queryKeys.syncStatus(activeServiceId),
@@ -258,7 +268,13 @@ export function useSyncStatus(opts?: { enabled?: boolean }) {
       (await unwrapClient(
         client.GET('/api/sync-status', { signal, params: { query: { skip_fos: true } } }),
       )) as SyncStatus,
-    enabled: callerEnabled && (!!activeServiceId || cloudMode) && !bootstrapPending && !isAnalyst && ready,
+    enabled:
+      callerEnabled &&
+      (!!activeServiceId || cloudMode) &&
+      !bootstrapPending &&
+      !waitingForBootstrapService &&
+      !isAnalyst &&
+      ready,
     staleTime: 60_000,
     refetchInterval: 5 * 60_000,
     refetchIntervalInBackground: false,

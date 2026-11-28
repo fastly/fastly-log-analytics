@@ -14,7 +14,7 @@ import { useRumStatus } from '@/hooks/useDashboardCards'
 import { useAnalyticsReportQuery, useReportRangeAnchor } from '@/hooks/useReportPageState'
 import { useTimezone } from '@/hooks/useSSE'
 import { adminJsonResult } from '@/lib/api'
-import { arrayOrEmpty, rangeLabelToHours, recordOrNull, type RangeWireArgs } from '@/lib/utils'
+import { arrayOrEmpty, recordOrNull, resolveRangeWire, type RangeWireArgs } from '@/lib/utils'
 import type { FiltersPayload } from '@/types/api'
 import {
   RumEmptyWindowCard,
@@ -175,27 +175,17 @@ export function RumClient({
     queryOptions: { enabled: queriesEnabled, refetchInterval: false },
   })
 
-  const liveRange = useMemo(() => {
-    const hours = relativeRange ? rangeLabelToHours(relativeRange) : isAutoRange ? 24 : null
-    if (hours !== null && anchor) {
-      const endMs = Date.parse(anchor)
-      if (Number.isFinite(endMs)) {
-        return {
-          start: new Date(endMs - hours * 3_600_000).toISOString(),
-          end: anchor,
-        }
-      }
-    }
-    return { start: startTime, end: endTime }
-  }, [relativeRange, isAutoRange, anchor, startTime, endTime])
+  const { rangeKey: liveRangeKey, rangeBody: liveRangeBody } = useMemo(
+    () => resolveRangeWire({ relativeRange, isAutoRange, startTime, endTime, anchor }),
+    [relativeRange, isAutoRange, startTime, endTime, anchor],
+  )
 
   const { data: liveEvents, isLoading: isLiveEventsLoading, isError: isLiveEventsError, refetch: refetchLiveEvents } = useQuery({
-    queryKey: ['rum-live-events', serviceId, liveRange.start, liveRange.end, filterPayload],
+    queryKey: ['rum-live-events', serviceId, liveRangeKey, anchor, filterPayload],
     queryFn: async ({ signal }) => {
       if (!serviceId) return []
       const params = new URLSearchParams()
-      if (liveRange.start) params.append('start_time', liveRange.start)
-      if (liveRange.end) params.append('end_time', liveRange.end)
+      for (const [k, v] of Object.entries(liveRangeBody)) if (v) params.append(k, v)
       if (filterPayload && Object.keys(filterPayload).length > 0) params.append('filters', JSON.stringify(filterPayload))
       const qs = params.toString()
       const res = await adminJsonResult<'/api/services/{service_id}/rum/live-events', RumLiveEvent[]>(

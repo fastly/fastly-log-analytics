@@ -24,6 +24,7 @@ import {
   formatUSD,
 } from '@/lib/utils'
 import type { ComputeUsageResponse } from '@/lib/cloud-engine/usage/computeSeries'
+import { IS_CLOUD_MODE, isCloudMode } from '@/lib/cloud-engine/mode'
 import type { operations } from '@/types/api.generated'
 
 const formatVcpu = (ms: number) => (ms < 1000 ? `${Math.round(ms)}ms` : formatDuration(ms / 1000))
@@ -399,6 +400,8 @@ export function UsageStatCards({
   )
 
   const useCloudHeight = Boolean(
+    IS_CLOUD_MODE ||
+    isCloudMode() ||
     computeRow ||
     (compute != null && compute.source !== 'not_applicable') ||
     storage?.incurred?.lines?.length,

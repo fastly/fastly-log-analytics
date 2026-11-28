@@ -655,6 +655,37 @@ describe('RumClient, RumFaroVersionCard, RumSettingsDialog & RumStatusPanel', ()
       expect(key).toEqual(['rum-analytics', SVC, '24h', params?.get('anchor'), {}])
     })
 
+    it('sends matching range_token+anchor on /rum/live-events on default cold 24h loads', async () => {
+      useServiceStore.setState({
+        activeServiceId: SVC,
+        services: [{ id: SVC, name: 'Test Service' }],
+        isInitialized: true,
+      })
+      useFilterStore.getState().resetAll()
+      mockRumEndpoints()
+      let analyticsParams: URLSearchParams | null = null
+      let liveParams: URLSearchParams | null = null
+      server.use(
+        http.get('/api/services/:service_id/rum/analytics', ({ request }) => {
+          analyticsParams = new URL(request.url).searchParams
+          return HttpResponse.json(analytics())
+        }),
+        http.get('/api/services/:service_id/rum/live-events', ({ request }) => {
+          liveParams = new URL(request.url).searchParams
+          return HttpResponse.json([])
+        }),
+      )
+
+      const qc = seededClient()
+      render(<RumPageClient initialServiceId={SVC} />, { wrapper: makeQueryWrapper(qc) })
+      await waitFor(() => expect(liveParams).not.toBeNull())
+
+      const live = liveParams as unknown as URLSearchParams
+      const anal = analyticsParams as unknown as URLSearchParams
+      expect(live.get('range_token')).toBe(anal.get('range_token'))
+      expect(live.get('anchor')).toBe(anal.get('anchor'))
+    })
+
     it('hydrates a cold 1h load without first fetching the default 24h window', async () => {
       useServiceStore.setState({
         activeServiceId: SVC,

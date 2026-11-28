@@ -71,6 +71,7 @@ type Recent = {
   at: number;
   epoch: number;
   reset: number;
+  commits: number;
   required: number | undefined;
 };
 const recent = new Map<string, Recent>();
@@ -113,6 +114,7 @@ type DeltaPage = {
 type Requirement = {
   generation: number;
   reset: number;
+  commits: number;
   manifest?: string | null;
 };
 const snapshots = new Map<string, Snapshot[]>();
@@ -295,6 +297,10 @@ export function observeCatalogCommit(
         ? event.generation
         : Math.max(previous?.generation ?? 0, event.generation),
     reset: (previous?.reset ?? 0) + (event.type === "resync" ? 1 : 0),
+    commits:
+      event.type === "resync"
+        ? 0
+        : (previous?.commits ?? 0) + (event.type === "commit" ? 1 : 0),
     manifest: event.manifest,
   });
 }
@@ -593,6 +599,18 @@ export async function fetchCatalogManifest(
   const requirement = requirements.get(identity);
   const required = requirement?.generation;
   const reset = requirement?.reset ?? 0;
+  const commits = requirement?.commits ?? 0;
+  const incremental =
+    (!dataset || dataset === "request") && (!view || view === "raw");
+  const recentSatisfiesRequirement = (young: Recent): boolean => {
+    if (!incremental) return young.commits === commits;
+    return (
+      required === undefined ||
+      young.required === required ||
+      (young.manifest.catalogGeneration !== undefined &&
+        young.manifest.catalogGeneration >= required)
+    );
+  };
   // A listing with inline summaries holds the same raw files, so a raw-only
   // caller of the same range (or a narrowed sub-range) reuses it rather than
   // listing again.
@@ -619,7 +637,7 @@ export async function fetchCatalogManifest(
       young &&
       young.epoch === epoch &&
       young.reset === reset &&
-      young.required === required &&
+      recentSatisfiesRequirement(young) &&
       now - young.at < SNAPSHOT_REUSE_MS
     )
       return candidate === shareKey ? young.manifest : rawOnly(young.manifest);
@@ -634,7 +652,7 @@ export async function fetchCatalogManifest(
           young.key !== candidateKey ||
           young.epoch !== epoch ||
           young.reset !== reset ||
-          young.required !== required ||
+          !recentSatisfiesRequirement(young) ||
           now - young.at >= SNAPSHOT_REUSE_MS ||
           !young.manifest.complete ||
           !Number.isFinite(young.fromMs) ||
@@ -784,6 +802,7 @@ export async function fetchCatalogManifest(
           at: Date.now(),
           epoch,
           reset,
+          commits,
           required,
         });
         while (recent.size > MAX_SNAPSHOTS)

@@ -53,7 +53,9 @@ if TYPE_CHECKING:
 import concurrent.futures
 import contextvars
 import copy
+import logging
 import os
+import threading
 from functools import partial
 
 from backend.models.analytics import (
@@ -68,18 +70,28 @@ from backend.models.analytics import (
 )
 from backend.models.common import ResponseCacheObservation
 from backend.repositories.utils.response_cache import cache_result, coalesce
-from backend.utils.bounded_cache import BoundedTTLCache, CacheRegistry
+from backend.utils.bounded_cache import CacheRegistry, SWRTTLCache
 from backend.utils.date_utils import ensure_utc, parse_iso_utc, safe_iso
+
+logger = logging.getLogger(__name__)
 
 _HS_DASHBOARD_CACHE_TTL = float(os.getenv("HS_DASHBOARD_CACHE_TTL_SECONDS", "60"))
 _dashboard_memo = ResponseMemo(ttl=_HS_DASHBOARD_CACHE_TTL, maxsize=128, prewarmer=False)
 CacheRegistry.register("hs_dashboard_aggregates_memo", _dashboard_memo.cache)
 
-_HS_HEADER_METRICS_CACHE_TTL = float(os.getenv("HS_HEADER_METRICS_CACHE_TTL_SECONDS", "15"))
-_header_metrics_cache: BoundedTTLCache[tuple[str, int], dict[str, Any]] = BoundedTTLCache(
-    maxsize=128, ttl_seconds=_HS_HEADER_METRICS_CACHE_TTL
+_HS_HEADER_METRICS_CACHE_TTL = float(os.getenv("HS_HEADER_METRICS_CACHE_TTL_SECONDS", "60"))
+_HS_HEADER_METRICS_STALE_TTL = float(os.getenv("HS_HEADER_METRICS_STALE_TTL_SECONDS", "600"))
+_header_metrics_cache: SWRTTLCache[tuple[str, int], dict[str, Any]] = SWRTTLCache(
+    maxsize=128,
+    ttl_seconds=_HS_HEADER_METRICS_CACHE_TTL,
+    stale_ttl_seconds=_HS_HEADER_METRICS_STALE_TTL,
 )
 CacheRegistry.register("hs_header_metrics_cache", _header_metrics_cache)
+
+_header_metrics_lock = threading.Lock()
+_header_metrics_refreshing: set[tuple[str, int]] = set()
+_HEADER_METRICS_SWR_ENABLED = True
+_FORCE_SWR_IN_TESTS = False
 
 _HEADER_TABLES = {"request": "request_facts", "rum_vitals": "rum_vitals_facts", "rum_errors": "rum_error_facts"}
 
@@ -144,17 +156,11 @@ def _query_source_extents(
     )
 
 
-def header_metrics(service: HighScaleService) -> dict[str, Any]:
-    """Return visible ClickHouse row counts and event-time extents for the header."""
-    cache_key = (service.service_id, client_cache_token(service.client))
-    use_cache = not hasattr(service.client, "responses")
-    if use_cache and (cached := _header_metrics_cache.get(cache_key)) is not None:
-        return copy.deepcopy(cached)
-
+def _compute_header_metrics(service: HighScaleService, *, use_pool: bool) -> dict[str, Any]:
     totals: dict[str, int] = {}
     earliest: dict[str, str | None] = {}
     latest: dict[str, str | None] = {}
-    if use_cache:
+    if use_pool:
         from backend.utils.telemetry.metrics import get_queries
 
         get_queries()
@@ -245,7 +251,7 @@ def header_metrics(service: HighScaleService) -> dict[str, Any]:
     except Exception:
         pass
 
-    result = {
+    return {
         "request": {
             "earliest_log_at": request_earliest,
             "latest_log_at": request_latest,
@@ -262,6 +268,54 @@ def header_metrics(service: HighScaleService) -> dict[str, Any]:
         "latest_log_at": request_latest,
         "local_rows": request_total + rum_total,
     }
+
+
+def header_metrics(service: HighScaleService) -> dict[str, Any]:
+    """Return visible ClickHouse row counts and event-time extents for the header."""
+    cache_key = (service.service_id, client_cache_token(service.client))
+    use_cache = not hasattr(service.client, "responses")
+    if use_cache and (cached := _header_metrics_cache.get(cache_key)) is not None:
+        return copy.deepcopy(cached)
+
+    swr_active = _HEADER_METRICS_SWR_ENABLED and (not os.getenv("PYTEST_CURRENT_TEST") or _FORCE_SWR_IN_TESTS)
+    if use_cache and swr_active and (stale := _header_metrics_cache.get_stale(cache_key)) is not None:
+        with _header_metrics_lock:
+            already_refreshing = cache_key in _header_metrics_refreshing
+            if not already_refreshing:
+                _header_metrics_refreshing.add(cache_key)
+        if not already_refreshing:
+
+            def _refresh() -> None:
+                def _run() -> None:
+                    try:
+                        fresh = _compute_header_metrics(service, use_pool=True)
+                        _header_metrics_cache.set(cache_key, copy.deepcopy(fresh))
+                    except Exception:
+                        logger.debug(
+                            "Background header_metrics refresh failed for %s",
+                            service.service_id,
+                            exc_info=True,
+                        )
+                    finally:
+                        try:
+                            from backend.core.metadata import pg_pool
+
+                            pg_pool.release_thread_connection()
+                        except Exception:
+                            pass
+                        with _header_metrics_lock:
+                            _header_metrics_refreshing.discard(cache_key)
+
+                contextvars.Context().run(_run)
+
+            threading.Thread(
+                target=_refresh,
+                name=f"hs-header-metrics-{service.service_id}",
+                daemon=True,
+            ).start()
+        return copy.deepcopy(stale)
+
+    result = _compute_header_metrics(service, use_pool=use_cache)
     if use_cache:
         _header_metrics_cache.set(cache_key, copy.deepcopy(result))
     return result
