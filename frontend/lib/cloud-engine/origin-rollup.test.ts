@@ -531,4 +531,17 @@ describe("originFromRollup", () => {
     expect([...decoded.dims.keys()]).toEqual(["oip"]);
     expect([...decoded.series.keys()].sort()).toEqual(["origin", "overall"]);
   });
+
+  it("rolls up unsummarized tail raw files via ORIGIN_RESIDUAL to match full summaries", async () => {
+    const params = body({ sections: PAGE_SECTIONS, timeseries_metric: "ttfb", slow_urls_min_requests: 1 });
+    const full = await originFromRollup("/api/origin/aggregates", params, source(WINDOWS)) as OriginAggregatesResponse;
+    const partial = await originFromRollup("/api/origin/aggregates", params, source(WINDOWS.slice(0, 6))) as OriginAggregatesResponse;
+    expect(partial).not.toBeNull();
+    expect(partial.summary).toEqual(full.summary);
+    expect(partial.status_codes).toEqual(full.status_codes);
+    expect(partial.ip_health).toEqual(full.ip_health);
+    expect(partial.path_breakdown).toEqual(full.path_breakdown);
+    expect(partial.pop_latency).toEqual(full.pop_latency);
+    expect(partial.slow_urls).toEqual(full.slow_urls);
+  });
 });

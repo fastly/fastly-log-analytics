@@ -26,6 +26,7 @@ import {
   type QualityPart,
 } from "./network";
 import { defineSummarySpec, type SummarySpec } from "./dashboard/summary-projection";
+import { NETWORK_RESIDUAL } from "./network-residual";
 import { shieldingFromRollup } from "./origin-rollup";
 import { hasFilterValues, singleLowCardFilter, type FilteredRollupFilter } from "./rollup-sections";
 import { formatAsnDisplayLabel, formatCityCountryLabel, loadAsnNames } from "./asn-names";
@@ -853,7 +854,13 @@ export async function networkFromRollup(
     ? (filtered ? NETWORK_FILTERED_SUMMARY_SPEC : NETWORK_SUMMARY_SPEC)
     : spec;
   const [result] = await Promise.all([
-    queryRollup(source, { fromMs, toMs, signal, spec: effectiveSpec ?? undefined }),
+    queryRollup(source, {
+      fromMs,
+      toMs,
+      signal,
+      spec: effectiveSpec ?? undefined,
+      residual: filtered ? undefined : NETWORK_RESIDUAL,
+    }),
     loadAsnNames(),
   ]);
   if (!result) return null;

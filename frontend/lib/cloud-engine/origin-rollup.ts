@@ -24,6 +24,7 @@ import {
 } from "./origin";
 import { hasFilterValues, originRollupSections, singleLowCardFilter, type FilteredRollupFilter } from "./rollup-sections";
 import { defineSummarySpec, type SummarySpec } from "./dashboard/summary-projection";
+import { ORIGIN_RESIDUAL } from "./origin-residual";
 
 export type OriginRollupBody = {
   start_time?: string | number;
@@ -592,7 +593,13 @@ export async function originFromRollup(
         ? ORIGIN_MINUTE_SUMMARY_SPEC
         : ORIGIN_SUMMARY_SPEC)
     : spec;
-  const result = await queryRollup(source, { fromMs, toMs, signal, spec: effectiveSpec ?? undefined });
+  const result = await queryRollup(source, {
+    fromMs,
+    toMs,
+    signal,
+    spec: effectiveSpec ?? undefined,
+    residual: filtered ? undefined : ORIGIN_RESIDUAL,
+  });
   if (!result) return null;
   if (hasFilterValues(body.filters, body.custom_filters)) {
     const filter = singleLowCardFilter(body.filters, body.custom_filters, body);

@@ -484,14 +484,13 @@ describe("networkFromRollup", () => {
     expect(networkRollupEligible("/api/network-quality", { network_residual: true })).toBe(false);
   });
 
-  it("omits the open tail newer than the newest summary and says how far the data goes", async () => {
-    const served = await networkFromRollup("/api/network-health", health, source(WINDOWS.slice(0, 7))) as {
+  it("rolls up unsummarized tail raw files via NETWORK_RESIDUAL to match full summaries", async () => {
+    const served = await networkFromRollup("/api/network-health", health, source(WINDOWS.slice(0, 6))) as {
       summary: { total_requests: number }; rollup: { data_through: string };
     };
-    const covered = networkHealthFromRollup(await rollupOf(WINDOWS.slice(0, 7)), {})!;
-    expect(served.summary.total_requests).toBe(covered.summary.total_requests);
-    expect(served.summary.total_requests).toBeLessThan(networkHealthFromRollup(await rollupOf(WINDOWS), {})!.summary.total_requests);
-    expect(served.rollup.data_through).toBe(WINDOWS[6].end);
+    const full = networkHealthFromRollup(await rollupOf(WINDOWS), {})!;
+    expect(served.summary.total_requests).toBe(full.summary.total_requests);
+    expect(served.rollup.data_through).toBe(WINDOWS[7].end);
   });
 
   it("leaves filtered reads, raw-only sections and non-v3 windows to the raw scan", async () => {
