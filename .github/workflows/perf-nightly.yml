@@ -87,3 +87,87 @@ jobs:
           # 14 days is enough headroom to debug a regression flagged
           # on a Friday without paging anyone over the weekend.
           retention-days: 14
+
+  soak-and-recovery-gates:
+    name: Soak, recovery & disposable real-store gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: fla
+          POSTGRES_PASSWORD: fla_test_password
+          POSTGRES_DB: fla_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fla -d fla_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      clickhouse:
+        image: clickhouse/clickhouse-server:25.8.4.13
+        env:
+          CLICKHOUSE_DB: fla
+          CLICKHOUSE_USER: fla
+          CLICKHOUSE_PASSWORD: fla_local_dev
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+        ports:
+          - 8123:8123
+        options: >-
+          --health-cmd "clickhouse-client --user fla --password fla_local_dev --query 'SELECT 1'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      METADATA_DSN: postgresql://fla:fla_test_password@localhost:5432/fla_test
+      TEST_METADATA_DSN: postgresql://fla:fla_test_password@localhost:5432/fla_test
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install pinned Rust 1.96.0 toolchain
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: compute
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+          python-version: "3.13"
+
+      - name: Install Python deps
+        run: uv sync
+
+      - name: Offline Cloud soak (2-day 1s ticks & maintenance fairness)
+        run: make release-confidence-offline
+
+      - name: Nightly disposable High-Scale ingest lag, drain/recovery & query latency budgets
+        env:
+          RUN_DISPOSABLE_PERF_RECOVERY_GATE: "1"
+          DISPOSABLE_POSTGRES_DSN: postgresql://fla:fla_test_password@localhost:5432/fla_test
+          DISPOSABLE_CLICKHOUSE_HTTP_URL: http://fla:fla_local_dev@127.0.0.1:8123/
+        run: uv run pytest -n 0 tests/high_scale/test_p1_perf_recovery_gates.py -k disposable
+
+      - name: Nightly disposable P1 provisioning, access & custom-field journey
+        env:
+          RUN_DISPOSABLE_P1_JOURNEY: "1"
+          DISPOSABLE_POSTGRES_DSN: postgresql://fla:fla_test_password@localhost:5432/fla_test
+          DISPOSABLE_CLICKHOUSE_HTTP_URL: http://fla:fla_local_dev@127.0.0.1:8123/
+        run: uv run pytest -n 0 tests/high_scale/test_p1_disposable_journey.py

@@ -551,7 +551,7 @@ fn raw_delete_requeues_manifests_it_could_not_delete() {
 mod simulation {
     use super::*;
     use fastly_log_analytics::admin::logs::MAINT_STAGES;
-    use fastly_log_analytics::admin::schedule::MAINT_INTERVAL_S;
+    use fastly_log_analytics::admin::schedule::{COMPACT_INTERVAL_S, MAINT_INTERVAL_S};
     use fastly_log_analytics::ingest::retention::SWEEP_INTERVAL_S;
     use std::collections::VecDeque;
 
@@ -644,10 +644,13 @@ mod simulation {
             .sum()
     }
 
-    fn start(fake: &Fake) {
+    fn start(fake: &Fake, ngwaf_workspace: bool) {
         tick_runtime(fake);
         let mut svc = serde_json::to_value(service()).unwrap();
         svc["log_period"] = json!(PERIOD_S);
+        if ngwaf_workspace {
+            svc["ngwaf_workspace_id"] = json!("ws-sim");
+        }
         svc["compaction"] = json!({"mode": "size_target", "size_target_mb": 64});
         fake.kv.borrow_mut().insert(format!("svc:{SID}"), (1, svc));
         *fake.window.borrow_mut() = Some(WINDOW_S.to_string());
@@ -681,7 +684,11 @@ mod simulation {
     }
 
     fn simulate(fake: &Fake, seconds: i64) -> Sim {
-        start(fake);
+        simulate_with_ngwaf(fake, seconds, false)
+    }
+
+    fn simulate_with_ngwaf(fake: &Fake, seconds: i64, ngwaf_workspace: bool) -> Sim {
+        start(fake, ngwaf_workspace);
         // Start on a period boundary, as Fastly's log periods are aligned.
         fake.now
             .set(fake.now.get() / PERIOD_S as u64 * PERIOD_S as u64);
@@ -861,7 +868,7 @@ mod simulation {
     #[ignore = "soak: run with `make -C app soak`"]
     fn every_maintenance_stage_gets_a_turn_within_four_intervals_under_load() {
         let fake = Fake::new(BASE + 40 * DAY);
-        let sim = simulate(&fake, DAY);
+        let sim = simulate_with_ngwaf(&fake, DAY, true);
         report(&fake, &sim);
         for key in [RECONCILE_KEY, HISTORY_KEY] {
             let wait = sim.max_wait.get(key).copied().unwrap_or(i64::MAX);
@@ -896,9 +903,13 @@ mod simulation {
                 "ingest latency on day {n}: {} s",
                 day.max_latency_s
             );
-            // About one run per period plus maintenance every 120 s; every other tick is idle.
+            // Ingest each period, request compaction every 30 s, maintenance every 120 s (plus 2 s catch-up); >85% of ticks stay idle.
             assert!(
-                day.tick_runs <= (DAY / PERIOD_S + DAY / MAINT_INTERVAL_S as i64) as usize * 2,
+                day.tick_runs
+                    <= (DAY / PERIOD_S
+                        + DAY / COMPACT_INTERVAL_S as i64
+                        + DAY / MAINT_INTERVAL_S as i64) as usize
+                        * 2,
                 "{} tick runs on day {n}",
                 day.tick_runs
             );
@@ -918,6 +929,64 @@ mod simulation {
         assert!(fake.keys("raw/").is_empty());
         let mut expected = sim.expected;
         expected.sort();
+        // Verify catalog discovery serves exact deduplicated rows even while retired `window=`
+        // files still sit on S3 inside `DELETE_GRACE_S`.
+        let svc: fastly_log_analytics::admin::Service =
+            serde_json::from_value(fake.kv.borrow()[&format!("svc:{SID}")].1.clone()).unwrap();
+        let mut catalog_got = Vec::new();
+        let mut cursor: Option<String> = None;
+        let to_ts = fake.now.get() as i64 + 60;
+        loop {
+            let mut query = format!(
+                "dataset=request&from={}&to={}",
+                ingest::rfc3339(BASE),
+                ingest::rfc3339(to_ts)
+            );
+            if let Some(ref c) = cursor {
+                let encoded: String = url::form_urlencoded::byte_serialize(c.as_bytes()).collect();
+                query.push_str(&format!("&cursor={encoded}"));
+            }
+            fake.new_request();
+            let resp = ingest::api::files(&fake, &svc, &query, Instant::now()).unwrap();
+            let bucket = fake.bucket.borrow();
+            for item in resp["files"].as_array().unwrap() {
+                let key = item["key"].as_str().unwrap();
+                for batch in batches(&bucket[key]) {
+                    let col = batch
+                        .column_by_name("ip")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .unwrap();
+                    catalog_got.extend((0..col.len()).map(|i| col.value(i).to_owned()));
+                }
+            }
+            cursor = resp["next_cursor"].as_str().map(str::to_owned);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        catalog_got.sort();
+        assert_eq!(
+            catalog_got.len(),
+            expected.len(),
+            "catalog missing or duplicate rows"
+        );
+        assert!(catalog_got == expected, "catalog rows differ from input");
+        // Advance past `2 * MIN_AGE_S + DELETE_GRACE_S` so the final hour closes past `next_compaction_check`
+        // and compaction deletes all retired sources and `work_cleanup` entries from S3.
+        for _ in 0..(2 * ingest::compaction::MIN_AGE_S
+            + ingest::compaction::DELETE_GRACE_S
+            + 6 * COMPACT_INTERVAL_S)
+        {
+            fake.now.set(fake.now.get() + 1);
+            run_tick(&fake);
+            run_flush(&fake);
+        }
+        if let Some((_, compact_state)) = fake.kv.borrow().get(ingest::compaction::STATE_KEY) {
+            assert_eq!(compact_state["queue"], json!([]));
+            assert_eq!(compact_state["work_cleanup"], json!([]));
+        }
         let got = processed_ips(&fake);
         assert_eq!(got.len(), expected.len(), "missing or duplicate rows");
         assert!(got == expected, "the Parquet rows differ from the input");

@@ -428,25 +428,57 @@ impl FixtureAdapter {
                             }
                         }
                     } else {
-                        let prefix = url::form_urlencoded::parse(request.query.as_bytes())
-                            .find(|(k, _)| k == "prefix")
-                            .map(|(_, v)| v.into_owned())
-                            .unwrap_or_default();
-                        let contents = bucket
-                            .keys()
-                            .find(|k| k.starts_with(&prefix))
-                            .map(|k| {
-                                format!(
-                                    "<Contents><Key>{}</Key></Contents>",
-                                    quick_xml::escape::escape(k)
-                                )
-                            })
-                            .unwrap_or_default();
+                        let query_pairs: BTreeMap<String, String> =
+                            url::form_urlencoded::parse(request.query.as_bytes())
+                                .into_owned()
+                                .collect();
+                        let prefix = query_pairs.get("prefix").cloned().unwrap_or_default();
+                        let delim = query_pairs
+                            .get("delimiter")
+                            .cloned()
+                            .filter(|d| !d.is_empty());
+                        let start_after = query_pairs
+                            .get("start-after")
+                            .cloned()
+                            .filter(|s| !s.is_empty());
+                        let mut contents = String::new();
+                        let mut prefixes = BTreeSet::new();
+                        for (k, v) in bucket.iter() {
+                            if !k.starts_with(&prefix) {
+                                continue;
+                            }
+                            if let Some(ref after) = start_after {
+                                if k.as_str() <= after.as_str() {
+                                    continue;
+                                }
+                            }
+                            let rest = &k[prefix.len()..];
+                            if let Some(ref d) = delim {
+                                if let Some(idx) = rest.find(d.as_str()) {
+                                    prefixes.insert(format!("{prefix}{}", &rest[..idx + d.len()]));
+                                    continue;
+                                }
+                            }
+                            contents.push_str(&format!(
+                                "<Contents><Key>{}</Key><Size>{}</Size></Contents>",
+                                quick_xml::escape::escape(k),
+                                v.len()
+                            ));
+                        }
+                        let mut pxml = String::new();
+                        for p in prefixes {
+                            pxml.push_str(&format!(
+                                "<CommonPrefixes><Prefix>{}</Prefix></CommonPrefixes>",
+                                quick_xml::escape::escape(&p)
+                            ));
+                        }
                         FosResponse {
                             cdn_cache: None,
                             status: 200,
-                            body: format!("<ListBucketResult>{contents}</ListBucketResult>")
-                                .into_bytes(),
+                            body: format!(
+                                "<ListBucketResult><IsTruncated>false</IsTruncated>{contents}{pxml}</ListBucketResult>"
+                            )
+                            .into_bytes(),
                             retry_after: None,
                         }
                     }
@@ -481,6 +513,32 @@ impl FixtureAdapter {
                     cdn_cache: None,
                     status,
                     body: vec![],
+                    retry_after: None,
+                }
+            }
+            "POST" if request.query == "delete" => {
+                let xml = String::from_utf8_lossy(&request.body);
+                let mut out = String::from("<DeleteResult>");
+                if let Some(bucket) = state.buckets.get_mut(request.bucket) {
+                    for part in xml.split("<Key>").skip(1) {
+                        if let Some(k) = part.split("</Key>").next() {
+                            let unescaped = k
+                                .replace("&amp;", "&")
+                                .replace("&lt;", "<")
+                                .replace("&gt;", ">");
+                            bucket.remove(&unescaped);
+                            out.push_str(&format!(
+                                "<Deleted><Key>{}</Key></Deleted>",
+                                quick_xml::escape::escape(&unescaped)
+                            ));
+                        }
+                    }
+                }
+                out.push_str("</DeleteResult>");
+                FosResponse {
+                    cdn_cache: None,
+                    status: 200,
+                    body: out.into_bytes(),
                     retry_after: None,
                 }
             }
@@ -584,6 +642,14 @@ impl FixtureAdapter {
             .entry(bucket.into())
             .or_default()
             .insert(key.into(), body);
+    }
+    pub fn get_object_bytes(&self, bucket: &str, key: &str) -> Option<Vec<u8>> {
+        self.state
+            .lock()
+            .expect("fixture lock")
+            .buckets
+            .get(bucket)
+            .and_then(|b| b.get(key).cloned())
     }
     pub fn seed_fos_key(&self, access_key: &str, secret_key: &str, bucket: &str) {
         self.state.lock().expect("fixture lock").keys.push(json!({

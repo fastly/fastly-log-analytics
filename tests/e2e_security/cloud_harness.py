@@ -3222,6 +3222,51 @@ class CloudTestServer:
         assert r.status_code == 200, f"GET /api/admin/services/{sid} failed: {r.status_code} {r.text}"
         return str(r.json()["generation"])
 
+    def put_raw_log_object(
+        self,
+        bucket: str,
+        key: str,
+        raw_bytes: bytes,
+        *,
+        zstd_compress: bool = True,
+    ) -> None:
+        """Seed a raw object into the native test server's fixture FOS bucket."""
+        import base64
+
+        r = self.request(
+            "POST",
+            "/__test/fos-put",
+            json_body={
+                "bucket": bucket,
+                "key": key,
+                "body_b64": base64.b64encode(raw_bytes).decode("ascii"),
+                "zstd_compress": zstd_compress,
+            },
+        )
+        assert r.status_code == 200, f"POST /__test/fos-put failed: {r.status_code} {r.text}"
+
+    def set_clock(self, unix_seconds: int) -> None:
+        """Override the native test server's wall clock for deterministic ingest scheduling."""
+        r = self.request("POST", "/__test/clock", json_body={"now": int(unix_seconds)})
+        assert r.status_code == 200, f"POST /__test/clock failed: {r.status_code} {r.text}"
+
+    def run_ingest_cycle(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Trigger one native /_tick and /_flush cycle under front-key authentication."""
+        tick = self.request(
+            "GET",
+            "/_tick",
+            front_key=self.front_key,
+            extra_headers={"x-flp-tick": "1"},
+        )
+        assert tick.status_code == 200, f"GET /_tick failed: {tick.status_code} {tick.text}"
+        flush = self.request(
+            "GET",
+            "/_flush",
+            front_key=self.front_key,
+        )
+        assert flush.status_code == 200, f"GET /_flush failed: {flush.status_code} {flush.text}"
+        return tick.json(), flush.json()
+
 
 def build_front_vcl_wrapper(
     *,

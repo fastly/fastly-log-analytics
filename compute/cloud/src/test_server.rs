@@ -12,7 +12,10 @@ use serde_json::Value;
 use std::{
     collections::BTreeMap,
     io::Read,
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -22,6 +25,7 @@ struct NativeRuntime {
     admin: fastly_log_analytics::admin::fixture::FixtureAdapter,
     csp_reports: Mutex<Vec<Value>>,
     extension_requests: Mutex<Vec<String>>,
+    clock_override: AtomicU64,
 }
 
 impl NativeRuntime {
@@ -86,6 +90,7 @@ impl NativeRuntime {
             admin: fastly_log_analytics::admin::fixture::FixtureAdapter::new(),
             csp_reports: Mutex::new(Vec::new()),
             extension_requests: Mutex::new(Vec::new()),
+            clock_override: AtomicU64::new(0),
         })
     }
 }
@@ -117,9 +122,16 @@ impl Runtime for NativeRuntime {
         Ok(random)
     }
     fn now(&self) -> u64 {
+        let override_now = self.clock_override.load(Ordering::SeqCst);
+        if override_now != 0 {
+            return override_now;
+        }
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |time| time.as_secs())
+    }
+    fn on_log_shield(&self) -> bool {
+        true
     }
     fn checks(&self, _: bool) -> Result<Value, String> {
         Err("Native harness cannot verify a Fastly account; run live checks".into())
@@ -156,6 +168,49 @@ impl Runtime for NativeRuntime {
     ) -> Result<fastly_log_analytics::admin::FosResponse, String> {
         self.admin.fos(request)
     }
+    fn admin_fos_etag(
+        &self,
+        request: fastly_log_analytics::admin::FosRequest<'_>,
+    ) -> Result<(fastly_log_analytics::admin::FosResponse, Option<String>), String> {
+        use md5::{Digest, Md5};
+        let tag = format!("\"{}\"", hex::encode(Md5::digest(&request.body)));
+        self.admin_fos(request)
+            .map(|response| (response, Some(tag)))
+    }
+    fn worker_dispatch(
+        &self,
+        requests: &[(String, Value)],
+        _deadline: std::time::Duration,
+    ) -> Vec<Result<Value, String>> {
+        let worker_key = self
+            .secret("worker_secret")
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        requests
+            .iter()
+            .map(|(path, body)| {
+                let request = Request {
+                    method: "POST".into(),
+                    path: path.clone(),
+                    headers: [("x-flp-worker-key".to_owned(), worker_key.clone())].into(),
+                    body: body.to_string().into_bytes(),
+                };
+                let response = if path == fastly_log_analytics::admin::stage::PATH {
+                    fastly_log_analytics::admin::stage::handle_worker_stage(self, &request)
+                } else if path == fastly_log_analytics::ingest::worker::PATH {
+                    fastly_log_analytics::ingest::worker::handle_worker_ingest(self, &request)
+                } else {
+                    return Ok(serde_json::json!({ "path": path, "echo": body }));
+                };
+                if response.status == 200 {
+                    serde_json::from_slice(&response.body).map_err(|err| err.to_string())
+                } else {
+                    Err(format!("worker_http_{}", response.status))
+                }
+            })
+            .collect()
+    }
     fn admin_cdn_get(
         &self,
         service_id: &str,
@@ -170,6 +225,14 @@ impl Runtime for NativeRuntime {
             .ok_or("fixture service unavailable")?;
         let service: Service =
             serde_json::from_value(record.value).map_err(|_| "fixture service invalid")?;
+        if let Some(body) = self.admin.get_object_bytes(&service.fos_bucket, key) {
+            return Ok(fastly_log_analytics::admin::FosResponse {
+                cdn_cache: None,
+                status: 200,
+                body,
+                retry_after: None,
+            });
+        }
         let prefix = if service.fos_prefix.is_empty() {
             String::new()
         } else {
@@ -185,6 +248,35 @@ impl Runtime for NativeRuntime {
             } else {
                 Vec::new()
             },
+            retry_after: None,
+        })
+    }
+    fn admin_cdn_read(
+        &self,
+        service_id: &str,
+        key: &str,
+        cdn_key: &str,
+        max_bytes: usize,
+        timeout: std::time::Duration,
+        range: Option<(u64, u64)>,
+    ) -> Result<fastly_log_analytics::admin::FosResponse, String> {
+        let Some((start, end)) = range else {
+            return self.admin_cdn_get(service_id, key, cdn_key, max_bytes, timeout);
+        };
+        let record = self
+            .admin
+            .get(&format!("svc:{service_id}"))?
+            .ok_or("fixture service unavailable")?;
+        let service: Service =
+            serde_json::from_value(record.value).map_err(|_| "fixture service invalid")?;
+        let body = self
+            .admin
+            .get_object_bytes(&service.fos_bucket, key)
+            .and_then(|bytes| bytes.get(start as usize..=end as usize).map(<[u8]>::to_vec));
+        Ok(fastly_log_analytics::admin::FosResponse {
+            cdn_cache: None,
+            status: if body.is_some() { 206 } else { 404 },
+            body: body.unwrap_or_default(),
             retry_after: None,
         })
     }
@@ -270,6 +362,40 @@ fn handle_test_endpoint(
                 .unwrap_or_default();
             Some(Response::json(200, &serde_json::json!({ "paths": paths })))
         }
+        ("POST", "/__test/fos-put") => {
+            use base64::Engine;
+            let Ok(payload) = request.json::<Value>() else {
+                return Some(Response::new(400, "Invalid request").private());
+            };
+            let (Some(bucket), Some(key), Some(body_b64)) = (
+                payload["bucket"].as_str(),
+                payload["key"].as_str(),
+                payload["body_b64"].as_str(),
+            ) else {
+                return Some(Response::new(400, "Missing fos-put fields").private());
+            };
+            let Ok(mut body) = base64::engine::general_purpose::STANDARD.decode(body_b64) else {
+                return Some(Response::new(400, "Invalid base64").private());
+            };
+            if payload["zstd_compress"].as_bool() == Some(true) {
+                let Ok(encoded) = zstd::stream::encode_all(body.as_slice(), 1) else {
+                    return Some(Response::new(500, "Zstd compression failed").private());
+                };
+                body = encoded;
+            }
+            runtime.admin.seed_object_bytes(bucket, key, body);
+            Some(Response::json(200, &serde_json::json!({ "ok": true })))
+        }
+        ("POST", "/__test/clock") => {
+            let Ok(payload) = request.json::<Value>() else {
+                return Some(Response::new(400, "Invalid request").private());
+            };
+            let Some(now) = payload["now"].as_u64() else {
+                return Some(Response::new(400, "Missing now").private());
+            };
+            runtime.clock_override.store(now, Ordering::SeqCst);
+            Some(Response::json(200, &serde_json::json!({ "ok": true })))
+        }
         ("POST", "/__test/reset") => {
             if let Ok(mut reports) = runtime.csp_reports.lock() {
                 reports.clear();
@@ -277,6 +403,7 @@ fn handle_test_endpoint(
             if let Ok(mut paths) = runtime.extension_requests.lock() {
                 paths.clear();
             }
+            runtime.clock_override.store(0, Ordering::SeqCst);
             runtime.admin = fastly_log_analytics::admin::fixture::FixtureAdapter::new();
             *state = MemoryStore::default();
             Some(Response::json(200, &serde_json::json!({ "ok": true })))

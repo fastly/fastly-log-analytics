@@ -246,10 +246,12 @@ jobs:
         env:
           RUN_DISPOSABLE_POSTGRES_INTEGRATION: "1"
           RUN_HS_READERS_CLICKHOUSE_INTEGRATION: "1"
+          RUN_DISPOSABLE_P1_JOURNEY: "1"
         run: |
           uv run pytest -n 0 \
             tests/high_scale/test_postgres_control_integration.py \
             tests/high_scale/test_insights_rollup.py::test_real_clickhouse_receipt_predicates_fence_serving_and_legacy_hourly_rows
+          uv run pytest -n 0 "tests/high_scale/test_p1_disposable_journey.py::test_p1_disposable_real_store_journey[high_scale]"
 
       - name: Worker-crash diagnostics (memory and kernel log)
         # pytest-xdist reports a killed worker only as "node down: Not properly terminated";
@@ -589,6 +591,11 @@ jobs:
 
       - name: Offline 4-tier E2E security suite
         run: uv run pytest -n 0 --timeout=300 tests/e2e_security
+
+      - name: Disposable Cloud P1 provisioning, ingest & access journey
+        env:
+          RUN_DISPOSABLE_P1_JOURNEY: "1"
+        run: uv run pytest -n 0 --timeout=300 "tests/high_scale/test_p1_disposable_journey.py::test_p1_disposable_real_store_journey[cloud]"
 
       - name: Cloud Python infra/tools tests & secret value scan
         run: make cloud-infra-test

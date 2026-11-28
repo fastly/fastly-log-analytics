@@ -2466,6 +2466,53 @@ mod request_compaction {
     }
 
     #[test]
+    fn stale_retry_after_intervening_compaction_never_deletes_live_committed_compact() {
+        let fake = Fake::new(NOW);
+        let _sources = seed(&fake, 5);
+        fake.fail_compact_after_publish.set(true);
+        let mut failed = false;
+        for _ in 0..32 {
+            fake.new_request();
+            match compaction::request_compact(&store(&fake, &service()), "ck", TARGET, 0) {
+                Err(error) if error == "injected_post_publication_failure" => {
+                    failed = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(error) => panic!("unexpected failure: {error}"),
+            }
+        }
+        assert!(failed);
+        let query = format!("from={}&to={}", iso_url(HOUR), iso_url(HOUR + 3600));
+        let committed = catalog_keys(&fake, &query).1;
+        assert_eq!(committed.len(), 1);
+        let committed_key = committed.iter().next().unwrap().clone();
+
+        fake.fail_compact_after_publish.set(false);
+        let mut stale_state = fake.kv.borrow()[compaction::STATE_KEY].1.clone();
+        fake.kv.borrow_mut().remove(compaction::STATE_KEY);
+
+        window(&fake, HOUR + 3600, &["b1"]);
+        window(&fake, HOUR + 3660, &["b2"]);
+        fake.now.set((NOW + 7200) as u64);
+        assert_eq!(finish(&fake, TARGET).sources, 2);
+
+        stale_state["lease_until"] = json!(0);
+        fake.kv
+            .borrow_mut()
+            .insert(compaction::STATE_KEY.into(), (999, stale_state));
+        for step in 1..=4 {
+            fake.now.set((NOW + 7200 + step * 120) as u64);
+            run(&fake, TARGET);
+        }
+        assert!(
+            fake.bucket.borrow().contains_key(&committed_key),
+            "live committed compact was deleted: {committed_key}"
+        );
+        assert_eq!(catalog_keys(&fake, &query).1, committed);
+    }
+
+    #[test]
     fn aged_mergeable_sources_survive_catalog_page_and_execution_boundaries() {
         let fake = Fake::new(NOW);
         fake.vcpu_step.set(0);

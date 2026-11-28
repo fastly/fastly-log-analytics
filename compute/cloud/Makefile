@@ -39,9 +39,9 @@ test: trim-target
 
 soak:
 	@if command -v cargo-nextest > /dev/null || [ -x "$$HOME/.cargo/bin/cargo-nextest" ]; then \
-		PATH="$$HOME/.cargo/bin:$$PATH" cargo nextest run --manifest-path ../Cargo.toml -p fastly-logs-parquet-shell --locked --test ingest --run-ignored ignored-only -E 'test(/^simulation::(two_days_of_1s_ticks_at_52_files_per_period_convert_exactly_without_a_backlog|every_maintenance_stage_gets_a_turn_within_four_intervals_under_load)$$/)'; \
+		PATH="$$HOME/.cargo/bin:$$PATH" cargo nextest run --manifest-path ../Cargo.toml --release -p fastly-logs-parquet-shell --locked --test ingest --run-ignored ignored-only --no-tests=fail -E 'test(/(^|::)simulation::(two_days_of_1s_ticks_at_52_files_per_period_convert_exactly_without_a_backlog|every_maintenance_stage_gets_a_turn_within_four_intervals_under_load)$$/)'; \
 	else \
-		PATH="$$HOME/.cargo/bin:$$PATH" cargo test --manifest-path ../Cargo.toml -p fastly-logs-parquet-shell --locked --test ingest simulation:: -- --ignored --nocapture; \
+		PATH="$$HOME/.cargo/bin:$$PATH" cargo test --manifest-path ../Cargo.toml --release -p fastly-logs-parquet-shell --locked --test ingest simulation:: -- --ignored --nocapture; \
 	fi
 
 lint:

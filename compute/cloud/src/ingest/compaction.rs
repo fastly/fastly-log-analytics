@@ -699,6 +699,24 @@ pub fn compact_pass<R: Runtime>(
                         run.state.work_cleanup.push(copying.footer);
                     }
                 }
+                // Fail closed: only queue uncommitted `pending` compacts when proven absent from the active catalog.
+                if run.remaining() > run.tail + 1 {
+                    if let Ok(Some(current)) = runtime.admin_get(WATERMARK_KEY) {
+                        for queued in &pending {
+                            if matches!(
+                                super::catalog::is_file_published(
+                                    store,
+                                    &current.value,
+                                    &queued.compact,
+                                    run.tail,
+                                ),
+                                Ok(false)
+                            ) {
+                                run.state.work_cleanup.push(queued.compact.clone());
+                            }
+                        }
+                    }
+                }
                 run.state.catalog_objects.clear();
                 run.state.catalog_carry.clear();
                 run.state.catalog_cursor = None;

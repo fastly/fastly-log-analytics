@@ -1007,6 +1007,53 @@ pub fn prepare_reserving<R: Runtime>(
     Ok(value)
 }
 
+/// Whether `key` appears in any committed block of its hour in `watermark`'s active catalog.
+pub(super) fn is_file_published<R: Runtime>(
+    store: &Store<'_, R>,
+    watermark: &Value,
+    key: &str,
+    reserve: u32,
+) -> Result<bool, String> {
+    let head = head(watermark)?;
+    if head.version != VERSION {
+        return Ok(false);
+    }
+    let hour = file_hour(key).ok_or("catalog_file_partition_invalid")?;
+    let Some(day_key) = head.days.get(&day_start(hour)) else {
+        return Ok(false);
+    };
+    if store.runtime.admin_remaining_calls() <= reserve + 1 || !admitted(store) {
+        return Err("catalog_prepare_pending".into());
+    }
+    let day = read_day(store, day_key)?;
+    let mut current = day.hours.get(&hour).cloned();
+    let mut visited = BTreeSet::new();
+    while let Some(reference) = current {
+        if !visited.insert(reference.key.clone()) || visited.len() > MAX_PROOF_BLOCKS {
+            return Err("catalog_parent_invalid".into());
+        }
+        if store.runtime.admin_remaining_calls() <= reserve + 1 || !admitted(store) {
+            return Err("catalog_prepare_pending".into());
+        }
+        let block: Block = read(store, &reference.key)?;
+        if block.version != VERSION
+            || block.service_id != store.service.service_id
+            || block.hour != hour
+            || block.generation != reference.generation
+            || reference.generation > head.generation
+        {
+            return Err("catalog_manifest_invalid".into());
+        }
+        if block.files.iter().any(|file| file.key == key)
+            || block.replaces.iter().any(|replaced| replaced == key)
+        {
+            return Ok(true);
+        }
+        current = block.previous;
+    }
+    Ok(false)
+}
+
 pub fn admitted<R: Runtime>(store: &Store<'_, R>) -> bool {
     store.within_wall()
         && store.vcpu_ms() < VCPU_STOP_MS
