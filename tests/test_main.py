@@ -1072,6 +1072,37 @@ def test_legacy_flat_extent_is_not_a_filename_fallback(snapshot_state, flat_late
 def _bind_high_scale_service(monkeypatch, *, include_rum: bool) -> None:
     class Client:
         def execute(self, sql, params=None):
+            if "hs_dashboard:header_metrics:all" in sql:
+                rum_vitals = (
+                    {
+                        "domain": "rum_vitals",
+                        "total_rows": 8,
+                        "earliest_log_at": datetime(2026, 9, 15, 18, 0, tzinfo=UTC),
+                        "latest_log_at": datetime(2026, 9, 15, 19, 1, tzinfo=UTC),
+                    }
+                    if include_rum
+                    else {"domain": "rum_vitals", "total_rows": 0, "earliest_log_at": None, "latest_log_at": None}
+                )
+                rum_errors = (
+                    {
+                        "domain": "rum_errors",
+                        "total_rows": 2,
+                        "earliest_log_at": datetime(2026, 9, 15, 18, 0, tzinfo=UTC),
+                        "latest_log_at": datetime(2026, 9, 15, 19, 2, tzinfo=UTC),
+                    }
+                    if include_rum
+                    else {"domain": "rum_errors", "total_rows": 0, "earliest_log_at": None, "latest_log_at": None}
+                )
+                return [
+                    {
+                        "domain": "request",
+                        "total_rows": 12,
+                        "earliest_log_at": datetime(2026, 9, 15, 18, 0, tzinfo=UTC),
+                        "latest_log_at": datetime(2026, 9, 15, 19, 0, tzinfo=UTC),
+                    },
+                    rum_vitals,
+                    rum_errors,
+                ]
             domain = (params or {}).get("domain")
             if domain == "request":
                 return [

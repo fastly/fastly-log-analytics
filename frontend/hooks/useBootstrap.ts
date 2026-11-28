@@ -132,6 +132,14 @@ export function useMounted(): boolean {
   )
 }
 
+function subscribeQueryCache(
+  queryClient: { getQueryCache?: () => { subscribe: (listener: () => void) => () => void } } | null | undefined,
+  onChange: () => void,
+): () => void {
+  const cache = typeof queryClient?.getQueryCache === 'function' ? queryClient.getQueryCache() : null
+  return cache ? cache.subscribe(onChange) : () => {}
+}
+
 /**
  * Subscribe to a derived slice of the React Query `['bootstrap']` cache entry
  * via `useSyncExternalStore` without triggering network fetches.
@@ -142,9 +150,9 @@ export function useBootstrapCacheSelector<T>(
 ): T {
   const queryClient = useContext(QueryClientContext)
   return useSyncExternalStore(
-    (onChange) => (queryClient ? queryClient.getQueryCache().subscribe(onChange) : () => {}),
+    (onChange) => subscribeQueryCache(queryClient, onChange),
     () => {
-      const data = queryClient?.getQueryData<Record<string, unknown>>(queryKeys.bootstrap())
+      const data = queryClient?.getQueryData?.<Record<string, unknown>>(queryKeys.bootstrap())
       applyBootstrapRuntimeMode(data)
       return selector(data)
     },
@@ -213,14 +221,14 @@ export function useIsDataReady(): boolean {
 
 export function useBootstrapResolved(): boolean {
   const queryClient = useQueryClient()
-  return queryClient.getQueryData(queryKeys.bootstrap()) !== undefined
+  return queryClient?.getQueryData?.(queryKeys.bootstrap()) !== undefined
 }
 
 export function useBootstrapPending(): boolean {
   const queryClient = useQueryClient()
   return useSyncExternalStore(
-    (onChange) => queryClient.getQueryCache().subscribe(onChange),
-    () => queryClient.getQueryState(queryKeys.bootstrap())?.status === 'pending',
+    (onChange) => subscribeQueryCache(queryClient, onChange),
+    () => queryClient?.getQueryState?.(queryKeys.bootstrap())?.status === 'pending',
     () => false,
   )
 }
@@ -228,13 +236,13 @@ export function useBootstrapPending(): boolean {
 export function useBootstrapSettled(): boolean {
   const queryClient = useQueryClient()
   return useSyncExternalStore(
-    (onChange) => queryClient.getQueryCache().subscribe(onChange),
+    (onChange) => subscribeQueryCache(queryClient, onChange),
     () => {
-      const data = queryClient.getQueryData<Record<string, unknown>>(queryKeys.bootstrap())
+      const data = queryClient?.getQueryData?.<Record<string, unknown>>(queryKeys.bootstrap())
       applyBootstrapRuntimeMode(data)
       return data !== undefined
     },
-    () => queryClient.getQueryData(queryKeys.bootstrap()) !== undefined,
+    () => queryClient?.getQueryData?.(queryKeys.bootstrap()) !== undefined,
   )
 }
 
@@ -384,8 +392,9 @@ function syncBootstrapServiceStore(data: {
   active_service_id?: string | null
 } | null | undefined): void {
   if (!data) return
-  const services = (data.services ?? []).map(toService)
   const store = useServiceStore.getState()
+  if (store.isInitialized) return
+  const services = (data.services ?? []).map(toService).filter((s) => Boolean(s.id))
   store.setServices(services)
   store.setInitialized(true)
 
