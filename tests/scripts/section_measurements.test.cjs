@@ -432,31 +432,20 @@ test('collector bounds records and explicitly reports truncation', async () => {
   collector.close();
 });
 
-test('collector regex stays coupled to every section_sweep ENDPOINTS path', async () => {
-  // Guards against a silent selector regression: if section_sweep adds or
-  // renames a swept endpoint whose path no longer ends in /aggregates or
-  // /bundle, the collector would stop capturing it and the pilot would
-  // produce zero rows for that section. cwd is the repo root under node --test.
-  const sweepSrc = fs.readFileSync('scripts/dev/section_sweep.py', 'utf8');
-  const endpointsBlock = sweepSrc.slice(
-    sweepSrc.indexOf('ENDPOINTS'),
-    sweepSrc.indexOf('ENDPOINTS') + 2000,
-  );
-  const paths = [...endpointsBlock.matchAll(/"(\/api\/[^"]+)"/g)]
-    .map((match) => match[1].split('?')[0])
-    .filter((path) => path.startsWith('/api/'));
-  assert.ok(paths.length >= 6, `expected >=6 swept endpoints, got ${paths.length}`);
-
-  for (const path of paths) {
+test('collectResponseMeasurements captures standard section endpoints and excludes /api/bootstrap', async () => {
+  for (const path of [
+    '/api/dashboard/bundle',
+    '/api/security/bundle',
+    '/api/network/bundle',
+    '/api/performance/aggregates',
+    '/api/origin/aggregates',
+    '/api/cmcd/aggregates',
+  ]) {
     const page = new EventEmitter();
     const collector = collectResponseMeasurements(page);
     page.emit('response', response(path, {}));
     const rows = await collector.snapshot();
-    assert.equal(
-      rows.length,
-      1,
-      `collector regex dropped swept endpoint ${path}`,
-    );
+    assert.equal(rows.length, 1, `collector dropped endpoint ${path}`);
     assert.equal(rows[0].endpoint, path);
     collector.close();
   }

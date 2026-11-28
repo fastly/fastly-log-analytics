@@ -39,10 +39,6 @@ from env vars or config, never hard-coded infra.
 
 | Script | Purpose |
 |---|---|
-| `dev/sync-from-remote.sh` | Pull prod data/cache/configs into local dev (scrubs configs). Used by `snapshot_prod_to_dev.sh` below. |
-| `dev/snapshot_prod_to_dev.sh` | Snapshot prod, then sync into dev (rollback runbook). |
-| `dev/audit_environments.py` | Read-only environment parity and configuration audit. |
-| `dev/measure_e2e_freshness.py` | End-to-end ingestion freshness probe across environments. |
 | `dev/verify_observability.py` | Diagnostic CLI verifying OTel traces, Prometheus metrics, and structured log delivery. |
 | `load_test/generate_synthetic_traffic.py` | Unified multi-tier synthetic traffic and log generator for FOS and ClickHouse. |
 

@@ -544,14 +544,6 @@ baseline:
 # e2e.yml), so verify is just an alias kept for muscle memory / older docs.
 verify: ci
 
-# Multi-environment pipeline, resource, and cron audit.
-# Runs scripts/dev/audit_environments.py across all 4 environments (standard & high-scale).
-audit:
-	python3 scripts/dev/audit_environments.py
-
-audit-watch:
-	python3 scripts/dev/audit_environments.py --watch --duration 5 --interval 5
-
 # CI gate ratchet helper. After a phase lifts coverage in a touched
 # module, bump the gate in .github/workflows/ci.yml's --cov-fail-under.
 # This target prints the current values + suggests the next floor
