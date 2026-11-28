@@ -464,7 +464,9 @@ export function notifyDashboardCatalogChange(
   event?: CatalogCommitEvent,
   serviceId?: string | null,
 ): void {
-  invalidateManifestRecent();
+  if (event?.type !== "ready") {
+    invalidateManifestRecent();
+  }
   rpcClient?.catalogChanged(event, serviceId);
 }
 

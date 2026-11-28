@@ -1689,6 +1689,17 @@ class FakeClient:
             return [{"v": "/synthetic", "c": 12}]
         if "count() AS c FROM request_facts" in sql:
             return [{"c": 12}]
+        if "hs_dashboard:header_metrics:all" in sql:
+            rows_map = {"request": (12, 0), "rum_vitals": (8, 1), "rum_errors": (2, 2)}
+            return [
+                {
+                    "domain": domain,
+                    "total_rows": total,
+                    "earliest_log_at": datetime(2026, 9, 15, 18, min_off, tzinfo=UTC),
+                    "latest_log_at": datetime(2026, 9, 15, 19, min_off, tzinfo=UTC),
+                }
+                for domain, (total, min_off) in rows_map.items()
+            ]
         if "max(event_timestamp)" in sql:
             domain = (params or {}).get("domain")
             rows_map = {"request": (12, 0), "rum_vitals": (8, 1), "rum_errors": (2, 2)}
@@ -1802,10 +1813,12 @@ def test_high_scale_header_metrics_and_clickhouse_failure_propagation():
         def execute(self, sql, params=None):
             return [
                 {
-                    "total_rows": 5,
+                    "domain": domain,
+                    "total_rows": total,
                     "earliest_log_at": "2026-09-15 18:00:00.000",
                     "latest_log_at": "2026-09-15 19:00:00.000",
                 }
+                for domain, total in (("request", 5), ("rum_vitals", 0), ("rum_errors", 1))
             ]
 
     str_metrics = header_metrics(
@@ -3507,7 +3520,13 @@ def test_watermark_and_header_metrics_ttl_caches_reuse_results() -> None:
             if "last_visible_event_id" in sql:
                 return [{"last_visible_event_id": "evt-1"}]
             return [
-                {"total_rows": 100, "earliest_log_at": "2026-01-01T00:00:00Z", "latest_log_at": "2026-01-02T00:00:00Z"}
+                {
+                    "domain": domain,
+                    "total_rows": 100,
+                    "earliest_log_at": "2026-01-01T00:00:00Z",
+                    "latest_log_at": "2026-01-02T00:00:00Z",
+                }
+                for domain in ("request", "rum_vitals", "rum_errors")
             ]
 
     client = _CountingClient()
@@ -3521,7 +3540,8 @@ def test_watermark_and_header_metrics_ttl_caches_reuse_results() -> None:
     hm1 = header_metrics(svc)  # type: ignore[arg-type]
     hm2 = header_metrics(svc)  # type: ignore[arg-type]
     assert hm1 == hm2
-    assert len(calls) == 3
+    assert len(calls) == 1
+    assert "UNION ALL" in calls[0]
 
 
 @pytest.mark.no_postgres
@@ -3540,20 +3560,23 @@ def test_header_metrics_default_ttl_and_swr_avoids_foreground_queries(monkeypatc
         def execute(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
             calls["count"] += 1
             get_queries().append({"sql": sql, "time_ms": 1.0, "engine": "ClickHouse"})
-            if calls["count"] > 3:
+            if calls["count"] > 1:
                 refresh_done.set()
+            total = 100 if calls["count"] <= 1 else 250
             return [
                 {
-                    "total_rows": 100 if calls["count"] <= 3 else 250,
+                    "domain": domain,
+                    "total_rows": total,
                     "earliest_log_at": "2026-01-01T00:00:00Z",
                     "latest_log_at": "2026-01-02T00:00:00Z",
                 }
+                for domain in ("request", "rum_vitals", "rum_errors")
             ]
 
     svc = SimpleNamespace(service_id="svc-swr", client=_SwrClient())
     hm_cold = header_metrics(svc)  # type: ignore[arg-type]
     assert hm_cold["request"]["total_rows"] == 100
-    assert calls["count"] == 3
+    assert calls["count"] == 1
 
     # Expire only the primary fresh TTL cache while leaving stale cache intact
     monkeypatch.setattr(hs_dashboard, "_FORCE_SWR_IN_TESTS", True)

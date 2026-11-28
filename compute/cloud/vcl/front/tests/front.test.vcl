@@ -1173,3 +1173,22 @@ sub idempotent_read_api_error_restarts_once_on_5xx_excluding_620 {
   assert.equal(obj.status, 503);
   assert.not_restart();
 }
+
+
+// @scope: fetch
+sub static_asset_non_200_responses_are_not_cached {
+  set req.method = "GET";
+  set req.url = "/_next/static/chunks/main.js";
+  set beresp.status = 404;
+  set beresp.http.Cache-Control = "public, max-age=60";
+  testing.call_subroutine("vcl_fetch");
+  assert.false(beresp.cacheable);
+  assert.state(pass);
+
+  set req.url = "/duckdb/1.33.1/duckdb-eh.wasm";
+  set beresp.status = 404;
+  set beresp.http.Cache-Control = "public, max-age=60";
+  testing.call_subroutine("vcl_fetch");
+  assert.false(beresp.cacheable);
+  assert.state(pass);
+}

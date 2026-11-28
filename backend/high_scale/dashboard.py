@@ -115,22 +115,20 @@ def _watermark_extent(value: datetime | None) -> str | None:
     return ensure_utc(value).isoformat() if isinstance(value, datetime) else None
 
 
-def _query_source_extents(
+def _source_extent_where(
     client: Any,
     source_id: str,
-    table_name: str,
-    *,
     domain: str,
-    count_expr: str = "count()",
-    ts_col: str = "event_timestamp",
-) -> tuple[int, str | None, str | None]:
-    params = {"service_id": source_id, "domain": domain}
+    *,
+    domain_param: str = "domain",
+) -> tuple[str, dict[str, Any]]:
+    params: dict[str, Any] = {"service_id": source_id, domain_param: domain}
     where_sql = (
         "service_id={service_id:String} "
         "AND publication_state = 'visible' "
         "AND batch_id IN ("
         "SELECT batch_id FROM high_scale_batch_publications FINAL "
-        "WHERE service_id={service_id:String} AND domain={domain:String} "
+        f"WHERE service_id={{service_id:String}} AND domain={{{domain_param}:String}} "
         "AND publication_state = 'visible'"
         ")"
     )
@@ -139,13 +137,12 @@ def _query_source_extents(
     is_real_ch = hasattr(client, "_http") and "MockTransport" not in type(client._http._transport).__name__
     if is_real_ch and "batch_id NOT IN" in where_sql:
         where_sql = "service_id={service_id:String}"
-    rows = client.execute(
-        f"SELECT {count_expr} AS total_rows, min({ts_col}) AS earliest_log_at, max({ts_col}) AS latest_log_at "
-        f"FROM {table_name} "
-        f"WHERE {where_sql}",
-        params,
-    )
-    row = rows[0] if rows else {}
+    return where_sql, params
+
+
+def _parse_extent_row(row: Mapping[str, Any] | None) -> tuple[int, str | None, str | None]:
+    if not row:
+        return 0, None, None
     total_rows = int(row.get("total_rows") or 0)
     if total_rows == 0:
         return 0, None, None
@@ -156,28 +153,52 @@ def _query_source_extents(
     )
 
 
+def _query_source_extents(
+    client: Any,
+    source_id: str,
+    table_name: str,
+    *,
+    domain: str,
+    count_expr: str = "count()",
+    ts_col: str = "event_timestamp",
+) -> tuple[int, str | None, str | None]:
+    where_sql, params = _source_extent_where(client, source_id, domain)
+    rows = client.execute(
+        f"SELECT {count_expr} AS total_rows, min({ts_col}) AS earliest_log_at, max({ts_col}) AS latest_log_at "
+        f"FROM {table_name} "
+        f"WHERE {where_sql}",
+        params,
+    )
+    return _parse_extent_row(rows[0] if rows else None)
+
+
+def _query_all_source_extents(
+    client: Any,
+    source_id: str,
+) -> dict[str, tuple[int, str | None, str | None]]:
+    selects: list[str] = []
+    params: dict[str, Any] = {}
+    for idx, (domain, table_name) in enumerate(_HEADER_TABLES.items()):
+        where_sql, sub_params = _source_extent_where(client, source_id, domain, domain_param=f"domain_{idx}")
+        params.update(sub_params)
+        selects.append(
+            f"SELECT '{domain}' AS domain, count() AS total_rows, "
+            "min(event_timestamp) AS earliest_log_at, max(event_timestamp) AS latest_log_at "
+            f"FROM {table_name} WHERE {where_sql}"
+        )
+    rows = client.execute("/* hs_dashboard:header_metrics:all */ " + " UNION ALL ".join(selects), params)
+    by_domain = {str(row.get("domain")): row for row in rows if isinstance(row, Mapping) and row.get("domain")}
+    return {domain: _parse_extent_row(by_domain.get(domain)) for domain in _HEADER_TABLES}
+
+
 def _compute_header_metrics(service: HighScaleService, *, use_pool: bool) -> dict[str, Any]:
     totals: dict[str, int] = {}
     earliest: dict[str, str | None] = {}
     latest: dict[str, str | None] = {}
     if use_pool:
-        from backend.utils.telemetry.metrics import get_queries
-
-        get_queries()
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(_HEADER_TABLES)) as pool:
-            futs = {
-                domain: pool.submit(
-                    contextvars.copy_context().run,
-                    _query_source_extents,
-                    service.client,
-                    service.service_id,
-                    table,
-                    domain=domain,
-                )
-                for domain, table in _HEADER_TABLES.items()
-            }
-            for domain in _HEADER_TABLES:
-                totals[domain], earliest[domain], latest[domain] = futs[domain].result()
+        extents = _query_all_source_extents(service.client, service.service_id)
+        for domain in _HEADER_TABLES:
+            totals[domain], earliest[domain], latest[domain] = extents[domain]
     else:
         for domain, table in _HEADER_TABLES.items():
             totals[domain], earliest[domain], latest[domain] = _query_source_extents(

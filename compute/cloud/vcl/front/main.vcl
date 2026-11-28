@@ -545,6 +545,10 @@ sub vcl_fetch {
     set beresp.http.Surrogate-Key = "flp-static";
     return(deliver);
   }
+  if (req.url.path ~ "^/_next/static/" || req.url.path ~ "^/(duckdb|geo)/" || req.url.path ~ "^/maplibre-gl-") {
+    set beresp.cacheable = false;
+    return(pass);
+  }
   if (beresp.http.Set-Cookie) {
     set beresp.cacheable = false;
     return(pass);
