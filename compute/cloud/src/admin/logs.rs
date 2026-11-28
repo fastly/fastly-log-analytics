@@ -1259,7 +1259,9 @@ fn compact_stage<R: Runtime>(
     let span = VcpuSpan::start(runtime);
     let began = Instant::now();
     let before = runtime.admin_remaining_calls();
-    match compact::log_compact(store, &cdn_key, settings, TAIL + 1) {
+    // `TAIL + 2` leaves `TAIL + 1` (4) calls after `log_compact`'s trailing state CAS, keeping
+    // `backend_requests_used <= 28` out of 32.
+    match compact::log_compact(store, &cdn_key, settings, TAIL + 2) {
         Ok(report) => {
             row.listed = report.sources;
             row.files = u64::from(report.chunks);

@@ -768,9 +768,7 @@ pub fn log_compact<R: Runtime>(
     }
     let runtime = store.runtime;
     let started_with = runtime.admin_remaining_calls();
-    // Keep 1 extra call for the trailing `admin_cas(STATE_KEY)` so `log_compact` never dips into
-    // the caller's `reserve` (e.g. `TAIL + 1 = 4` -> `<= 28` backend calls out of 32).
-    let room = |need: u32| runtime.admin_remaining_calls() >= reserve + 1 + need;
+    let room = |need: u32| runtime.admin_remaining_calls() >= reserve + need;
     // Measured for the whole execution: a maintenance step may follow a Delete Data step.
     let stop = || {
         if runtime.admin_elapsed(store.started) >= WALL_STOP {
@@ -1405,7 +1403,7 @@ mod tests {
                 started: Instant::now(),
                 vcpu_start: 0,
             };
-            let report = log_compact(&store, "ck", &OperationalLogSettings::default(), 4).unwrap();
+            let report = log_compact(&store, "ck", &OperationalLogSettings::default(), 5).unwrap();
             assert!(
                 report.backend_calls <= 28,
                 "expected <= 28 backend calls, got {}",
