@@ -174,3 +174,43 @@ def test_cloud_export_prunes_only_a_snapshot_and_cleans_it_up(
     assert all(not snapshot.exists() for snapshot in snapshots)
     assert (frontend / "app/api/route.ts").exists()
     assert page.read_text() == "export const dynamic = 'force-dynamic'"
+
+
+def test_ci_workflow_curl_downloads_verify_sha256_checksums() -> None:
+    workflows_dir = ROOT / ".github/workflows"
+    dockerfile = (ROOT / "backend/Dockerfile").read_text()
+    dockerfile_falco = re.search(r"ARG FALCO_VERSION=([^\s]+)", dockerfile)
+    assert dockerfile_falco is not None
+    expected_falco_version = dockerfile_falco.group(1)
+
+    checked_steps = 0
+    falco_steps: list[str] = []
+    for wf_path in sorted(workflows_dir.glob("*.yml")):
+        workflow = yaml.safe_load(wf_path.read_text())
+        for job_name, job in (workflow.get("jobs") or {}).items():
+            for step in job.get("steps") or []:
+                run = step.get("run") or ""
+                if "curl " not in run or "/releases/download/" not in run:
+                    continue
+                checked_steps += 1
+                label = f"{wf_path.name}:{job_name}:{step.get('name', '<unnamed>')}"
+                code = "\n".join(line for line in run.splitlines() if not line.lstrip().startswith("#"))
+                assert not re.search(r"curl\b[^\n]*(\\\n[^\n]*)*\|\s*(?:sudo\s+)?(?:tar|sh|bash)\b", code), (
+                    f"{label} pipes curl directly into tar/sh without checksum verification"
+                )
+                sha_pos = code.find("sha256sum -c")
+                assert sha_pos != -1, f"{label} missing sha256sum -c verification"
+                install_matches = list(re.finditer(r"^\s*(?:sudo\s+)?(?:tar|unzip|install)\s", code, re.MULTILINE))
+                assert install_matches, f"{label} missing install/extract command"
+                assert sha_pos < install_matches[0].start(), f"{label} verifies sha256sum after extraction/install"
+                digests = re.findall(r"\b[0-9a-f]{64}\b", code)
+                assert len(digests) >= 2, f"{label} must pin both amd64 and arm64 64-hex SHA-256 digests"
+                assert "x86_64" in code and "aarch64" in code, f"{label} must handle x86_64 and aarch64"
+                if step.get("name") == "Install falco":
+                    falco_steps.append(code)
+
+    assert checked_steps == 5
+    assert len(falco_steps) == 2
+    for run in falco_steps:
+        assert f"FALCO_VERSION={expected_falco_version}" in run
+    assert falco_steps[0] == falco_steps[1]

@@ -104,17 +104,25 @@ jobs:
           # Resolve the release arch from the runner so this works on both
           # x86_64 and arm64 runners (e.g. ubuntu-22.04 vs ubuntu-22.04-arm).
           case "$(uname -m)" in
-            x86_64)  ARCH=amd64 ;;
-            aarch64) ARCH=arm64 ;;
+            x86_64)
+              ARCH=amd64
+              FALCO_SHA256=9888d04cd63a6b1058ecf228997f7ee6a18480394bfa9e5e00c8d8f46d03d19f
+              ;;
+            aarch64)
+              ARCH=arm64
+              FALCO_SHA256=b559fb0772fc280337b03c7b9d9221a0bd89c274c7d917f4c0832e1578d05dfa
+              ;;
             *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;
           esac
           # Extract the whole archive (no member arg) — it contains only the
           # binary, stored as "./falco". GNU tar (the runner's tar) won't match
           # a bare "falco" against the "./"-prefixed name, so naming the member
-          # fails with "falco: Not found in archive". This mirrors how
-          # backend/Dockerfile installs falco, keeping CI and prod identical.
-          sudo curl -sSfL "https://github.com/ysugimoto/falco/releases/download/v${FALCO_VERSION}/falco-linux-${ARCH}.tar.gz" \
-            | sudo tar -xz -C /usr/local/bin
+          # fails with "falco: Not found in archive".
+          curl -sSfL "https://github.com/ysugimoto/falco/releases/download/v${FALCO_VERSION}/falco-linux-${ARCH}.tar.gz" \
+            -o /tmp/falco.tar.gz
+          echo "${FALCO_SHA256}  /tmp/falco.tar.gz" | sha256sum -c -
+          sudo tar -xz -f /tmp/falco.tar.gz -C /usr/local/bin
+          rm -f /tmp/falco.tar.gz
           sudo chmod +x /usr/local/bin/falco
           falco --version
 
@@ -126,12 +134,21 @@ jobs:
           GITLEAKS_VERSION=8.30.1
           # gitleaks names x86_64 assets "x64" (not "amd64"); arm64 matches.
           case "$(uname -m)" in
-            x86_64)  ARCH=x64 ;;
-            aarch64) ARCH=arm64 ;;
+            x86_64)
+              ARCH=x64
+              GITLEAKS_SHA256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+              ;;
+            aarch64)
+              ARCH=arm64
+              GITLEAKS_SHA256=e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080
+              ;;
             *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;
           esac
-          sudo curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${ARCH}.tar.gz" \
-            | sudo tar -xz -C /usr/local/bin gitleaks
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${ARCH}.tar.gz" \
+            -o /tmp/gitleaks.tar.gz
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
+          sudo tar -xz -f /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
+          rm -f /tmp/gitleaks.tar.gz
           sudo chmod +x /usr/local/bin/gitleaks
           gitleaks version
 
@@ -150,13 +167,21 @@ jobs:
         run: |
           OSV_VERSION=2.2.4
           case "$(uname -m)" in
-            x86_64)  ARCH=amd64 ;;
-            aarch64) ARCH=arm64 ;;
+            x86_64)
+              ARCH=amd64
+              OSV_SHA256=7702cd1e5d9f5059dd9570f4ad967f27d3c5f5391b371ec937b384c238177f55
+              ;;
+            aarch64)
+              ARCH=arm64
+              OSV_SHA256=94d1c520b30a7e28b0189b2a1dd24c7b08f41887186e8ae3f811067ec9ed7043
+              ;;
             *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;
           esac
-          sudo curl -sSfL "https://github.com/google/osv-scanner/releases/download/v${OSV_VERSION}/osv-scanner_linux_${ARCH}" \
-            -o /usr/local/bin/osv-scanner
-          sudo chmod +x /usr/local/bin/osv-scanner
+          curl -sSfL "https://github.com/google/osv-scanner/releases/download/v${OSV_VERSION}/osv-scanner_linux_${ARCH}" \
+            -o /tmp/osv-scanner
+          echo "${OSV_SHA256}  /tmp/osv-scanner" | sha256sum -c -
+          sudo install -m 0755 /tmp/osv-scanner /usr/local/bin/osv-scanner
+          rm -f /tmp/osv-scanner
           osv-scanner --version
 
       - name: Dependency vulnerability scan (osv-scanner, CRITICAL gate)
@@ -186,13 +211,21 @@ jobs:
         run: |
           TFLINT_VERSION=0.55.0
           case "$(uname -m)" in
-            x86_64)  ARCH=amd64 ;;
-            aarch64) ARCH=arm64 ;;
+            x86_64)
+              ARCH=amd64
+              TFLINT_SHA256=a2baead74dfcbcb4fade8ba6e1a7dd29b090edec2b8c6594c1e047d6a6487363
+              ;;
+            aarch64)
+              ARCH=arm64
+              TFLINT_SHA256=0d3111c2cf84261595de1e90143dbd6fb2243a5406bc1573d04fbc66241ce06d
+              ;;
             *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;
           esac
-          sudo curl -sSfL "https://github.com/terraform-linters/tflint/releases/download/v${TFLINT_VERSION}/tflint_linux_${ARCH}.zip" \
+          curl -sSfL "https://github.com/terraform-linters/tflint/releases/download/v${TFLINT_VERSION}/tflint_linux_${ARCH}.zip" \
             -o /tmp/tflint.zip
-          sudo unzip /tmp/tflint.zip -d /usr/local/bin tflint
+          echo "${TFLINT_SHA256}  /tmp/tflint.zip" | sha256sum -c -
+          sudo unzip -q /tmp/tflint.zip -d /usr/local/bin tflint
+          rm -f /tmp/tflint.zip
           sudo chmod +x /usr/local/bin/tflint
           tflint --version
 
@@ -566,13 +599,23 @@ jobs:
         run: |
           FALCO_VERSION=2.3.0
           case "$(uname -m)" in
-            x86_64)  ARCH=amd64 ;;
-            aarch64) ARCH=arm64 ;;
+            x86_64)
+              ARCH=amd64
+              FALCO_SHA256=9888d04cd63a6b1058ecf228997f7ee6a18480394bfa9e5e00c8d8f46d03d19f
+              ;;
+            aarch64)
+              ARCH=arm64
+              FALCO_SHA256=b559fb0772fc280337b03c7b9d9221a0bd89c274c7d917f4c0832e1578d05dfa
+              ;;
             *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;
           esac
-          sudo curl -sSfL "https://github.com/ysugimoto/falco/releases/download/v${FALCO_VERSION}/falco-linux-${ARCH}.tar.gz" \
-            | sudo tar -xz -C /usr/local/bin
+          curl -sSfL "https://github.com/ysugimoto/falco/releases/download/v${FALCO_VERSION}/falco-linux-${ARCH}.tar.gz" \
+            -o /tmp/falco.tar.gz
+          echo "${FALCO_SHA256}  /tmp/falco.tar.gz" | sha256sum -c -
+          sudo tar -xz -f /tmp/falco.tar.gz -C /usr/local/bin
+          rm -f /tmp/falco.tar.gz
           sudo chmod +x /usr/local/bin/falco
+          falco --version
 
       - name: Verify catalog & VCL fixture sync
         run: |
