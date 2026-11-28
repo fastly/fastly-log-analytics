@@ -980,4 +980,98 @@ describe("Feature F23 — RUM & Web Vitals cloud-engine", () => {
       await engine.reset();
     }
   });
+
+  it("derives per-pageview worst_pages.views and scales row-counted environments to pageviewCount in rumWireFromSummary", async () => {
+    const T_START = Date.UTC(2027, 0, 15, 8, 0, 0);
+    const T_END = T_START + 3_600_000;
+
+    const lcpHist = new Histogram();
+    const clsHist = new Histogram();
+    const cidHll = new Hll();
+    for (let i = 0; i < 10; i++) {
+      lcpHist.add(1800 * 1_000);
+      clsHist.add(Math.round(0.05 * 1_000_000));
+      cidHll.add(`pv-${i}`);
+    }
+
+    const blank = {
+      bucket: null as bigint | null,
+      key: null as string | null,
+      count: null as bigint | null,
+      good: null as bigint | null,
+      poor: null as bigint | null,
+      value_hist: null as Uint8Array | null,
+      lcp_hist: null as Uint8Array | null,
+      cls_hist: null as Uint8Array | null,
+      inp_hist: null as Uint8Array | null,
+      cid_hll: null as Uint8Array | null,
+      msg_hll: null as Uint8Array | null,
+      min_line: null as bigint | null,
+      min_col: null as bigint | null,
+      last_ts: null as bigint | null,
+      truncated: null as boolean | null,
+    };
+
+    // Mirrors rum_summary.rs: 10 pageviews emitting 14 vital rows each (140 total rows),
+    // 9 pageviews on Chrome (126 rows) and 1 on Safari (14 rows).
+    const rows = [
+      { ...blank, kind: "metric", bucket: BigInt(T_START), key: "LCP", count: BigInt(10), good: BigInt(10), poor: BigInt(0), value_hist: lcpHist.toBytes() },
+      { ...blank, kind: "metric", bucket: BigInt(T_START), key: "CLS", count: BigInt(10), good: BigInt(10), poor: BigInt(0), value_hist: clsHist.toBytes() },
+      { ...blank, kind: "vitals_total", bucket: BigInt(T_START), count: BigInt(140), cid_hll: cidHll.toBytes() },
+      { ...blank, kind: "page", key: "/rum-demo/page1", count: BigInt(140), lcp_hist: lcpHist.toBytes(), cls_hist: clsHist.toBytes(), truncated: false },
+      { ...blank, kind: "env", key: JSON.stringify(["browser", "Chrome"]), count: BigInt(126), truncated: false },
+      { ...blank, kind: "env", key: JSON.stringify(["browser", "Safari"]), count: BigInt(14), truncated: false },
+      { ...blank, kind: "env", key: JSON.stringify(["os", "macOS"]), count: BigInt(140), truncated: false },
+      { ...blank, kind: "env", key: JSON.stringify(["device", "desktop"]), count: BigInt(140), truncated: false },
+    ];
+
+    const buf = parquetWriteBuffer({
+      columnData: [
+        { name: "kind", type: "STRING", data: rows.map((r) => r.kind) },
+        { name: "bucket", type: "INT64", data: rows.map((r) => r.bucket) },
+        { name: "key", type: "STRING", data: rows.map((r) => r.key) },
+        { name: "count", type: "INT64", data: rows.map((r) => r.count) },
+        { name: "good", type: "INT64", data: rows.map((r) => r.good) },
+        { name: "poor", type: "INT64", data: rows.map((r) => r.poor) },
+        { name: "value_hist", type: "BYTE_ARRAY", data: rows.map((r) => r.value_hist) },
+        { name: "lcp_hist", type: "BYTE_ARRAY", data: rows.map((r) => r.lcp_hist) },
+        { name: "cls_hist", type: "BYTE_ARRAY", data: rows.map((r) => r.cls_hist) },
+        { name: "inp_hist", type: "BYTE_ARRAY", data: rows.map((r) => r.inp_hist) },
+        { name: "cid_hll", type: "BYTE_ARRAY", data: rows.map((r) => r.cid_hll) },
+        { name: "msg_hll", type: "BYTE_ARRAY", data: rows.map((r) => r.msg_hll) },
+        { name: "min_line", type: "INT64", data: rows.map((r) => r.min_line) },
+        { name: "min_col", type: "INT64", data: rows.map((r) => r.min_col) },
+        { name: "last_ts", type: "INT64", data: rows.map((r) => r.last_ts) },
+        { name: "truncated", type: "BOOLEAN", data: rows.map((r) => r.truncated) },
+      ],
+      kvMetadata: [{ key: "flp_rum_summary", value: "1" }],
+    });
+
+    const sumKey = "processed/summary_bundle/rum/year=2027/month=01/day=15/hour_bundle=08-c60-n140-h0123456789abcdef.parquet";
+    const source: RumRollupSource = {
+      async fetchJson(url) {
+        const view = new URL(url, "http://localhost").searchParams.get("view");
+        if (view === "summary") {
+          return {
+            files: [{ key: sumKey, kind: "hour", start: new Date(T_START).toISOString(), end: new Date(T_END).toISOString(), size: buf.byteLength, rows: rows.length }],
+            next_cursor: null,
+            complete: true,
+          };
+        }
+        return { files: [], next_cursor: null, complete: true };
+      },
+      async fetchFile() {
+        return { bytes: buf, cached: false };
+      },
+    };
+
+    const wire = await queryRumWireFromRollup(source, { start_time: T_START, end_time: T_END });
+    expect(wire).not.toBeNull();
+    expect(wire!.pageview_count).toBe(10);
+    expect(wire!.worst_pages).toHaveLength(1);
+    expect(wire!.worst_pages[0].views).toBe(10);
+    expect(wire!.environments.browsers).toEqual({ Chrome: 9, Safari: 1 });
+    expect(wire!.environments.os).toEqual({ macOS: 10 });
+    expect(wire!.environments.devices).toEqual({ desktop: 10 });
+  });
 });

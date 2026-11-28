@@ -783,9 +783,12 @@ export function rumWireFromSummary(summary: RumSummary, params: RumQueryParams) 
     .filter(([, p]) => p.count > 0)
     .map(([page_url, p]) => {
       const pCls = histQuantileScaled(p.cls, 1_000_000);
+      // rum_summary increments page.count on every vital row (~14 rows/pageview);
+      // LCP and CLS histograms record one sample per pageview.
+      const pageViews = Math.max(p.lcp?.count() ?? 0, p.cls?.count() ?? 0) || p.count;
       return {
         path: decodePct(page_url),
-        views: p.count,
+        views: pageViews,
         avg_load_time: null as number | null,
         lcp_p75: secondsFromMs(histQuantileScaled(p.lcp, 1_000)),
         cls_p75: pCls == null ? null : roundTo(pCls, 3),
@@ -821,7 +824,19 @@ export function rumWireFromSummary(summary: RumSummary, params: RumQueryParams) 
       count: e.count,
     }));
 
-  const envRecord = (map: Map<string, number>) => Object.fromEntries(map.entries());
+  // rum_summary increments browser/os/device on every vital row, so their sum
+  // equals vitalsCount rather than pageviewCount; scale proportionally when so.
+  const envRecord = (map: Map<string, number>) => {
+    let total = 0;
+    for (const count of map.values()) total += count;
+    if (pageviewCount > 0 && total > pageviewCount) {
+      const scale = pageviewCount / total;
+      return Object.fromEntries(
+        [...map.entries()].map(([k, v]) => [k, v > 0 ? Math.max(1, Math.round(v * scale)) : 0]),
+      );
+    }
+    return Object.fromEntries(map.entries());
+  };
 
   return {
     ...data,
