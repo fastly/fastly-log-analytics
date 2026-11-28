@@ -157,6 +157,50 @@ vi.mock('@/components/SessionScoring/ScoringAdminPanels', async (importOriginal)
   }
 })
 
+vi.mock('@/components/SessionScoring/ExcludeRegexCard', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/components/SessionScoring/ExcludeRegexCard')>()
+  function wrap<T extends (...args: never[]) => unknown>(fn: T) {
+    return (...args: Parameters<T>) => (mockScoringSubcomponents ? null : fn(...args))
+  }
+  return {
+    ...actual,
+    ScoringHealthCard: wrap(actual.ScoringHealthCard),
+    ScorerFailOpenBreakdownCard: wrap(actual.ScorerFailOpenBreakdownCard),
+    ExcludeRegexCard: wrap(actual.ExcludeRegexCard),
+  }
+})
+
+vi.mock('@/components/SessionScoring/ThresholdSlider', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/components/SessionScoring/ThresholdSlider')>()
+  return {
+    ...actual,
+    ThresholdSlider: (...args: Parameters<typeof actual.ThresholdSlider>) =>
+      mockScoringSubcomponents ? null : actual.ThresholdSlider(...args),
+  }
+})
+
+vi.mock('@/components/SessionScoring/MatrixVersionsCard', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/components/SessionScoring/MatrixVersionsCard')>()
+  return {
+    ...actual,
+    MatrixVersionsCard: (...args: Parameters<typeof actual.MatrixVersionsCard>) =>
+      mockScoringSubcomponents ? null : actual.MatrixVersionsCard(...args),
+  }
+})
+
+vi.mock('@/components/SessionScoring/ScoringOperationsAndAudit', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/components/SessionScoring/ScoringOperationsAndAudit')>()
+  function wrap<T extends (...args: never[]) => unknown>(fn: T) {
+    return (...args: Parameters<T>) => (mockScoringSubcomponents ? null : fn(...args))
+  }
+  return {
+    ...actual,
+    RetrainButton: wrap(actual.RetrainButton),
+    RotateKeyButton: wrap(actual.RotateKeyButton),
+    AuditLogTab: wrap(actual.AuditLogTab),
+  }
+})
+
 vi.mock('@/components/SessionScoring/StatusPanel', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/components/SessionScoring/StatusPanel')>()
   function wrap<T extends (...args: never[]) => unknown>(fn: T) {

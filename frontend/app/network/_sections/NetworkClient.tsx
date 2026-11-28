@@ -34,26 +34,28 @@ import {
 } from './NetworkHelp'
 import {
   adjustShieldingRows,
-  getShieldingLabels,
-  SHIELDING_COLUMNS,
   SHIELDING_MIN_REQUESTS_DEFAULT,
   SHIELDING_MIN_REQUESTS_OPTIONS,
-  TransportSection,
   type ShieldingRowInput,
-} from './TransportAndShielding'
-import {
-  HEATMAP_LAYOUT,
-  NetworkKpiGrid,
-  NetworkLeaderboardsSection,
-} from './NetworkLeaderboardsAndQuality'
+} from './shieldingConfig'
+import { getShieldingLabels, SHIELDING_COLUMNS } from './shieldingColumns'
+import { HEATMAP_LAYOUT, NetworkKpiGrid } from './NetworkKpiGrid'
 
 const PopHealthHeatmap = dynamic(
   () => import('@/components/network/PopHealthHeatmap').then((m) => m.PopHealthHeatmap),
   { ssr: false, loading: () => <Skeleton className="w-full h-[280px] rounded-xl" /> },
 )
+const TransportSection = dynamic(
+  () => import('./TransportSection').then((m) => m.TransportSection),
+  { ssr: false, loading: () => <Skeleton className="w-full h-[220px] rounded-xl my-6" /> },
+)
 const ShieldingSection = dynamic(
   () => import('./TransportAndShielding').then((m) => m.ShieldingSection),
   { ssr: false, loading: () => <Skeleton className="w-full h-[460px] rounded-xl" /> },
+)
+const NetworkLeaderboardsSection = dynamic(
+  () => import('./NetworkLeaderboardsSection').then((m) => m.NetworkLeaderboardsSection),
+  { ssr: false, loading: () => <Skeleton className="w-full h-[420px] rounded-xl" /> },
 )
 const NetworkQualitySection = dynamic(
   () => import('./NetworkLeaderboardsAndQuality').then((m) => m.NetworkQualitySection),

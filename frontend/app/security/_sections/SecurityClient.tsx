@@ -16,7 +16,12 @@ import { mergeRollupMeta, RawWindowNote, readRawWindow, readRollupMeta, RollupDa
 import { isCloudMode } from '@/lib/cloud-engine/mode'
 import { hasFilterValues } from '@/lib/cloud-engine/rollup-sections'
 import type { components, operations } from '@/types/api.generated'
-import { BotsSection, type SecurityData, type SummaryQueryState } from './BotsSection'
+import type { SecurityData, SummaryQueryState } from './BotsSection'
+
+const BotsSection = dynamic(
+  () => import('./BotsSection').then((m) => m.BotsSection),
+  { ssr: false, loading: () => <Skeleton className="w-full h-[420px] rounded-xl" /> },
+)
 
 const ThreatIntelPanel = dynamic(
   () => import('./ThreatIntelSection').then((m) => m.ThreatIntelPanel),
@@ -38,7 +43,6 @@ const ProxyWatchdogSection = dynamic(
   { ssr: false, loading: () => <Skeleton className="w-full h-[420px] rounded-xl" /> },
 )
 
-export { BotsSection } from './BotsSection'
 export { ThreatIntelPanel, HeaderAnomaliesSection, NetworkSection }
 
 const SECURITY_TABS = ['waf-activity', 'threat-intel', 'proxy-watchdog'] as const

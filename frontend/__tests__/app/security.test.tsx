@@ -8,7 +8,8 @@ import {
   spyOnConsoleError, stubResizeObserver, stubPointerCaptureAndScroll,
   createUseSSEMock, partial, type ReportLayoutChildArgs, type InteractiveDataTableMockProps,
 } from '../helpers/page-smoke'
-import SecurityClient, { BotsSection } from '@/app/security/_sections/SecurityClient'
+import SecurityClient from '@/app/security/_sections/SecurityClient'
+import { BotsSection } from '@/app/security/_sections/BotsSection'
 import {
   HeaderAnomaliesSection,
   NetworkSection,

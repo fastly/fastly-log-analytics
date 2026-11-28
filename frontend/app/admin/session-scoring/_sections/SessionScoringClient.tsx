@@ -23,19 +23,37 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { CalloutBanner, StatusPanel } from '@/components/SessionScoring/StatusPanel'
 import {
-  ExcludeRegexCard,
-  RetrainButton,
-  RotateKeyButton,
-  ScorerFailOpenBreakdownCard,
-  ScoringHealthCard,
-  ThresholdSlider,
   invalidateServiceScoringQueries,
   scoringAnalyticsCompositeOptions,
   scoringConfigCompositeOptions,
-} from '@/components/SessionScoring/ScoringAdminPanels'
+} from '@/components/SessionScoring/scoringQueryOptions'
 import { useBootstrapPending } from '@/hooks/useBootstrap'
 import { useServiceStore } from '@/stores/filterStore'
 
+const RetrainButton = dynamic(
+  () => import('@/components/SessionScoring/ScoringOperationsAndAudit').then((m) => m.RetrainButton),
+  { ssr: false, loading: () => <Skeleton className="h-8 w-28 rounded-md" /> },
+)
+const RotateKeyButton = dynamic(
+  () => import('@/components/SessionScoring/ScoringOperationsAndAudit').then((m) => m.RotateKeyButton),
+  { ssr: false, loading: () => <Skeleton className="h-8 w-24 rounded-md" /> },
+)
+const ScoringHealthCard = dynamic(
+  () => import('@/components/SessionScoring/ExcludeRegexCard').then((m) => m.ScoringHealthCard),
+  { ssr: false, loading: () => <Skeleton className="h-[240px] w-full rounded-xl" /> },
+)
+const ScorerFailOpenBreakdownCard = dynamic(
+  () => import('@/components/SessionScoring/ExcludeRegexCard').then((m) => m.ScorerFailOpenBreakdownCard),
+  { ssr: false, loading: () => <Skeleton className="h-48 w-full rounded-xl" /> },
+)
+const ExcludeRegexCard = dynamic(
+  () => import('@/components/SessionScoring/ExcludeRegexCard').then((m) => m.ExcludeRegexCard),
+  { ssr: false, loading: () => <Skeleton className="h-48 w-full rounded-xl" /> },
+)
+const ThresholdSlider = dynamic(
+  () => import('@/components/SessionScoring/ThresholdSlider').then((m) => m.ThresholdSlider),
+  { ssr: false, loading: () => <Skeleton className="h-64 w-full rounded-xl" /> },
+)
 const L2EnforcementCard = dynamic(
   () => import('@/components/SessionScoring/ScoringEvaluationPanel').then((m) => m.L2EnforcementCard),
   { ssr: false, loading: () => <Skeleton className="h-64 w-full rounded-xl" /> },
@@ -69,11 +87,11 @@ const TopFlaggedTable = dynamic(
   { ssr: false, loading: () => <Skeleton className="h-64 w-full rounded-xl" /> },
 )
 const MatrixVersionsCard = dynamic(
-  () => import('@/components/SessionScoring/ScoringAdminPanels').then((m) => m.MatrixVersionsCard),
+  () => import('@/components/SessionScoring/MatrixVersionsCard').then((m) => m.MatrixVersionsCard),
   { ssr: false, loading: () => <Skeleton className="h-48 w-full rounded-xl" /> },
 )
 const AuditLogTab = dynamic(
-  () => import('@/components/SessionScoring/ScoringAdminPanels').then((m) => m.AuditLogTab),
+  () => import('@/components/SessionScoring/ScoringOperationsAndAudit').then((m) => m.AuditLogTab),
   { ssr: false, loading: () => <Skeleton className="h-48 w-full rounded-xl" /> },
 )
 
@@ -123,7 +141,7 @@ export function SinceHoursPicker({ value, onChange, compact = false }: SinceHour
 // Popover/Dialog/Table dependencies). `ssr: false` because the tab uses
 // client-only React Query hooks and there's no SEO value to pre-rendering.
 const LabelsTab = dynamic(
-  () => import('@/components/SessionScoring/ScoringAdminPanels').then((m) => ({ default: m.LabelsTab })),
+  () => import('@/components/SessionScoring/LabelsTab').then((m) => ({ default: m.LabelsTab })),
   {
     ssr: false,
     loading: () => (

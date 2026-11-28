@@ -1153,14 +1153,14 @@ describe('Usage, Sessions, Streaming & CostCalculator', () => {
       expect(screen.getByText('Loading FOS usage ledger...')).toBeInTheDocument()
     })
 
-    it('renders pending skeleton reservations before usage-log data resolves', () => {
+    it('renders pending skeleton reservations before usage-log data resolves', async () => {
       mockGet.mockImplementation(() => new Promise(() => {}))
       renderWithQuery(<UsageLogClient initialServiceId="svc-alpha" initialNowMs={1780315200000} />)
       expect(screen.getByTestId('admin-usage-log-root')).toBeInTheDocument()
       expect(screen.getByTestId('admin-usage-log-kpi-reservation').className).toContain('[contain-intrinsic-size:auto_164px]')
       expect(screen.getByTestId('admin-usage-log-chart-reservation').className).toContain('[contain-intrinsic-size:auto_380px]')
       expect(screen.getByTestId('admin-usage-log-table-reservation').className).toContain('[contain-intrinsic-size:auto_520px]')
-      expect(screen.getByText('Loading log accounting…')).toBeInTheDocument()
+      expect(await screen.findByText('Loading log accounting…')).toBeInTheDocument()
     })
 
     it('renders aggregate KPIs, ingest accounting, and usage log rows', async () => {

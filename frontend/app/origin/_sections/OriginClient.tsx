@@ -44,12 +44,24 @@ import {
 import {
   ORIGIN_METRICS,
   ORIGIN_PERCENTILES,
-  Timeseries,
   type OriginMetric,
   type OriginPercentile,
-  type TimeseriesProps,
-} from './Timeseries'
+} from './originMetrics'
+import type { TimeseriesProps } from './Timeseries'
 import type { LatencyHeatmapProps } from './LatencyHeatmap'
+
+const Timeseries = dynamic(
+  () => import('./Timeseries').then((m) => m.Timeseries),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+        <Skeleton className="lg:col-span-2 h-[400px] w-full rounded-xl" />
+        <Skeleton className="h-[400px] w-full rounded-xl" />
+      </div>
+    ),
+  },
+)
 
 const LatencyHeatmap = dynamic(
   () => import('./LatencyHeatmap').then((m) => m.LatencyHeatmap),

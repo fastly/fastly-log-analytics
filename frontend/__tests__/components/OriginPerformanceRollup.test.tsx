@@ -117,7 +117,7 @@ describe('OriginClient on Cloud', () => {
 
     expect(await screen.findByText('≈45.0ms')).toBeInTheDocument()
     expect(sections).toEqual(expect.arrayContaining([['timeseries'], ORIGIN_SECTIONS.filter((s) => s !== 'timeseries')]))
-    expect(screen.getByText('Loading origin latency timeseries...')).toBeInTheDocument()
+    expect(await screen.findByText('Loading origin latency timeseries...')).toBeInTheDocument()
   })
 
   it('keeps one raw read, with no summary labels, when a filter is applied', async () => {

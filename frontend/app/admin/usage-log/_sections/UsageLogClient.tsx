@@ -1,6 +1,7 @@
 'use client'
 
-import React, { Suspense, useState, useMemo } from 'react'
+import React, { useState, useMemo } from 'react'
+import dynamic from 'next/dynamic'
 import { useQuery } from '@tanstack/react-query'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { parseAsString, useQueryStates } from 'nuqs'
@@ -8,14 +9,13 @@ import { ArrowLeft, Download, DollarSign, Trash2, RefreshCw } from 'lucide-react
 import { adminFetch, client, extractApiError, unwrapClient } from '@/lib/api'
 import { downloadBlob, buildServiceHref, toQueryDate } from '@/lib/utils'
 import { useServiceStore } from '@/stores/filterStore'
-import { DataTable } from '@/components/DataTable'
 import { Button, buttonVariants } from '@/components/ui/button'
 import { PageHeader, ConfirmDialog } from '@/components/ui/confirm-dialog'
+import { Skeleton } from '@/components/ui/skeleton'
 import { useDateFormat } from '@/hooks/useSSE'
 import { useMounted } from '@/hooks/useBootstrap'
 import { keepPreviousWithinService } from '@/hooks/useDashboardCards'
 import { isCloudMode } from '@/lib/cloud-engine/mode'
-import { LogAccountingPanel } from './LogAccountingPanel'
 import {
   DATE_PRESETS,
   fmtCost,
@@ -26,7 +26,17 @@ import {
   type UsageLogResponse,
 } from './UsageLogTableAndCards'
 
-export { LogAccountingPanel, DATE_PRESETS, fmtCost, buildUsageLogColumns, UsageLogFilters, type UsageLogEntry }
+const LogAccountingPanel = dynamic(
+  () => import('./LogAccountingPanel').then((m) => m.LogAccountingPanel),
+  { ssr: false, loading: () => <Skeleton className="h-[320px] w-full rounded-xl" /> },
+)
+
+const DataTable = dynamic(
+  () => import('@/components/DataTable').then((m) => m.DataTable),
+  { ssr: false, loading: () => <Skeleton className="h-[420px] w-full rounded-xl" /> },
+) as typeof import('@/components/DataTable').DataTable
+
+export { DATE_PRESETS, fmtCost, buildUsageLogColumns, UsageLogFilters, type UsageLogEntry }
 
 export const usageLogUrlParsers = {
   service: parseAsString,
@@ -335,28 +345,4 @@ export function UsageLogClient(props?: UsageLogClientProps) {
   )
 }
 
-function UsageLogPageInner() {
-  const { service } = useSafeUsageLogQueryParams()
-  return <UsageLogClient initialServiceId={service} />
-}
-
-export default function UsageLogPage() {
-  return (
-    <Suspense
-      fallback={
-        <div data-testid="admin-usage-log-root" className="space-y-6">
-          <div className="h-[52px]" />
-          <div className="h-[46px] rounded-lg border border-dashed bg-muted/30" />
-          <div
-            data-testid="admin-usage-log-kpi-reservation"
-            className="grid grid-cols-2 md:grid-cols-4 gap-3 min-h-[216px]"
-          />
-          <div data-testid="admin-usage-log-chart-reservation" className="min-h-[380px]" />
-          <div data-testid="admin-usage-log-table-reservation" className="rounded-lg border bg-card min-h-[520px]" />
-        </div>
-      }
-    >
-      <UsageLogPageInner />
-    </Suspense>
-  )
-}
+export default UsageLogClient

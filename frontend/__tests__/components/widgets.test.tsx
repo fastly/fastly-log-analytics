@@ -271,7 +271,7 @@ import {
 import { FilterBar, ActiveFiltersBanner, AddFilterDialogContent } from '@/components/FilterBar/FilterBar'
 import { Dialog } from '@/components/ui/dialog'
 import { usePathname } from 'next/navigation'
-import { PlotlyChart, ChartA11yTable, tracesToTable } from '@/components/PlotlyChart'
+import { PlotlyChart, ChartA11yTable, tracesToTable, PlotlyPrewarm, MapPrewarm } from '@/components/PlotlyChart'
 import { ScorerLatencyChart, ScorerErrorsChart } from '@/components/SessionScoring/StatusPanel'
 import { TopTenTable, FieldSearchDialog } from '@/components/Dashboard/TopTenTable'
 import type { ReportConfiguration } from '@/hooks/useDashboardCards'
@@ -1997,6 +1997,78 @@ describe('TimeSeriesChart, ScorerSeries, PlotlyChart, TrafficChart, CardGrid, Fi
       expect(bigShape.truncatedFrom).toBe(1200)
       render(<ChartA11yTable shape={bigShape} />)
       expect(document.querySelector('caption')?.textContent).toContain('showing first 500 of 1200 rows')
+    })
+
+    it('defers PlotlyPrewarm and MapPrewarm until after first paint and idle callback (or timeout fallback), and cleans up on unmount', () => {
+      const rafQueue: Array<{ id: number; cb: FrameRequestCallback }> = []
+      const idleQueue: Array<{ id: number; cb: IdleRequestCallback }> = []
+      let nextId = 1
+      const cancelRaf = vi.fn()
+      const cancelIdle = vi.fn()
+      const reqRaf = vi.fn((cb: FrameRequestCallback) => {
+        const id = nextId++
+        rafQueue.push({ id, cb })
+        return id
+      })
+      const reqIdle = vi.fn((cb: IdleRequestCallback) => {
+        const id = nextId++
+        idleQueue.push({ id, cb })
+        return id
+      })
+
+      vi.stubGlobal('requestAnimationFrame', reqRaf)
+      vi.stubGlobal('cancelAnimationFrame', cancelRaf)
+      vi.stubGlobal('requestIdleCallback', reqIdle)
+      vi.stubGlobal('cancelIdleCallback', cancelIdle)
+
+      const view = render(<><PlotlyPrewarm /><MapPrewarm /></>)
+      expect(view.container.firstChild).toBeNull()
+      expect(reqRaf).toHaveBeenCalledTimes(2)
+      expect(reqIdle).not.toHaveBeenCalled()
+
+      act(() => {
+        for (const item of rafQueue.splice(0)) item.cb(0)
+      })
+      expect(reqIdle).toHaveBeenCalledTimes(2)
+      expect(reqIdle).toHaveBeenCalledWith(expect.any(Function), { timeout: 1500 })
+      expect(view.container.firstChild).toBeNull()
+
+      act(() => {
+        for (const item of idleQueue.splice(0)) item.cb({ didTimeout: false, timeRemaining: () => 50 })
+      })
+      expect(view.container.querySelectorAll('[aria-hidden="true"]')).toHaveLength(2)
+      view.unmount()
+
+      // Fallback when requestIdleCallback is unavailable + cleanup before timer fires.
+      vi.useFakeTimers()
+      try {
+        vi.stubGlobal('requestAnimationFrame', reqRaf)
+        vi.stubGlobal('cancelAnimationFrame', cancelRaf)
+        vi.stubGlobal('requestIdleCallback', undefined)
+        const fallbackView = render(<PlotlyPrewarm />)
+        expect(fallbackView.container.firstChild).toBeNull()
+
+        act(() => {
+          for (const item of rafQueue.splice(0)) item.cb(0)
+        })
+        expect(fallbackView.container.firstChild).toBeNull()
+
+        act(() => { vi.advanceTimersByTime(249) })
+        expect(fallbackView.container.firstChild).toBeNull()
+
+        act(() => { vi.advanceTimersByTime(1) })
+        expect(fallbackView.container.querySelector('[aria-hidden="true"]')).not.toBeNull()
+        fallbackView.unmount()
+
+        // Unmount before rAF fires cancels rAF handle.
+        const earlyView = render(<MapPrewarm />)
+        const pendingRafId = rafQueue.at(-1)!.id
+        earlyView.unmount()
+        expect(cancelRaf).toHaveBeenCalledWith(pendingRafId)
+      } finally {
+        vi.useRealTimers()
+        vi.unstubAllGlobals()
+      }
     })
   })
 

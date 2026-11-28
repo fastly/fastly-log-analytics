@@ -497,10 +497,63 @@ const PREWARM_LAYOUT: PlotlyLayout = {
   yaxis: { visible: false },
 }
 
-function PlotlyPrewarmImpl() {
+function useIdleAfterFirstPaint(): boolean {
+  const [idleReady, setIdleReady] = React.useState(false)
+
   React.useEffect(() => {
-    void preloadPlotlyChunk()
+    let rafId: number | null = null
+    let idleId: number | null = null
+    let timeoutId: number | null = null
+    let cancelled = false
+
+    const scheduleIdle = () => {
+      if (cancelled) return
+      if (typeof window.requestIdleCallback === 'function') {
+        idleId = window.requestIdleCallback(
+          () => {
+            if (!cancelled) setIdleReady(true)
+          },
+          { timeout: 1500 },
+        )
+      } else {
+        timeoutId = window.setTimeout(() => {
+          if (!cancelled) setIdleReady(true)
+        }, 250)
+      }
+    }
+
+    if (typeof window.requestAnimationFrame === 'function') {
+      rafId = window.requestAnimationFrame(scheduleIdle)
+    } else {
+      scheduleIdle()
+    }
+
+    return () => {
+      cancelled = true
+      if (rafId !== null && typeof window.cancelAnimationFrame === 'function') {
+        window.cancelAnimationFrame(rafId)
+      }
+      if (idleId !== null && typeof window.cancelIdleCallback === 'function') {
+        window.cancelIdleCallback(idleId)
+      }
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId)
+      }
+    }
   }, [])
+
+  return idleReady
+}
+
+function PlotlyPrewarmImpl() {
+  const idleReady = useIdleAfterFirstPaint()
+
+  React.useEffect(() => {
+    if (!idleReady) return
+    void preloadPlotlyChunk()
+  }, [idleReady])
+
+  if (!idleReady) return null
 
   return (
     <div
@@ -558,6 +611,9 @@ const PrewarmMap = dynamic(
 )
 
 function MapPrewarmImpl() {
+  const idleReady = useIdleAfterFirstPaint()
+  if (!idleReady) return null
+
   return (
     <div
       aria-hidden="true"

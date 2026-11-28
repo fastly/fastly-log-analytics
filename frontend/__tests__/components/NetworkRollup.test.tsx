@@ -104,7 +104,7 @@ describe('NetworkClient on Cloud', () => {
     expect(await screen.findByText('1 cities')).toBeInTheDocument()
     expect(screen.getByText('≈87/100')).toBeInTheDocument()
     expect(screen.getByText('Score: ≈40')).toBeInTheDocument()
-    expect(screen.getByText('≥1,234')).toBeInTheDocument()
+    expect(await screen.findByText('≥1,234')).toBeInTheDocument()
     expect(screen.getByText('≥77')).toBeInTheDocument()
     expect(screen.getByText('Avg RTT').closest('div')?.parentElement?.textContent).not.toContain('≈')
     await waitFor(() => expect(screen.getAllByTestId('plot').some((plot) => plot.textContent?.includes('Score: ≈%{z}'))).toBe(true))
