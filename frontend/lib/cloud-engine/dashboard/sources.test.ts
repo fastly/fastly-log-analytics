@@ -1311,17 +1311,23 @@ describe("pruneRequestCache", () => {
   });
 
   it("prunes the file and rollup caches through the browser source", async () => {
-    const rollupUrl = (k: string) =>
-      `/__flp_rollup?${new URLSearchParams({ v: rollupCacheVersion(CARD_FIELDS, ROLLUP_SEMANTICS), key: k })}`;
-    const { stores } = fakeCacheStorage({
-      [CACHE_NAME]: [live, superseded].map(fileUrl),
-      [ROLLUP_CACHE_NAME]: [live, superseded].map(rollupUrl),
-    });
-    await browserSource("").pruneCache!(manifest, ...range);
-    expect([...stores.get(CACHE_NAME)!.keys()]).toEqual([fileUrl(live)]);
-    expect([...stores.get(ROLLUP_CACHE_NAME)!.keys()]).toEqual([
-      rollupUrl(live),
-    ]);
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(Date.parse("2026-10-29T13:00:00Z"));
+    try {
+      const rollupUrl = (k: string) =>
+        `/__flp_rollup?${new URLSearchParams({ v: rollupCacheVersion(CARD_FIELDS, ROLLUP_SEMANTICS), key: k })}`;
+      const { stores } = fakeCacheStorage({
+        [CACHE_NAME]: [live, superseded].map(fileUrl),
+        [ROLLUP_CACHE_NAME]: [live, superseded].map(rollupUrl),
+      });
+      await browserSource("").pruneCache!(manifest, ...range);
+      expect([...stores.get(CACHE_NAME)!.keys()]).toEqual([fileUrl(live)]);
+      expect([...stores.get(ROLLUP_CACHE_NAME)!.keys()]).toEqual([
+        rollupUrl(live),
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -1381,28 +1387,34 @@ describe("persistent Parquet store", () => {
   });
 
   it("evicts the least recently used files outside the manifest before writing", async () => {
-    const { stores, used } = sizedStores();
-    storage(() => used(), 10 * MiB);
-    vi.stubGlobal("fetch", network());
-    const source = browserSource("");
-    for (let minute = 0; minute < 8; minute += 1) {
-      await source.fetchFile(key(minute));
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(Date.parse("2026-10-29T13:00:00Z"));
+    try {
+      const { stores, used } = sizedStores();
+      storage(() => used(), 10 * MiB);
+      vi.stubGlobal("fetch", network());
+      const source = browserSource("");
+      for (let minute = 0; minute < 8; minute += 1) {
+        await source.fetchFile(key(minute));
+        await flushStore();
+      }
+      // Minutes 0 and 1 were used most recently through the manifest, so they stay.
+      await source.pruneCache!(
+        { complete: false, files: [entry(0), entry(1)] },
+        ...range,
+      );
+      await source.fetchFile(key(8));
       await flushStore();
+      const left = [...stores.get(CACHE_NAME)!.keys()];
+      expect(left).toContain(fileUrl(key(0)));
+      expect(left).toContain(fileUrl(key(1)));
+      expect(left).toContain(fileUrl(key(8)));
+      expect(left).not.toContain(fileUrl(key(2)));
+      expect(used()).toBeLessThanOrEqual(8 * MiB);
+      expect(await readStoreError()).toBeNull();
+    } finally {
+      vi.useRealTimers();
     }
-    // Minutes 0 and 1 were used most recently through the manifest, so they stay.
-    await source.pruneCache!(
-      { complete: false, files: [entry(0), entry(1)] },
-      ...range,
-    );
-    await source.fetchFile(key(8));
-    await flushStore();
-    const left = [...stores.get(CACHE_NAME)!.keys()];
-    expect(left).toContain(fileUrl(key(0)));
-    expect(left).toContain(fileUrl(key(1)));
-    expect(left).toContain(fileUrl(key(8)));
-    expect(left).not.toContain(fileUrl(key(2)));
-    expect(used()).toBeLessThanOrEqual(8 * MiB);
-    expect(await readStoreError()).toBeNull();
   });
 
   it("records a quota error when no unpinned entry can be evicted", async () => {
