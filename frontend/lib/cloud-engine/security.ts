@@ -980,6 +980,185 @@ export function threatIntelScanColumns(filters: unknown): string[] | null {
     .filter((key) => key !== "filter_mode").map((key) => key.replace(/_\d+$/, ""))])];
 }
 
+const COALESCE_DIST_SECTIONS = [
+  "fingerprint_coverage",
+  "req_size_dist",
+  "conn_reuse_dist",
+  "ipv6_adoption",
+  "proxy_dist",
+] as const;
+
+/**
+ * Coalesces 2+ distribution scans in Cloud mode into one `GROUPING SETS` query
+ * over `WHERE (${whereSql})` while preserving single-section output parity.
+ */
+async function runCoalescedSecurityDists(
+  req: SecurityAggregatesRequest,
+  client: SecurityEngineClient,
+  availableColumns: ReadonlySet<string>,
+  sections: ReadonlySet<SecuritySectionName>,
+  response: SecurityAggregatesResponse,
+): Promise<void> {
+  const wantFp = sections.has("fingerprint_coverage");
+  const wantReq = sections.has("req_size_dist");
+  const wantConn = sections.has("conn_reuse_dist");
+  const wantIpv6 = sections.has("ipv6_adoption");
+  const wantProxy = sections.has("proxy_dist");
+
+  const { whereSql, params } = buildBaseWhere(req, availableColumns);
+  const baseCols: string[] = [];
+  const selectCols: string[] = ["COUNT(*) AS row_count"];
+  const groupingSets: string[] = [];
+  const groupFlagKeys: string[] = [];
+
+  if (wantFp) {
+    const fpCond = availableColumns.has("tls_ciphers_sha")
+      ? "(tls_ciphers_sha IS NOT NULL AND CAST(tls_ciphers_sha AS VARCHAR) != '')"
+      : "FALSE";
+    baseCols.push(`${fpCond} AS has_tls_fp`);
+    selectCols.push("COUNT(*) FILTER (WHERE has_tls_fp) AS fp_populated");
+    groupingSets.push("()");
+    response.fingerprint_coverage = { tls_ciphers_sha: 0.0 };
+  }
+  if (wantReq) {
+    if (availableColumns.has("req_header_bytes")) {
+      baseCols.push(
+        "TRY_CAST(req_header_bytes AS BIGINT) AS h_val",
+        `CASE WHEN TRY_CAST(req_header_bytes AS BIGINT) IS NOT NULL THEN ${buildReqHeaderBucketCaseSql("TRY_CAST(req_header_bytes AS BIGINT)")} ELSE NULL END AS req_bucket`,
+      );
+    } else {
+      baseCols.push("CAST(NULL AS BIGINT) AS h_val", "CAST(NULL AS VARCHAR) AS req_bucket");
+    }
+    selectCols.push("req_bucket", "MIN(h_val) AS req_min_val", "GROUPING(req_bucket) AS g_req");
+    groupingSets.push("(req_bucket)");
+    groupFlagKeys.push("g_req");
+  }
+  if (wantConn) {
+    if (availableColumns.has("conn_requests")) {
+      baseCols.push(
+        "CASE WHEN TRY_CAST(conn_requests AS BIGINT) > 0 THEN TRY_CAST(conn_requests AS BIGINT) ELSE NULL END AS c_val",
+        `CASE WHEN TRY_CAST(conn_requests AS BIGINT) > 0 THEN ${buildConnReuseBucketCaseSql("TRY_CAST(conn_requests AS BIGINT)")} ELSE NULL END AS conn_bucket`,
+      );
+    } else {
+      baseCols.push("CAST(NULL AS BIGINT) AS c_val", "CAST(NULL AS VARCHAR) AS conn_bucket");
+    }
+    selectCols.push("conn_bucket", "MIN(c_val) AS conn_min_val", "GROUPING(conn_bucket) AS g_conn");
+    groupingSets.push("(conn_bucket)");
+    groupFlagKeys.push("g_conn");
+  }
+  if (wantIpv6) {
+    const ipv6Expr = availableColumns.has("is_ipv6")
+      ? "LOWER(CAST(is_ipv6 AS VARCHAR)) IN ('1', 'true', 't', 'yes')"
+      : "FALSE";
+    baseCols.push(
+      "date_trunc('hour', EPOCH_MS(CAST(ts_ms AS BIGINT))) AS ipv6_ts",
+      `${ipv6Expr} AS is_ipv6_flag`,
+    );
+    selectCols.push(
+      "ipv6_ts",
+      "COUNT(*) FILTER (WHERE is_ipv6_flag) * 100.0 / NULLIF(COUNT(*), 0) AS ipv6_pct",
+      "GROUPING(ipv6_ts) AS g_ipv6",
+    );
+    groupingSets.push("(ipv6_ts)");
+    groupFlagKeys.push("g_ipv6");
+  }
+  if (wantProxy) {
+    const proxyCol = availableColumns.has("proxy_type")
+      ? "proxy_type"
+      : availableColumns.has("p_type")
+        ? "p_type"
+        : null;
+    baseCols.push(
+      proxyCol
+        ? `NULLIF(CAST(${proxyCol} AS VARCHAR), '') AS proxy_raw`
+        : "CAST(NULL AS VARCHAR) AS proxy_raw",
+    );
+    selectCols.push("proxy_raw", "GROUPING(proxy_raw) AS g_proxy");
+    groupingSets.push("(proxy_raw)");
+    groupFlagKeys.push("g_proxy");
+  }
+
+  const sql = `
+    WITH base AS (
+      SELECT ${baseCols.join(", ")}
+      FROM logs
+      WHERE (${whereSql})
+    )
+    SELECT ${selectCols.join(", ")}
+    FROM base
+    GROUP BY GROUPING SETS (${groupingSets.join(", ")})
+  `.trim();
+
+  const rows = await client.query(sql, params);
+  const reqRows: Array<{ bucket: string; count: number; minVal: number }> = [];
+  const connRows: Array<{ bucket: string; count: number; minVal: number }> = [];
+  const ipv6Rows: SecurityIpv6Point[] = [];
+  const proxyMerged = new Map<string, number>();
+
+  for (const r of rows) {
+    if (wantReq && toNum(r.g_req) === 0) {
+      if (r.req_bucket != null) {
+        reqRows.push({
+          bucket: String(r.req_bucket),
+          count: Math.trunc(toNum(r.row_count)),
+          minVal: toNum(r.req_min_val),
+        });
+      }
+      continue;
+    }
+    if (wantConn && toNum(r.g_conn) === 0) {
+      if (r.conn_bucket != null) {
+        connRows.push({
+          bucket: String(r.conn_bucket),
+          count: Math.trunc(toNum(r.row_count)),
+          minVal: toNum(r.conn_min_val),
+        });
+      }
+      continue;
+    }
+    if (wantIpv6 && toNum(r.g_ipv6) === 0) {
+      if (r.ipv6_ts != null) {
+        ipv6Rows.push({
+          time: toIsoTimestamp(r.ipv6_ts),
+          pct: roundTo(toNum(r.ipv6_pct), 2),
+        });
+      }
+      continue;
+    }
+    if (wantProxy && toNum(r.g_proxy) === 0) {
+      if (r.proxy_raw != null) {
+        const decoded = decodeProxyType(String(r.proxy_raw));
+        proxyMerged.set(decoded, (proxyMerged.get(decoded) ?? 0) + Math.trunc(toNum(r.row_count)));
+      }
+      continue;
+    }
+    if (wantFp && groupFlagKeys.every((k) => toNum(r[k]) === 1)) {
+      const total = toNum(r.row_count, 0);
+      const pop = toNum(r.fp_populated, 0);
+      response.fingerprint_coverage = { tls_ciphers_sha: total > 0 ? pop / total : 0.0 };
+    }
+  }
+
+  if (wantReq) {
+    response.req_size_dist = reqRows
+      .sort((a, b) => a.minVal - b.minVal)
+      .map(({ bucket, count }) => ({ bucket, count }));
+  }
+  if (wantConn) {
+    response.conn_reuse_dist = connRows
+      .sort((a, b) => a.minVal - b.minVal)
+      .map(({ bucket, count }) => ({ bucket, count }));
+  }
+  if (wantIpv6) {
+    response.ipv6_adoption = ipv6Rows.sort((a, b) => a.time.localeCompare(b.time));
+  }
+  if (wantProxy) {
+    response.proxy_dist = [...proxyMerged.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([type, count]) => ({ type, count }));
+  }
+}
+
 export async function executeSecurityAggregates(
   req: SecurityAggregatesRequest,
   context?: DuckDBReadContext,
@@ -995,6 +1174,12 @@ export async function executeSecurityAggregates(
     rdns_verification_available: false,
   };
   const tasks: Promise<void>[] = [];
+  const coalesceDists =
+    customSecurityClient === null &&
+    COALESCE_DIST_SECTIONS.filter((s) => sections.has(s)).length >= 2;
+  if (coalesceDists) {
+    tasks.push(runCoalescedSecurityDists(req, client, availableColumns, sections, response));
+  }
 
   if (sections.has("tls_fingerprints")) {
     tasks.push(
@@ -1010,7 +1195,7 @@ export async function executeSecurityAggregates(
     );
   }
 
-  if (sections.has("fingerprint_coverage")) {
+  if (!coalesceDists && sections.has("fingerprint_coverage")) {
     tasks.push(
       (async () => {
         const { sql, params } = buildSecurityFingerprintCoverageSql(req, availableColumns);
@@ -1024,7 +1209,7 @@ export async function executeSecurityAggregates(
     );
   }
 
-  if (sections.has("req_size_dist")) {
+  if (!coalesceDists && sections.has("req_size_dist")) {
     tasks.push(
       (async () => {
         const { sql, params } = buildSecurityReqSizeDistSql(req, availableColumns);
@@ -1050,7 +1235,7 @@ export async function executeSecurityAggregates(
     );
   }
 
-  if (sections.has("conn_reuse_dist")) {
+  if (!coalesceDists && sections.has("conn_reuse_dist")) {
     tasks.push(
       (async () => {
         const { sql, params } = buildSecurityConnReuseDistSql(req, availableColumns);
@@ -1063,7 +1248,7 @@ export async function executeSecurityAggregates(
     );
   }
 
-  if (sections.has("ipv6_adoption")) {
+  if (!coalesceDists && sections.has("ipv6_adoption")) {
     tasks.push(
       (async () => {
         const { sql, params } = buildSecurityIpv6AdoptionSql(req, availableColumns);
@@ -1076,7 +1261,7 @@ export async function executeSecurityAggregates(
     );
   }
 
-  if (sections.has("proxy_dist")) {
+  if (!coalesceDists && sections.has("proxy_dist")) {
     tasks.push(
       (async () => {
         const { sql, params } = buildSecurityProxyDistSql(req, availableColumns);

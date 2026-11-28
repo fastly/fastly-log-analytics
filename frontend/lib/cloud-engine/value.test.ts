@@ -364,4 +364,33 @@ describe("Feature F22 — Fastly Value cloud-engine", () => {
       await engine.reset();
     }
   });
+
+  it("skips DESCRIBE requests when filtering only on known catalog columns", async () => {
+    const engine = new DuckDBAnalyticalEngine();
+    const sqls: string[] = [];
+    const spyEngine = {
+      executeSql: <T extends Record<string, unknown>>(sql: string, params?: unknown[], signal?: AbortSignal) => {
+        sqls.push(sql);
+        return engine.executeSql<T>(sql, params, signal);
+      },
+    } as unknown as DuckDBAnalyticalEngine;
+    try {
+      await engine.executeSql(`
+        INSERT INTO requests (scoped_key, ts_ms, "timestamp", status, cache, resp_bytes)
+        VALUES ('known-col', 1700000000000, epoch_ms(1700000000000), 200, 'HIT', 100),
+          ('known-col', 1700000001000, epoch_ms(1700000001000), 404, 'MISS', 50)
+      `);
+      const res = await queryValueSummary({
+        engine: spyEngine,
+        start_time: "2023-11-14T22:00:00Z",
+        end_time: "2023-11-14T23:00:00Z",
+        sections: ["overview"],
+        filters: { status: { mode: "include", values: ["200"] } },
+      });
+      expect(sqls.filter((sql) => sql.startsWith("DESCRIBE"))).toHaveLength(0);
+      expect(res.overview?.total_requests).toBe(1);
+    } finally {
+      await engine.reset();
+    }
+  });
 });

@@ -25,13 +25,16 @@ export type SummarySpec = {
   readonly only: ReadonlyMap<string, ReadonlySet<string>>;
   /** Optional per-group field allowlist so `decodeRollup` skips unneeded dimension/field rows. */
   readonly fields?: ReadonlyMap<string, ReadonlySet<string>>;
+  /** Optional lower whole-file byte threshold for specs that span many files (e.g. multi-day Insights). */
+  readonly wholeBelowBytes?: number;
 };
 
-export function defineSummarySpec({ groups, columns, only = {}, fields }: {
+export function defineSummarySpec({ groups, columns, only = {}, fields, wholeBelowBytes }: {
   groups: readonly string[];
   columns: readonly string[];
   only?: Record<string, readonly string[]>;
   fields?: Record<string, readonly string[]>;
+  wholeBelowBytes?: number;
 }): SummarySpec {
   const sortedOnly = Object.entries(only).map(([column, of]) => [column, [...new Set(of)].sort()] as const)
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
@@ -55,8 +58,14 @@ export function defineSummarySpec({ groups, columns, only = {}, fields }: {
     ...(sortedFields.length
       ? { fields: new Map(sortedFields.map(([group, names]) => [group, new Set(names)])) }
       : {}),
+    ...(wholeBelowBytes !== undefined ? { wholeBelowBytes } : {}),
   };
 }
+
+const effectiveWholeBelowBytes = (spec: SummarySpec): number =>
+  spec.wholeBelowBytes !== undefined
+    ? Math.min(summaryProjectionLimits.wholeBelowBytes, spec.wholeBelowBytes)
+    : summaryProjectionLimits.wholeBelowBytes;
 
 /**
  * When a projection is not worth its extra requests: files at most
@@ -112,7 +121,7 @@ export async function hasSummaryProjection(
   spec: SummarySpec,
 ): Promise<boolean> {
   if (await source.hasFile?.(file.key)) return true;
-  if (!source.fetchRange || !source.writeDerivedFile || !(file.size > summaryProjectionLimits.wholeBelowBytes)) return false;
+  if (!source.fetchRange || !source.writeDerivedFile || !(file.size > effectiveWholeBelowBytes(spec))) return false;
   return Boolean(await source.readDerivedFile?.(file.key, partsIdentity(source, file, spec)));
 }
 
@@ -213,7 +222,7 @@ export async function readSummaryProjection(
     return { parts: [bytes], whole: true, cached, downloadedBytes: cached ? 0 : bytes.byteLength, cdn };
   };
   const { fetchRange, readDerivedFile, writeDerivedFile } = source;
-  if (!fetchRange || !readDerivedFile || !writeDerivedFile || !(file.size > summaryProjectionLimits.wholeBelowBytes)) {
+  if (!fetchRange || !readDerivedFile || !writeDerivedFile || !(file.size > effectiveWholeBelowBytes(spec))) {
     return whole();
   }
   assertProjectionActive();

@@ -1,7 +1,8 @@
 import type { components } from "@/types/api";
 import { BOT_UA_CLASSIFY_LIMIT, classifyUserAgentCountsSync, loadWellKnownBots } from "./bots/classify";
 import {
-  compileFiltersToSql, duckSqlString, getDuckDBEngine, type DuckDBAnalyticalEngine, type DuckDBColumnType,
+  compileFiltersToSql, duckSqlString, FIELD_DUCKDB_TYPES, getDuckDBEngine,
+  type DuckDBAnalyticalEngine, type DuckDBColumnType,
 } from "./dashboard/duckdb";
 import type { DashboardFilter } from "./dashboard/filters";
 import { roundTo } from "./engine-utils";
@@ -23,7 +24,9 @@ export interface ValueQueryParams {
   custom_filters?: Record<string, { mode?: string; values?: string[] }>;
   sections?: readonly ValueSection[] | null;
   chart_interval?: string;
-  engine?: Pick<DuckDBAnalyticalEngine, "executeSql" | "getPresentColumns">;
+  engine?: Pick<DuckDBAnalyticalEngine, "executeSql" | "getPresentColumns"> & {
+    getCustomColumnTypes?: () => ReadonlyMap<string, DuckDBColumnType>;
+  };
   signal?: AbortSignal;
 }
 
@@ -111,8 +114,22 @@ const CHART_INTERVAL_SECONDS: Record<string, number> = {
 
 export async function queryValueSummary(params: ValueQueryParams = {}): Promise<ValueSummary> {
   const engine = params.engine ?? getDuckDBEngine().readContext();
-  const types = new Map<string, DuckDBColumnType>();
-  if (Object.keys(params.filters ?? {}).length || Object.keys(params.custom_filters ?? {}).length) {
+  const types = new Map<string, DuckDBColumnType>(
+    Object.entries(FIELD_DUCKDB_TYPES) as Array<[string, DuckDBColumnType]>,
+  );
+  const customTypes = engine.getCustomColumnTypes?.();
+  if (customTypes) {
+    for (const [name, colType] of customTypes) {
+      types.set(name, colType);
+    }
+  }
+  const needsDescribe = [params.filters, params.custom_filters].some((source) =>
+    Object.entries(source ?? {}).some(([key, spec]) => {
+      if (key === "filter_mode" || !(spec?.values?.length)) return false;
+      return !types.has(key.replace(/_\d+$/, ""));
+    }),
+  );
+  if (needsDescribe) {
     const schema = await engine.executeSql<{ column_name: string; column_type: string }>(
       "DESCRIBE requests", [], params.signal,
     );

@@ -506,6 +506,110 @@ describe("planRollup", () => {
       [...tier1Summaries, ...tier2Summaries].map((s) => s.key).sort(),
     );
   });
+
+  it("ignores open_bundle files marked kind hour in planBundleCoverage", async () => {
+    const { planBundleCoverage } = await import("./rollup-query");
+    const openMarkedHour: ManifestFile = {
+      key: `processed/summary_bundle/request/sha256=${"b".repeat(64)}/year=2027/month=01/day=15/open_bundle=09-${T0 + HOUR}-c4-n10-h0123.parquet`,
+      start: new Date(T0).toISOString(),
+      end: new Date(T0 + HOUR).toISOString(),
+      rows: 10,
+      size: 1024,
+      kind: "hour",
+    };
+    const cov = planBundleCoverage([openMarkedHour], T0, T0 + HOUR);
+    expect(cov.bundles).toEqual([]);
+    expect(cov.uncovered).toEqual([{ startMs: T0, endMs: T0 + HOUR }]);
+  });
+
+  it("trims multi-compact leading partial hour when a sealed hour_bundle covers that hour", () => {
+    const h0Start = T0;
+    const h0Mid = T0 + 35 * 60_000;
+    const h1Start = T0 + HOUR;
+    const h2Start = T0 + 2 * HOUR;
+    const fromMs = T0 + 31 * 60_000;
+
+    const c1: ManifestFile = {
+      key: `processed/request/year=2027/month=01/day=15/hour=08/compact=${h0Start / 1000}-${h0Mid / 1000}-c2-n50-deadbeefcafe0001.parquet`,
+      start: new Date(h0Start).toISOString(),
+      end: new Date(h0Mid).toISOString(),
+      rows: 50,
+      size: 1000,
+    };
+    const c2: ManifestFile = {
+      key: `processed/request/year=2027/month=01/day=15/hour=08/compact=${h0Mid / 1000}-${h1Start / 1000}-c2-n50-deadbeefcafe0002.parquet`,
+      start: new Date(h0Mid).toISOString(),
+      end: new Date(h1Start).toISOString(),
+      rows: 50,
+      size: 1000,
+    };
+    const hour1Bundle = HOURS.find((f) => at(f) === h1Start)!;
+    const hour0Bundle = HOURS.find((f) => at(f) === h0Start)!;
+    const h1Raw = RAW.filter((f) => at(f) >= h1Start);
+
+    // With hour0Bundle straddling [h0Start, h1Start), c2 (inside hour=08, after fromMs) is trimmed rather than triggering null.
+    const plan = planRollup([c1, c2, ...h1Raw], [hour0Bundle, hour1Bundle], fromMs, h2Start)!;
+    expect(plan).not.toBeNull();
+    expect(plan.dataFromMs).toBe(h1Start);
+    expect(plan.dataThroughMs).toBe(h2Start);
+    expect(plan.files.map((u) => u.file.key)).toEqual([hour1Bundle.key]);
+
+    // Without hour0Bundle covering hour=08, c2 is a true gap and must still return null.
+    expect(planRollup([c1, c2, ...h1Raw], [hour1Bundle], fromMs, h2Start)).toBeNull();
+  });
+
+  it("permits up to 5 minutes of omitted 60s tail windows on >= 1h ranges", () => {
+    const h0Bundle = HOURS.find((f) => at(f) === T0)!;
+    const h1Start = T0 + HOUR;
+    const mkWin = (minOffset: number): { raw: ManifestFile; sum: ManifestFile } => {
+      const s = h1Start + minOffset * 60_000;
+      const e = s + 60_000;
+      const tag = `${s / 1000}-${e / 1000}-w${minOffset}-n10`;
+      return {
+        raw: {
+          key: `processed/request/year=2027/month=01/day=15/hour=09/window=${tag}.parquet`,
+          start: new Date(s).toISOString(),
+          end: new Date(e).toISOString(),
+          rows: 10,
+          size: 500,
+        },
+        sum: {
+          key: `processed/summary/request/year=2027/month=01/day=15/hour=09/summary=${tag}.parquet`,
+          start: new Date(s).toISOString(),
+          end: new Date(e).toISOString(),
+          rows: 10,
+          size: 200,
+        },
+      };
+    };
+    const w0 = mkWin(0);
+    const w1 = mkWin(1);
+    const w2 = mkWin(2);
+    const w3 = mkWin(3);
+    const w4 = mkWin(4);
+    const w5 = mkWin(5);
+    const w6 = mkWin(6);
+
+    // 3 minutes of omitted 60s windows at end of a >= 1h range succeeds.
+    const plan3m = planRollup(
+      [...RAW.filter((f) => at(f) < h1Start), w0.raw, w1.raw, w2.raw, w3.raw],
+      [h0Bundle, w0.sum],
+      T0,
+      h1Start + 4 * 60_000,
+    )!;
+    expect(plan3m).not.toBeNull();
+    expect(plan3m.dataThroughMs).toBe(h1Start + 60_000);
+
+    // 6 minutes (> 5 minutes) still returns null.
+    expect(
+      planRollup(
+        [...RAW.filter((f) => at(f) < h1Start), w0.raw, w1.raw, w2.raw, w3.raw, w4.raw, w5.raw, w6.raw],
+        [h0Bundle, w0.sum],
+        T0,
+        h1Start + 7 * 60_000,
+      ),
+    ).toBeNull();
+  });
 });
 
 describe("queryRollup", () => {

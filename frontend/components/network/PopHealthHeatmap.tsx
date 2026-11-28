@@ -50,10 +50,22 @@ interface PopHealthHeatmapProps {
   startTime: string | null
   endTime: string | null
   filterPayload?: FiltersPayload
+  externalData?: PopHealthItem[] | null
+  externalLoading?: boolean
+  externalError?: Error | null
 }
 
-export function PopHealthHeatmap({ serviceId, startTime, endTime, filterPayload }: PopHealthHeatmapProps) {
+export function PopHealthHeatmap({
+  serviceId,
+  startTime,
+  endTime,
+  filterPayload,
+  externalData,
+  externalLoading,
+  externalError,
+}: PopHealthHeatmapProps) {
   const [selectedPop, setSelectedPop] = React.useState<PopHealthItem | null>(null)
+  const useExternal = externalData !== undefined || externalLoading !== undefined
   const serializedFilters = React.useMemo(
     () => (filterPayload && Object.keys(filterPayload).length > 0 ? JSON.stringify(filterPayload) : undefined),
     [filterPayload],
@@ -77,16 +89,22 @@ export function PopHealthHeatmap({ serviceId, startTime, endTime, filterPayload 
         'Failed to load PoP health data',
       )
       return { items: data?.data ?? [], rollup: readRollupMeta(data) }
-    }
+    },
+    { enabled: !useExternal },
   )
 
-  const items = React.useMemo(() => popHealthQuery.data?.items ?? [], [popHealthQuery.data])
-  const rollup = popHealthQuery.data?.rollup
+  const items = React.useMemo(
+    () => (useExternal ? (externalData ?? []) : (popHealthQuery.data?.items ?? [])),
+    [useExternal, externalData, popHealthQuery.data],
+  )
+  const rollup = useExternal ? undefined : popHealthQuery.data?.rollup
   const hitMark = boundMark(rollup, 'cache_hit_rate')
   const rttMark = approxMark(rollup, 'p50_rtt_us')
   const ttfbMark = approxMark(rollup, 'p95_ttfb_ms')
-  const isLoading = popHealthQuery.isLoading || (popHealthQuery.isFetching && !popHealthQuery.data)
-  const error = popHealthQuery.error
+  const isLoading = useExternal
+    ? Boolean(externalLoading)
+    : popHealthQuery.isLoading || (popHealthQuery.isFetching && !popHealthQuery.data)
+  const error = useExternal ? (externalError ?? null) : popHealthQuery.error
 
   // Metrics aggregates
   const totalRequests = React.useMemo(() => items.reduce((acc, curr) => acc + curr.requests, 0), [items])

@@ -324,6 +324,24 @@ describe("readSummaryProjection", () => {
     expect(source.net.ranges).toEqual([]);
   });
 
+  it("projects bundles above a spec's own wholeBelowBytes limit while keeping global 4 MiB default", async () => {
+    const insightsLikeSpec = defineSummarySpec({
+      groups: ["overview", "time_series"],
+      columns: ["requests"],
+      wholeBelowBytes: 128,
+    });
+    const source = fakeSource(layoutBytes);
+    const read = await readSummaryProjection(source, manifestFile(layoutBytes), insightsLikeSpec);
+    expect(read.whole).toBe(false);
+    expect(source.net.whole).toEqual([]);
+    expect(dataRanges(source.net, layoutBytes).length).toBeGreaterThan(0);
+
+    const defaultSource = fakeSource(layoutBytes);
+    const wholeRead = await readSummaryProjection(defaultSource, { ...manifestFile(layoutBytes), size: 1_200_000 }, HEAD);
+    expect(wholeRead.whole).toBe(true);
+    expect(defaultSource.net.ranges).toEqual([]);
+  });
+
   it("falls back to whole-file fetch when coalesced summary wire ranges exceed wholeAboveShare", async () => {
     Object.assign(summaryProjectionLimits, { wholeBelowBytes: 0, wholeAboveShare: 0.6 });
     const source = fakeSource(layoutBytes);

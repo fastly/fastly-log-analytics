@@ -1200,21 +1200,18 @@ describe("insightsFromRollup summary-first multi-day manifest handling", () => {
     expect(single[0].endMs - single[0].startMs).toBe(8 * DAY);
   });
 
-  it("coalesces scattered uncovered gaps across an 8-day window into bounded raw-only listings without re-fetching summaries", async () => {
+  it("coalesces nearby uncovered gaps without bridging across >2h of covered bundles", async () => {
     const END = Date.UTC(2025, 0, 9, 0, 0, 0);
     const day2 = Date.UTC(2025, 0, 2, 0, 0, 0);
     const day8 = Date.UTC(2025, 0, 8, 0, 0, 0);
-    // 9 scattered uncovered hours across 2 days (5 in baseline day2, 4 in window day8).
+    // Cluster A on day2 (1h, 3h = 1h gap between them), Cluster B on day2 (18h),
+    // and two distant gaps on day8 (2h and 15h = 12h of covered bundles between them).
     const missingHourStartsMs = [
       day2 + 1 * HOUR,
-      day2 + 5 * HOUR,
-      day2 + 11 * HOUR,
+      day2 + 3 * HOUR,
       day2 + 18 * HOUR,
-      day2 + 22 * HOUR,
       day8 + 2 * HOUR,
-      day8 + 8 * HOUR,
       day8 + 15 * HOUR,
-      day8 + 21 * HOUR,
     ];
     const { src, rawCalls, summaryCalls } = makeMultiDayServer({
       endMs: END,
@@ -1235,39 +1232,34 @@ describe("insightsFromRollup summary-first multi-day manifest handling", () => {
       signal,
     );
     expect(result).not.toBeNull();
-    // 20 covered hour_bundles (each from sampleHourBuf) + 4 uncovered raw hours (2 requests each).
+    // 22 covered hour_bundles + 2 uncovered raw hours (2 requests each) in window day8.
     const hourReq = (await decodeRollup(sampleHourBuf, 300_000))!.dims.get("proto")!;
     let perHourReqs = 0;
     for (const agg of hourReq.values()) perHourReqs += agg.requests;
-    expect(result!.window_total_requests).toBe(20 * perHourReqs + 4 * 2);
+    expect(result!.window_total_requests).toBe(22 * perHourReqs + 2 * 2);
 
-    // Only 1 view=summary call for the whole 8-day window; never re-fetched for uncovered gaps.
     expect(summaryCalls).toHaveLength(1);
-    // 9 scattered gaps coalesced into 2 bounded (<=24h) raw listings (3 /api/files calls total).
-    expect(rawCalls).toHaveLength(2);
-    for (const url of rawCalls) {
-      const p = new URL(url, "http://x").searchParams;
-      expect(p.get("view")).toBeNull();
-      expect(p.get("summaries")).toBeNull();
-      expect(Date.parse(p.get("to")!) - Date.parse(p.get("from")!)).toBeLessThanOrEqual(DAY);
-    }
+    // [day2+1h..4h), [day2+18h..19h), [day8+2h..3h), [day8+15h..16h) -> 4 bounded listings, never bridging 12h of bundles.
+    expect(rawCalls).toHaveLength(4);
     const ranges = rawCalls.map((url) => {
       const p = new URL(url, "http://x").searchParams;
       return [p.get("from"), p.get("to")];
     }).sort();
     expect(ranges).toEqual([
-      [new Date(day2 + 1 * HOUR).toISOString(), new Date(day2 + 23 * HOUR).toISOString()],
-      [new Date(day8 + 2 * HOUR).toISOString(), new Date(day8 + 22 * HOUR).toISOString()],
+      [new Date(day2 + 1 * HOUR).toISOString(), new Date(day2 + 4 * HOUR).toISOString()],
+      [new Date(day2 + 18 * HOUR).toISOString(), new Date(day2 + 19 * HOUR).toISOString()],
+      [new Date(day8 + 2 * HOUR).toISOString(), new Date(day8 + 3 * HOUR).toISOString()],
+      [new Date(day8 + 15 * HOUR).toISOString(), new Date(day8 + 16 * HOUR).toISOString()],
     ]);
   });
 
   it("falls back to individual gap listings when a coalesced span truncates, and to null if a single gap truncates", async () => {
     const END = Date.UTC(2025, 0, 9, 0, 0, 0);
     const day8 = Date.UTC(2025, 0, 8, 0, 0, 0);
-    // Two gaps 14h apart: coalesced 14h span exceeds rawTruncatedOverMs (2h), individual 1h spans succeed.
+    // Two nearby gaps 1h apart: coalesced 3h span exceeds rawTruncatedOverMs (2h), individual 1h spans succeed.
     const { src, rawCalls, summaryCalls } = makeMultiDayServer({
       endMs: END,
-      missingHourStartsMs: [day8 + 2 * HOUR, day8 + 15 * HOUR],
+      missingHourStartsMs: [day8 + 2 * HOUR, day8 + 4 * HOUR],
       omitInlineSummaries: true,
       rawTruncatedOverMs: 2 * HOUR,
     });
@@ -1291,7 +1283,7 @@ describe("insightsFromRollup summary-first multi-day manifest handling", () => {
     // If even a 1h gap truncates, falls back cleanly to null.
     const { src: truncSrc } = makeMultiDayServer({
       endMs: END,
-      missingHourStartsMs: [day8 + 2 * HOUR, day8 + 15 * HOUR],
+      missingHourStartsMs: [day8 + 2 * HOUR, day8 + 4 * HOUR],
       omitInlineSummaries: true,
       rawTruncatedOverMs: 30 * 60_000,
     });

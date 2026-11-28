@@ -626,4 +626,69 @@ describe("security cloud-engine module (F20)", () => {
     expect(badFormat?.status).toBe(400);
     expect(await badFormat!.json()).toMatchObject({ detail: { error: "bad_request" } });
   });
+
+  it("coalesces distribution scans into a single GROUPING SETS pass with exact single-section parity", async () => {
+    const engine = getDuckDBEngine();
+    const sqlQueries: string[] = [];
+    const origReadContext = engine.readContext.bind(engine);
+    const readContextSpy = vi.spyOn(engine, "readContext").mockImplementation(() => {
+      const ctx = origReadContext();
+      const origQuery = ctx.querySql.bind(ctx);
+      return {
+        ...ctx,
+        querySql: async (sql, params, signal) => {
+          sqlQueries.push(sql);
+          return origQuery(sql, params, signal);
+        },
+        executeSql: async (sql, params, signal) => {
+          sqlQueries.push(sql);
+          return ctx.executeSql(sql, params, signal);
+        },
+      };
+    });
+    try {
+      await engine.executeSql(`
+        INSERT INTO requests (
+          scoped_key, ts_ms, "timestamp", ip, tls_ciphers_sha, req_header_bytes,
+          conn_requests, is_ipv6, p_type, waf_sig
+        ) VALUES
+          ('coalesce', 1700000000000, epoch_ms(1700000000000), '198.51.100.1', 'fp-a', 128, 1, TRUE, 'H', 'VERIFIED-BOT.googlebot'),
+          ('coalesce', 1700000100000, epoch_ms(1700000100000), '198.51.100.2', 'fp-b', 2048, 3, FALSE, 'hosting', NULL),
+          ('coalesce', 1700003700000, epoch_ms(1700003700000), '198.51.100.3', '', 50000, 15, TRUE, 'A', 'SQLI'),
+          ('coalesce', 1700003800000, epoch_ms(1700003800000), '198.51.100.4', NULL, NULL, 0, NULL, NULL, NULL),
+          ('coalesce', 1700003900000, epoch_ms(1700003900000), '198.51.100.5', 'fp-a', 600, 250, TRUE, '', NULL)
+      `);
+      const bodyBase = { start_time: "2023-11-14T22:00:00Z", end_time: "2023-11-15T00:00:00Z" };
+      const distSections = ["fingerprint_coverage", "req_size_dist", "conn_reuse_dist", "ipv6_adoption", "proxy_dist"] as const;
+      const singles: Record<string, unknown> = {};
+      for (const sec of distSections) {
+        const res = await handleSecurityRequest(
+          new Request("https://example.test/api/security/aggregates", {
+            method: "POST",
+            body: JSON.stringify({ ...bodyBase, sections: [sec] }),
+          }),
+        );
+        singles[sec] = (await res!.json())[sec];
+      }
+
+      sqlQueries.length = 0;
+      const combinedRes = await handleSecurityRequest(
+        new Request("https://example.test/api/security/aggregates", {
+          method: "POST",
+          body: JSON.stringify({
+            ...bodyBase,
+            sections: ["tls_fingerprints", ...distSections, "verified_bots_ts", "top_ips_header"],
+          }),
+        }),
+      );
+      const combined = await combinedRes!.json() as SecurityAggregatesResponse;
+      expect(sqlQueries.length).toBeLessThanOrEqual(4);
+      for (const sec of distSections) {
+        expect(combined[sec], sec).toEqual(singles[sec]);
+      }
+    } finally {
+      readContextSpy.mockRestore();
+      await engine.reset();
+    }
+  });
 });

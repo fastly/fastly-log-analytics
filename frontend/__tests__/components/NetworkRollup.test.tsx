@@ -123,21 +123,30 @@ describe('NetworkClient on Cloud', () => {
     await waitFor(() => expect(sections).toContainEqual(['shielding_analysis']))
   })
 
-  it('consolidates filtered Cloud reads into one /api/network/bundle request with no summary labels', async () => {
+  it('consolidates filtered Cloud reads into one /api/network/bundle request including pop_health and defers shielding until visible', async () => {
     setCloudModeRuntime(true)
+    const observer = stubIntersectionObserver()
     layout.filterPayload = { pop: { mode: 'include', values: ['LIS'] } }
     const healthCalls: string[][] = []
     const qualityCalls: unknown[] = []
+    const popHealthCalls: string[] = []
     const bundleCalls: string[][] = []
     server.use(
       http.post(`${getApiBase()}/api/network-health`, async ({ request }) => {
         const body = await request.json() as { sections: string[] }
         healthCalls.push(body.sections)
-        return HttpResponse.json(coreResponse())
+        return HttpResponse.json({
+          ...coreResponse(),
+          shielding_analysis: { has_data: false, rows: [] },
+        })
       }),
       http.post(`${getApiBase()}/api/network-quality`, async ({ request }) => {
         qualityCalls.push(await request.json())
         return HttpResponse.json({ available: true, has_data: true })
+      }),
+      http.get(`${getApiBase()}/api/network/pop-health`, ({ request }) => {
+        popHealthCalls.push(request.url)
+        return HttpResponse.json({ data: [] })
       }),
       http.post(`${getApiBase()}/api/network/bundle`, async ({ request }) => {
         const body = await request.json() as { sections: string[] }
@@ -147,8 +156,11 @@ describe('NetworkClient on Cloud', () => {
           health: {
             ...coreResponse(),
             cities: [{ name: 'Lisbon', lat: 38.7, lon: -9.1 }],
-            shielding_analysis: { has_data: false, rows: [] },
           },
+          pop_health: [{
+            pop: 'LIS', requests: 1234, errors: 0, error_rate: 0, bandwidth_bytes: 1024,
+            cache_hit_rate: 50, p50_rtt_us: 10_000, p95_ttfb_ms: 80,
+          }],
           quality: { available: true, has_data: true, summary: { total_requests: 1234 } },
           transport: { has_transport_data: true, tcp_rtt_p50_ms: 18.4, tcp_rtt_p95_ms: 42.1, protocol_distribution: [] },
         })
@@ -159,12 +171,17 @@ describe('NetworkClient on Cloud', () => {
     expect(await screen.findByText('87/100')).toBeInTheDocument()
     expect(await screen.findByText('1 cities')).toBeInTheDocument()
     expect(await screen.findByText('18.4')).toBeInTheDocument()
-    expect(bundleCalls).toEqual([[...ROLLUP_SECTIONS, 'cities', 'map_buckets', 'shielding_analysis', 'quality', 'transport']])
+    expect(await screen.findByText('50.0% Hit')).toBeInTheDocument()
+    expect(bundleCalls).toEqual([[...ROLLUP_SECTIONS, 'cities', 'map_buckets', 'pop_health', 'quality', 'transport']])
+    expect(popHealthCalls).toEqual([])
     expect(healthCalls).toEqual([])
     expect(qualityCalls).toEqual([])
     expect(screen.queryByText(/Data through/)).not.toBeInTheDocument()
     expect(screen.queryByTestId('rollup-data-through-slot')).not.toBeInTheDocument()
     expect(screen.getByText('1,234')).toBeInTheDocument()
+
+    act(() => observer.fire(true))
+    await waitFor(() => expect(healthCalls).toContainEqual(['shielding_analysis']))
   })
 
   it('reserves the data-through slot before the response and fills it in place', async () => {

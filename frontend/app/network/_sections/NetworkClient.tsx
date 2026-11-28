@@ -104,7 +104,7 @@ const NETWORK_CORE_SECTIONS: NetworkSections = [...NETWORK_ROLLUP_SECTIONS, 'cit
 const NETWORK_MAP_SECTIONS: NetworkSections = ['buckets', 'cities', 'map_buckets']
 const NETWORK_SHIELDING_SECTIONS: NetworkSections = ['shielding_analysis']
 const NETWORK_CLOUD_FILTERED_BUNDLE_SECTIONS: NetworkBundleSections = [
-  ...NETWORK_CORE_SECTIONS, ...NETWORK_SHIELDING_SECTIONS, 'quality', 'transport',
+  ...NETWORK_CORE_SECTIONS, 'pop_health', 'quality', 'transport',
 ]
 
 function defaultStepSecondsForWindow(startIso?: string | null, endIso?: string | null): number | null {
@@ -206,10 +206,10 @@ function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: Rep
   // Shielding always reads raw rows in Cloud, so it waits until its panel nears the viewport.
   const shieldingRef = React.useRef<HTMLDivElement>(null)
   const shieldingNear = useInViewOnce(shieldingRef, { rootMargin: '600px' })
-  const shieldingEnabled = !rollupFirst || shieldingNear
+  const shieldingEnabled = !(rollupFirst || cloudFiltered) || shieldingNear
   const shieldingQuery = useAnalyticsReportQuery<NetworkHealthResponse>({
     namespace: ['network', 'health', 'shielding'], serviceId: activeServiceId, filterPayload, range,
-    queryOptions: { enabled: !cloudFiltered && shieldingEnabled },
+    queryOptions: { enabled: shieldingEnabled },
     queryFn: ({ rangeToken, signal }) => postNetworkHealth(NETWORK_SHIELDING_SECTIONS, rangeToken, signal, mapAsn),
   })
 
@@ -234,16 +234,15 @@ function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: Rep
     ? (filteredBundleQuery.isLoading || (filteredBundleQuery.isFetching && !filteredBundleQuery.data))
     : (coreQuery.isLoading || (coreQuery.isFetching && !coreQuery.data))
   const isMapLoadingInitial = !mapData && (mapFromCore ? isCoreLoadingInitial : mapQuery.isLoading || (mapQuery.isFetching && !mapQuery.data))
-  const isShieldingLoadingInitial = cloudFiltered
-    ? isCoreLoadingInitial
-    : (!shieldingEnabled || shieldingQuery.isLoading || (shieldingQuery.isFetching && !shieldingQuery.data))
+  const isShieldingLoadingInitial =
+    !shieldingEnabled || shieldingQuery.isLoading || (shieldingQuery.isFetching && !shieldingQuery.data)
   const isQualityLoadingInitial = cloudFiltered
     ? isCoreLoadingInitial
     : (qualityQuery.isLoading || (qualityQuery.isFetching && !qualityQuery.data))
 
-  const shieldingData = cloudFiltered ? filteredBundleQuery.data?.health?.shielding_analysis : shieldingQuery.data?.shielding_analysis
-  const shieldingError = cloudFiltered ? filteredBundleQuery.error : shieldingQuery.error
-  const shieldingIsFetching = cloudFiltered ? filteredBundleQuery.isFetching : shieldingQuery.isFetching
+  const shieldingData = shieldingQuery.data?.shielding_analysis
+  const shieldingError = shieldingQuery.error
+  const shieldingIsFetching = shieldingQuery.isFetching
   const adjustedShieldingRows = React.useMemo(
     () => adjustShieldingRows(shieldingData?.rows ?? [], minRequests),
     [shieldingData?.rows, minRequests],
@@ -326,7 +325,17 @@ function NetworkBody({ startTime, endTime, activeServiceId, filterPayload }: Rep
       />
 
       <div className="my-6 min-h-[280px] [contain-intrinsic-size:280px]">
-        {activeServiceId && <PopHealthHeatmap serviceId={activeServiceId} startTime={startTime} endTime={endTime} filterPayload={filterPayload} />}
+        {activeServiceId && (
+          <PopHealthHeatmap
+            serviceId={activeServiceId}
+            startTime={startTime}
+            endTime={endTime}
+            filterPayload={filterPayload}
+            externalData={cloudFiltered ? (filteredBundleQuery.data?.pop_health ?? null) : undefined}
+            externalLoading={cloudFiltered ? isCoreLoadingInitial : undefined}
+            externalError={cloudFiltered ? filteredBundleQuery.error : undefined}
+          />
+        )}
       </div>
 
       {heatmapData && (

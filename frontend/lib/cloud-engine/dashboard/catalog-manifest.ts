@@ -3,7 +3,6 @@ import {
   deleteManifestSnapshot,
   deleteManifestSnapshots,
   persistManifestSnapshot,
-  readManifestSnapshot,
   readManifestSnapshotWithAge,
 } from "./manifest-store";
 import { CARD_FIELDS, type CustomCard } from "./summaries";
@@ -53,9 +52,10 @@ export const MAX_MANIFEST_BYTES = 16 * 1024 * 1024;
 export const MAX_IDENTITIES = 16_384;
 const MAX_REPLAY = 32;
 const MAX_SNAPSHOTS = 8;
-const MAX_WINDOWS_PER_KEY = 4;
+const MAX_WINDOWS_PER_KEY = 8;
 const MAX_DELTA_PAGES = 64;
 const DAY_MS = 86_400_000;
+const HOUR_MS = 3_600_000;
 /**
  * A page's scans run one after another on the analytical queue, and each asks
  * for the same range (or a narrowed sub-range) across several seconds. A
@@ -121,15 +121,14 @@ const snapshots = new Map<string, Snapshot[]>();
 const persistedMeta = new Map<string, { generation: number; toMs: number }>();
 const requirements = new Map<string, Requirement>();
 
-function selectBaseSnapshot(
-  key: string,
+function selectBestFromList(
+  list: readonly Snapshot[],
   fromMs: number,
   toMs: number,
   summaries: boolean | undefined,
 ): Snapshot | undefined {
-  const list = snapshots.get(key);
-  if (!list?.length) return undefined;
   let best: Snapshot | undefined;
+  let bestHasOverlap = false;
   let bestGen = -1;
   let bestOverlap = -1;
   let bestToMs = -Infinity;
@@ -144,14 +143,19 @@ function selectBaseSnapshot(
       Number.isFinite(sTo)
         ? Math.max(0, Math.min(toMs, sTo) - Math.max(fromMs, sFrom))
         : 0;
+    const hasOverlap = overlap > 0;
     if (
       !best ||
-      s.generation > bestGen ||
-      (s.generation === bestGen &&
-        (overlap > bestOverlap ||
-          (overlap === bestOverlap && sTo > bestToMs)))
+      hasOverlap !== bestHasOverlap && hasOverlap ||
+      hasOverlap === bestHasOverlap && (
+        s.generation > bestGen ||
+        (s.generation === bestGen &&
+          (overlap > bestOverlap ||
+            (overlap === bestOverlap && sTo > bestToMs)))
+      )
     ) {
       best = s;
+      bestHasOverlap = hasOverlap;
       bestGen = s.generation;
       bestOverlap = overlap;
       bestToMs = sTo;
@@ -160,12 +164,21 @@ function selectBaseSnapshot(
   return best;
 }
 
+function selectBaseSnapshot(
+  key: string,
+  fromMs: number,
+  toMs: number,
+  summaries: boolean | undefined,
+): Snapshot | undefined {
+  const list = snapshots.get(key);
+  if (!list?.length) return undefined;
+  return selectBestFromList(list, fromMs, toMs, summaries);
+}
+
 function saveMemorySnapshot(key: string, snapshot: Snapshot, resynced: boolean): void {
   const existing = resynced ? [] : (snapshots.get(key) ?? []);
   const filtered = existing.filter(
-    (s) =>
-      s.generation >= snapshot.generation &&
-      !(s.from === snapshot.from && s.to === snapshot.to),
+    (s) => !(s.from === snapshot.from && s.to === snapshot.to),
   );
   filtered.push(snapshot);
   while (filtered.length > MAX_WINDOWS_PER_KEY) filtered.shift();
@@ -602,8 +615,19 @@ export async function fetchCatalogManifest(
   const commits = requirement?.commits ?? 0;
   const incremental =
     (!dataset || dataset === "request") && (!view || view === "raw");
+  const closedHourSummary =
+    (!dataset || dataset === "request") && view === "summary";
   const recentSatisfiesRequirement = (young: Recent): boolean => {
-    if (!incremental) return young.commits === commits;
+    if (!incremental) {
+      if (
+        closedHourSummary &&
+        Number.isFinite(young.toMs) &&
+        young.toMs <= Math.floor(Date.now() / HOUR_MS) * HOUR_MS
+      ) {
+        return true;
+      }
+      return young.commits === commits;
+    }
     return (
       required === undefined ||
       young.required === required ||
@@ -879,23 +903,25 @@ async function fetchCatalogManifestUncached(
   const fromMs = Date.parse(from);
   const toMs = Date.parse(to);
   let base = incremental ? selectBaseSnapshot(key, fromMs, toMs, summaries) : undefined;
+  let hydratedWindows: Snapshot[] = [];
   if (
     !base &&
     persisted &&
     !globalHydrationBlocked &&
     !blockedHydrationScopes.has(key)
   ) {
-    const saved = await readManifestSnapshot(key);
+    const saved = await readManifestSnapshotWithAge(key);
     if (saved) {
-      base = {
-        from: saved.from,
-        to: saved.to,
-        generation: saved.generation,
-        manifest: saved.manifest,
+      hydratedWindows = [saved.snapshot, ...(saved.windows ?? [])];
+      base = selectBestFromList(hydratedWindows, fromMs, toMs, summaries) ?? {
+        from: saved.snapshot.from,
+        to: saved.snapshot.to,
+        generation: saved.snapshot.generation,
+        manifest: saved.snapshot.manifest,
       };
       persistedMeta.set(key, {
-        generation: saved.generation,
-        toMs: Date.parse(saved.to),
+        generation: saved.snapshot.generation,
+        toMs: Date.parse(saved.snapshot.to),
       });
     }
   }
@@ -972,6 +998,9 @@ async function fetchCatalogManifestUncached(
       throw new ManifestRequestError(503, "catalog_head_behind");
     const current = selectBaseSnapshot(key, fromMs, toMs, summaries);
     if (!current || generation >= current.generation || resynced) {
+      for (const candidate of hydratedWindows) {
+        if (!resynced) saveMemorySnapshot(key, candidate, false);
+      }
       const snapshot = { from, to, generation, manifest: result };
       saveMemorySnapshot(key, snapshot, resynced);
       const prevPersisted = persistedMeta.get(key);
@@ -983,7 +1012,7 @@ async function fetchCatalogManifestUncached(
           (generation === prevPersisted.generation && toMs >= prevPersisted.toMs));
       if (shouldPersist) {
         persistedMeta.set(key, { generation, toMs });
-        await queueStoreWork(() => persistManifestSnapshot(key, snapshot));
+        await queueStoreWork(() => persistManifestSnapshot(key, snapshot, snapshots.get(key)));
         if (
           startEpoch !== epoch ||
           scope(fetchJson) !== identity ||

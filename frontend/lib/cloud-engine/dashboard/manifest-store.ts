@@ -27,6 +27,7 @@ export type ManifestSnapshot = {
 export type PersistedManifestSnapshot = {
   snapshot: ManifestSnapshot;
   savedAt: number;
+  windows?: ManifestSnapshot[];
 };
 
 type PersistedManifest = {
@@ -34,6 +35,7 @@ type PersistedManifest = {
   cacheKey: string;
   savedAt: number;
   snapshot: ManifestSnapshot;
+  windows?: ManifestSnapshot[];
 };
 
 export function manifestSnapshotUrl(cacheKey: string): string {
@@ -103,6 +105,47 @@ function validFile(
   );
 }
 
+function validSnapshotPayload(
+  snapshot: unknown,
+  summaries: boolean,
+): snapshot is ManifestSnapshot {
+  const s = snapshot as Partial<ManifestSnapshot> | undefined;
+  const manifest = s?.manifest as Partial<Manifest> | undefined;
+  const rangeFrom = s?.from;
+  const rangeTo = s?.to;
+  const generation = s?.generation;
+  if (
+    !s ||
+    typeof s !== "object" ||
+    !validIso(rangeFrom) ||
+    !validIso(rangeTo) ||
+    Date.parse(rangeFrom) >= Date.parse(rangeTo) ||
+    typeof generation !== "number" ||
+    !Number.isSafeInteger(generation) ||
+    generation < 0 ||
+    !manifest ||
+    typeof manifest !== "object" ||
+    Array.isArray(manifest) ||
+    manifest.complete !== true ||
+    manifest.catalogGeneration !== generation ||
+    !Array.isArray(manifest.files) ||
+    (summaries
+      ? !Array.isArray(manifest.summaryFiles) ||
+        manifest.summaryRange?.from !== rangeFrom ||
+        manifest.summaryRange?.to !== rangeTo
+      : manifest.summaryFiles !== undefined ||
+        manifest.summaryRange !== undefined)
+  )
+    return false;
+
+  const files = manifest.files;
+  const summaryFiles = manifest.summaryFiles ?? [];
+  return (
+    files.every((file) => validFile(file, rangeFrom, rangeTo)) &&
+    summaryFiles.every((file) => validFile(file, rangeFrom, rangeTo, true))
+  );
+}
+
 function parseSnapshotRecord(
   body: unknown,
   cacheKey: string,
@@ -127,52 +170,32 @@ function parseSnapshotRecord(
     now - record.savedAt >= MANIFEST_SNAPSHOT_MAX_AGE_MS
   )
     return null;
-  const snapshot = record.snapshot as Partial<ManifestSnapshot> | undefined;
-  const manifest = snapshot?.manifest as Partial<Manifest> | undefined;
-  const rangeFrom = snapshot?.from;
-  const rangeTo = snapshot?.to;
-  const generation = snapshot?.generation;
+  if (!validSnapshotPayload(record.snapshot, summaries)) return null;
+  const extra = record.windows;
   if (
-    !snapshot ||
-    typeof snapshot !== "object" ||
-    !validIso(rangeFrom) ||
-    !validIso(rangeTo) ||
-    Date.parse(rangeFrom) >= Date.parse(rangeTo) ||
-    typeof generation !== "number" ||
-    !Number.isSafeInteger(generation) ||
-    generation < 0 ||
-    !manifest ||
-    typeof manifest !== "object" ||
-    Array.isArray(manifest) ||
-    manifest.complete !== true ||
-    manifest.catalogGeneration !== generation ||
-    !Array.isArray(manifest.files) ||
-    (summaries
-      ? !Array.isArray(manifest.summaryFiles) ||
-        manifest.summaryRange?.from !== rangeFrom ||
-        manifest.summaryRange?.to !== rangeTo
-      : manifest.summaryFiles !== undefined ||
-        manifest.summaryRange !== undefined)
-  )
-    return null;
-
-  const files = manifest.files;
-  const summaryFiles = manifest.summaryFiles ?? [];
-  if (
-    !files.every((file) => validFile(file, rangeFrom, rangeTo)) ||
-    !summaryFiles.every((file) => validFile(file, rangeFrom, rangeTo, true))
+    extra !== undefined &&
+    (!Array.isArray(extra) || !extra.every((w) => validSnapshotPayload(w, summaries)))
   )
     return null;
 
   const budget: ManifestBudget = { bytes: 0, identities: new Set() };
   try {
-    accountManifestPage({ files, summary_files: summaryFiles }, budget);
+    for (const w of [record.snapshot, ...(extra ?? [])]) {
+      accountManifestPage(
+        { files: w.manifest.files, summary_files: w.manifest.summaryFiles ?? [] },
+        budget,
+      );
+    }
   } catch {
     return null;
   }
   return budget.bytes <= MAX_MANIFEST_BYTES &&
     budget.identities.size <= MAX_IDENTITIES
-    ? { snapshot: snapshot as ManifestSnapshot, savedAt: record.savedAt }
+    ? {
+        snapshot: record.snapshot,
+        savedAt: record.savedAt,
+        ...(extra?.length ? { windows: extra } : {}),
+      }
     : null;
 }
 
@@ -297,6 +320,7 @@ export async function readManifestSnapshot(
 export async function persistManifestSnapshot(
   cacheKey: string,
   snapshot: ManifestSnapshot,
+  windows?: ManifestSnapshot[],
 ): Promise<void> {
   const callMetaEpoch = currentStoreMetaEpoch();
   let bytes = 0;
@@ -305,12 +329,14 @@ export async function persistManifestSnapshot(
       return;
     }
     const now = Date.now();
-    const record = {
+    const extra = windows?.filter((w) => !(w.from === snapshot.from && w.to === snapshot.to));
+    const record: PersistedManifest = {
       formatVersion: FORMAT_VERSION,
       cacheKey,
       savedAt: now,
       snapshot,
-    } satisfies PersistedManifest;
+      ...(extra?.length ? { windows: extra } : {}),
+    };
     if (!parseSnapshot(record, cacheKey, now))
       throw new Error("Refusing to persist an invalid file manifest snapshot");
     const response = new Response(JSON.stringify(record));

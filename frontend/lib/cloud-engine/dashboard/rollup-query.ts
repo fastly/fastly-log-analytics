@@ -53,7 +53,7 @@ function isDayBundle(file: ManifestFile): boolean {
 }
 
 function isHourBundle(file: ManifestFile): boolean {
-  return file.kind === "hour" || file.key.includes("/hour_bundle=");
+  return (file.kind === "hour" || file.key.includes("/hour_bundle=")) && !file.key.includes("/open_bundle=");
 }
 
 function preferBundle(a: ManifestFile, b: ManifestFile): ManifestFile {
@@ -1066,6 +1066,15 @@ export function planRollup(
   const covered = plan.summaries.flatMap((use) => use.covers);
   const dataFromMs = Math.min(...covered.map((f) => Date.parse(f.start)));
   const dataThroughMs = Math.max(...covered.map((f) => Date.parse(f.end)));
+  let trimmedHeadEndMs = -Infinity;
+  for (const s of summaryFiles) {
+    if (!isHourBundle(s) && !isDayBundle(s)) continue;
+    const sStart = Date.parse(s.start);
+    const sEnd = Date.parse(s.end);
+    if (sStart < fromMs && sEnd > fromMs && sEnd <= dataFromMs) {
+      trimmedHeadEndMs = Math.max(trimmedHeadEndMs, sEnd);
+    }
+  }
   let tailEndMs = dataThroughMs;
   let windowMs = 0;
   for (const file of plan.raw) {
@@ -1073,6 +1082,8 @@ export function planRollup(
     const end = Date.parse(file.end);
     if (start < fromMs) {
       if (end > dataFromMs) return null;
+    } else if (end <= trimmedHeadEndMs) {
+      continue;
     } else if (start < dataThroughMs || !file.key.includes("/window=")) {
       return null;
     } else {
@@ -1080,7 +1091,8 @@ export function planRollup(
       windowMs = Math.max(windowMs, end - start);
     }
   }
-  if (tailEndMs - dataThroughMs > windowMs) return null;
+  const maxTailMs = toMs - fromMs >= HOUR_MS ? Math.max(windowMs, FIVE_MINUTES_MS) : windowMs;
+  if (tailEndMs - dataThroughMs > maxTailMs) return null;
   return { files: plan.summaries, dataFromMs, dataThroughMs };
 }
 

@@ -1721,4 +1721,72 @@ describe("forked catalog listing", () => {
     expect(calls[0].has("previous_from")).toBe(false);
     expect(calls[0].get("fork")).toBe("1");
   });
+
+  it("reuses closed-hour view=summary snapshots across live commits until resync and persists multiple raw gap windows", async () => {
+    fakeManifestCacheStorage();
+    const scope = '["insights-multi-gap","service"]';
+    const closedHour = T0 + 6 * H;
+    const sumFile = { ...file(T0, 60), key: "sum-closed", kind: "hour" as const };
+    const gapAFrom = iso(T0 + H);
+    const gapATo = iso(T0 + 2 * H);
+    const gapBFrom = iso(T0 + 12 * H);
+    const gapBTo = iso(T0 + 13 * H);
+    const calls: URLSearchParams[] = [];
+    let catalogGen = 20;
+    const fetchJson = Object.assign(
+      vi.fn(async (input: string) => {
+        const params = new URL(input, "http://x").searchParams;
+        calls.push(params);
+        if (params.get("view") === "summary") {
+          return {
+            files: [sumFile],
+            next_cursor: null,
+            complete: true,
+            catalog_generation: catalogGen,
+          };
+        }
+        if (params.has("since_generation")) {
+          return {
+            files: [],
+            changes: [],
+            summary_partitions: [],
+            base_generation: 22,
+            catalog_generation: 23,
+            next_cursor: null,
+            complete: true,
+          };
+        }
+        return {
+          files: [file(Date.parse(params.get("from")!))],
+          next_cursor: null,
+          complete: true,
+          catalog_generation: catalogGen,
+        };
+      }),
+      { manifestCacheScope: () => scope },
+    );
+
+    vi.setSystemTime(closedHour + 120_000);
+    await fetchManifest(fetchJson, iso(T0), iso(closedHour), undefined, undefined, "summary");
+    observeManifestCommit(fetchJson, { type: "commit", generation: 21 });
+    await fetchManifest(fetchJson, iso(T0), iso(closedHour), undefined, undefined, "summary");
+    expect(calls.filter((p) => p.get("view") === "summary")).toHaveLength(1);
+
+    catalogGen = 22;
+    observeManifestCommit(fetchJson, { type: "resync", generation: 22 });
+    await fetchManifest(fetchJson, iso(T0), iso(closedHour), undefined, undefined, "summary");
+    expect(calls.filter((p) => p.get("view") === "summary")).toHaveLength(2);
+
+    // Two disjoint raw windows persisted across module reload both delta-sync.
+    await fetchManifest(fetchJson, gapAFrom, gapATo);
+    await fetchManifest(fetchJson, gapBFrom, gapBTo);
+    vi.resetModules();
+    const { fetchManifest: fetchAfterReload } = await import("./manifest");
+    calls.length = 0;
+    await fetchAfterReload(fetchJson, gapAFrom, gapATo);
+    await fetchAfterReload(fetchJson, gapBFrom, gapBTo);
+    expect(calls).toHaveLength(2);
+    expect(calls[0].get("since_generation")).toBe("22");
+    expect(calls[1].get("since_generation")).toBe("22");
+  });
 });

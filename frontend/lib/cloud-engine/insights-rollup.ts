@@ -173,6 +173,7 @@ export const INSIGHTS_SUMMARY_SPEC = defineSummarySpec({
     dims: ["city", "proto"],
     all_fields: INSIGHTS_RESIDUAL_FIELDS,
   },
+  wholeBelowBytes: 256 * 1024,
 });
 
 function sumTotalRequests(rollup: Rollup): number {
@@ -475,6 +476,7 @@ const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
 const ALIGN_MIN_WINDOW_HOURS = 6;
 const UNCOVERED_COALESCE_MAX_SPAN_MS = DAY_MS;
+const UNCOVERED_COALESCE_MAX_GAP_MS = 2 * HOUR_MS;
 
 export type CoalescedUncoveredGroup = {
   startMs: number;
@@ -484,18 +486,24 @@ export type CoalescedUncoveredGroup = {
 
 /**
  * Coalesces nearby uncovered intervals into bounded `[minStart, maxEnd]` spans
- * (at most `maxSpanMs`, default 24h) so scattered gaps across multi-day ranges
- * share one raw `/api/files` listing instead of one request per gap.
+ * (at most `maxSpanMs`, default 24h, and `maxGapMs`, default 2h, between adjacent
+ * uncovered intervals) so adjacent gaps share one raw `/api/files` listing without
+ * bridging across many already-bundled hours.
  */
 export function coalesceUncoveredIntervals(
   intervals: readonly TimeInterval[],
   maxSpanMs = UNCOVERED_COALESCE_MAX_SPAN_MS,
+  maxGapMs = Number.POSITIVE_INFINITY,
 ): CoalescedUncoveredGroup[] {
   const merged = mergeTimeIntervals(intervals);
   const groups: CoalescedUncoveredGroup[] = [];
   for (const iv of merged) {
     const prev = groups[groups.length - 1];
-    if (prev && iv.endMs - prev.startMs <= maxSpanMs) {
+    if (
+      prev &&
+      iv.startMs - prev.endMs <= maxGapMs &&
+      iv.endMs - prev.startMs <= maxSpanMs
+    ) {
       prev.endMs = Math.max(prev.endMs, iv.endMs);
       prev.intervals.push(iv);
     } else {
@@ -566,6 +574,8 @@ export async function insightsFromRollup(
     const bCoverage = planBundleCoverage(baselineSummaries, fromStart, fromWindow);
     const uncoveredGroups = coalesceUncoveredIntervals(
       clipPreHistory([...bCoverage.uncovered, ...wCoverage.uncovered]),
+      UNCOVERED_COALESCE_MAX_SPAN_MS,
+      UNCOVERED_COALESCE_MAX_GAP_MS,
     );
 
     const rawByKey = new Map<string, ManifestFile>();
