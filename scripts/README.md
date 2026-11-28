@@ -34,7 +34,6 @@ from env vars or config, never hard-coded infra.
 | `setup_pg_schema.py` | Idempotent PostgreSQL 16 metadata schema bootstrap (`metadata-schema-init` container / manual init). |
 | `backfill_high_scale.py` | Backfills High-Scale ClickHouse tables from archived or FOS raw log batches. |
 | `clickhouse_replay.py` | Replays quarantined or archived batches into High-Scale ClickHouse tables. |
-| `verify_dashboard.js` | Playwright dashboard & role verification across local and remote environments. |
 
 ## Dev & perf harnesses (`dev/` + load tooling)
 
