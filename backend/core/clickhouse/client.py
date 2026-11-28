@@ -608,9 +608,15 @@ class ClickHouseClient:
                 try:
                     # No client/connection handle: shared HTTP pools cannot be
                     # safely interrupted. Avoid SQL values in the monitor too.
+                    if operation == "execute":
+                        raw_sql = str((data or {}).get("query") or "").strip()
+                        monitor_sql = _redact_ddl_secrets(raw_sql) or "ClickHouse execute"
+                    else:
+                        raw_sql = (sql or "").strip()
+                        monitor_sql = _redact_ddl_secrets(raw_sql) or "ClickHouse insert"
                     registry_id = query_registry.register(
                         "ClickHouse",
-                        f"ClickHouse {operation}; query_id={query_id}",
+                        monitor_sql,
                         service_id=stats["service_id"],
                         con=None,
                     )

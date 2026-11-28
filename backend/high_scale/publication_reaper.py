@@ -37,8 +37,44 @@ from backend.high_scale.archive.manifests import build_batch_id_from_manifest_id
 logger = logging.getLogger("backend.high_scale.publication_reaper")
 
 VisibleReceipts = Callable[[str, frozenset[str]], set[str]]
+ZeroRowsChecker = Callable[[str, str, str], bool]
 
 _TERMINAL_SOURCE_STATUSES = frozenset({"acknowledged", "source_deleted"})
+_LEGACY_DIRECT_MIN_AGE_SECONDS = 600.0
+_PUBLICATION_SOURCE_DOMAINS: dict[str, tuple[str, ...]] = {
+    "request": ("request",),
+    "request_aggregate": ("request",),
+    "cmcd": ("request",),
+    "cmcd_aggregate": ("request",),
+    "origin_summary": ("request",),
+    "origin_dimensions": ("request",),
+    "performance_dimensions": ("request",),
+    "performance_summary": ("request",),
+    "performance_scatter": ("request",),
+    "security_dimensions": ("request",),
+    "network_dimensions": ("request",),
+    "rum_vitals": ("rum_vitals", "rum_errors"),
+    "rum_vitals_aggregate": ("rum_vitals", "rum_errors"),
+    "rum_errors": ("rum_vitals", "rum_errors"),
+    "rum_errors_aggregate": ("rum_vitals", "rum_errors"),
+}
+_PUBLICATION_CLICKHOUSE_TABLES: dict[str, str] = {
+    "request": "request_facts",
+    "request_aggregate": "request_aggregates",
+    "cmcd": "cmcd_projection_facts",
+    "cmcd_aggregate": "cmcd_aggregates",
+    "origin_summary": "origin_minute_summary",
+    "origin_dimensions": "origin_minute_dimensions",
+    "performance_dimensions": "performance_minute_dimensions",
+    "performance_summary": "performance_minute_summary",
+    "performance_scatter": "performance_scatter_samples",
+    "security_dimensions": "security_minute_dimensions",
+    "network_dimensions": "network_minute_dimensions",
+    "rum_vitals": "rum_vitals_facts",
+    "rum_vitals_aggregate": "rum_vitals_aggregates",
+    "rum_errors": "rum_error_facts",
+    "rum_errors_aggregate": "rum_error_aggregates",
+}
 
 
 def publication_batch_id(manifest_id: str, manifest_domain: str, domain: str) -> str:
@@ -75,6 +111,26 @@ def clickhouse_visible_receipts(client: Any) -> VisibleReceipts:
     return visible
 
 
+def clickhouse_batch_has_no_rows(client: Any) -> ZeroRowsChecker:
+    """Verify ClickHouse has zero rows for ``batch_uuid`` on ``domain``'s target table; fail closed otherwise."""
+
+    def has_no_rows(service_id: str, domain: str, batch_uuid: str) -> bool:
+        table = _PUBLICATION_CLICKHOUSE_TABLES.get(domain)
+        if table is None:
+            return False
+        uid = str(uuid.UUID(batch_uuid))
+        rows = client.execute(
+            f"SELECT count() AS row_count FROM `{table}` "
+            "WHERE service_id={service_id:String} AND batch_id={batch_id:UUID}",
+            {"service_id": service_id, "batch_id": uid},
+        )
+        if len(rows) != 1 or not isinstance(rows[0].get("row_count"), int):
+            return False
+        return int(rows[0]["row_count"]) == 0
+
+    return has_no_rows
+
+
 @dataclass(frozen=True)
 class ReapResult:
     superseded: tuple[str, ...]
@@ -97,6 +153,7 @@ class PublicationReaper:
         *,
         control: Any,
         visible_receipts: VisibleReceipts,
+        zero_rows_checker: ZeroRowsChecker | None = None,
         grace_seconds: float = 3600.0,
         max_age_seconds: float | None = None,
         interval_seconds: float = 600.0,
@@ -105,6 +162,7 @@ class PublicationReaper:
     ) -> None:
         self._control = control
         self._visible_receipts = visible_receipts
+        self._zero_rows_checker = zero_rows_checker
         self.grace_seconds = grace_seconds
         self.max_age_seconds = max_age_seconds
         self._interval_seconds = interval_seconds
@@ -185,6 +243,8 @@ class PublicationReaper:
                     "generation": row["generation"],
                     "expected_rows": row["expected_rows"],
                     "age_seconds": row["age_seconds"],
+                    "updated_at": row.get("updated_at"),
+                    "source_keys": row.get("source_keys"),
                 }
 
         if not pending:
@@ -246,10 +306,55 @@ class PublicationReaper:
                 kept["recently_updated"] += 1
             else:
                 replacements[batch_id] = owners
+        direct_proven: list[str] = []
         for batch_id in remaining_pending:
             if batch_id not in candidates and batch_id in direct_batches:
-                kept["sources_not_republished"] += 1
-                unprovable.append(batch_id)
+                info = pending[batch_id]
+                domain = info["domain"]
+                source_domains = _PUBLICATION_SOURCE_DOMAINS.get(domain)
+                if source_domains is None:
+                    kept["sources_not_republished"] += 1
+                    unprovable.append(batch_id)
+                    continue
+                source_keys = info.get("source_keys")
+                required_age = (
+                    grace_seconds if source_keys is not None else max(grace_seconds, _LEGACY_DIRECT_MIN_AGE_SECONDS)
+                )
+                if info["age_seconds"] < required_age:
+                    kept["recently_updated"] += 1
+                    continue
+                if source_keys is not None:
+                    sources_ok = bool(source_keys) and self._control.all_sources_durable(
+                        service_id, source_domains, source_keys
+                    )
+                else:
+                    updated_at = info.get("updated_at")
+                    sources_ok = updated_at is not None and self._control.has_settled_durable_sources_before(
+                        service_id, source_domains, cutoff=updated_at
+                    )
+                if not sources_ok:
+                    kept["sources_not_republished"] += 1
+                    unprovable.append(batch_id)
+                    continue
+                if self._zero_rows_checker is None:
+                    kept["clickhouse_rows_unverified"] += 1
+                    unprovable.append(batch_id)
+                    continue
+                batch_uuid = publication_batch_uuid(service_id, domain, info["generation"], batch_id)
+                try:
+                    no_rows = bool(self._zero_rows_checker(service_id, domain, batch_uuid))
+                except Exception:
+                    logger.warning(
+                        "high-scale publication reaper zero-row check failed",
+                        extra={"service_id": service_id, "domain": domain, "batch_id": batch_id},
+                        exc_info=True,
+                    )
+                    no_rows = False
+                if not no_rows:
+                    kept["clickhouse_rows_present"] += 1
+                    unprovable.append(batch_id)
+                    continue
+                direct_proven.append(batch_id)
 
         replacement_domains = self._control.archive_manifest_domains(
             service_id, sorted({m for owners in replacements.values() for m in owners})
@@ -265,7 +370,7 @@ class PublicationReaper:
         replacement_states = self._control.publication_manifest_states(
             service_id, sorted({b for batches in replacement_batches.values() for b in batches})
         )
-        proven: list[str] = []
+        proven: list[str] = list(direct_proven)
         for batch_id, batches in replacement_batches.items():
             statuses = [replacement_states[b]["status"] for b in batches if b in replacement_states]
             # A replacement with no publication for this domain had no rows for it; one that is not visible
@@ -325,6 +430,16 @@ def _visible_receipts_from_environment() -> VisibleReceipts:
     return clickhouse_visible_receipts(ClickHouseClient(settings))
 
 
+def _zero_rows_checker_from_environment() -> ZeroRowsChecker | None:
+    from backend import config as app_config
+    from backend.core.clickhouse import ClickHouseClient
+
+    settings = app_config.load_clickhouse_config()
+    if settings is None:
+        return None
+    return clickhouse_batch_has_no_rows(ClickHouseClient(settings))
+
+
 def reaper_from_environment(control: Any, clickhouse: Any) -> PublicationReaper | None:
     if os.getenv("HIGH_SCALE_PUBLICATION_REAPER_ENABLED", "1").strip().lower() not in {"1", "true", "yes", "on"}:
         return None
@@ -332,6 +447,7 @@ def reaper_from_environment(control: Any, clickhouse: Any) -> PublicationReaper 
     return PublicationReaper(
         control=control,
         visible_receipts=clickhouse_visible_receipts(clickhouse),
+        zero_rows_checker=clickhouse_batch_has_no_rows(clickhouse),
         grace_seconds=float(os.getenv("HIGH_SCALE_PUBLICATION_REAPER_GRACE_SECONDS", "300")),
         max_age_seconds=float(raw_max_age) if raw_max_age else None,
         interval_seconds=float(os.getenv("HIGH_SCALE_PUBLICATION_REAPER_INTERVAL_SECONDS", "60")),
@@ -366,7 +482,11 @@ def _main(argv: Sequence[str] | None) -> int:
         parser.error("--abandon-older-than-days must be positive")
     abandon_after = None if args.abandon_older_than_days is None else args.abandon_older_than_days * 86400
 
-    reaper = PublicationReaper(control=PostgresControlPlane(), visible_receipts=_visible_receipts_from_environment())
+    reaper = PublicationReaper(
+        control=PostgresControlPlane(),
+        visible_receipts=_visible_receipts_from_environment(),
+        zero_rows_checker=_zero_rows_checker_from_environment(),
+    )
     by_domain: Counter[str] = Counter()
     abandoned_by_domain: Counter[str] = Counter()
     kept: Counter[str] = Counter()

@@ -472,6 +472,7 @@ class HighScaleBatch:
     domain: str
     generation: str
     rows: tuple[dict[str, Any], ...]
+    source_keys: tuple[str, ...] = ()
 
     @cached_property
     def digest(self) -> str:
@@ -496,6 +497,7 @@ class BatchManifest:
     expected_rows: int
     status: PublicationStatus
     visible_rows: int = 0
+    source_keys: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -793,6 +795,7 @@ class ClickHousePublication:
                 batch.digest,
                 len(batch.rows),
                 PublicationStatus.PENDING,
+                source_keys=batch.source_keys,
             )
             self._manifests.put(manifest)
         else:
@@ -820,6 +823,7 @@ class ClickHousePublication:
                 manifest.expected_rows,
                 PublicationStatus.VISIBLE,
                 receipt.rows_inserted,
+                source_keys=manifest.source_keys or batch.source_keys,
             )
         )
         return PublicationResult(batch.batch_id, PublicationStatus.VISIBLE, receipt.rows_inserted, False)

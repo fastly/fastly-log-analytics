@@ -83,7 +83,7 @@ from .sql_queries import Detection, _base_sql, _detection_for, rewrite_materiali
 
 logger = logging.getLogger(__name__)
 
-_MAX_WORKERS = 3
+_MAX_WORKERS = 2
 _BACKGROUND_MAX_WORKERS = 2
 _BACKGROUND_QUERY_MAX_THREADS = str(max(1, int(os.getenv("INSIGHTS_BG_MAX_THREADS", "3") or "3")))
 _INSIGHT_MARKER_RE = re.compile(r"^\s*/\*\s*insight:\w+\s*\*/\s*")

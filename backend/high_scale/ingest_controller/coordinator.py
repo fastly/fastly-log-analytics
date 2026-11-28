@@ -541,7 +541,13 @@ class HighScaleIngestController:
                 _apply_high_scale_ngwaf_bots(all_events, ngwaf_bots)
             try:
                 publication, derived_ok, derived_err = self._publish_manifest_publications(
-                    service_id, domain, publication_id, owner.owner_epoch, all_events, sibling_events
+                    service_id,
+                    domain,
+                    publication_id,
+                    owner.owner_epoch,
+                    all_events,
+                    sibling_events,
+                    source_keys=object_keys,
                 )
             except Exception as exc:
                 self._fail_deferred_sources(service_id, object_keys, owner.owner_epoch, str(exc), tokens_by_key)
@@ -969,24 +975,40 @@ class HighScaleIngestController:
         owner_epoch: int,
         events: Sequence[dict[str, Any]],
         sibling_events: Sequence[dict[str, Any]],
+        *,
+        source_keys: Sequence[str] = (),
     ) -> tuple[PublicationResult, bool, str]:
         """Publish a committed manifest's facts and derived projections under batch ids derived from the manifest.
 
         A fact publication failure raises; derived failures are reported so the caller can hold the sources.
         """
+        normalized_keys = tuple(sorted({k for k in source_keys if k}))
         serving_rows = tuple(e for e in events if row_matches_serving_domain(domain, e))
         batch_id = build_batch_id_from_manifest_id(manifest_id)
         if serving_rows:
             publication = self._serving.publish(
-                HighScaleBatch(batch_id, service_id, domain, str(owner_epoch), serving_rows)
+                HighScaleBatch(
+                    batch_id,
+                    service_id,
+                    domain,
+                    str(owner_epoch),
+                    serving_rows,
+                    source_keys=normalized_keys,
+                )
             )
         else:
             publication = PublicationResult(batch_id, PublicationStatus.VISIBLE, 0, False)
-        agg_ok, agg_err = self._publish_aggregates_batch(service_id, domain, manifest_id, owner_epoch, events)
+        agg_ok, agg_err = self._publish_aggregates_batch(
+            service_id, domain, manifest_id, owner_epoch, events, source_keys=normalized_keys
+        )
         cmcd_ok, cmcd_err = True, None
         if domain == "request":
             cmcd_ok, cmcd_err = self._publish_cmcd_projection(
-                service_id, build_batch_id_from_manifest_id(f"{manifest_id}:cmcd"), owner_epoch, events
+                service_id,
+                build_batch_id_from_manifest_id(f"{manifest_id}:cmcd"),
+                owner_epoch,
+                events,
+                source_keys=normalized_keys,
             )
         sibling = _RUM_SIBLING_DOMAIN.get(domain)
         sibling_ok, sibling_err = True, None
@@ -994,7 +1016,14 @@ class HighScaleIngestController:
             sibling_batch_id = build_batch_id_from_manifest_id(f"{manifest_id}:{sibling}")
             try:
                 self._serving.publish(
-                    HighScaleBatch(sibling_batch_id, service_id, sibling, str(owner_epoch), tuple(sibling_events))
+                    HighScaleBatch(
+                        sibling_batch_id,
+                        service_id,
+                        sibling,
+                        str(owner_epoch),
+                        tuple(sibling_events),
+                        source_keys=normalized_keys,
+                    )
                 )
             except Exception as exc:
                 logger.exception(
@@ -1004,7 +1033,7 @@ class HighScaleIngestController:
                 sibling_ok, sibling_err = False, str(exc)
             else:
                 sibling_ok, sibling_err = self._publish_aggregates_batch(
-                    service_id, sibling, manifest_id, owner_epoch, sibling_events
+                    service_id, sibling, manifest_id, owner_epoch, sibling_events, source_keys=normalized_keys
                 )
         derived_ok = agg_ok and cmcd_ok and sibling_ok
         return publication, derived_ok, agg_err or cmcd_err or sibling_err or "derived publication failed"
@@ -1192,11 +1221,19 @@ class HighScaleIngestController:
         return events, sibling_events
 
     def _publish_aggregates_batch(
-        self, service_id: str, domain: str, manifest_id: str, owner_epoch: int, events: Sequence[dict[str, Any]]
+        self,
+        service_id: str,
+        domain: str,
+        manifest_id: str,
+        owner_epoch: int,
+        events: Sequence[dict[str, Any]],
+        *,
+        source_keys: Sequence[str] = (),
     ) -> tuple[bool, str | None]:
         if self._aggregates is None or not events:
             return True, None
         try:
+            normalized_keys = tuple(sorted({k for k in source_keys if k}))
             event_tuple: tuple[dict[str, Any], ...] = tuple(events)
             batches_to_publish: list[HighScaleBatch] = []
             epoch_str = str(owner_epoch)
@@ -1215,7 +1252,14 @@ class HighScaleIngestController:
                 if counts:
                     agg_id = build_batch_id_from_manifest_id(f"{manifest_id}:{domain}_aggregate")
                     batches_to_publish.append(
-                        HighScaleBatch(agg_id, service_id, f"{domain}_aggregate", epoch_str, counts)
+                        HighScaleBatch(
+                            agg_id,
+                            service_id,
+                            f"{domain}_aggregate",
+                            epoch_str,
+                            counts,
+                            source_keys=normalized_keys,
+                        )
                     )
                 for sub_domain, rows in (
                     ("origin_summary", origin_proj.summary_rows),
@@ -1228,14 +1272,30 @@ class HighScaleIngestController:
                 ):
                     if rows:
                         sub_id = build_batch_id_from_manifest_id(f"{manifest_id}:{sub_domain}")
-                        batches_to_publish.append(HighScaleBatch(sub_id, service_id, sub_domain, epoch_str, rows))
+                        batches_to_publish.append(
+                            HighScaleBatch(
+                                sub_id,
+                                service_id,
+                                sub_domain,
+                                epoch_str,
+                                rows,
+                                source_keys=normalized_keys,
+                            )
+                        )
                 del origin_proj, perf_proj, security_proj, network_proj
             else:
                 counts = compute_dimension_counts(domain, event_tuple)
                 if counts:
                     agg_id = build_batch_id_from_manifest_id(f"{manifest_id}:{domain}_aggregate")
                     batches_to_publish.append(
-                        HighScaleBatch(agg_id, service_id, f"{domain}_aggregate", epoch_str, counts)
+                        HighScaleBatch(
+                            agg_id,
+                            service_id,
+                            f"{domain}_aggregate",
+                            epoch_str,
+                            counts,
+                            source_keys=normalized_keys,
+                        )
                     )
                 if domain == "request":
                     origin_proj = build_origin_projection_rows(event_tuple)
@@ -1245,7 +1305,16 @@ class HighScaleIngestController:
                     ):
                         if rows:
                             sub_id = build_batch_id_from_manifest_id(f"{manifest_id}:{sub_domain}")
-                            batches_to_publish.append(HighScaleBatch(sub_id, service_id, sub_domain, epoch_str, rows))
+                            batches_to_publish.append(
+                                HighScaleBatch(
+                                    sub_id,
+                                    service_id,
+                                    sub_domain,
+                                    epoch_str,
+                                    rows,
+                                    source_keys=normalized_keys,
+                                )
+                            )
                     del origin_proj
 
                     perf_proj = build_performance_projection_rows(event_tuple)
@@ -1256,7 +1325,16 @@ class HighScaleIngestController:
                     ):
                         if rows:
                             sub_id = build_batch_id_from_manifest_id(f"{manifest_id}:{sub_domain}")
-                            batches_to_publish.append(HighScaleBatch(sub_id, service_id, sub_domain, epoch_str, rows))
+                            batches_to_publish.append(
+                                HighScaleBatch(
+                                    sub_id,
+                                    service_id,
+                                    sub_domain,
+                                    epoch_str,
+                                    rows,
+                                    source_keys=normalized_keys,
+                                )
+                            )
                     del perf_proj
 
                     security_proj = build_security_projection_rows(event_tuple)
@@ -1264,7 +1342,12 @@ class HighScaleIngestController:
                         sub_id = build_batch_id_from_manifest_id(f"{manifest_id}:security_dimensions")
                         batches_to_publish.append(
                             HighScaleBatch(
-                                sub_id, service_id, "security_dimensions", epoch_str, security_proj.dimension_rows
+                                sub_id,
+                                service_id,
+                                "security_dimensions",
+                                epoch_str,
+                                security_proj.dimension_rows,
+                                source_keys=normalized_keys,
                             )
                         )
                     del security_proj
@@ -1274,7 +1357,12 @@ class HighScaleIngestController:
                         sub_id = build_batch_id_from_manifest_id(f"{manifest_id}:network_dimensions")
                         batches_to_publish.append(
                             HighScaleBatch(
-                                sub_id, service_id, "network_dimensions", epoch_str, network_proj.dimension_rows
+                                sub_id,
+                                service_id,
+                                "network_dimensions",
+                                epoch_str,
+                                network_proj.dimension_rows,
+                                source_keys=normalized_keys,
                             )
                         )
                     del network_proj
@@ -1300,10 +1388,17 @@ class HighScaleIngestController:
             return False, str(exc)
 
     def _publish_cmcd_projection(
-        self, service_id: str, batch_id: str, owner_epoch: int, events: Sequence[dict[str, Any]]
+        self,
+        service_id: str,
+        batch_id: str,
+        owner_epoch: int,
+        events: Sequence[dict[str, Any]],
+        *,
+        source_keys: Sequence[str] = (),
     ) -> tuple[bool, str | None]:
         """Publish CMCD projection rows for request events carrying CMCD fields."""
         try:
+            normalized_keys = tuple(sorted({k for k in source_keys if k}))
             rows: list[dict[str, Any]] = []
             skipped = 0
             for event in events:
@@ -1322,7 +1417,16 @@ class HighScaleIngestController:
                     extra={"service_id": service_id, "skipped": skipped},
                 )
             if rows:
-                self._serving.publish(HighScaleBatch(batch_id, service_id, "cmcd", str(owner_epoch), tuple(rows)))
+                self._serving.publish(
+                    HighScaleBatch(
+                        batch_id,
+                        service_id,
+                        "cmcd",
+                        str(owner_epoch),
+                        tuple(rows),
+                        source_keys=normalized_keys,
+                    )
+                )
             return True, None
         except Exception as exc:
             logger.exception(

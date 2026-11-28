@@ -224,10 +224,17 @@ CREATE TABLE IF NOT EXISTS high_scale_publication_manifests (
     batch_digest TEXT NOT NULL, expected_rows BIGINT NOT NULL CHECK (expected_rows >= 0),
     visible_rows BIGINT NOT NULL DEFAULT 0 CHECK (visible_rows >= 0),
     status TEXT NOT NULL CHECK (status IN ('pending', 'visible', 'superseded', 'abandoned')),
+    source_keys_json TEXT,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 DO $$
 BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_attribute WHERE attrelid = 'high_scale_publication_manifests'::regclass
+          AND attname = 'source_keys_json' AND NOT attisdropped
+    ) THEN
+        ALTER TABLE high_scale_publication_manifests ADD COLUMN IF NOT EXISTS source_keys_json TEXT;
+    END IF;
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conrelid = 'high_scale_publication_manifests'::regclass
@@ -973,12 +980,13 @@ class PostgresControlPlane:
         _require_text(batch_id, "batch_id")
         with self.transaction(read_only=True) as connection:
             row = connection.execute(
-                "SELECT batch_id, service_id, domain, generation, batch_digest, expected_rows, visible_rows, status "
-                "FROM high_scale_publication_manifests WHERE batch_id=%s",
+                "SELECT batch_id, service_id, domain, generation, batch_digest, expected_rows, visible_rows, status, "
+                "source_keys_json FROM high_scale_publication_manifests WHERE batch_id=%s",
                 (batch_id,),
             ).fetchone()
         if row is None:
             return None
+        source_keys = tuple(str(k) for k in json.loads(row[8])) if row[8] else ()
         return BatchManifest(
             batch_id=row[0],
             service_id=row[1],
@@ -988,16 +996,23 @@ class PostgresControlPlane:
             expected_rows=row[5],
             status=PublicationStatus(row[7]),
             visible_rows=row[6],
+            source_keys=source_keys,
         )
 
     def put_batch_manifest(self, manifest: Any) -> None:
+        raw_keys = getattr(manifest, "source_keys", ()) or ()
+        normalized_keys = sorted({str(k) for k in raw_keys if k})
+        source_keys_json = json.dumps(normalized_keys) if normalized_keys else None
         with self.transaction() as connection:
             connection.execute(
                 "INSERT INTO high_scale_publication_manifests "
-                "(batch_id, service_id, domain, generation, batch_digest, expected_rows, visible_rows, status, updated_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, clock_timestamp()) "
+                "(batch_id, service_id, domain, generation, batch_digest, expected_rows, visible_rows, status, "
+                "source_keys_json, updated_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, clock_timestamp()) "
                 "ON CONFLICT (batch_id) DO UPDATE SET "
-                "visible_rows=EXCLUDED.visible_rows, status=EXCLUDED.status, updated_at=clock_timestamp()",
+                "visible_rows=EXCLUDED.visible_rows, status=EXCLUDED.status, "
+                "source_keys_json=COALESCE(EXCLUDED.source_keys_json, high_scale_publication_manifests.source_keys_json), "
+                "updated_at=clock_timestamp()",
                 (
                     manifest.batch_id,
                     manifest.service_id,
@@ -1007,6 +1022,7 @@ class PostgresControlPlane:
                     manifest.expected_rows,
                     manifest.visible_rows,
                     manifest.status.value,
+                    source_keys_json,
                 ),
             )
 
@@ -1060,7 +1076,7 @@ class PostgresControlPlane:
         with self.transaction(read_only=True) as connection:
             rows = connection.execute(
                 "SELECT batch_id, domain, generation, expected_rows, "
-                "EXTRACT(EPOCH FROM (clock_timestamp() - updated_at)) "
+                "EXTRACT(EPOCH FROM (clock_timestamp() - updated_at)), updated_at, source_keys_json "
                 "FROM high_scale_publication_manifests "
                 "WHERE service_id=%s AND status='pending' "
                 "AND updated_at < clock_timestamp() - make_interval(secs => %s) "
@@ -1074,9 +1090,52 @@ class PostgresControlPlane:
                 "generation": str(r[2]),
                 "expected_rows": int(r[3]),
                 "age_seconds": float(r[4]),
+                "updated_at": r[5],
+                "source_keys": tuple(str(k) for k in json.loads(r[6])) if r[6] is not None else None,
             }
             for r in rows
         ]
+
+    def all_sources_durable(
+        self, service_id: str, source_domains: str | Sequence[str], object_keys: Sequence[str]
+    ) -> bool:
+        """Return True iff every ``object_key`` exists in ``source_domains`` with a durable status."""
+        _require_text(service_id, "service_id")
+        domains = [source_domains] if isinstance(source_domains, str) else [str(d) for d in source_domains if d]
+        keys = sorted({str(k) for k in object_keys if k})
+        if not domains or not keys:
+            return False
+        with self.transaction(read_only=True) as connection:
+            rows = connection.execute(
+                "SELECT object_key, status FROM high_scale_source_objects "
+                "WHERE service_id=%s AND domain = ANY(%s) AND object_key = ANY(%s)",
+                (service_id, domains, keys),
+            ).fetchall()
+        by_key = {str(r[0]): str(r[1]) for r in rows}
+        return len(by_key) == len(keys) and all(
+            by_key[k] in {"appended", "acknowledged", "source_deleted"} for k in keys
+        )
+
+    def has_settled_durable_sources_before(
+        self, service_id: str, source_domains: str | Sequence[str], *, cutoff: datetime
+    ) -> bool:
+        """Return True iff ``source_domains`` has >= 1 durable and 0 active/uncommitted sources discovered <= cutoff."""
+        _require_text(service_id, "service_id")
+        domains = [source_domains] if isinstance(source_domains, str) else [str(d) for d in source_domains if d]
+        if not domains:
+            return False
+        with self.transaction(read_only=True) as connection:
+            row = connection.execute(
+                "SELECT "
+                "COUNT(*) FILTER (WHERE status IN ('appended', 'acknowledged', 'source_deleted')), "
+                "COUNT(*) FILTER (WHERE status IN ('discovered', 'claimed', 'archived', 'source_missing')) "
+                "FROM high_scale_source_objects "
+                "WHERE service_id=%s AND domain = ANY(%s) AND discovered_at <= %s",
+                (service_id, domains, cutoff),
+            ).fetchone()
+        if not row:
+            return False
+        return int(row[0] or 0) >= 1 and int(row[1] or 0) == 0
 
     def publication_manifest_states(self, service_id: str, batch_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
         _require_text(service_id, "service_id")

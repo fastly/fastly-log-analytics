@@ -432,6 +432,11 @@ def _build_geo(
     present: set[str],
     rollup_span: tuple[datetime, datetime] | None,
     filter_clause: str,
+    baseline_hours: float = 0.0,
+    window_hours: float = 0.0,
+    baseline_start: datetime | None = None,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
 ) -> tuple[str, QuerySource]:
     has_country = "new_country_traffic" in active
     city_ids = active & {"city_surges", "city_error_spikes", "new_city_traffic"}
@@ -441,7 +446,17 @@ def _build_geo(
     if "city_error_spikes" in active:
         proj.append(("status", COLUMNS["status"]))
     cte, source = _base_cte(
-        "geo", proj, rollup_shape="geo", rollup_span=rollup_span, filter_clause=filter_clause, weighted=True
+        "geo",
+        proj,
+        rollup_shape="geo",
+        rollup_span=rollup_span,
+        filter_clause=filter_clause,
+        weighted=True,
+        baseline_sample_stride=_baseline_sample_stride(baseline_hours),
+        window_sample_stride=_window_sample_stride(window_hours),
+        baseline_start=baseline_start,
+        window_start=window_start,
+        window_end=window_end,
     )
     use_sets = has_country and bool(city_ids)
     g_city = "grouping(city)" if use_sets else ("toUInt8(0)" if city_ids else "toUInt8(1)")
@@ -536,12 +551,27 @@ def _build_asn(
     present: set[str],
     rollup_span: tuple[datetime, datetime] | None,
     filter_clause: str,
+    baseline_hours: float = 0.0,
+    window_hours: float = 0.0,
+    baseline_start: datetime | None = None,
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
 ) -> tuple[str, QuerySource]:
     proj: list[tuple[str, str]] = [("asn", COLUMNS["asn"])]
     if "asn_hosting_shift" in active:
         proj.append(("p_type", COLUMNS["p_type"]))
     cte, source = _base_cte(
-        "asn", proj, rollup_shape="asn", rollup_span=rollup_span, filter_clause=filter_clause, weighted=True
+        "asn",
+        proj,
+        rollup_shape="asn",
+        rollup_span=rollup_span,
+        filter_clause=filter_clause,
+        weighted=True,
+        baseline_sample_stride=_baseline_sample_stride(baseline_hours),
+        window_sample_stride=_window_sample_stride(window_hours),
+        baseline_start=baseline_start,
+        window_start=window_start,
+        window_end=window_end,
     )
     host_cols = (
         "sumIf(n, is_w AND p_type = 'hosting') AS w_hosting, "

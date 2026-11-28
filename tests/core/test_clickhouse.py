@@ -863,6 +863,32 @@ def test_query_settings_and_credential_redaction(clients):
         telemetry._QUERIES.reset(token)
     assert "hunter2-super-secret" not in recorded and "BY '[REDACTED]'" in recorded
 
+
+@pytest.mark.no_postgres
+def test_query_registry_receives_normalized_redacted_sql_without_query_id(clients, monkeypatch):
+    registered: list[tuple[str, str, str | None]] = []
+    monkeypatch.setattr(
+        ch.query_registry,
+        "register",
+        lambda db_type, sql, *, service_id=None, con=None, pool_slot=None: (
+            registered.append((db_type, sql, service_id)) or 1
+        ),
+    )
+    monkeypatch.setattr(ch.query_registry, "deregister", lambda qid, **kw: None)
+
+    c = clients(lambda _req: response([{"ok": 1}]))
+    c.execute("  SELECT count() FROM request_facts WHERE service_id = {service_id:String}  ", {"service_id": "svc-1"})
+    c.execute("ALTER USER `u` IDENTIFIED WITH sha256_password BY 'top-secret-pw' DEFAULT DATABASE `d`")
+    c.insert_rows(ch.CLICKHOUSE_FACT_TABLE, ["country"], [("US",)])
+
+    assert len(registered) == 3
+    assert registered[0][0] == "ClickHouse"
+    assert registered[0][1] == "SELECT count() FROM request_facts WHERE service_id = {service_id:String}"
+    assert "query_id=" not in registered[0][1]
+    assert "top-secret-pw" not in registered[1][1] and "BY '[REDACTED]'" in registered[1][1]
+    assert "query_id=" not in registered[1][1]
+    assert registered[2][1].startswith("INSERT INTO `log_facts`") and "query_id=" not in registered[2][1]
+
     analyzer_seen: list[httpx.Request] = []
 
     class AnalyzerTransport(httpx.BaseTransport):

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -130,7 +130,7 @@ def test_full_evaluation_consolidates_queries_by_at_least_half() -> None:
     assert "group_window_perf" not in queries
     assert len(client.calls) <= 27, f"Expected <= 27 ClickHouse queries, got {len(client.calls)}: {list(queries)}"
     assert evaluator._MULTIPLEX_GROUPS == ()
-    assert evaluator._MAX_WORKERS == 3
+    assert evaluator._MAX_WORKERS == 2
     assert evaluator._BACKGROUND_MAX_WORKERS == 2
     assert evaluator._COLD_POOL._max_workers == 1
 
@@ -853,7 +853,7 @@ def test_background_insights_refresh_caps_concurrency_and_uses_tdigest(monkeypat
     assert "quantileExactInclusiveIf" not in sql
 
     # force_refresh (prewarmer) caps max_workers below interactive _MAX_WORKERS
-    assert 0 < evaluator._BACKGROUND_MAX_WORKERS < evaluator._MAX_WORKERS
+    assert 0 < evaluator._BACKGROUND_MAX_WORKERS <= evaluator._MAX_WORKERS
     seen_workers: list[int] = []
 
     def fake_evaluate(*args: Any, max_workers: int = evaluator._MAX_WORKERS, **kwargs: Any):
@@ -996,3 +996,66 @@ def test_materialized_cf_columns_used_across_insights_and_cache_collapse_when_en
         assert "FROM request_facts PREWHERE " in sql
     misses_sql = next(s for s in detail_calls if "insight:cache_collapse_misses" in s)
     assert "`_cf_pop`" in misses_sql and "`_cf_status`" in misses_sql
+
+
+@pytest.mark.no_postgres
+def test_geo_and_asn_batches_apply_pk_stride_sampling_and_worker_cap() -> None:
+    from backend.high_scale.insights.batches import _build_asn, _build_geo
+
+    assert evaluator._MAX_WORKERS == 2
+
+    end = datetime(2026, 11, 26, 12, 0, tzinfo=UTC)
+    w_start = end - timedelta(hours=1)
+    b_start = end - timedelta(days=7)
+    # Rollup covers only part of baseline, leaving uncovered baseline hours >= 24h total baseline.
+    rollup_span = (b_start + timedelta(hours=24), w_start)
+
+    geo_sql, geo_src = _build_geo(
+        {"new_country_traffic", "city_surges"},
+        present={"country", "city", "region"},
+        rollup_span=rollup_span,
+        filter_clause="",
+        baseline_hours=168.0,
+        window_hours=1.0,
+        baseline_start=b_start,
+        window_start=w_start,
+        window_end=end,
+    )
+    asn_sql, asn_src = _build_asn(
+        {"asn_concentration", "new_asn_traffic"},
+        present={"asn"},
+        rollup_span=rollup_span,
+        filter_clause="",
+        baseline_hours=168.0,
+        window_hours=1.0,
+        baseline_start=b_start,
+        window_start=w_start,
+        window_end=end,
+    )
+
+    for sql, src in ((geo_sql, geo_src), (asn_sql, asn_src)):
+        assert src == "mixed"
+        raw_part, rollup_part = sql.split("UNION ALL", 1)
+        assert "toDateTime(" in raw_part
+        assert "if(event_timestamp < {window_start:DateTime64(3)}, toUInt64(8), toUInt64(1)) AS n" in raw_part
+        assert "toDateTime(" not in rollup_part
+
+    geo_unbound, _ = _build_geo(
+        {"new_country_traffic"},
+        present={"country"},
+        rollup_span=None,
+        filter_clause="",
+        baseline_hours=168.0,
+        window_hours=1.0,
+    )
+    asn_unbound, _ = _build_asn(
+        {"new_asn_traffic"},
+        present={"asn"},
+        rollup_span=None,
+        filter_clause="",
+        baseline_hours=168.0,
+        window_hours=1.0,
+    )
+    for sql in (geo_unbound, asn_unbound):
+        assert "intDiv(toUnixTimestamp(event_timestamp), 300) % 8 = 0" in sql
+        assert "toUInt64(8)" in sql

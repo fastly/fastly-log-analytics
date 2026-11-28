@@ -727,3 +727,267 @@ def test_reaper_from_environment_defaults_and_stale_request_batch_reaping(
     assert orphan_batch in reap_res.superseded
     assert seed.status(orphan_batch) == "superseded"
     assert seed.status(rep_batch) == "visible"
+
+
+def _seed_source_object(
+    seed: _Seed,
+    key: str,
+    *,
+    domain: str = "request",
+    status: str = "appended",
+    age_seconds: float = 900.0,
+) -> None:
+    with seed.control.transaction() as connection:
+        connection.execute(
+            "INSERT INTO high_scale_source_objects (object_id, service_id, domain, object_key, checksum, size_bytes, "
+            "status, discovered_at) VALUES (%s, %s, %s, %s, 'c', 1, %s, "
+            "clock_timestamp() - make_interval(secs => %s)) "
+            "ON CONFLICT (service_id, object_key) DO UPDATE SET status=EXCLUDED.status",
+            (f"{seed.sid}:{key}", seed.sid, domain, key, status, age_seconds),
+        )
+
+
+def test_reaper_retires_direct_ingest_pending_manifest_with_source_keys_when_durable_and_zero_ch_rows(seed) -> None:
+    # 1. Still active/uncommitted source -> kept
+    _seed_source_object(seed, "raw/request/active-1.gz", status="discovered")
+    b_active = build_batch_id_from_manifest_id("ingest-active")
+    seed.control.put_batch_manifest(
+        BatchManifest(
+            b_active,
+            seed.sid,
+            "request",
+            "1",
+            "sha256:a",
+            10,
+            PublicationStatus.PENDING,
+            source_keys=("raw/request/active-1.gz",),
+        )
+    )
+
+    # 2. All sources durable, but ClickHouse still has rows -> kept
+    _seed_source_object(seed, "raw/request/ch-rows.gz", status="appended")
+    b_ch_rows = build_batch_id_from_manifest_id("ingest-ch-rows")
+    ch_uuid_rows = publication_batch_uuid(seed.sid, "request", "1", b_ch_rows)
+    seed.control.put_batch_manifest(
+        BatchManifest(
+            b_ch_rows,
+            seed.sid,
+            "request",
+            "1",
+            "sha256:b",
+            10,
+            PublicationStatus.PENDING,
+            source_keys=("raw/request/ch-rows.gz",),
+        )
+    )
+
+    # 3. All sources durable (one appended, one acknowledged) and ClickHouse confirms 0 rows -> superseded!
+    # Also cover derived domain ('security_dimensions' -> 'request') and RUM sibling ('rum_errors' -> rum_vitals/rum_errors).
+    _seed_source_object(seed, "raw/request/done-1.gz", status="appended")
+    _seed_source_object(seed, "raw/request/done-2.gz", status="acknowledged")
+    b_done = build_batch_id_from_manifest_id("ingest-done:security_dimensions")
+    seed.control.put_batch_manifest(
+        BatchManifest(
+            b_done,
+            seed.sid,
+            "security_dimensions",
+            "1",
+            "sha256:c",
+            5,
+            PublicationStatus.PENDING,
+            source_keys=("raw/request/done-2.gz", "raw/request/done-1.gz"),
+        )
+    )
+
+    _seed_source_object(seed, "raw/rum/done-rum.gz", domain="rum_vitals", status="appended")
+    b_rum = build_batch_id_from_manifest_id("ingest-rum:rum_errors")
+    seed.control.put_batch_manifest(
+        BatchManifest(
+            b_rum,
+            seed.sid,
+            "rum_errors",
+            "1",
+            "sha256:d",
+            3,
+            PublicationStatus.PENDING,
+            source_keys=("raw/rum/done-rum.gz",),
+        )
+    )
+
+    with seed.control.transaction() as connection:
+        connection.execute(
+            "UPDATE high_scale_publication_manifests SET updated_at = clock_timestamp() - interval '10 minutes' "
+            "WHERE service_id=%s",
+            (seed.sid,),
+        )
+
+    # Without zero_rows_checker -> fail closed, nothing superseded!
+    no_checker_res = PublicationReaper(control=seed.control, visible_receipts=_no_receipts).reap(
+        seed.sid, apply=True, grace_seconds=300.0
+    )
+    assert no_checker_res.superseded == ()
+    assert seed.status(b_done) == "pending"
+
+    # Raising checker -> fail closed!
+    def raising_checker(_sid: str, _dom: str, _uid: str) -> bool:
+        raise RuntimeError("ch down")
+
+    err_res = PublicationReaper(
+        control=seed.control, visible_receipts=_no_receipts, zero_rows_checker=raising_checker
+    ).reap(seed.sid, apply=True, grace_seconds=300.0)
+    assert err_res.superseded == ()
+    assert seed.status(b_done) == "pending"
+
+    # Real checker returning False for b_ch_rows and True for others:
+    checked_calls: list[tuple[str, str, str]] = []
+
+    def checker(sid: str, dom: str, batch_uuid: str) -> bool:
+        checked_calls.append((sid, dom, batch_uuid))
+        return batch_uuid != ch_uuid_rows
+
+    res = PublicationReaper(control=seed.control, visible_receipts=_no_receipts, zero_rows_checker=checker).reap(
+        seed.sid, apply=True, grace_seconds=300.0
+    )
+    assert set(res.superseded) == {b_done, b_rum}
+    assert seed.status(b_done) == "superseded"
+    assert seed.status(b_rum) == "superseded"
+    assert seed.status(b_active) == "pending"
+    assert seed.status(b_ch_rows) == "pending"
+    assert any(dom == "security_dimensions" for _, dom, _ in checked_calls)
+    assert any(dom == "rum_errors" for _, dom, _ in checked_calls)
+
+
+def test_reaper_retires_legacy_direct_ingest_pending_manifest_without_source_keys_after_600s(seed) -> None:
+    _seed_source_object(seed, "raw/request/legacy-durable.gz", status="appended", age_seconds=1200.0)
+    b_legacy = build_batch_id_from_manifest_id("ingest-legacy-1")
+    seed.publication(b_legacy, "request", status="pending", age_hours=0.12)  # ~432s (< 600s)
+
+    reaper = PublicationReaper(
+        control=seed.control,
+        visible_receipts=_no_receipts,
+        zero_rows_checker=lambda _s, _d, _u: True,
+    )
+
+    # 1. Age < 600s -> kept as recently_updated even when grace_seconds=300s
+    young_res = reaper.reap(seed.sid, apply=True, grace_seconds=300.0)
+    assert young_res.superseded == ()
+    assert young_res.kept.get("recently_updated", 0) == 1
+    assert seed.status(b_legacy) == "pending"
+
+    # 2. Age >= 600s, but an active/uncommitted source discovered <= updated_at -> kept
+    with seed.control.transaction() as connection:
+        connection.execute(
+            "UPDATE high_scale_publication_manifests SET updated_at = clock_timestamp() - interval '12 minutes' "
+            "WHERE batch_id=%s",
+            (b_legacy,),
+        )
+    _seed_source_object(seed, "raw/request/legacy-uncommitted.gz", status="claimed", age_seconds=1000.0)
+    blocked_res = reaper.reap(seed.sid, apply=True, grace_seconds=300.0)
+    assert blocked_res.superseded == ()
+    assert seed.status(b_legacy) == "pending"
+
+    # 3. Once all sources <= updated_at are durable (a newer uncommitted source > updated_at doesn't block) -> superseded
+    with seed.control.transaction() as connection:
+        connection.execute(
+            "UPDATE high_scale_source_objects SET status='acknowledged' WHERE service_id=%s AND object_key=%s",
+            (seed.sid, "raw/request/legacy-uncommitted.gz"),
+        )
+    _seed_source_object(seed, "raw/request/newer-discovered.gz", status="discovered", age_seconds=60.0)
+
+    ok_res = reaper.reap(seed.sid, apply=True, grace_seconds=300.0)
+    assert ok_res.superseded == (b_legacy,)
+    assert seed.status(b_legacy) == "superseded"
+
+
+def test_reaper_from_environment_wires_clickhouse_zero_rows_checker(seed) -> None:
+    _seed_source_object(seed, "raw/request/env-1.gz", status="appended", age_seconds=900.0)
+    b_env = build_batch_id_from_manifest_id("ingest-env-1")
+    seed.control.put_batch_manifest(
+        BatchManifest(
+            b_env,
+            seed.sid,
+            "request",
+            "1",
+            "sha256:e",
+            1,
+            PublicationStatus.PENDING,
+            source_keys=("raw/request/env-1.gz",),
+        )
+    )
+    with seed.control.transaction() as connection:
+        connection.execute(
+            "UPDATE high_scale_publication_manifests SET updated_at = clock_timestamp() - interval '10 minutes' "
+            "WHERE batch_id=%s",
+            (b_env,),
+        )
+
+    ch = MagicMock()
+    ch.execute.side_effect = [[], [{"row_count": 0}]]
+    env_reaper = publication_reaper.reaper_from_environment(seed.control, ch)
+    assert env_reaper is not None
+    res = env_reaper.reap(seed.sid, apply=True, grace_seconds=300.0)
+    assert res.superseded == (b_env,)
+    assert seed.status(b_env) == "superseded"
+    assert any("SELECT count() AS row_count FROM `request_facts`" in call.args[0] for call in ch.execute.call_args_list)
+
+
+def test_source_keys_json_migration_is_idempotent_and_coordinator_threads_source_keys(seed) -> None:
+    from backend.high_scale.archive import (
+        ArchivePublication,
+        InMemoryObjectStore,
+        InsertReceipt,
+        PostgresBatchManifestStore,
+    )
+    from backend.high_scale.ingest_controller import HighScaleIngestController, SourceObjectDescriptor
+
+    with seed.control.transaction() as connection:
+        connection.execute("ALTER TABLE high_scale_publication_manifests DROP COLUMN IF EXISTS source_keys_json")
+    seed.control.create_schema()
+    seed.control.create_schema()
+
+    seed.control.initialize_owner(seed.sid, owner="high_scale", source_cursor="cur-0")
+    payload = b'{"timestamp":"2026-11-20T12:00:00Z","url":"/p","status":200}\n'
+    key = "raw/request/threaded-1.gz"
+    seed.control.discover_source(
+        seed.sid,
+        "request",
+        key,
+        "sha256:t1",
+        size_bytes=len(payload),
+        version="v1",
+        expected_owner="high_scale",
+        expected_owner_epoch=1,
+    )
+    seed.control.claim_source(seed.sid, key, "worker-1", expected_owner="high_scale", expected_owner_epoch=1)
+
+    class _FailingChAdapter:
+        def insert(self, batch: HighScaleBatch) -> InsertReceipt:
+            raise RuntimeError("transient ch outage")
+
+        def delete_batch_rows(self, table: str, batch_id: str) -> None:
+            pass
+
+    controller = HighScaleIngestController(
+        ownership=seed.control,  # type: ignore[arg-type]
+        ledger=seed.control,  # type: ignore[arg-type]
+        control_plane=seed.control,
+        archive=ArchivePublication(InMemoryObjectStore()),
+        serving=ClickHousePublication(PostgresBatchManifestStore(seed.control), _FailingChAdapter()),  # type: ignore[arg-type]
+        worker_id="worker-1",
+        defer_archive_flush=True,
+    )
+    desc = SourceObjectDescriptor(key, "sha256:t1", len(payload), "v1")
+    with pytest.raises(RuntimeError, match="transient ch outage"):
+        controller.ingest_batch(service_id=seed.sid, domain="request", sources_payloads=[(desc, payload)])
+
+    with seed.control.transaction() as connection:
+        connection.execute(
+            "UPDATE high_scale_publication_manifests SET updated_at = clock_timestamp() - interval '10 minutes' "
+            "WHERE service_id=%s",
+            (seed.sid,),
+        )
+    pending = seed.control.pending_publication_manifests(seed.sid, min_age_seconds=300.0)
+    assert len(pending) == 1
+    assert pending[0]["source_keys"] == (key,)
+    manifest = seed.control.get_batch_manifest(pending[0]["batch_id"])
+    assert manifest is not None and manifest.source_keys == (key,)
