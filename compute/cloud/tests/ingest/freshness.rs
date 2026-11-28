@@ -520,3 +520,22 @@ fn internal_worker_requests_are_read_past_the_public_body_cap() {
         65_536
     );
 }
+
+#[test]
+fn source_index_peer_succeeds_when_watermark_exceeds_request_limit() {
+    let fake = Fake::new(BASE + 10);
+    let mut svc = service();
+    svc.log_period = 10;
+    // Seed a watermark larger than source_index::REQUEST_LIMIT (1 MiB) so sending the full
+    // watermark in the worker request body would trip `source_index_capacity`.
+    let oversized = "x".repeat(1_200_000);
+    fake.kv.borrow_mut().insert(
+        ingest::WATERMARK_KEY.into(),
+        (1, json!({ "run_id": "seed", "padding": oversized })),
+    );
+    put_raw(&fake, BASE, "a", &[line(BASE, "private-ip")]);
+    let report = ingest_available(&fake, &svc).unwrap();
+    assert_eq!(report.failed, 0);
+    assert_eq!(report.converted, 1);
+    assert!(!fake.keys("processed/_sources/").is_empty());
+}

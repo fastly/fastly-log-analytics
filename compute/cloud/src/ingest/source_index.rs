@@ -24,6 +24,7 @@ struct Request {
     attempt: u32,
     base_generation: Option<String>,
     base_identity: String,
+    #[serde(default)]
     root: Value,
     keys: Vec<String>,
     stop_ms: u64,
@@ -61,7 +62,9 @@ pub fn prepare_remote<R: Runtime>(
         attempt: plan.attempt,
         base_generation: watermark.map(|record| record.generation.clone()),
         base_identity: root_identity(&root)?,
-        root,
+        // Worker loads WATERMARK_KEY directly and verifies base_generation + base_identity;
+        // omit the full watermark payload here so large watermarks never trip REQUEST_LIMIT.
+        root: Value::Null,
         keys: plan.raw_keys.clone(),
         stop_ms: remaining.saturating_sub(Duration::from_secs(1)).as_millis() as u64,
     };
@@ -140,7 +143,8 @@ pub(crate) fn handle_authorized_worker<R: Runtime>(
         || input.keys.windows(2).any(|pair| pair[0] >= pair[1])
         || input.stop_ms == 0
         || input.stop_ms > super::coordinator::DRAIN_AT.as_millis() as u64
-        || root_identity(&input.root).ok().as_deref() != Some(input.base_identity.as_str())
+        || (!input.root.is_null()
+            && root_identity(&input.root).ok().as_deref() != Some(input.base_identity.as_str()))
     {
         return deny();
     }
@@ -184,7 +188,7 @@ pub(crate) fn handle_authorized_worker<R: Runtime>(
         };
         prepare(
             &store,
-            &input.root,
+            &root,
             &input.plan_id,
             &input.keys,
             2,
