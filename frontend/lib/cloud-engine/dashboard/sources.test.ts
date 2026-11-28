@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CARD_FIELDS } from "./summaries";
 import { estimateRollupBytes } from "./rollup-codec";
 import {
@@ -30,7 +30,10 @@ import {
   recordStoreError,
 } from "./file-store";
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
 
 describe("browserSource", () => {
   it("keeps a field search bound to its service in manifest requests and cache identity", async () => {
@@ -1105,6 +1108,10 @@ describe("clearRequestLogCaches", () => {
 });
 
 describe("pruneRequestCache", () => {
+  beforeEach(() => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-11-01T00:00:00Z"));
+  });
+
   const prefix = "svc/requests/";
   const key = (hour: number, start: number, run = "r") =>
     `${prefix}year=2026/month=10/day=29/hour=${String(hour).padStart(2, "0")}/window=${start}-${start + 60}-${run}-n1.parquet`;
@@ -1319,6 +1326,10 @@ describe("pruneRequestCache", () => {
 });
 
 describe("persistent Parquet store", () => {
+  beforeEach(() => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-11-01T00:00:00Z"));
+  });
+
   const MiB = 1024 * 1024;
   const fileUrl = (k: string) => `/api/file?${new URLSearchParams({ key: k })}`;
   const at = (minute: number) =>

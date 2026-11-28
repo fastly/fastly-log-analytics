@@ -2696,7 +2696,7 @@ mod request_compaction {
             let fake = Fake::new(BASE);
             let service = service();
             let ready = catalog::events(&fake, &service, "").unwrap();
-            assert!(ready.contains("retry: 30000\n"));
+            assert!(ready.contains("retry: 30000\nid: "));
             assert!(ready.contains("event: ready\n"));
             let before = format!("{SID}:0");
             publish(&fake, "batch-a");

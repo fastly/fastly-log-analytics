@@ -1306,7 +1306,7 @@ pub fn events<R: Runtime>(runtime: &R, service: &Service, query: &str) -> Result
     };
     let data = serde_json::to_string(&current).map_err(|e| e.to_string())?;
     Ok(format!(
-        "retry: {}\n\nid: {}\nevent: {kind}\ndata: {data}\n\n",
+        "retry: {}\nid: {}\nevent: {kind}\ndata: {data}\n\n",
         retry_ms(service.log_period),
         current.cursor
     ))

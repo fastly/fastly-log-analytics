@@ -142,7 +142,7 @@ export function useHeaderBadgeStream(enabled: boolean) {
     let timer: ReturnType<typeof setTimeout> | undefined
     let inFlight = false
     let resumePending = false
-    let reconnectMs = 5_000
+    let reconnectMs = 15_000
     const source = browserSource(
       typeof window !== 'undefined' ? window.location.origin : '',
       { serviceId: effectiveServiceId },

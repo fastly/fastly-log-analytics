@@ -52,6 +52,8 @@ struct Fake {
     bucket: RefCell<BTreeMap<String, Vec<u8>>>,
     calls: Cell<u32>,
     vcpu: Cell<u64>,
+    heap_mib: Cell<Option<u32>>,
+    linear_memory_high_water_bytes: Cell<Option<u64>>,
     gets: Cell<u64>,
     puts: Cell<u64>,
     lists: Cell<u64>,
@@ -195,6 +197,12 @@ impl Runtime for Fake {
     }
     fn vcpu_ms(&self) -> u64 {
         self.vcpu.get()
+    }
+    fn heap_mib(&self) -> Option<u32> {
+        self.heap_mib.get()
+    }
+    fn linear_memory_high_water_bytes(&self) -> Option<u64> {
+        self.linear_memory_high_water_bytes.get()
     }
     fn admin_get(&self, key: &str) -> Result<Option<Record>, String> {
         self.charge(0)?;
@@ -1645,4 +1653,78 @@ fn rum_bundling_runs_in_bundle_datasets_and_waits_for_delete_data() {
         .keys("hour_bundle=08-")
         .iter()
         .any(|k| k.starts_with(RUM_BUNDLES)));
+}
+
+#[test]
+fn linear_memory_high_water_stops_folding_and_defers_final_write() {
+    let fake = Fake::default();
+    let svc = service();
+    minute(&fake, BASE, &bodies());
+    fake.now.set(BASE + 2 * HOUR);
+    watermark(&fake, fake.now.get());
+    let sources: Vec<Vec<u8>> = fake.bucket.borrow().values().cloned().collect();
+    let expected = bundle::merge(
+        &sources.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+        BASE,
+        bundle::Unit::Hour,
+    )
+    .unwrap();
+
+    // Even when heap_mib stays low, high linear-memory water must stop folding and defer final write.
+    fake.heap_mib.set(Some(60));
+    fake.linear_memory_high_water_bytes
+        .set(Some(bundle::LINEAR_MEMORY_STOP_BYTES));
+    let first = run(&fake, &svc);
+    assert_eq!(first.stopped, Some("heap"));
+    assert_eq!(first.sources, 1);
+    assert_eq!(first.partials, 1);
+    assert!(first.more_pending);
+    assert!(hour_bundle(&fake, BASE).is_none());
+
+    // Once linear memory drops in a fresh pass, remaining sources fold and finalize identically.
+    fake.linear_memory_high_water_bytes.set(None);
+    for _ in 0..10 {
+        run(&fake, &svc);
+        if hour_bundle(&fake, BASE).is_some() {
+            break;
+        }
+    }
+    let key = hour_bundle(&fake, BASE).expect("bundle completes after memory stop");
+    assert_eq!(fake.bucket.borrow()[&key], expected);
+
+    // Sub-stop linear memory (84 MiB < 96 MiB) folds all sources in one pass when calls suffice,
+    // but still defers final serialization because final_memory_stop requires <84 MiB.
+    let fake2 = Fake::default();
+    let next_hour = BASE + 2 * HOUR;
+    for (shard, body) in bodies().into_iter().take(4).enumerate() {
+        fake2.bucket.borrow_mut().insert(
+            summary::summary_key(WINDOWS, next_hour, next_hour + 60, &format!("s{shard}"), 4),
+            body,
+        );
+    }
+    fake2.now.set(BASE + 4 * HOUR);
+    watermark(&fake2, fake2.now.get());
+    fake2.heap_mib.set(Some(60));
+    fake2
+        .linear_memory_high_water_bytes
+        .set(Some(bundle::FINAL_LINEAR_MEMORY_STOP_BYTES));
+    let next_bodies: Vec<Vec<u8>> = fake2.bucket.borrow().values().cloned().collect();
+    let next_expected = bundle::merge(
+        &next_bodies.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+        next_hour,
+        bundle::Unit::Hour,
+    )
+    .unwrap();
+    let deferred = run(&fake2, &svc);
+    assert_eq!(deferred.stopped, Some("heap"));
+    assert_eq!(deferred.sources, next_bodies.len() as u64);
+    assert_eq!(deferred.partials, 1);
+    assert!(deferred.more_pending);
+    assert!(hour_bundle(&fake2, next_hour).is_none());
+
+    fake2.linear_memory_high_water_bytes.set(None);
+    let finalized = run(&fake2, &svc);
+    assert_eq!(finalized.hours, 1);
+    let next_key = hour_bundle(&fake2, next_hour).expect("final write completes on fresh pass");
+    assert_eq!(fake2.bucket.borrow()[&next_key], next_expected);
 }

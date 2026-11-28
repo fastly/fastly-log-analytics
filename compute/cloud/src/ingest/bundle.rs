@@ -130,7 +130,11 @@ pub const VCPU_STOP_MS: u64 = 600;
 /// Start a final serialization (~250ms plus the tail) only below this, keeping it under 900ms.
 pub const WRITE_VCPU_STOP_MS: u64 = 630;
 /// Stop folding and defer final serialization once Wasm heap reaches this threshold (of 128 MiB).
-const HEAP_STOP_MIB: u32 = 88;
+const HEAP_STOP_MIB: u32 = 76;
+/// Stop folding and defer final serialization once Wasm linear memory high-water reaches this threshold (of 128 MiB).
+pub const LINEAR_MEMORY_STOP_BYTES: u64 = 96 * 1024 * 1024;
+/// Defer final serialization after folding sources when Wasm linear memory high-water leaves <44 MiB headroom.
+pub const FINAL_LINEAR_MEMORY_STOP_BYTES: u64 = 84 * 1024 * 1024;
 const PARTIAL_MAGIC: &[u8; 5] = b"FLPB\x0a";
 /// A packed partial: [`PACKED_MAGIC`], the object count (u32 LE) and the raw length (u64 LE),
 /// then the first slice of the zstd-compressed [`PARTIAL_MAGIC`] body; the rest follows in
@@ -1733,19 +1737,22 @@ impl Acc {
                     layout.push(["bins", "assets", "transport", "origin"].as_slice());
                     tail_non_empty = false;
                 }
+                "urls" if tail_non_empty => {
+                    layout.push(["urls"].as_slice());
+                    tail_non_empty = false;
+                }
+                "proxy" if tail_non_empty => {
+                    layout.push(
+                        ["quality", "header_ip", "bot_ua", "tls_fp", "value", "proxy"].as_slice(),
+                    );
+                    tail_non_empty = false;
+                }
                 _ => {}
             }
         }
         if tail_non_empty || !self.sample.is_empty() {
             layout.push(
                 [
-                    "urls",
-                    "quality",
-                    "header_ip",
-                    "bot_ua",
-                    "tls_fp",
-                    "value",
-                    "proxy",
                     "ins_url",
                     "ins_ip",
                     "asset_urls",
@@ -3005,6 +3012,13 @@ impl Acc {
                     &mut writer,
                     &mut layout_rg,
                 )?,
+                "urls" => flush_group(&mut out, &["urls"], &mut writer, &mut layout_rg)?,
+                "proxy" => flush_group(
+                    &mut out,
+                    &["quality", "header_ip", "bot_ua", "tls_fp", "value", "proxy"],
+                    &mut writer,
+                    &mut layout_rg,
+                )?,
                 _ => {}
             }
         }
@@ -3026,13 +3040,6 @@ impl Acc {
         flush_group(
             &mut out,
             &[
-                "urls",
-                "quality",
-                "header_ip",
-                "bot_ua",
-                "tls_fp",
-                "value",
-                "proxy",
                 "ins_url",
                 "ins_ip",
                 "asset_urls",
@@ -3370,6 +3377,23 @@ impl<R: Runtime> Ctx<'_, '_, R> {
             || runtime.vcpu_ms() >= WRITE_VCPU_STOP_MS
     }
 
+    fn memory_stop(&self) -> bool {
+        let runtime = self.store.runtime;
+        runtime.heap_mib().is_some_and(|m| m >= HEAP_STOP_MIB)
+            || runtime
+                .linear_memory_high_water_bytes()
+                .is_some_and(|b| b >= LINEAR_MEMORY_STOP_BYTES)
+    }
+
+    fn final_memory_stop(&self) -> bool {
+        self.memory_stop()
+            || self
+                .store
+                .runtime
+                .linear_memory_high_water_bytes()
+                .is_some_and(|b| b >= FINAL_LINEAR_MEMORY_STOP_BYTES)
+    }
+
     fn list_all(
         &self,
         prefix: &str,
@@ -3563,13 +3587,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
             if done - resumed >= MAX_SOURCES || self.stop() {
                 break;
             }
-            if done > resumed
-                && self
-                    .store
-                    .runtime
-                    .heap_mib()
-                    .is_some_and(|m| m >= HEAP_STOP_MIB)
-            {
+            if done > resumed && self.memory_stop() {
                 self.report.stopped = Some("heap");
                 break;
             }
@@ -3617,12 +3635,7 @@ impl<R: Runtime> Ctx<'_, '_, R> {
             self.report.sources += 1;
         }
         let rows: u64 = sources[..done].iter().map(|k| name_rows(k)).sum();
-        let heap_defer = done > resumed
-            && self
-                .store
-                .runtime
-                .heap_mib()
-                .is_some_and(|m| m >= HEAP_STOP_MIB);
+        let heap_defer = done > resumed && self.final_memory_stop();
         let defer_final =
             job.final_key.is_some() && done == sources.len() && (self.write_stop() || heap_defer);
         if defer_final && self.report.stopped.is_none() {
@@ -3642,14 +3655,19 @@ impl<R: Runtime> Ctx<'_, '_, R> {
                 (Some(final_key.to_owned()), vec![body], true)
             }
             None if done > resumed => {
-                let objects = if open.is_none() {
-                    acc.take()
-                        .ok_or("bundle_acc_missing")?
-                        .encode_packed_owned(CDN_READ_LIMIT)?
-                } else {
+                let keep_for_open = open.as_ref().is_some_and(|o| {
+                    done.saturating_sub(o.covered) >= OPEN_BUNDLE_MIN
+                        && !self.write_stop()
+                        && !self.memory_stop()
+                });
+                let objects = if keep_for_open {
                     acc.as_ref()
                         .ok_or("bundle_acc_missing")?
                         .encode_packed_ref(CDN_READ_LIMIT)?
+                } else {
+                    acc.take()
+                        .ok_or("bundle_acc_missing")?
+                        .encode_packed_owned(CDN_READ_LIMIT)?
                 };
                 if !self.room(objects.len() as u32) {
                     return Ok(Step::Pending);
@@ -3722,7 +3740,9 @@ impl<R: Runtime> Ctx<'_, '_, R> {
         {
             let due = done.saturating_sub(*open_covered) >= OPEN_BUNDLE_MIN;
             let write = due
+                && acc.is_some()
                 && !self.write_stop()
+                && !self.memory_stop()
                 // The PUT, then the state write.
                 && self.room(2);
             if write {
@@ -5340,7 +5360,7 @@ mod tests {
         let bundle = acc.write(1_800_000_000, Some(Unit::Hour), "hour").unwrap();
         assert_eq!(
             hex::encode(Sha256::digest(&bundle)),
-            "30c06dc5f496883ad541c57292562716a771753a1e7aba8c1c6bce7c5dd963be"
+            "b3376d6cd6d134c30ac20d693b69d416a197b66e05ca37d70db529dd271425e8"
         );
         let resumed = Acc::decode_partial(&partial, Unit::Hour).unwrap();
         assert_eq!(
@@ -6000,10 +6020,23 @@ mod tests {
                 .and_then(|kv| kv.value.as_deref())
                 .unwrap();
             let parsed: serde_json::Value = serde_json::from_str(layout).unwrap();
-            assert_eq!(
-                parsed["rg"].as_array().unwrap().len(),
-                reader.metadata().num_row_groups()
-            );
+            let rg = parsed["rg"].as_array().unwrap();
+            assert_eq!(rg.len(), reader.metadata().num_row_groups());
+            if unit == Some(Unit::Hour) {
+                let urls_rg = rg
+                    .iter()
+                    .find(|entry| entry.as_array().unwrap().iter().any(|g| g == "urls"))
+                    .expect("urls row group present");
+                assert_eq!(
+                    urls_rg.as_array().unwrap(),
+                    &vec![serde_json::json!("urls")]
+                );
+                let proxy_rg = rg
+                    .iter()
+                    .find(|entry| entry.as_array().unwrap().iter().any(|g| g == "proxy"))
+                    .expect("proxy row group present");
+                assert!(!proxy_rg.as_array().unwrap().iter().any(|g| g == "sample"));
+            }
         }
     }
 

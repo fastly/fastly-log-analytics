@@ -458,15 +458,15 @@ impl Out {
         }
         let arrays: Vec<ArrayRef> = self
             .cols
-            .iter_mut()
+            .into_iter()
             .map(|col| -> ArrayRef {
                 match col {
-                    Col::Utf8(b) => Arc::new(b.finish()),
-                    Col::I64(b) => Arc::new(b.finish()),
-                    Col::F64(b) => Arc::new(b.finish()),
-                    Col::Bool(b) => Arc::new(b.finish()),
-                    Col::Ts(b) => Arc::new(b.finish()),
-                    Col::Bin(b) => Arc::new(b.finish()),
+                    Col::Utf8(mut b) => Arc::new(b.finish()),
+                    Col::I64(mut b) => Arc::new(b.finish()),
+                    Col::F64(mut b) => Arc::new(b.finish()),
+                    Col::Bool(mut b) => Arc::new(b.finish()),
+                    Col::Ts(mut b) => Arc::new(b.finish()),
+                    Col::Bin(mut b) => Arc::new(b.finish()),
                 }
             })
             .collect();

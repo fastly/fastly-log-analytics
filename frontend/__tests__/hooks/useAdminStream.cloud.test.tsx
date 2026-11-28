@@ -364,4 +364,22 @@ describe('Cloud header ingest events', () => {
       'x-service-id': 'svc-1',
     })
   })
+
+  it('waits 15s before retrying /api/ingest/events after an initial transient error', async () => {
+    mocks.fetch
+      .mockRejectedValueOnce(new Error('network'))
+      .mockResolvedValueOnce(response(frame('ready', 'svc-1:0')))
+    mountStream()
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(mocks.fetch).toHaveBeenCalledTimes(1)
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000) })
+    expect(mocks.fetch).toHaveBeenCalledTimes(1)
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(9_999) })
+    expect(mocks.fetch).toHaveBeenCalledTimes(1)
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(1) })
+    expect(mocks.fetch).toHaveBeenCalledTimes(2)
+  })
 })
