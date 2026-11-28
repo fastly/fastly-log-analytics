@@ -47,15 +47,23 @@ const PopHealthHeatmap = dynamic(
 )
 const TransportSection = dynamic(
   () => import('./TransportSection').then((m) => m.TransportSection),
-  { ssr: false, loading: () => <Skeleton className="w-full h-[220px] rounded-xl my-6" /> },
+  { ssr: false, loading: () => <Skeleton className="w-full h-[220px] [contain-intrinsic-size:220px] rounded-xl my-6" /> },
 )
 const ShieldingSection = dynamic(
   () => import('./TransportAndShielding').then((m) => m.ShieldingSection),
-  { ssr: false, loading: () => <Skeleton className="w-full h-[460px] rounded-xl" /> },
+  { ssr: false, loading: () => <Skeleton className="w-full h-[460px] [contain-intrinsic-size:460px] rounded-xl" /> },
 )
 const NetworkLeaderboardsSection = dynamic(
   () => import('./NetworkLeaderboardsSection').then((m) => m.NetworkLeaderboardsSection),
-  { ssr: false, loading: () => <Skeleton className="w-full h-[420px] rounded-xl" /> },
+  {
+    ssr: false,
+    loading: () => (
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 [contain-intrinsic-size:420px]">
+        <Skeleton className="w-full min-h-[420px] [contain-intrinsic-size:420px] rounded-xl" />
+        <Skeleton className="w-full min-h-[420px] [contain-intrinsic-size:420px] rounded-xl" />
+      </div>
+    ),
+  },
 )
 const NetworkQualitySection = dynamic(
   () => import('./NetworkLeaderboardsAndQuality').then((m) => m.NetworkQualitySection),
