@@ -15,6 +15,13 @@ import {
 import { emptyValueSummary, type ValueQueryParams } from "./value";
 import { defineSummarySpec, type SummarySpec } from "./dashboard/summary-projection";
 import type { LoggedHour } from "./value-stats";
+import {
+  VALUE_ALL_FIELDS_BASE,
+  VALUE_RAW_ALIASES as RAW_ALIASES,
+  VALUE_SUMMARY_TAB_RESIDUAL,
+} from "./value-residual";
+
+export { VALUE_ALL_FIELDS_BASE };
 
 export type ValueRollupBody = Pick<ValueQueryParams, "start_time" | "end_time" | "chart_interval"> & {
   filters?: unknown;
@@ -29,23 +36,6 @@ type ValuePoint = NonNullable<ValueSummary["network"]["protocol_time_series"]>[n
 const CHART_INTERVAL_SECONDS: Record<string, number> = {
   "1 second": 1, "1 minute": 60, "5 minutes": 300, "1 hour": 3600, "1 day": 86400,
 };
-
-/**
- * Columns the raw scan coalesces ahead of (or beside) the Cloud ones the
- * summaries read (`cache`, `proto`, `tls`, `is_ipv6`, `resp_bytes`, `elapsed`,
- * `edge`, `_bot_name`, the Image Optimizer fields); any of them logged as a
- * custom field would change the raw answer.
- */
-const RAW_ALIASES = [
-  "cache_status", "resp_body_size", "resp_body_bytes", "time_elapsed_usec", "protocol", "is_ssl",
-  "tls_version", "ipv6", "waf_action", "ngwaf_decision", "fastly_is_shield", "is_shield", "content_type",
-  "resp_header_content_type", "bot_verified", "verified_bot", "ngwaf_bot_name", "bot_category", "is_bot",
-  "ofmt", "ifmt",
-];
-
-export const VALUE_ALL_FIELDS_BASE = [
-  ...RAW_ALIASES, "waf", "cache", "proto", "tls", "is_ipv6", "io_output_format",
-] as const;
 
 /** The `value` fields each section reads; summaries without one leave the section to the raw scan. */
 const VALUE_FIELDS: Partial<Record<keyof ValueSummary, readonly string[]>> = {
@@ -603,6 +593,7 @@ export async function valueFromRollup(
       : VALUE_SUMMARY_SPEC)
     : spec;
   const preloadedBots = body.sections?.includes("bots") ? await loadWellKnownBots() : undefined;
-  const result = await queryRollup(source, { fromMs, toMs, signal, spec: effectiveSpec ?? undefined });
+  const residual = effectiveSpec === VALUE_SUMMARY_TAB_SPEC ? VALUE_SUMMARY_TAB_RESIDUAL : undefined;
+  const result = await queryRollup(source, { fromMs, toMs, signal, spec: effectiveSpec ?? undefined, residual });
   return result ? valueSummaryFromRollup(result, body, preloadedBots) : null;
 }

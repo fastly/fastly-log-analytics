@@ -5,6 +5,7 @@ import { parseEpochMs } from "./network";
 import type { NetworkRollupMeta } from "./network-rollup";
 import { ASSETS_ROLLUP_SECTIONS, assetsRollupCacheFilter } from "./rollup-sections";
 import { defineSummarySpec, type SummarySpec } from "./dashboard/summary-projection";
+import { ASSETS_RESIDUAL } from "./assets-residual";
 
 export type AssetsRollupBody = {
   start_time?: string | number | null;
@@ -137,6 +138,12 @@ export async function assetsFromRollup(
   const fromMs = parseEpochMs(body.start_time ?? undefined);
   const toMs = parseEpochMs(body.end_time ?? undefined);
   if (fromMs === null || toMs === null || fromMs >= toMs) return null;
-  const result = await queryRollup(source, { fromMs, toMs, signal, spec: spec ?? undefined });
+  const result = await queryRollup(source, {
+    fromMs,
+    toMs,
+    signal,
+    spec: spec ?? undefined,
+    residual: ASSETS_RESIDUAL,
+  });
   return result ? assetsAggregatesFromRollup(result, body) : null;
 }

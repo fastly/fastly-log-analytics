@@ -880,26 +880,6 @@ export function mergeRollups(rollups: readonly Rollup[], keys?: ReadonlySet<stri
       mergeKept(out, rollup, keep, has);
       continue;
     }
-    for (const [field, values] of own(rollup, "value") ?? []) {
-      for (const [value, days] of values) {
-        for (const [day, sums] of days) addValue((out.value ??= new Map()), field, value, day, sums);
-      }
-    }
-    for (const [field, n] of own(rollup, "valueTotals") ?? []) {
-      const totals = (out.valueTotals ??= new Map());
-      totals.set(field, (totals.get(field) ?? 0) + n);
-    }
-    for (const [field, n] of own(rollup, "binsTotals") ?? []) {
-      const totals = (out.binsTotals ??= new Map());
-      totals.set(field, (totals.get(field) ?? 0) + n);
-    }
-    const overview = own(rollup, "overview");
-    if (overview) out.overview = addSums(out.overview, overview, OVERVIEW_KEYS);
-    const assets = own(rollup, "assets");
-    if (assets) {
-      const into = (out.assets ??= new Map());
-      for (const [key, asset] of assets) into.set(key, addSums(into.get(key), asset, ASSET_KEYS));
-    }
     mergeKept(out, rollup, keep, has);
   }
   return guard(out, loaded);
@@ -927,6 +907,33 @@ function mergeKept(
   if (has(rollup, "series5")) addSeries(out.series, rollup.series, (field) => keep(`series5/${field}`));
   const series1 = own(rollup, "series1");
   if (series1) addSeries((out.series1 ??= new Map()), series1, (field) => keep(`series1/${field}`));
+  if (keep("overview")) {
+    const overview = own(rollup, "overview");
+    if (overview) out.overview = addSums(out.overview, overview, OVERVIEW_KEYS);
+  }
+  if (keep("assets/asset")) {
+    const assets = own(rollup, "assets");
+    if (assets) {
+      const into = (out.assets ??= new Map());
+      for (const [key, asset] of assets) into.set(key, addSums(into.get(key), asset, ASSET_KEYS));
+    }
+  }
+  for (const [field, values] of own(rollup, "value") ?? []) {
+    if (!keep(`value/${field}`)) continue;
+    for (const [value, days] of values) {
+      for (const [day, sums] of days) addValue((out.value ??= new Map()), field, value, day, sums);
+    }
+  }
+  for (const [field, n] of own(rollup, "valueTotals") ?? []) {
+    if (!keep(`value/${field}`)) continue;
+    const totals = (out.valueTotals ??= new Map());
+    totals.set(field, (totals.get(field) ?? 0) + n);
+  }
+  for (const [field, n] of own(rollup, "binsTotals") ?? []) {
+    if (!keep(`bins/${field}`)) continue;
+    const totals = (out.binsTotals ??= new Map());
+    totals.set(field, (totals.get(field) ?? 0) + n);
+  }
   if (keep("overview/waterfall")) {
     const waterfall = own(rollup, "waterfall");
     if (waterfall) out.waterfall = addWaterfall(out.waterfall, waterfall);

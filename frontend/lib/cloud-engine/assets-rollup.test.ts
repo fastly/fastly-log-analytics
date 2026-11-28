@@ -207,6 +207,26 @@ describe("assetsFromRollup", () => {
     }
     expect(assetsRollupEligible("/api/assets/other", body())).toBe(false);
   });
+
+  it("rolls up unsummarized tail raw files via ASSETS_RESIDUAL to match full summaries", async () => {
+    const net = FIXTURES.origin;
+    const allWindows = net.files("window");
+    const full = await assetsFromRollup("/api/assets/aggregates", body(), source());
+    expect(full).not.toBeNull();
+    // Drop the last two window summaries so their raw files must be rolled up via ASSETS_RESIDUAL.
+    const partialSource = fixtureSource(
+      [fixturePage(net.files("raw"))],
+      net.buffers,
+      { json: [], files: [] },
+      [fixturePage(allWindows.slice(0, -2))],
+    );
+    const partial = await assetsFromRollup("/api/assets/aggregates", body(), partialSource);
+    expect(partial).not.toBeNull();
+    expect(partial!.summary).toEqual(full!.summary);
+    expect(partial!.asset_type_breakdown).toEqual(full!.asset_type_breakdown);
+    expect(partial!.cache_performance).toEqual(full!.cache_performance);
+    expect(partial!.compression_performance).toEqual(full!.compression_performance);
+  });
 });
 
 describe("queryAssetsAggregates sections", () => {

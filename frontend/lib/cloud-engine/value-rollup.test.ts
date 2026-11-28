@@ -487,4 +487,30 @@ describe("valueFromRollup", () => {
     const ioRes = await valueFromRollup("/api/value/summary", body({ sections: ["io"] }), src);
     expect(ioRes).toBeNull();
   });
+
+  it("rolls up unsummarized tail raw files via VALUE_SUMMARY_TAB_RESIDUAL to match full summaries", async () => {
+    const net = FIXTURES.network;
+    const allWindows = net.files("window");
+    const req = body({ sections: ["overview", "caching", "network"] });
+    const fullSource = fixtureSource(
+      [fixturePage(net.files("raw"))],
+      net.buffers,
+      { json: [], files: [] },
+      [fixturePage(allWindows)],
+    );
+    const full = await valueFromRollup("/api/value/summary", req, fullSource);
+    expect(full).not.toBeNull();
+    // Drop the last two window summaries so their raw files must be rolled up via VALUE_SUMMARY_TAB_RESIDUAL.
+    const partialSource = fixtureSource(
+      [fixturePage(net.files("raw"))],
+      net.buffers,
+      { json: [], files: [] },
+      [fixturePage(allWindows.slice(0, -2))],
+    );
+    const partial = await valueFromRollup("/api/value/summary", req, partialSource);
+    expect(partial).not.toBeNull();
+    expect(partial!.overview).toEqual(full!.overview);
+    expect(partial!.caching).toEqual(full!.caching);
+    expect(partial!.network).toEqual(full!.network);
+  });
 });
