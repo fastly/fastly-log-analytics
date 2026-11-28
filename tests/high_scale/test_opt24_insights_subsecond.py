@@ -199,7 +199,8 @@ def test_coverage_cache_reuses_when_checksums_match_and_invalidates_on_change() 
     evaluator._evaluate(svc, 24.0, 168.0, None, "2026-11-26T12:00:00Z", False, "", {}, frozenset(ALL_FIELDS))
     assert sum(1 for q, _, _ in client.calls if "/* insight:rollup_coverage */" in q) == 1
     ref_sql_1 = next(q for q, _, _ in client.calls if "/* insight:referer_monoculture */" in q)
-    assert "intDiv(toUnixTimestamp(event_timestamp), 300) % 4 = 0" in ref_sql_1
+    assert "toDateTime(" in ref_sql_1
+    assert "intDiv(toUnixTimestamp(event_timestamp), 300) %" not in ref_sql_1
     assert "toUInt64(4)" in ref_sql_1
 
     # 2. Same checksums -> hits _INSIGHTS_COVERAGE_CACHE without querying rollup_coverage.
